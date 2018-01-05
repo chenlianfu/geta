@@ -10,6 +10,7 @@ GETA is a multi-threaded, automatic, and memory-saving GWAT, which effectively i
 1.unpack
 
 2.install dependencies:
+
     ParaFly
     java 1.8.0_144
     HISAT2 2.1.0
@@ -22,11 +23,11 @@ GETA is a multi-threaded, automatic, and memory-saving GWAT, which effectively i
 ## 3. the usage of the main script geta.pl
 Usage:
 
-    perl ./geta.pl [options]
+    geta.pl [options]
 
 For example:
 
-    perl ./geta.pl --out_prefix out -1 reads.1 fastq -2 reads.2.fastq --protein homolog.fasta --cpu 80 --hisat2 " --min-intronlen 20 --max-intronlen 20000 --rna-strandness RF" --strand_specific --sam2transfrag " --fraction --min_expressed_base_depth 2 --max_expressed_base_depth 50 --min_junction_depth 2 --max_junction_depth 50" --species oryza_sativa_20171120 --pfam_db /opt/biosoft/hmmer-3.1b2/Pfam-AB.hmm --gene_prefix OS01Gene --genome genome.fasta
+    geta.pl --out_prefix out -1 reads.1 fastq -2 reads.2.fastq --protein homolog.fasta --cpu 80 --hisat2 " --min-intronlen 20 --max-intronlen 20000 --rna-strandness RF" --strand_specific --sam2transfrag " --fraction --min_expressed_base_depth 2 --max_expressed_base_depth 50 --min_junction_depth 2 --max_junction_depth 50" --species oryza_sativa_20171120 --pfam_db /opt/biosoft/hmmer-3.1b2/Pfam-AB.hmm --gene_prefix OS01Gene --genome genome.fasta
 
 Parameters:
 
