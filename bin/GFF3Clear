@@ -1,0 +1,358 @@
+#!/usr/bin/perl
+use strict;
+use Getopt::Long;
+
+my $usage = <<USAGE;
+Usage:
+    perl $0 [options] combine.1.gff3 combine.filter.gff3 > genome.gff3
+
+	输入文件中包含CDS，exon信息；输出文件中要包含UTR信息。
+	有部分基因模型的尾部CDS不包含终止密码子，需要进行修正。
+	添加基因完整性信息。
+
+	--gene_prefix <string>    default: gene
+	设置gene ID前缀
+
+	--genome <string>
+	输入基因组fasta文件
+
+USAGE
+if(@ARGV==0){die $usage}
+
+my ($gene_prefix, $genome);
+GetOptions(
+	"gene_prefix:s" => \$gene_prefix,
+	"genome:s" => \$genome,
+);
+$gene_prefix ||= "gene";
+die "--genome should be set\n" unless $genome;
+
+open IN, $genome or die $!;
+my (%seq, $seq_id);
+while (<IN>) {
+	chomp;
+	if (m/^>(\S+)/) {
+		$seq_id = $1;
+	}
+	else {
+		$seq{$seq_id} .= $_;
+	}
+}
+close IN;
+
+my (%gff, $id, %sort1, %sort2, %sort3, %sort4);
+foreach (@ARGV) {
+	open IN, $_ or die $!;
+	while (<IN>) {
+		next if m/^#/;
+		next if m/^\s*$/;
+		if (m/\tgene\t.*ID=([^;\s]+)/) {
+			$id = $1;
+			@_ = split /\t/;
+			$sort1{$id} = $_[0];
+			$sort2{$id} = $_[3];
+			$sort3{$id} = $_[4];
+			$sort4{$id} = $_[6];
+		}
+		$gff{$id} .= $_;
+	}
+	close IN;
+}
+
+my @id = sort {$sort1{$a} cmp $sort1{$b} or $sort2{$a} <=> $sort2{$b} or $sort3{$a} <=> $sort3{$b} or $sort4{$a} cmp $sort4{$b}} keys %gff;
+my $total_number = @id;
+$total_number = length $total_number;
+my $number;
+foreach my $gene_id (@id) {
+	$number ++;
+	my $gff_info = $gff{$gene_id};
+	my $id_out = $gene_prefix . 0 x ($total_number - (length $number)) . $number;
+	$gff_info =~ s/$gene_id/$id_out/g;
+	$gff_info =~ s/(\tgene\t.*)/${1}source=$gene_id;/;
+
+	my %info = &cdsIncludeStopCodon_and_integrity($gff_info);
+	$gff_info = $info{"info"};
+	my $integrity = $info{"integrity"};
+	$gff_info =~ s/(\tgene\t.*)/${1}Integrity=$integrity;/;
+
+	$gff_info = &addUTR($gff_info);
+
+	#$gff_info = &sortgff($gff_info);
+	&sortgff($gff_info);
+	#print "$gff_info\n";
+}
+
+sub sortgff {
+	my $info = $_[0];
+	my @line = split /\n/, $info;
+	@_ = split /\t/, $line[0];
+	my $strand = $_[6];
+	my %sort;
+	foreach (@line) {
+		@_ = split /\t/;
+		if ($_[2] eq "gene") {
+			print "$_\n";
+		}
+		elsif ($_[2] eq "mRNA") {
+			print "$_\n";
+		}
+		elsif ($_[2] eq "CDS" or $_[2] eq "exon" or $_[2] eq "five_prime_UTR" or $_[2] eq "three_prime_UTR") {
+			$sort{$_} = $_[3];
+		}
+	}
+
+	if ($strand eq "+") {
+		foreach (sort {$sort{$a} <=> $sort{$b} or $b cmp $a } keys %sort) {
+			print "$_\n";
+		}
+	}
+	elsif ($strand eq "-") {
+		foreach (sort {$sort{$b} <=> $sort{$a} or $a cmp $b } keys %sort) {
+			print "$_\n";
+		}
+	}
+	print "\n";
+}
+
+sub addUTR {
+	my $info = $_[0];
+	my @line = split /\n/, $info;
+	@_ = split /\t/, $line[0];
+	my ($seqID, $strand) = ($_[0], $_[6]);
+	my $gene_id = $1 if $_[8] =~ /ID=([^;\s]+)/;
+
+	my (@cds, @exon, @utr, %cds_pos);
+	foreach (@line) {
+		@_ = split /\t/;
+		if ($_[2] eq 'CDS') {
+			push @cds, "$_[3]\t$_[4]";
+			$cds_pos{$_[3]} = 1;
+			$cds_pos{$_[4]} = 1;
+		}
+		elsif ($_[2] eq 'exon') {
+			push @exon, "$_[3]\t$_[4]";
+		}
+	}
+
+	foreach (@exon) {
+		my ($start, $end) = split /\t/;
+		my $utr_keep = 1;
+		foreach (@cds) {
+			@_ = split /\t/;
+			if ($_[0] <= $end && $_[1] >= $start) {
+				$utr_keep = 0;
+				if ($start < $_[0] && $end == $_[1]) {
+					my $utr_start = $start;
+					my $utr_end = $_[0] - 1;
+					push @utr, "$utr_start\t$utr_end";
+				}
+				elsif ($start == $_[0] && $end > $_[1]) {
+					my $utr_start = $_[1] + 1;
+					my $utr_end = $end;
+					push @utr, "$utr_start\t$utr_end";
+				}
+			}
+		}
+		push @utr, $_ if $utr_keep == 1;
+	}
+
+	my @cds_pos = sort {$a <=> $b} keys %cds_pos;
+	my ($utr5num, $utr3num);
+	if ($strand eq "+") {
+		@utr = sort {$a <=> $b} @utr;
+		foreach (@utr) {
+			@_ = split /\t/;
+			if ($_[1] <= $cds_pos[0]) {
+				$utr5num ++;
+				$info .= "$seqID\t\.\tfive_prime_UTR\t$_\t\.\t$strand\t\.\tID=$gene_id.t1.5UTR$utr5num;Parent=$gene_id.t1;\n";
+			}
+			elsif ($_[0] >= $cds_pos[1]) {
+				$utr3num ++;
+				$info .= "$seqID\t\.\tthree_prime_UTR\t$_\t\.\t$strand\t\.\tID=$gene_id.t1.3UTR$utr3num;Parent=$gene_id.t1;\n";
+			}
+		}
+	}
+	elsif ($strand eq "-") {
+		@utr = sort {$b <=> $a} @utr;
+		foreach (@utr) {
+			@_ = split /\t/;
+			if ($_[0] >= $cds_pos[1]) {
+				$utr5num ++;
+				$info .= "$seqID\t\.\tfive_prime_UTR\t$_\t\.\t$strand\t\.\tID=$gene_id.t1.5UTR$utr5num;Parent=$gene_id.t1;\n";
+			}
+			elsif ($_[1] <= $cds_pos[0]) {
+				$utr3num ++;
+				$info .= "$seqID\t\.\tthree_prime_UTR\t$_\t\.\t$strand\t\.\tID=$gene_id.t1.3UTR$utr3num;Parent=$gene_id.t1;\n";
+			}
+		}
+	}
+
+	return $info;
+}
+sub cdsIncludeStopCodon_and_integrity {
+	# 输入一个genemodel的GFF3信息
+	my $info = $_[0];
+	my @line = split /\n/, $info;
+	@_ = split /\t/, $line[0];
+	my ($seqID, $strand) = ($_[0], $_[6]);
+	my $gene_id = $1 if $_[8] =~ /source=([^;\s]+)/;
+
+	my @cds;
+	foreach (@line) {
+		@_ = split /\t/;
+		push @cds, "$_[3]\t$_[4]\t$_[7]" if $_[2] eq 'CDS';
+	}
+	@cds = sort { $a <=> $b } @cds;
+	@_ = split /\t/, $cds[0];
+	my $frame = $_[2];
+
+	my $cds_seq;
+	foreach (@cds) {
+		@_ = split /\t/;
+		my $start = $_[0] - 1;
+		my $len = $_[1] - $start;
+		$cds_seq .= substr($seq{$seqID}, $start, $len);
+	}
+
+	if ($strand eq "-") {
+		@_ = split /\t/, $cds[-1];
+		$frame = $_[2];
+		$cds_seq = reverse $cds_seq;
+		$cds_seq =~ tr/ATCGatcg/TAGCTAGC/;
+	}
+
+	$cds_seq =~ s/^\w{$frame}//;
+	my $pep_seq = &cds2pep($cds_seq, $gene_id);
+
+	unless ($pep_seq =~ m/\*$/) {
+		my $next_codon;
+		if ($strand eq "+") {
+			my ($start, $end, $frame) = split /\t/, $cds[-1];
+			$frame = ($end + 1 - $start - $frame) % 3;
+			$frame = 1 if $frame == 2;
+			$frame = 2 if $frame == 1;
+			if ($frame == 0) {
+				my $codon = substr($seq{$seqID}, $end, 3);
+				#print "OK1:\t$gene_id\t$frame\t$seqID\t$start\t$end\t$codon\n";
+				if ($codon eq "TAA" or $codon eq "TGA" or $codon eq "TAG") {
+					my $end3 = $end + 3;
+					#print "$info\n";
+					$info =~ s/$end/$end3/g;
+					#print "$info\n";
+					$pep_seq .= '*';
+				}
+			}
+		}
+		elsif ($strand eq "-") {
+			my ($start, $end, $frame) = split /\t/, $cds[0];
+			$frame = ($end + 1 - $start - $frame) % 3;
+			$frame = 1 if $frame == 2;
+			$frame = 2 if $frame == 1;
+			if ($frame == 0) {
+				my $codon = substr($seq{$seqID}, ($start - 4), 3);
+				$codon = reverse $codon;
+				$codon =~ tr/ATCGatcg/TAGCTAGC/;
+				#print "OK2:\t$gene_id\t$frame\t$seqID\t$start\t$end\t$codon\n";
+				if ($codon eq "TAA" or $codon eq "TGA" or $codon eq "TAG") {
+					my $start3 = $start - 3;
+					#print "$info\n";
+					$info =~ s/$start/$start3/g;
+					#print "$info\n";
+					$pep_seq .= '*';
+				}
+			}
+		}
+	}
+
+	my ($integrity, $start_ok, $end_ok);
+	if ($pep_seq =~ m/^M/) {$start_ok = 1}
+	if ($pep_seq =~ m/\*$/) {$end_ok = 1}
+	if ($start_ok == 1 && $end_ok == 1) { $integrity = "complete" }
+	elsif ($start_ok == 1 && $end_ok != 1) { $integrity = "3prime_partial" }
+	elsif ($start_ok != 1 && $end_ok == 1) { $integrity = "5prime_partial" }
+	elsif ($start_ok != 1 && $end_ok != 1) { $integrity = "internal" }
+
+	my %out;
+	$out{"info"} = $info;
+	$out{"integrity"} = $integrity;
+	return %out;
+}
+
+sub cds2pep {
+    my %cds2pep = (
+        "TTT" => "F",
+        "TTC" => "F",
+        "TTA" => "L",
+        "TTG" => "L",
+        "TCT" => "S",
+        "TCC" => "S",
+        "TCA" => "S",
+        "TCG" => "S",
+        "TAT" => "Y",
+        "TAC" => "Y",
+        "TAA" => "*",
+        "TAG" => "*",
+        "TGT" => "C",
+        "TGC" => "C",
+        "TGA" => "*",
+        "TGG" => "W",
+        "CTT" => "L",
+        "CTC" => "L",
+        "CTA" => "L",
+        "CTG" => "L",
+        "CCT" => "P",
+        "CCC" => "P",
+        "CCA" => "P",
+        "CCG" => "P",
+        "CAT" => "H",
+        "CAC" => "H",
+        "CAA" => "Q",
+        "CAG" => "Q",
+        "CGT" => "R",
+        "CGC" => "R",
+        "CGA" => "R",
+        "CGG" => "R",
+        "ATT" => "I",
+        "ATC" => "I",
+        "ATA" => "I",
+        "ATG" => "M",
+        "ACT" => "T",
+        "ACC" => "T",
+        "ACA" => "T",
+        "ACG" => "T",
+        "AAT" => "N",
+        "AAC" => "N",
+        "AAA" => "K",
+        "AAG" => "K",
+        "AGT" => "S",
+        "AGC" => "S",
+        "AGA" => "R",
+        "AGG" => "R",
+        "GTT" => "V",
+        "GTC" => "V",
+        "GTA" => "V",
+        "GTG" => "V",
+        "GCT" => "A",
+        "GCC" => "A",
+        "GCA" => "A",
+        "GCG" => "A",
+        "GAT" => "D",
+        "GAC" => "D",
+        "GAA" => "E",
+        "GAG" => "E",
+        "GGT" => "G",
+        "GGC" => "G",
+        "GGA" => "G",
+        "GGG" => "G",
+    );
+    my $seq = shift @_;
+    my $gene = shift @_;
+    my $pep;
+    while ((length $seq) >= 3) {
+        $seq =~ s/(\w{3})//;
+        $pep .= $cds2pep{$1};
+    }
+	#print STDERR "Warning: CDS length of $gene is not multiple of 3\n" if (length $seq) > 0;
+	#print STDERR "Warning: Stop Codon appear in the middle of $gene\n" if $pep =~ m/\*\w/;
+    return $pep;
+}

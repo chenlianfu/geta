@@ -1,0 +1,118 @@
+#!/usr/bin/perl
+use strict;
+
+my $usage = <<USAGE;
+Usage:
+    perl $0 file.sam out_dir min_fragment_per_region
+
+For example:
+    perl $0 hisat2.sam out 10 > splited_sam_files.list
+
+    输入RNA-Seq数据利用HISAT2进行比对得到的SAM文件。该SAM文件是按coordinate进行排序的数据。
+    程序能对SAM文件数据在没有read比对上的区域进行分割。分割后的sam文件最小的fragment数是10; sam文件没有header信息; 在标准输出中输出分割后的sam文件路径信息。
+    注意: 本程序没有考虑比对的方向; 给出的sam文件结果中去除了没有比对上的reads信息；给出的sam文件结果中去除了次优的比对结果。
+
+USAGE
+if (@ARGV==0){die $usage}
+
+mkdir $ARGV[1] unless -e $ARGV[1];
+open IN, $ARGV[0] or die $!;
+while ($_ = <IN>) {
+    @_ = split /\t/;
+    my $flag = sprintf("%b",$_[1])+0;
+
+    if (m/^\@/) { next; }
+    elsif ($_[5] eq '*') { next; }
+    elsif ($flag =~ m/(\d)\d\d\d\d\d\d\d\d$/ && $1 == 1) { next; }
+    else { last; }
+}
+
+my %fragment;
+@_ = split /\t/;
+my $last_chromosome_id = $_[2];
+my $last_alignment_start = $_[3];
+my $cigar = $_[5];
+my @cigar = $cigar =~ m/(\d+\w)/g;
+my $last_alignment_end = $last_alignment_start;
+foreach (@cigar) {
+    m/(\d+)(\w)/;
+    if ($2 eq "M") {
+        $last_alignment_end += $1;
+    }
+    elsif ($2 eq "D") {
+        $last_alignment_end += $1;
+    }
+    elsif ($2 eq "N") {
+        $last_alignment_end += $1;
+    }
+}
+my $sam_content = $_;
+$fragment{$_[0]} = 1;
+
+while (<IN>) {
+    @_ = split /\t/;
+    my $flag = sprintf("%b",$_[1])+0;
+    next if $_[5] eq '*';
+    if ($flag =~ m/(\d)\d\d\d\d\d\d\d\d$/ && $1 == 1) { next; }
+
+    if ($_[2] eq $last_chromosome_id && $_[3] < $last_alignment_end) {
+        $sam_content .= $_;
+        my $end = $_[3];
+        $cigar = $_[5];
+        @cigar = $cigar =~ m/(\d+\w)/g;
+        foreach (@cigar) {
+            m/(\d+)(\w)/;
+            if ($2 eq "M") {
+                $end += $1;
+            }
+            elsif ($2 eq "D") {
+                $end += $1;
+            }
+            elsif ($2 eq "N") {
+                $end += $1;
+            }
+        }
+        $last_alignment_end = $end if $end > $last_alignment_end;
+        $fragment{$_[0]} = 1;
+    }
+    else {
+        my $fragment_num = keys %fragment;
+        if ($fragment_num >= $ARGV[2]) {
+            $last_alignment_end --;
+            open OUT, '>', "$ARGV[1]/$last_chromosome_id.$last_alignment_start-$last_alignment_end.sam" or die $!;
+            print OUT $sam_content;
+            close OUT;
+            print  "$ARGV[1]/$last_chromosome_id.$last_alignment_start-$last_alignment_end.sam\n";
+        }
+        $sam_content = "";
+        %fragment = ();
+
+        $last_chromosome_id = $_[2];
+        $last_alignment_start = $_[3];
+        $cigar = $_[5];
+        @cigar = $cigar =~ m/(\d+\w)/g;
+        $last_alignment_end = $last_alignment_start;
+        foreach (@cigar) {
+            m/(\d+)(\w)/;
+            if ($2 eq "M") {
+                $last_alignment_end += $1;
+            }
+            elsif ($2 eq "D") {
+                $last_alignment_end += $1;
+            }
+            elsif ($2 eq "N") {
+                $last_alignment_end += $1;
+            }
+        }
+        $sam_content = $_;
+    }
+}
+my $fragment_num = keys %fragment;
+if ($fragment_num >= $ARGV[2]) {
+    $last_alignment_end --;
+    open OUT, '>', "$ARGV[1]/$last_chromosome_id.$last_alignment_start-$last_alignment_end.sam" or die $!;
+    print OUT $sam_content;
+    close OUT;
+    print  "$ARGV[1]/$last_chromosome_id.$last_alignment_start-$last_alignment_end.sam\n";
+}
+close IN;

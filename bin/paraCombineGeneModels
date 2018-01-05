@@ -1,0 +1,134 @@
+#!/usr/bin/perl
+use strict;
+use File::Basename;
+use Getopt::Long;
+
+my $usage = <<USAGE;
+Usage:
+    perl $0 [options] augustus.gff3 transfrag.gff3 genewise.gff3 intron.gff
+
+    --cpu <int>    default: 1
+    设置并行数
+
+    --tmp <string>    default: combineGeneModels_tmp
+    设置临时文件夹路径
+
+    --overlap <string>    default: 30
+    传输给combineGeneModels命令的参数。
+
+USAGE
+if (@ARGV==0){die $usage}
+
+my ($cpu, $tmp, $overlap);
+GetOptions(
+    "cpu:i" => \$cpu,
+    "tmp:s" => \$tmp,
+    "overlap:i" => \$overlap,
+);
+
+$cpu ||= 1;
+$tmp ||= "combineGeneModels_tmp";
+$overlap ||= 30;
+my $dirname = dirname($0);
+my $cmd_name = "$dirname/combineGeneModels --overlap $overlap";
+
+my %chr;
+open IN, $ARGV[0] or die $!;
+my %augustus;
+while (<IN>) {
+    next if m/^#/;
+    next if m/^\s*$/;
+    @_ = split /\t/;
+    $chr{$_[0]} = 1;
+    $augustus{$_[0]}{$_[6]} .= $_;
+}
+close IN;
+
+open IN, $ARGV[1] or die $!;
+my %transfrag;
+while (<IN>) {
+    next if m/^#/;
+    next if m/^\s*$/;
+    @_ = split /\t/;
+    $chr{$_[0]} = 1;
+    $transfrag{$_[0]}{$_[6]} .= $_;
+}
+close IN;
+
+open IN, $ARGV[2] or die $!;
+my %genewise;
+while (<IN>) {
+    next if m/^#/;
+    next if m/^\s*$/;
+    @_ = split /\t/;
+    $chr{$_[0]} = 1;
+    $genewise{$_[0]}{$_[6]} .= $_;
+}
+close IN;
+
+open IN, $ARGV[3] or die $!;
+my %intron;
+while (<IN>) {
+    next if m/^#/;
+    next if m/^\s*$/;
+    @_ = split /\t/;
+    $chr{$_[0]} = 1;
+    $intron{$_[0]}{$_[6]} .= $_ if $_[2] eq "intron";
+}
+close IN;
+
+open CMD, ">", "command.combineGeneModels.list" or die $!;
+mkdir $tmp unless -e $tmp;
+my @out_name;
+foreach my $chr (sort keys %chr) {
+    open OUT, ">", "combineGeneModels_tmp/${chr}_plus_augustus.gff3" or die $!;
+    print OUT $augustus{$chr}{"+"};
+    close OUT;
+    open OUT, ">", "combineGeneModels_tmp/${chr}_minus_augustus.gff3" or die $!;
+    print OUT $augustus{$chr}{"-"};
+    close OUT;
+
+    open OUT, ">", "combineGeneModels_tmp/${chr}_plus_transfrag.gff3" or die $!;
+    print OUT $transfrag{$chr}{"+"};
+    close OUT;
+    open OUT, ">", "combineGeneModels_tmp/${chr}_minus_transfrag.gff3" or die $!;
+    print OUT $transfrag{$chr}{"-"};
+    close OUT;
+
+    open OUT, ">", "combineGeneModels_tmp/${chr}_plus_genewise.gff3" or die $!;
+    print OUT $genewise{$chr}{"+"};
+    close OUT;
+    open OUT, ">", "combineGeneModels_tmp/${chr}_minus_genewise.gff3" or die $!;
+    print OUT $genewise{$chr}{"-"};
+    close OUT;
+
+    open OUT, ">", "combineGeneModels_tmp/${chr}_plus_intron.gff" or die $!;
+    print OUT $intron{$chr}{"+"};
+    close OUT;
+    open OUT, ">", "combineGeneModels_tmp/${chr}_minus_intron.gff" or die $!;
+    print OUT $intron{$chr}{"-"};
+    close OUT;
+
+    print CMD "$cmd_name combineGeneModels_tmp/${chr}_plus_augustus.gff3 combineGeneModels_tmp/${chr}_plus_transfrag.gff3 combineGeneModels_tmp/${chr}_plus_genewise.gff3 combineGeneModels_tmp/${chr}_plus_intron.gff > combineGeneModels_tmp/${chr}_plus.1.gff3 2> combineGeneModels_tmp/${chr}_plus.2.gff3\n";
+    print CMD "$cmd_name combineGeneModels_tmp/${chr}_minus_augustus.gff3 combineGeneModels_tmp/${chr}_minus_transfrag.gff3 combineGeneModels_tmp/${chr}_minus_genewise.gff3 combineGeneModels_tmp/${chr}_minus_intron.gff > combineGeneModels_tmp/${chr}_minus.1.gff3 2> combineGeneModels_tmp/${chr}_minus.2.gff3\n";
+
+    push @out_name, "combineGeneModels_tmp/${chr}_plus";
+    push @out_name, "combineGeneModels_tmp/${chr}_minus";
+}
+close CMD;
+
+my $cmdString = "ParaFly -c command.combineGeneModels.list -CPU $cpu > /dev/null";
+(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+
+open OUT1, ">", "combine.1.gff3" or die $!;
+open OUT2, ">", "combine.2.gff3" or die $!;
+foreach (@out_name) {
+    open IN, "$_.1.gff3" or die $!;
+    print OUT1 <IN>;
+    close IN;
+}
+foreach (@out_name) {
+    open IN, "$_.2.gff3" or die $!;
+    print OUT2 <IN>;
+    close IN;
+}

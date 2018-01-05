@@ -1,0 +1,168 @@
+#!/usr/bin/perl
+use strict;
+use Getopt::Long;
+
+my $usage = <<USAGE;
+Usage:
+    perl $0 --out transfrag sam2transfrag.gtf genome.fasta
+
+    程序输入sam2transfrag得到的gtf文件，对转录本序列按染色体名称及其位置进行排序，输出排序后的GTF文件、标准的GFF3文件、alignment GFF3文件和转录本序列文件。
+
+    --out    default: transfrag
+    设置输出文件前缀
+
+USAGE
+if (@ARGV==0){die $usage}
+
+my $out;
+GetOptions(
+    "out:s" => \$out,
+);
+
+$out ||= 'transfrag';
+
+open IN, $ARGV[0] or die $!;
+my (%gtf, %sort1, %sort2, %sort3, %sort4, $gene_id);
+while (<IN>) {
+    next if m/^\s*$/;
+    next if m/^#/;
+
+    @_ = split /\t/;
+    if ($_[2] eq 'gene') {
+        $gene_id = $1 if $_[8] =~ m/gene_id \"([^;\"]+)\"/;
+        $sort1{$gene_id} = $_[0];
+        $sort2{$gene_id} = $_[3];
+        $sort3{$gene_id} = $_[4];
+        $sort4{$gene_id} = $_[6];
+    }
+    $gtf{$gene_id} .= $_;
+}
+close IN;
+
+open IN, $ARGV[1] or die $!;
+my (%seq, $seq_id);
+while (<IN>) {
+    chomp;
+    if (m/^>(\S+)/) { $seq_id = $1; }
+    else { $seq{$seq_id} .= $_; }
+}
+close IN;
+
+my @gene_id = sort { $sort1{$a} cmp $sort1{$b} or $sort2{$a} <=> $sort2{$b} or $sort3{$a} <=> $sort3{$b}  or $sort4{$b} cmp $sort4{$a} } keys %gtf;
+
+open OUT, ">", "$out.gtf" or die $!;
+foreach (@gene_id) {
+    print OUT "$gtf{$_}\n";
+}
+close OUT;
+
+open OUT1, '>', "$out.gff3" or die $!;
+open OUT2, '>', "$out.alignment.gff3" or die $!;
+open OUT3, '>', "$out.strand.fasta" or die $!;
+open OUT4, '>', "$out.noStrand.fasta" or die $!;
+my (@intron_length, %transfrag_length, %gene_length, @intergenic_length, $last_chr, $last_end);
+foreach (@gene_id) {
+    $_ = $gtf{$_};
+    my $gene_info = $1 if m/(.*\tgene\t.*)/;
+    @_ = split /\t/, $gene_info;
+    my ($chr, $source, $strand) = ($_[0], $_[1], $_[6]);
+
+    my $gene_length = $_[4] - $_[3] + 1;
+    if ($chr eq $last_chr) {
+        my $intergenic_length = $_[3] - $last_end - 1;
+        push @intergenic_length, $intergenic_length if $intergenic_length > 0;
+    }
+    else {
+        $last_chr = $chr;
+        $last_end = 0;
+    }
+    $last_end = $_[4] if $last_end < $_[4];
+
+    $_[8] =~ /gene_id \"([^;\"]+)\"; FragmentCount \"(\d+)\"; JunctionThreshold \"(\d+)\"; BaseDepthThreshold \"(\d+)\"; MaxDepth \"(\d+)\";/;
+    my $geneID = $1;
+    print OUT1 "$_[0]\t$_[1]\t$_[2]\t$_[3]\t$_[4]\t$_[5]\t$_[6]\t$_[7]\tID=$geneID;FragmentCount=$2;JunctionThreshold=$3;BaseDepthThreshold=$4;MaxDept=$5;\n";
+    
+    my $transcript_info = $1 if m/(.*\ttranscript\t.*)/;
+    @_ = split /\t/, $transcript_info;
+    $_[8] =~ /gene_id \"([^;\"]+)\"; transcript_id \"([^;\"]+)\";/;
+    my $transcriptID = $2;
+    print OUT1 "$_[0]\t$_[1]\tmRNA\t$_[3]\t$_[4]\t$_[5]\t$_[6]\t$_[7]\tID=$transcriptID;Parent=$1\n";
+
+    my $type = "single_exon";
+    $type = "multi_exon" if m/\tintron\t/;
+
+    my $exon_num = 0;
+    my @gene_info = split /\n/;
+    my $map_start = 1;
+    my @exon;
+    foreach (@gene_info) {
+        if (m/\texon\t/) {
+            $exon_num ++;
+            @_ = split /\t/;
+            print OUT1 "$_[0]\t$_[1]\t$_[2]\t$_[3]\t$_[4]\t$_[5]\t$_[6]\t$_[7]\tID=$transcriptID.exon$exon_num;Parent=$transcriptID\n";
+
+            my $map_end = $_[4] - $_[3] + $map_start;
+            print OUT2 "$_[0]\t$_[1]\tcDNA_match\t$_[3]\t$_[4]\t$_[5]\t$_[6]\t$_[7]\tID=$transcriptID;Target=$transcriptID $map_start $map_end \+\n";
+            $map_start = $map_end + 1;
+
+            push @exon, "$_[3]\t$_[4]";
+
+            $transfrag_length{$type}{$geneID} += ($_[4] - $_[3] + 1);
+            $gene_length{$type}{$geneID} = $gene_length;
+        }
+        elsif (m/\tintron\t/) {
+            @_ = split /\t/;
+            push @intron_length, $_[4] - $_[3] + 1;
+        }
+    }
+
+    @exon = sort {$a <=> $b} @exon;
+    my $seq;
+    foreach (@exon) {
+        @_ = split /\t/;
+        $seq .= substr($seq{$chr}, $_[0] - 1, $_[1] - $_[0] + 1);
+    }
+    if ($strand eq "-") {
+        $seq = reverse $seq;
+        $seq =~ tr/ATCGatcgn/TAGCTAGCN/;
+    }
+    if ($strand eq '.') {
+        print OUT4 ">$transcriptID\n$seq\n";
+    }
+    else {
+        print OUT3 ">$transcriptID\n$seq\n";
+    }
+
+    print OUT1 "\n";
+    print OUT2 "\n";
+}
+close OUT1;
+close OUT2;
+close OUT3;
+close OUT4;
+
+@intron_length = sort {$a <=> $b} @intron_length;
+my $transfrag_num_multi_exon = keys %{$transfrag_length{'multi_exon'}};
+my $transfrag_num_single_exon = keys %{$transfrag_length{'single_exon'}};
+my $transfrag_num = $transfrag_num_multi_exon + $transfrag_num_single_exon;
+my @length = values %{$transfrag_length{'multi_exon'}};
+@length = sort {$a <=> $b} @length;
+my @gene_length = values %{$gene_length{'multi_exon'}};
+@gene_length = sort {$a <=> $b} @gene_length;
+@intergenic_length = sort {$a <=> $b} @intergenic_length;
+
+print STDERR "transfrag_num\t$transfrag_num
+multi_exon_transfrag_num\t$transfrag_num_multi_exon
+single_exon_transfrag_num\t$transfrag_num_single_exon
+max_multi_exon_transfrag_length\t$length[-1]
+min_multi_exon_transfrag_length\t$length[0]
+median_multi_exon_transfrag_length\t$length[@length/2]
+max_multi_exon_transfrag_gene_length\t$gene_length[-1]
+min_multi_exon_transfrag_gene_length\t$gene_length[0]
+median_multi_exon_transfrag_gene_length\t$gene_length[@gene_length/2]
+max_intron_length\t$intron_length[-1]
+min_intron_length\t$intron_length[0]
+median_intron_length\t$intron_length[@intron_length/2]
+max_intergenic_length\t$intergenic_length[-1]
+median_intergenic_length\t$intergenic_length[@intergenic_length/2]
+";

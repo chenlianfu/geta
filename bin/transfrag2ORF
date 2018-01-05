@@ -1,0 +1,6 @@
+#!/usr/bin/perl
+use trict;
+
+my $usage = <<USAGE;
+Usage:
+    perl $0 

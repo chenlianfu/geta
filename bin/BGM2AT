@@ -1,0 +1,162 @@
+#!/usr/bin/perl
+use strict;
+use Getopt::Long;
+
+my $usage = <<USAGE;
+Usage:
+    perl $0 best_candidates.lowIdentity.gff3 genome.fasta species_name
+
+    --flanking_length <int>    default: auto_calculated_value
+    该参数用于转换得到genebank格式基因模型时，在gene两端添加的侧翼序列长度。若不添加该参数，则程序根据best_candidates.lowIdentity.gff3文件得到gene长度，取其median值作为该参数的值。若添加该参数，则使用该参素指定的值。
+    注意：对基因组基因比较稠密的物种，一定要手动设置该值。例如对真菌物种，推荐设置该值为100。
+
+    --min_gene_number_for_augustus_training <int>    default: 500
+    若用于augustus training的基因模型数量低于此数目的时候，程序直接使用所有的基因模型进行augustus training；再用这些基因模型进行准确性检测（该准确性检测结果是不可信的）。
+
+    --gene_number_for_accuracy_detection <int>    default: 200
+    若用于augustus training的基因模型数量超过上一个参数设定阈值时，进行Augustus traing，会将gene models随机分成两部分，第一部分包含该指定数目的基因，用于准确性检测（该准确性检测结果是可信的）；剩下的基因模型用于进行augustus training。
+
+    --gene_number_of_optimize_chunk <int>    default: 50
+    进行Augustus优化时，会将基因模型分成很多小份数据。该参数设置每一小份数据包含的基因模型数目。该值推荐设置为50-100。
+
+USAGE
+if (@ARGV==0){die $usage}
+
+my ($flanking_length, $min_gene_number_for_augustus_training, $gene_number_for_accuracy_detection, $gene_number_of_optimize_chunk);
+GetOptions(
+    "flanking_length:i" => \$flanking_length,
+    "min_gene_number_for_augustus_training:i" => \$min_gene_number_for_augustus_training,
+    "gene_number_for_accuracy_detection:i" => \$gene_number_for_accuracy_detection,
+    "gene_number_of_optimize_chunk:i" => \$gene_number_of_optimize_chunk,
+);
+$min_gene_number_for_augustus_training ||= 500;
+$gene_number_for_accuracy_detection ||= 200;
+$gene_number_of_optimize_chunk ||= 50;
+
+# 计算gene长度
+open IN, $ARGV[0] or die $!;
+my @gene_length;
+while (<IN>) {
+    push @gene_length, $2 - $1 if m/\tgene\t(\d+)\t(\d+)/;
+}
+@gene_length = sort {$a <=> $b} @gene_length;
+$flanking_length = $gene_length[@gene_length/2] unless $flanking_length;
+print STDERR "the median gene length is $gene_length[@gene_length/2], the flanking length was set to $flanking_length\n";
+
+# 将GFF3转换成GeneBank格式
+my $cmdString = "gff2gbSmallDNA.pl $ARGV[0] $ARGV[1] $flanking_length genes.raw.gb &> gff2gbSmallDNA.log";
+print STDERR "CMD: $cmdString\n";
+(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+
+# 去除错误的基因模型
+$cmdString = `echo \$AUGUSTUS_CONFIG_PATH`;
+$cmdString =~ s/^/rm -rf /;
+$cmdString =~ s/$/species\/for_bad_genes_removing/;
+print STDERR "CMD: $cmdString";
+(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+$cmdString = "new_species.pl --species=for_bad_genes_removing &> new_species.1.log";
+print STDERR "CMD: $cmdString\n";
+(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+$cmdString = "etraining --species=for_bad_genes_removing --stopCodonExcludedFromCDS=false genes.raw.gb 1>etraining.out 2> train.err";
+print STDERR "CMD: $cmdString\n";
+(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+$cmdString = "cat train.err | perl -pe 's/.*in sequence (\\S+): .*/\$1/' > badgenes.lst";
+print STDERR "CMD: $cmdString\n";
+(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+$cmdString = "filterGenes.pl badgenes.lst genes.raw.gb > genes.gb";
+print STDERR "CMD: $cmdString\n";
+(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+
+open IN, "genes.gb" or die $!;
+my $gene_models_number;
+while (<IN>) {
+    $gene_models_number ++ if m/^LOCUS/;
+}
+print STDERR "$gene_models_number gene models were prepared for Augustus Training\n";
+
+# 统计用于augustus training的基因数目
+my $gene_number_for_training = $gene_models_number;
+if ($gene_models_number >= $min_gene_number_for_augustus_training) {
+    print STDERR "$gene_number_for_accuracy_detection gene models were randomly extracted for accuracy detection\n";
+    $gene_number_for_training = $gene_models_number - $gene_number_for_accuracy_detection;
+    print STDERR "$gene_number_for_training gene models were randomly extracted for augustus training\n";
+    $cmdString = "randomSplit.pl genes.gb $gene_number_for_accuracy_detection";
+    print STDERR "CMD: $cmdString\n";
+    (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+}
+else {
+    print STDERR "All of the $gene_models_number gene models were used for accuracy detection\n";
+    $cmdString = "ln -fs genes.gb genes.gb.test";
+    print STDERR "CMD: $cmdString\n";
+    (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+    print STDERR "All of the $gene_models_number gene models were used for augustus training\n";
+    $cmdString = "ln -fs genes.gb genes.gb.train";
+    print STDERR "CMD: $cmdString\n";
+    (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+}
+
+# 进行第一次augustus training
+my $species_config_dir = `echo \$AUGUSTUS_CONFIG_PATH`;
+chomp($species_config_dir);
+$species_config_dir = "$species_config_dir/species/$ARGV[2]";
+$cmdString = "rm -rf $species_config_dir";
+print STDERR "CMD: $cmdString\n";
+(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+$cmdString = "new_species.pl --species=$ARGV[2] &> new_species.2.log";
+print STDERR "CMD: $cmdString\n";
+(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+$cmdString = "etraining --species=$ARGV[2] genes.gb.train > train.out";
+print STDERR "CMD: $cmdString\n";
+(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+
+my ($frequency_tag, $frequency_taa, $frequency_tga);
+open IN, "train.out" or die $!;
+while (<IN>) {
+    $frequency_tag = $1 if m/^tag:.+\((.*)\)/;
+    $frequency_taa = $1 if m/^taa:.+\((.*)\)/;
+    $frequency_tga = $1 if m/^tga:.+\((.*)\)/;
+}
+print STDERR "the frequecy of three stop codons: TAG($frequency_tag), TAA($frequency_taa), TGA($frequency_tga)\n";
+open IN, "$species_config_dir/$ARGV[2]_parameters.cfg" or die $!;
+open OUT, ">", "$ARGV[2]_parameters.cfg" or die $!;
+while (<IN>) {
+    s#/(Constant/amberprob\s+)\S+#$1$frequency_tag#;
+    s#/(Constant/ochreprob\s+)\S+#$1$frequency_taa#;
+    s#/(Constant/opalprob\s+)\S+#$1$frequency_tga#;
+    print OUT;
+}
+close IN;
+close OUT;
+$cmdString = "mv $ARGV[2]_parameters.cfg $species_config_dir/$ARGV[2]_parameters.cfg";
+print STDERR "CMD: $cmdString\n";
+(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+print STDERR "the parameters of the frequecy of three stop codons were changed in file $species_config_dir/$ARGV[2]_parameters.cfg\n";
+
+# 进行第一次准确性检测
+$cmdString = "augustus --species=$ARGV[2] genes.gb.test > firsttest.out";
+print STDERR "CMD: $cmdString\n";
+(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+
+# 进行augustus training优化
+my $noly_train_gene_number = $gene_number_for_training % $gene_number_of_optimize_chunk;
+my $cpus = int ($gene_number_for_training / $gene_number_of_optimize_chunk);
+print STDERR "$cpus chunks (each have $gene_number_of_optimize_chunk gene models) were used for augustus training optimization\n";
+$cmdString = "randomSplit.pl genes.gb.train $noly_train_gene_number";
+print STDERR "CMD: $cmdString\n";
+(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+$cmdString = "ln -fs genes.gb.train.test training.gb.onlytrain";
+print STDERR "CMD: $cmdString\n";
+(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+$cmdString = "optimize_augustus.pl --species=$ARGV[2] --rounds=5 --cpus=$cpus --kfold=$cpus --onlytrain=training.gb.onlytrain genes.gb.train.train > optimize.out";
+print STDERR "CMD: $cmdString\n";
+(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+$cmdString = "etraining --species=$ARGV[2] genes.gb.train > train.out";
+print STDERR "CMD: $cmdString\n";
+(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+
+# 进行第二次准确性检测
+$cmdString = "augustus --species=$ARGV[2] genes.gb.test > secondtest.out";
+print STDERR "CMD: $cmdString\n";
+(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+
+print STDERR "the Augustus training completed\n";

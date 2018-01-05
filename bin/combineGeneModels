@@ -1,0 +1,711 @@
+#!/usr/bin/perl
+use strict;
+use Getopt::Long;
+
+my $usage = <<USAGE;
+Usage:
+    perl $0 [options] augustus.gff3 transfrag.gff3 genewise.gff3 intron.gff
+
+    输入的augustus.gff3是进行augustus基因预测的结果，标准的GFF3文件格式，不能包含可变剪接信息，主要利用其CDS,exon,start_codon和stop_codon信息；
+    输入transfrag.gff3是使用转录本信息进行基因预测的结果，标准的GFF3文件格式，不能包含可变剪接信息，主要利用其exon和CDS信息；
+    输入genewise.gff3是使用同源蛋白进行基因预测的结果，标准的GFF3文件格式，不能包含可变剪接信息，主要利用CDS Feature信息；
+    输入intron.gff包含intron信息，主要利用intron Featrue信息。
+    输入的3个GFF3文件gene Feature的ID必须都是独一无二的。
+    本程序输入的是一条序列单条链（正链或负链）的数据信息，对其进行整合。
+
+    程序结果生成2个gff3文件：第一个文件为整合后结果文件；第二个文件为augustus ab initio预测结果，需要进一步验证。
+
+    整合算法：
+    1. 根据3种基因预测结果的重叠，得到一个个基因区域，再单独对每个基因区域进行整合。
+    2. 基因区域中若存在augustus的基因预测结果，则以augustus的基因预测结果为准，对其进行UTR添加和intron支持度分析；若无intron支持，则对编码蛋白氨基酸长度较低的基因使用Pfam数据库进行过滤。
+    3. 基因区域中若不存在augustus的基因预测结果，则以transfrag的基因预测结果为准，最后以genewise的基因预测结果为准。
+
+    整合算法中为什么以augustus的结果为准：进行augustus预测的时候，添加了exon信息和intron信息，augustus对有这些有evidence支持的基因预测极其准确。可能augustus的预测结果与输入的transfrag有冲突，但根据可变剪接的intron信息，发现augustus的预测结果是正确的，且其protein编码区域预测的很长，而在transfrag中，cds的区域却比较短。
+
+    --overlap <int>    default: 30
+    程序先整合3种基因预测结果的基因区域。若两个基因模型的区域重叠超过此指定长度（30bp），则认为是同一个基因区域。再分别对基因区域上的基因模型进行整合。
+
+USAGE
+if (@ARGV==0){die $usage}
+
+my ($overlap);
+GetOptions(
+    "overlap:i" => \$overlap,
+);
+$overlap ||= 30;
+
+# 读取augustus.gff3, transfrag.gff3, genewise.gff3 文件
+my (%augustus, %transfrag, %genewise, $id, %intron, %geneRegion);
+open IN, $ARGV[0] or die $!;
+while (<IN>) {
+    next if m/^#/;
+    next if m/^\s*$/;
+    if (m/\tgene\t.*ID=([^;\s]+)/) {
+        $id = $1;
+        @_ = split /\t/;
+        $geneRegion{"$_[3]\t$_[4]"}{$id} = 1;
+    }
+    $augustus{$id} .= $_;
+}
+close IN;
+
+open IN, $ARGV[1] or die $!;
+while (<IN>) {
+    next if m/^#/;
+    next if m/^\s*$/;
+    if (m/\tgene\t.*ID=([^;\s]+)/) {
+        $id = $1;
+        @_ = split /\t/;
+        $geneRegion{"$_[3]\t$_[4]"}{$id} = 1;
+    }
+    $transfrag{$id} .= $_;
+}
+close IN;
+
+open IN, $ARGV[2] or die $!;
+while (<IN>) {
+    next if m/^#/;
+    next if m/^\s*$/;
+    if (m/\tgene\t.*ID=([^;\s]+)/) {
+        $id = $1;
+        @_ = split /\t/;
+        $geneRegion{"$_[3]\t$_[4]"}{$id} = 1;
+    }
+    $genewise{$id} .= $_;
+}
+close IN;
+
+open IN, $ARGV[3] or die $!;
+while (<IN>) {
+    next if m/^#/;
+    next if m/^\s*$/;
+    if (m/\tintron\t/) {
+        @_ = split /\t/;
+        $intron{"$_[3]\t$_[4]"} = 1;
+    }
+}
+close IN;
+
+# 根据3种基因预测结果，将重叠区域合并成一个基因区域。
+my @geneRegion = sort {$a <=> $b} keys %geneRegion;
+my $first_region = shift @geneRegion;
+my ($start, $end) = split /\t/, $first_region;
+my @id;
+foreach (keys %{$geneRegion{$first_region}}) {
+    push @id, $_;
+}
+
+my %region;
+while (@geneRegion) {
+    my $next_region = shift @geneRegion;
+    my ($next_start, $next_end) = split /\t/, $next_region;
+
+    if ($next_start < $end - $overlap) {
+        $end = $next_end if $next_end > $end;
+    }
+    else {
+        foreach (@id) {
+            $region{"$start\t$end"}{$_} = 1;
+        }
+        @id = ();
+        
+        ($start, $end) = ($next_start, $next_end);
+    }
+
+    foreach (keys %{$geneRegion{$next_region}}) {
+        push @id, $_;
+    }
+}
+
+foreach (@id) {
+    $region{"$start\t$end"}{$_} = 1;
+}
+
+my %gene_out;
+foreach my $region (sort {$a <=> $b} keys %region) {
+    my @ID = keys %{$region{$region}};
+    my $ID = join ",", @ID;
+    
+    my ($status_augustus, $status_transfrag, $status_genewise) = (0, 0, 0);
+    foreach (@ID) {
+        $status_augustus = 1 if exists $augustus{$_};
+        $status_transfrag = 1 if exists $transfrag{$_};
+        $status_genewise = 1 if exists $genewise{$_};
+    }
+    #print "OK1:\t$status_augustus\t$status_transfrag\t$status_genewise\t$region\t$ID\n";
+
+    if ($status_augustus == 1) {
+        foreach my $gene_id (@ID) {
+            if (exists $augustus{$gene_id}) {
+                my $intron_support = &intron_support($gene_id);
+                #print "OK2:\t$gene_id\t$intron_support\n";
+                my %gff3_out = &add_UTR($gene_id, @ID);
+
+                foreach (keys %{$gff3_out{$gene_id}{"CDS"}}) {
+                    $gene_out{$gene_id}{"CDS"}{$_} = 1;
+                }
+                foreach (keys %{$gff3_out{$gene_id}{"exon"}}) {
+                    $gene_out{$gene_id}{"exon"}{$_} = 1;
+                }
+                $gene_out{$gene_id}{"start_codon"} = $gff3_out{$gene_id}{"start_codon"};
+                $gene_out{$gene_id}{"stop_codon"} = $gff3_out{$gene_id}{"stop_codon"};
+                $gene_out{$gene_id}{"strand"} = $gff3_out{$gene_id}{"strand"};
+                $gene_out{$gene_id}{"chr"} = $gff3_out{$gene_id}{"chr"};
+                $gene_out{$gene_id}{"intron_support"} = $intron_support;
+
+				#if ($intron_support =~ m/^0/ && $status_transfrag != 1 && $status_genewise != 1) {
+                if ($intron_support =~ m/^0/) {
+                    $gene_out{$gene_id}{"pfam"} = 1;
+                    #print "OK3:\t$region\t$ID\n";
+                }
+            }
+        }
+    }
+    elsif ($status_transfrag == 1) {
+        #print "OK4:\t$region\t$ID\n";
+        foreach my $gene_id (@ID) {
+            if (exists $transfrag{$gene_id}) {
+                my %gff3_out = &combine_transfrag_and_genewise($gene_id, @ID);
+                foreach (keys %{$gff3_out{$gene_id}{"CDS"}}) {
+                    $gene_out{$gene_id}{"CDS"}{$_} = 1;
+                }
+                foreach (keys %{$gff3_out{$gene_id}{"exon"}}) {
+                    $gene_out{$gene_id}{"exon"}{$_} = 1;
+                }
+                $gene_out{$gene_id}{"strand"} = $gff3_out{$gene_id}{"strand"};
+                $gene_out{$gene_id}{"chr"} = $gff3_out{$gene_id}{"chr"};
+            }
+        }
+    }
+    elsif ($status_genewise == 1) {
+        #print "OK5:\t$region\t$ID\n";
+        foreach my $gene_id (@ID) {
+            if (exists $genewise{$gene_id}) {
+                my $genewise_info = $genewise{$gene_id};
+                foreach (split /\n/, $genewise_info) {
+                    @_ = split /\t/;
+                    if ($_[2] eq "CDS") {
+                        $gene_out{$gene_id}{"CDS"}{"$_[3]\t$_[4]\t$_[5]\t$_[6]\t$_[7]"} = 1;
+                        $gene_out{$gene_id}{"exon"}{"$_[3]\t$_[4]"} = 1;
+                    }
+                    elsif ($_[2] eq "gene") {
+                        $gene_out{$gene_id}{"chr"} = $_[0];
+                        $gene_out{$gene_id}{"strand"} = $_[6];
+                    }
+                }
+            }
+        }
+    }
+}
+
+foreach my $gene_id (sort keys %gene_out) {
+    my %out;
+    my $chr = $gene_out{$gene_id}{'chr'};
+    my $intron_support = $gene_out{$gene_id}{'intron_support'};
+    my $strand = $gene_out{$gene_id}{'strand'};
+    my %position;
+
+    my $start_codon = $gene_out{$gene_id}{'start_codon'};
+    @_ = split /\t/, $start_codon;
+    $position{$_[0]} = 1;
+    $position{$_[1]} = 1;
+    $out{"$chr\t\.\tstart_codon\t$start_codon\tID=$gene_id.t1.start_codon;Parent=$gene_id.t1;"} = $_[0] if $start_codon;
+    my $stop_codon = $gene_out{$gene_id}{'stop_codon'};
+    @_ = split /\t/, $stop_codon;
+    $position{$_[0]} = 1;
+    $position{$_[1]} = 1;
+    $out{"$chr\t\.\tstop_codon\t$stop_codon\tID=$gene_id.t1.stop_codon;Parent=$gene_id.t1;"} = $_[0] if $stop_codon;
+
+    if ($strand eq "+") {
+        my $number = 0;
+        foreach (sort {$a <=> $b} keys %{$gene_out{$gene_id}{"CDS"}}) {
+            $number ++;
+            @_ = split /\t/; 
+            $position{$_[0]} = 1;
+            $position{$_[1]} = 1;
+            $out{"$chr\t\.\tCDS\t$_\tID=$gene_id.t1.CDS$number;Parent=$gene_id.t1;"} = $_[0];
+        }
+        $number = 0;
+        foreach (sort {$a <=> $b} keys %{$gene_out{$gene_id}{"exon"}}) {
+            $number ++;
+            @_ = split /\t/;
+            $position{$_[0]} = 1;
+            $position{$_[1]} = 1;
+            $out{"$chr\t\.\texon\t$_\t\.\t$strand\t\.\tID=$gene_id.t1.exon$number;Parent=$gene_id.t1;"} = $_[0];
+        }
+    }
+    elsif ($strand eq "-") {
+        my $number = 0;
+        foreach (sort {$b <=> $a} keys %{$gene_out{$gene_id}{"CDS"}}) {
+            $number ++;
+            @_ = split /\t/; 
+            $position{$_[0]} = 1;
+            $position{$_[1]} = 1;
+            $out{"$chr\t\.\tCDS\t$_\tID=$gene_id.t1.CDS$number;Parent=$gene_id.t1;"} = $_[0];
+        }
+        $number = 0;
+        foreach (sort {$b <=> $a} keys %{$gene_out{$gene_id}{"exon"}}) {
+            $number ++;
+            @_ = split /\t/;
+            $position{$_[0]} = 1;
+            $position{$_[1]} = 1;
+            $out{"$chr\t\.\texon\t$_\t\.\t$strand\t\.\tID=$gene_id.t1.exon$number;Parent=$gene_id.t1;"} = $_[0];
+        }
+    }
+
+    foreach (keys %position) { delete $position{$_} unless $_; }
+    my @position = sort {$a <=> $b} keys %position;
+    my $intron_support_out;
+    $intron_support_out = "IntronSupport=$intron_support;" if $intron_support;
+    if ($gene_out{$gene_id}{"pfam"} == 1) {
+        print STDERR "$chr\t\.\tgene\t$position[0]\t$position[-1]\t\.\t$strand\t\.\tID=$gene_id;$intron_support_out\n";
+        print STDERR "$chr\t\.\tmRNA\t$position[0]\t$position[-1]\t\.\t$strand\t\.\tID=$gene_id.t1;Parent=$gene_id;\n";
+    }
+    else {
+        print "$chr\t\.\tgene\t$position[0]\t$position[-1]\t\.\t$strand\t\.\tID=$gene_id;$intron_support_out\n";
+        print "$chr\t\.\tmRNA\t$position[0]\t$position[-1]\t\.\t$strand\t\.\tID=$gene_id.t1;Parent=$gene_id;\n";
+    }
+
+    my @out;
+    if ($strand eq "+") {
+        @out = sort {$out{$a} <=> $out{$b} or $b cmp $a} keys %out;
+    }
+    elsif ($strand eq "-") {
+        @out = sort {$out{$b} <=> $out{$a} or $b cmp $a} keys %out;
+    }
+    foreach (@out) {
+        if ($gene_out{$gene_id}{"pfam"} == 1) {
+            print STDERR "$_\n";
+        }
+        else {
+            print "$_\n";
+        }
+    }
+}
+
+sub combine_transfrag_and_genewise {
+    # 输入的第一个参数是transfrag的基因ID
+    # 输入的第二个参数是数组：该基因区域的所有基因ID
+    my $gene_id = shift @_;
+    my $transfrag_info = $transfrag{$gene_id};
+    my @id = @_;
+
+    # 得到chr，strand和transfrag基因的完整性信息
+    my (%gff3_out, $strand, $intergrity);
+    if ($transfrag_info =~ m/(\S+?)\t\S+?\tgene\t\d+?\t\d+?\t\S+?\t(\S+?).*?Integrity=([^;\s]+)/) {
+        $strand = $2;
+        $gff3_out{$gene_id}{"chr"} = $1;
+        $gff3_out{$gene_id}{"strand"} = $strand;
+        $intergrity=$3;
+    }
+
+    # 得到transfrag基因的CDS和exon信息
+    my (@CDS, %CDS, %exon);
+    foreach my $line (split /\n/, $transfrag_info) {
+        @_ = split /\t/, $line;
+        if ($_[2] eq "CDS") {
+            push @CDS, "$_[3]\t$_[4]\t$_[7]";
+            $CDS{"$_[3]\t$_[4]\t$_[7]"} = 1;
+        }
+        elsif ($_[2] eq "exon") {
+            $exon{"$_[3]\t$_[4]"} = 1;
+        }
+    }
+    @CDS = sort {$a <=> $b} @CDS;
+
+    # transfrag基因是5prime_partial,3prime_partial,internal,strand等情况下，分别使用genewise结果进行整合
+    # transfrag基因首尾CDS和genewise的CDS有重叠，且具有相同的frame，则进行整合。
+    # transfrag基因是complete则不整合
+    if ($intergrity == '5prime_partial' or $intergrity == 'internal') {
+        if ($strand eq "+") {
+            my @cds_first = split /\t/, $CDS[0];
+            foreach (@id) {
+                if (exists $genewise{$_}) {
+                    my $genewise_info = $genewise{$_};
+                    my @genewise_cds;
+                    foreach (split /\n/, $genewise_info) {
+                        @_ = split /\t/,
+                        push @genewise_cds, "$_[3]\t$_[4]\t$_[7]" if $_[2] eq 'CDS';
+                    }
+                    @genewise_cds = sort {$a <=> $b} @genewise_cds;
+
+                    my (@cds_ok, $merge);
+                    foreach (@genewise_cds) {
+                        @_ = split /\t/;
+                        if ($_[0] < $cds_first[0] && $_[1] >= $cds_first[0]) {
+                            my $frame = ($cds_first[0] - $_[0] - $_[2]) % 3;
+                            $frame = 1 if $frame == 2;
+							$frame = 2 if $frame == 1;
+=cut
+       =================        cds_first
+   21021021
+   12345678
+     ^^^###
+   =================           genewise
+   2
+
+0  =>  0
+1  =>  2
+2  =>  1
+
+       ==================   cds_first
+   1021021
+   12345678
+    ^^^###
+   =================           genewise
+=cut
+
+                            if ($frame == $cds_first[2]) {
+                                push @cds_ok, "$_[0]\t$cds_first[1]\t$_[2]";
+                                $merge = 1;
+                                last;
+                            }
+                        }
+                        else {
+                            push @cds_ok, $_;
+                        }
+                    }
+
+                    if ($merge == 1) {
+                        delete $CDS{$CDS[1]};
+                        foreach (@cds_ok) {
+                            $CDS{$_} = 1;
+                        }
+                    }
+                }
+            }
+        }
+        elsif ($strand eq "-") {
+            my @cds_first = split /\t/, $CDS[-1];
+            foreach (@id) {
+                if (exists $genewise{$_}) {
+                    my $genewise_info = $genewise{$_};
+                    my @genewise_cds;
+                    foreach (split /\n/, $genewise_info) {
+                        @_ = split /\t/,
+                        push @genewise_cds, "$_[3]\t$_[4]\t$_[7]" if $_[2] eq 'CDS';
+                    }
+                    @genewise_cds = sort {$b <=> $a} @genewise_cds;
+                    my (@cds_ok, $merge);
+                    foreach (@genewise_cds) {
+                        @_ = split /\t/;
+                        if ($_[1] > $cds_first[1] && $_[0] <= $cds_first[1]) {
+                            my $frame = ($_[1] - $cds_first[1] - $_[2]) % 3;
+                            $frame = 2 if $frame == 1;
+                            $frame = 1 if $frame == 2;
+=cut
+          =================                  cds_fisrt
+                       12012012
+                       12345678
+                       ###^^^
+              =================              genewise
+                              2
+=cut
+
+                            if ($frame == $cds_first[2]) {
+                                push @cds_ok, "$cds_first[0]\t$_[1]\t$_[2]";
+                                $merge = 1;
+                                last;
+                            }
+                        }
+                        else {
+                            push @cds_ok, $_;
+                        }
+                    }
+
+                    if ($merge == 1) {
+                        delete $CDS{$CDS[-1]};
+                        foreach (@cds_ok) {
+                            $CDS{$_} = 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    if ($intergrity == '3prime_partial' or $intergrity == 'internal') {
+        if ($strand eq "+") {
+            my @cds_last = split /\t/, $CDS[-1];
+            foreach (@id) {
+                if (exists $genewise{$_}) {
+                    my $genewise_info = $genewise{$_};
+                    my @genewise_cds;
+                    foreach (split /\n/, $genewise_info) {
+                        @_ = split /\t/,
+                        push @genewise_cds, "$_[3]\t$_[4]\t$_[7]" if $_[2] eq 'CDS';
+                    }
+                    @genewise_cds = sort {$b <=> $a} @genewise_cds;
+                    my (@cds_ok, $merge);
+                    foreach (@genewise_cds) {
+                        @_ = split /\t/;
+                        if ($_[1] > $cds_last[1] && $_[0] <= $cds_last[1]) {
+                            if ($_[0] > $cds_last[0]) {
+								my $frame = ($_[0] - $cds_last[0] - $cds_last[2]) % 3;
+                                $frame = 1 if $frame == 2;
+                                $frame = 2 if $frame == 1;
+=cut
+       2
+       ================>               cds_last
+       12345678
+       21021021
+         ^^^###
+           ==================>         genewise
+=cut
+                                if ($frame == $_[2]) {
+                                    push @cds_ok, "$cds_last[0]\t$_[1]\t$cds_last[2]";
+                                    $merge = 1;
+                                    last;
+                                }
+                            }
+                            else {
+								my $frame = ($cds_last[0] - $_[0] - $_[2]) % 3;
+								$frame = 1 if $frame == 2;
+								$frame = 2 if $frame == 1;
+                                if ($frame == $cds_last[2]) {
+                                    push @cds_ok, "$cds_last[0]\t$_[1]\t$cds_last[2]";
+                                    $merge = 1;
+                                    last;
+                                }
+                            }
+                        }
+                        else {
+                            push @cds_ok, $_;
+                        }
+                    }
+
+                    if ($merge == 1) {
+                        delete $CDS{$CDS[-1]};
+                        foreach (@cds_ok) {
+                            $CDS{$_} = 1;
+                        }
+                    }
+                }
+            }
+        }
+        elsif ($strand eq "-") {
+            my @cds_last = split /\t/, $CDS[0];
+            foreach (@id) {
+                if (exists $genewise{$_}) {
+                    my $genewise_info = $genewise{$_};
+                    my @genewise_cds;
+                    foreach (split /\n/, $genewise_info) {
+                        @_ = split /\t/,
+                        push @genewise_cds, "$_[3]\t$_[4]\t$_[7]" if $_[2] eq 'CDS';
+                    }
+                    @genewise_cds = sort {$a <=> $b} @genewise_cds;
+                    my (@cds_ok, $merge);
+                    foreach (@genewise_cds) {
+                        @_ = split /\t/;
+                        if ($_[0] < $cds_last[0] && $_[1] >= $cds_last[0]) {
+                            if ($_[1] > $cds_last[1]) {
+								my $frame = ($_[1] - $cds_last[1] - $_[2]) % 3;
+                                $frame = 1 if $frame == 2;
+                                $frame = 2 if $frame == 1;
+=cut
+            <============             cds_last
+                     12012012
+                     12345678
+       <=====================              genewise
+                            2
+=cut
+                                if ($frame == $cds_last[2]) {
+                                    push @cds_ok, "$_[0]\t$cds_last[1]\t$cds_last[2]";
+                                    $merge = 1;
+                                    last;
+                                }
+                            }
+                            else {
+								my $frame = ($cds_last[1] - $_[1] - $cds_last[2]) % 3;
+                                $frame = 1 if $frame == 2;
+                                $frame = 2 if $frame == 1;
+                                if ($frame == $_[2]) {
+                                    push @cds_ok, "$_[0]\t$cds_last[1]\t$cds_last[2]";
+                                    $merge = 1;
+                                    last;
+                                }
+                            }
+                        }
+                        else {
+                            push @cds_ok, $_;
+                        }
+                    }
+
+                    if ($merge == 1) {
+                        delete $CDS{$CDS[0]};
+                        foreach (@cds_ok) {
+                            $CDS{$_} = 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if ($intergrity == 'complete') {
+        foreach (@CDS) {
+            @_ = split /\t/;
+            $gff3_out{$gene_id}{"CDS"}{"$_[0]\t$_[1]\t\.\t$strand\t$_[2]"} = 1;
+        }
+        foreach (keys %exon) {
+            $gff3_out{$gene_id}{"exon"}{$_} = 1;
+        }
+    }
+    else {
+        my %cds_exon;
+        foreach (@CDS) {
+            @_ = split /\t/;
+            $gff3_out{$gene_id}{"CDS"}{"$_[0]\t$_[1]\t\.\t$strand\t$_[2]"} = 1;
+            $cds_exon{"$_[0]\t$_[1]"} = 1;
+        }
+        foreach (keys %exon) {
+            my ($start, $end) = split /\t/;
+            my $keep = 1;
+            foreach (keys %cds_exon) {
+                @_ = split /\t/;
+                if ($_[0] <= $end && $_[1] >= $start) {
+                    $keep = 0;
+                    if ($_[0] >= $start && $_[1] <= $end) {
+                        delete $cds_exon{$_};
+                        $cds_exon{"$start\t$end"} = 1;
+                    }
+                }
+            } 
+            $cds_exon{"$start\t$end"} = 1 if $keep == 1;
+        }
+        foreach (keys %cds_exon) {
+            $gff3_out{$gene_id}{"exon"}{$_} = 1;
+        }
+    }
+
+    return %gff3_out;
+}
+
+sub add_UTR {
+    my $augustus_id = shift @_;
+    my @id = @_;
+
+    my $augustus_info = $augustus{$augustus_id};
+    my (%gff3_out, $gene_id, $strand, @augustus_CDS);
+
+    if ($augustus_info =~ m/(\S+?)\t\S+?\tgene\t\d+?\t\d+?\t\S+?\t(\S+?)\t\S+?\tID=([^;\s]+)/) {
+        $gene_id = $3;
+        $strand = $2;
+        $gff3_out{$gene_id}{"chr"} = $1;
+        $gff3_out{$gene_id}{"strand"} = $strand;
+        #print "$1\t$gene_id\t$strand\n";
+    }
+
+    foreach my $line (split /\n/, $augustus_info) {
+        @_ = split /\t/, $line;
+        if ($_[2] eq "start_codon") {
+            $gff3_out{$gene_id}{"start_codon"} = "$_[3]\t$_[4]\t$_[5]\t$_[6]\t$_[7]";
+        }
+        elsif ($_[2] eq "stop_codon") {
+            $gff3_out{$gene_id}{"stop_codon"} = "$_[3]\t$_[4]\t$_[5]\t$_[6]\t$_[7]";
+        }
+        elsif ($_[2] eq "CDS") {
+            $gff3_out{$gene_id}{"CDS"}{"$_[3]\t$_[4]\t$_[5]\t$_[6]\t$_[7]"} = 1;
+            push @augustus_CDS, "$_[3]\t$_[4]";
+        }
+    }
+
+    @augustus_CDS = sort {$a <=> $b} @augustus_CDS;
+
+    my @utr5_cds = split /\t/, $augustus_CDS[0];
+    my @utr3_cds = split /\t/, $augustus_CDS[-1];
+
+    shift @augustus_CDS;
+    pop @augustus_CDS;
+    foreach (@augustus_CDS) {
+        @_ = split /\t/;
+        $gff3_out{$gene_id}{"exon"}{"$_[0]\t$_[1]"} = 1;
+    }
+
+    my ($utr5_status, $utr3_status) = (0, 0);
+    foreach (@id) {
+        if (exists $transfrag{$_}) {
+            my $transfrag_info = $transfrag{$_};
+            my ($utr5_ok, $utr3_ok) = (0, 0);
+            my @transfrag_exon;
+            foreach my $line (split /\n/, $transfrag_info) {
+                @_ = split /\t/, $line;
+                if ($_[2] eq "CDS") {
+                    if ($_[3] <= $utr5_cds[0] && $_[4] >= $utr5_cds[1]) {
+                        $utr5_ok = 1;
+                    }
+                    if ($_[3] <= $utr3_cds[0] && $_[4] >= $utr3_cds[1]) {
+                        $utr3_ok = 1;
+                    }
+                }
+                elsif ($_[2] eq "exon") {
+                    push @transfrag_exon, "$_[3]\t$_[4]";
+                }
+            }
+
+            @transfrag_exon = sort {$a <=> $b} @transfrag_exon;
+
+            if ($utr5_ok == 1) {
+                foreach (@transfrag_exon) {
+                    @_ = split /\t/;
+                    if ($_[0] <= $utr5_cds[1]) {
+                        if ($_[1] > $utr5_cds[1]) {
+                            $gff3_out{$gene_id}{"exon"}{"$_[0]\t$utr5_cds[1]"} = 1;
+                        }
+                        else {
+                            $gff3_out{$gene_id}{"exon"}{"$_[0]\t$_[1]"} = 1;
+                        }
+                    }
+                }
+                $utr5_status = 1;
+            }
+
+            if ($utr3_ok == 1) {
+                foreach (@transfrag_exon) {
+                    @_ = split /\t/;
+                    if ($_[1] >= $utr3_cds[0]) {
+                        if ($_[0] < $utr5_cds[0]) {
+                            $gff3_out{$gene_id}{"exon"}{"$utr5_cds[0]\t$_[1]"} = 1;
+                        }
+                        else {
+                            $gff3_out{$gene_id}{"exon"}{"$_[0]\t$_[1]"} = 1;
+                        }
+                    }
+                }
+                $utr3_status = 1;
+            }
+        }
+    }
+
+    if ($utr5_status == 0) {
+        $gff3_out{$gene_id}{"exon"}{"$utr5_cds[0]\t$utr5_cds[1]"} = 1;
+    }
+    if ($utr3_status== 0) {
+        $gff3_out{$gene_id}{"exon"}{"$utr3_cds[0]\t$utr3_cds[1]"} = 1;
+    }
+=cut
+    print "$gff3_out{$gene_id}{'chr'}\t\.\tstart_codon\t$gff3_out{$gene_id}{'start_codon'}\tID=$gene_id.t1.start_codon;Parent=$gene_id.t1\n";
+    print "$gff3_out{$gene_id}{'chr'}\t\.\tstop_codon\t$gff3_out{$gene_id}{'stop_codon'}\tID=$gene_id.t1.stop_codon;Parent=$gene_id.t1\n";
+    foreach (sort {$a <=> $b} keys %{$gff3_out{$gene_id}{"CDS"}}) {
+        print "$gff3_out{$gene_id}{'chr'}\t\.\tCDS\t$_\tID=$gene_id.t1.cds;Parent=$gene_id.t1\n";
+    }
+    foreach (sort {$a <=> $b} keys %{$gff3_out{$gene_id}{"exon"}}) {
+        print "$gff3_out{$gene_id}{'chr'}\t\.\texon\t$_\t\.\t$gff3_out{$gene_id}{'strand'}\t\.\tID=$gene_id.t1.exon;Parent=$gene_id.t1\n";
+    }
+=cut
+    return %gff3_out;
+}
+
+sub intron_support {
+    my $augustus_info = $augustus{$_[0]};
+    my ($total_num, $support_num) = (0, 0);
+    foreach (split /\n/, $augustus_info) {
+        if (m/\tintron\t(\d+)\t(\d+)/) {
+            $total_num ++;
+            if (exists $intron{"$1\t$2"}) {
+                $support_num ++;
+            }
+        }
+    }
+    return "$support_num/$total_num";
+}

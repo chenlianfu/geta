@@ -1,0 +1,151 @@
+#!/usr/bin/perl
+use strict;
+use Getopt::Long;
+
+my $usage = <<USAGE;
+Usage:
+    perl $0 [options] genome.fasta hints.gff
+
+	--gene_prefix <string>    default: augustus
+	设置基因ID前缀
+
+    --species <string>    default: None
+    设置用于进行Augustus基因预测的HMM模型数据。
+
+    --cpu <int>    default: 1
+    设置并行运行augustus命令的数目。
+
+    --tmp_dir <string>    default: aug_para_with_hints.tmp
+    设置临时文件夹
+
+USAGE
+if (@ARGV==0){die $usage}
+
+my ($species, $cpu, $tmp_dir, $gene_prefix);
+GetOptions(
+    "species:s" => \$species,
+    "cpu:i" => \$cpu,
+    "tmp_dir:s" => \$tmp_dir,
+	"gene_prefix:s" => \$gene_prefix,
+);
+
+$gene_prefix ||= "augustus";
+$cpu ||= 1;
+$tmp_dir ||= 'aug_para_with_hints.tmp';
+die "The --species parameter not setted!\n" unless $species;
+
+open IN, $ARGV[0] or die $!;
+my (%seq, $id);
+while (<IN>) {
+    chomp;
+    if (/>(\S+)/) { $id = $1; }
+    else { $seq{$id} .= $_; }
+}
+close IN;
+
+open IN, $ARGV[1] or die $!;
+my %hints;
+while (<IN>) {
+	@_ = split /\t/;
+    $hints{$_[0]}{$_[6]} .= $_;
+}
+close IN;
+
+# extrinsic.cfg
+my $extrinsic = '[SOURCES]
+M E W
+
+[SOURCE-PARAMETERS]
+
+[GENERAL]
+      start        1        1  M    1  1e+100  E 1    1    W 1    1
+       stop        1        1  M    1  1e+100  E 1    1    W 1    1
+        tss        1        1  M    1  1e+100  E 1    1    W 1    1
+        tts        1        1  M    1  1e+100  E 1    1    W 1    1
+        ass        1        1  M    1  1e+100  E 1    1    W 1    1
+        dss        1        1  M    1  1e+100  E 1    1    W 1    1
+   exonpart        1     .997  M    1  1e+100  E 1    1e2  W 1    1.05
+       exon        1        1  M    1  1e+100  E 1    1e4  W 1    1
+ intronpart        1        1  M    1  1e+100  E 1    1    W 1    1
+     intron        1       .3  M    1  1e+100  E 1    1e6  W 1    1
+    CDSpart        1  1 0.985  M    1  1e+100  E 1    1	   W 1    1
+        CDS        1        1  M    1  1e+100  E 1    1    W 1    1
+    UTRpart        1    1 .96  M    1  1e+100  E 1    1    W 1    1
+        UTR        1        1  M    1  1e+100  E 1    1    W 1    1
+     irpart        1        1  M    1  1e+100  E 1    1    W 1    1
+nonexonpart        1        1  M    1  1e+100  E 1    1    W 1    1
+  genicpart        1        1  M    1  1e+100  E 1    1    W 1    1';
+open OUT, ">", "extrinsic.cfg" or die $!;
+print OUT $extrinsic;
+close OUT;
+
+mkdir $tmp_dir unless -e $tmp_dir;
+open COM, ">", "command.augustus.list" or die $!;
+foreach (sort keys %seq) {
+    open OUT1, ">", "$tmp_dir/$_.fasta" or die $!;
+    open OUT2, ">", "$tmp_dir/$_.hint_plus.gff" or die $!;
+    open OUT3, ">", "$tmp_dir/$_.hint_minus.gff" or die $!;
+    print OUT1 ">$_\n$seq{$_}\n";
+    print OUT2 "$hints{$_}{'+'}";
+    print OUT3 "$hints{$_}{'-'}";
+    close OUT1;
+    close OUT2;
+	close OUT3;
+
+    print COM "augustus --gff3=on --strand=forward --species=$species --hintsfile=$tmp_dir/$_.hint_plus.gff --extrinsicCfgFile=extrinsic.cfg $tmp_dir/$_.fasta > $tmp_dir/$_.out_plus\n";
+    print COM "augustus --gff3=on --strand=backward --species=$species --hintsfile=$tmp_dir/$_.hint_minus.gff --extrinsicCfgFile=extrinsic.cfg $tmp_dir/$_.fasta > $tmp_dir/$_.out_minus\n";
+}
+close COM;
+
+my $cmdString = "ParaFly -c command.augustus.list -CPU $cpu &> command.augustus.log";
+system ($cmdString) == 0 or die "Failed to execute: $cmdString\n$!\n";
+
+my (%out, $info);
+foreach my $seq_id (sort keys %seq) {
+    open IN, "$tmp_dir/$seq_id.out_plus" or die "Can not open the file $tmp_dir/$_.out_minus ! $!\n";
+	while (<IN>) {
+		next if m/^#/;
+		next if m/^\s*$/;
+		if (m/\tgene\t/) {
+			@_ = split /\t/;
+			$info = "$_[0]\t$_[6]\t$_[3]\t$_[4]";
+		}
+		$out{$info} .= $_;
+	}
+    close IN;
+
+    open IN, "$tmp_dir/$seq_id.out_minus" or die "Can not open the file $tmp_dir/$_.out_minus ! $!\n";
+	while (<IN>) {
+		next if m/^#/;
+		next if m/^\s*$/;
+		if (m/\tgene\t/) {
+			@_ = split /\t/;
+			$info = "$_[0]\t$_[6]\t$_[3]\t$_[4]";
+		}
+		$out{$info} .= $_;
+	}
+    close IN;
+}
+
+my (%sort1, %sort2, %sort3, %sort4);
+foreach (keys %out) {
+	@_ = split /\t/;
+	$sort1{$_} = $_[0];
+	$sort2{$_} = $_[1];
+	$sort3{$_} = $_[2];
+	$sort4{$_} = $_[3];
+}
+
+my $num = 0;
+my @out = sort { $sort1{$a} cmp $sort1{$b} or $sort3{$a} <=> $sort3{$b} or $sort4{$a} <=> $sort4{$b} or $sort2{$a} cmp $sort2{$b} } keys %out;
+foreach (@out) {
+	$num ++;
+	my $gene_id = $gene_prefix . '0' x (length(@out) - length($num)) . $num;
+	my @line = split /\n/, $out{$_};
+	foreach (@line) {
+		s/ID=g\d+/ID=$gene_id/;
+		s/Parent=g\d+/Parent=$gene_id/;
+		print "$_\n";
+	}
+	print "\n";
+}

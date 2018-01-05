@@ -1,0 +1,141 @@
+#!/usr/bin/perl
+use strict;
+use Getopt::Long;
+
+my $usage = <<USAGE;
+Usage:
+    perl $0 [options] transfrag.genome.gff3 > best_candidates.gff3
+
+For Example:
+    perl $0 --min_cds_num 3 --min_cds_length 900 --min_cds_exon_ratio 0.60 --intron_length_fractile 0.95 --cds_length_fractile 0.95 transfrag.genome.gff3 > best_candidates.gff3
+
+    程序按照先后顺序对transfrag.genome.gff3（该文件是标准的GFF3格式，必须包含exon和cds信息，且不同的基因模型信息之前使用连续两个换行符分割）中的基因模型进行过滤。
+    1. 首先，过滤cds数目<3的基因模型。
+    2. 再过滤cds长度<900的基因模型。
+    3. 再过滤cds region占exon region比例<0.6的基因模型。
+    4. 再过滤含有过长intron的基因模型。根据全部数据的cds(而不是exon)信息得到的intron长度信息；再将intron长度按从小到大进行排序，选取95%分位数为阈值。
+    5. 最后过滤cds长度过长的基因模型。根据全部数据得到的cds长度信息；将cds长度长度从小到大排序，选取95%分为数为阈值。
+
+    本程序的目的是为了获得优质的基因模型，用于后期的Augustus training。若输入的transfrag.genome.gff3文件中包含不完整的基因模型，推荐过后自己单独去除不完整基因模型。
+
+USAGE
+if (@ARGV==0){die $usage}
+
+my ($min_cds_num, $min_cds_length, $min_cds_exon_ratio, $intron_length_fractile, $cds_length_fractile);
+GetOptions(
+    "min_cds_num:i" => \$min_cds_num,
+    "min_cds_length:i" => \$min_cds_length,
+    "min_cds_exon_ratio:f" => \$min_cds_exon_ratio,
+    "intron_length_fractile:f" => \$intron_length_fractile,
+    "cds_length_fractile:f" => \$cds_length_fractile,
+);
+
+$min_cds_num ||= 3;
+$min_cds_length ||= 900;
+$min_cds_exon_ratio ||= 0.60;
+$intron_length_fractile ||= 0.95;
+$cds_length_fractile ||= 0.95;
+
+open IN, $ARGV[0] or die $!;
+$/ = "\n\n";
+my (@intron_length, @cds_length, %validate);
+my ($gene_number_total, $gene_nuber_validate, $gene_number_exonLack, $gene_number_short, $gene_number_cdsRatio, $gene_number_intron, $gene_number_long);
+while (<IN>) {
+    $gene_number_total ++;
+
+    if (m/mRNA\t.*?ID=(\S+?);/) {
+        my @cds_line = m/(CDS\t\d+?\t\d+?)\t/g;
+        my @exon_line = m/(exon\t\d+?\t\d+?)\t/g;
+        push @intron_length, &get_intron_length(@cds_line);
+
+        my $cds_line = @cds_line;
+        if ($cds_line < $min_cds_num) {
+            $gene_number_exonLack ++;
+            next;
+        }
+
+        my ($cds_length, $exon_length);
+        foreach (@cds_line) {
+            m/CDS\t(\d+)\t(\d+)/;
+            $cds_length += ($2 - $1 + 1);
+        }
+        push @cds_length, $cds_length;
+        foreach (@exon_line) {
+            m/exon\t(\d+)\t(\d+)/;
+            $exon_length += ($2 - $1 + 1);
+        }
+
+        if ($cds_length >= $min_cds_length) {
+            my $cdsRation = $cds_length / $exon_length;
+            if ($cdsRation >= $min_cds_exon_ratio) {
+                $validate{$_} = 1;
+            }
+            else {
+                $gene_number_cdsRatio ++;
+            }
+        }
+        else {
+            $gene_number_short ++;
+        }
+    }
+}
+
+my @intron_length = sort {$a <=> $b} @intron_length;
+my $intron_length_threshold = $intron_length[@intron_length*$intron_length_fractile];
+print STDERR "Max inron length threshold was set to: $intron_length_threshold\n";
+my @cds_length = sort {$a <=> $b} @cds_length;
+my $cds_length_threshold = $cds_length[@cds_length*$cds_length_fractile];
+print STDERR "Max CDS length threshold was set to:   $cds_length_threshold\n";
+
+foreach (sort keys %validate) {
+    my @cds_region = m/\tCDS\t(\d+?\t\d+?)\t/g;
+    my $cds_length;
+    foreach (@cds_region) {
+        @_ = split /\t/;
+        $cds_length += ($_[1] - $_[0] + 1);
+    }
+
+    my @intron_length = &get_intron_length(@cds_region);
+    @intron_length = sort {$b <=> $a} @intron_length;
+
+    if ($intron_length[0] <= $intron_length_threshold) {
+        if ($cds_length <= $cds_length_threshold) {
+            $gene_nuber_validate ++;
+            print;
+        }
+        else {
+            $gene_number_long ++;
+        }
+    }
+    else {
+        $gene_number_intron ++;
+    }
+}
+
+print STDERR "
+Total gene number:                   $gene_number_total
+Validate gene number:                $gene_nuber_validate
+Exon < $min_cds_num gene number:                $gene_number_exonLack
+CDS length < $min_cds_length gene number:        $gene_number_short
+CDS region ratio < $min_cds_exon_ratio gene number:  $gene_number_cdsRatio
+Intron length > $intron_length_threshold gene number:      $gene_number_intron
+CDS length > $cds_length_threshold gene number:       $gene_number_long\n\n";
+
+sub get_intron_length {
+    my @exon;
+    foreach (@_) {
+        m/(\d+)\t(\d+)$/;
+        push @exon, "$1\t$2";
+    }
+    @exon = sort {$a <=> $b} @exon;
+    my $first = shift @exon;
+    my $end = $1 if $first =~ m/(\d+)$/;
+    my @intron_length;
+    foreach (@exon) {
+        m/^(\d+)\t(\d+)$/;
+        my $intron_length = $1 - $end;
+        $end = $2;
+        push @intron_length, $intron_length;
+    }
+    return @intron_length;
+}

@@ -1,0 +1,208 @@
+#!/usr/bin/perl
+use strict;
+use Getopt::Long;
+
+my $usage = <<USAGE;
+Usage:
+    perl $0 [options] combine.2.gff3 genome.fasta > combine.filter.gff3
+
+	--cpu <int>    default: 1
+	设置进行pfam分析时的并行数
+
+	--evalue <float>    default: 1e-6
+	设置Pfam的evalue阈值
+
+	--coverage <float>    default: 0.3
+	设置Pfam的覆盖度阈值
+
+	--pfam_db <string>    default: /opt/biosoft/hmmer-3.1b2/Pfam-AB.hmm
+	设置Pfam数据库路径
+
+USAGE
+if (@ARGV==0){die $usage}
+
+my ($cpu, $evalue, $coverage, $pfam_db);
+GetOptions(
+	"cpu:i" => \$cpu,
+	"evalue:f" => \$evalue,
+	"coverage:f" => \$coverage,
+	"pfam_db:s" => \$pfam_db,
+);
+
+$cpu ||= 1;
+$evalue ||= 1e-6;
+$coverage ||= 0.3;
+$pfam_db ||= "/opt/biosoft/hmmer-3.1b2/Pfam-AB.hmm";
+
+open IN, $ARGV[0] or die $!;
+my (%gff, $id, @id, %id);
+while (<IN>) {
+    if (m/\tgene\t.*ID=([^;\s]+)/) {
+		$id = $1;
+        push @id, $id unless exists $id{$id};
+        $gff{$id} .= $_;
+        $id{$id} = 1;
+    }
+	else {
+		$gff{$id} .= $_;
+	}
+}
+close IN;
+
+open IN, $ARGV[1] or die $!;
+my (%seq, $seq_id);
+while (<IN>) {
+    chomp;
+    if (/^>(\S+)/) { $seq_id = $1; }
+    else { $seq{$seq_id} .= $_; }
+}
+close IN;
+
+open FASTA, ">", "for_pfam_search.fasta" or die $!;
+open CMD, ">", "command.hmmscan.list" or die $!;
+mkdir "hmmscan.tmp" unless -e "hmmscan.tmp";
+foreach my $gene_id (@id) {
+	my @gff = split /\n/, $gff{$gene_id};
+	my @cds;
+	foreach (@gff) {
+		next unless $_;
+		@_ = split /\t/;
+		push @cds, "$_[3]\t$_[4]\t$_[0]\t$_[6]\t$_[7]" if m/\tCDS\t/i;
+	}
+	@_ = split /\t/, $cds[0];
+	my ($seqID, $strand, $frame) = ($_[2], $_[3], $_[4]);
+	@cds = sort {$a <=> $b} @cds;
+
+	my $cds_seq;
+	foreach (@cds) {
+		@_ = split /\t/;
+		my $start = $_[0] - 1;
+		my $len = $_[1] - $start;
+		$cds_seq .= substr($seq{$seqID}, $start, $len);
+	}
+
+	if ($strand eq "-") {
+		@_ = split /\t/, $cds[-1];
+		$frame = $_[4];
+		$cds_seq = reverse $cds_seq;
+		$cds_seq =~ tr/ATCGatcg/TAGCtagc/;
+	}
+
+	$cds_seq =~ s/^\w{$frame}//;
+	my $pep_seq = &cds2pep($cds_seq, $gene_id);
+	print FASTA ">$gene_id\n$pep_seq\n";
+
+	$pep_seq =~ s/\*$//;
+	open OUT, ">", "hmmscan.tmp/$gene_id.fasta" or die $!;
+	print OUT ">$gene_id\n$pep_seq\n";
+	close OUT;
+	print CMD "hmmscan -o hmmscan.tmp/$gene_id.txt --cpu 1 -E $evalue --domE $evalue --tblout hmmscan.tmp/$gene_id.tbl --domtblout hmmscan.tmp/$gene_id.domtbl $pfam_db hmmscan.tmp/$gene_id.fasta\n";
+}
+close FASTA;
+close CMD;
+
+my $cmdString = "ParaFly -c command.hmmscan.list -CPU $cpu > /dev/null";
+system ($cmdString) == 0 or die "Failed to execute: $cmdString\n$!";
+
+my %gene_ok;
+foreach my $gene_id (@id) {
+	open IN, "hmmscan.tmp/$gene_id.domtbl" or die $!;
+	while (<IN>) {
+		next if m/^#/;
+		@_ = split /\s+/;
+		my $ratio1 = abs($_[15] - $_[16]) / $_[2];
+        my $ratio2 = abs($_[17] - $_[18]) / $_[5];
+        if ($ratio1 >= $coverage or $ratio2 >= $coverage) {
+            $gene_ok{$gene_id} = 1;
+        }
+	}
+	close IN;
+}
+
+my $number1 = @id;
+my $number2 = keys %gene_ok;
+print STDERR "Genes for Pfam: $number1
+Pfam Search passed: $number2\n";
+
+foreach (@id) {
+	print "$gff{$_}\n" if exists $gene_ok{$_};
+}
+
+sub cds2pep {
+    my %cds2pep = (
+        "TTT" => "F",
+        "TTC" => "F",
+        "TTA" => "L",
+        "TTG" => "L",
+        "TCT" => "S",
+        "TCC" => "S",
+        "TCA" => "S",
+        "TCG" => "S",
+        "TAT" => "Y",
+        "TAC" => "Y",
+        "TAA" => "*",
+        "TAG" => "*",
+        "TGT" => "C",
+        "TGC" => "C",
+        "TGA" => "*",
+        "TGG" => "W",
+        "CTT" => "L",
+        "CTC" => "L",
+        "CTA" => "L",
+        "CTG" => "L",
+        "CCT" => "P",
+        "CCC" => "P",
+        "CCA" => "P",
+        "CCG" => "P",
+        "CAT" => "H",
+        "CAC" => "H",
+        "CAA" => "Q",
+        "CAG" => "Q",
+        "CGT" => "R",
+        "CGC" => "R",
+        "CGA" => "R",
+        "CGG" => "R",
+        "ATT" => "I",
+        "ATC" => "I",
+        "ATA" => "I",
+        "ATG" => "M",
+        "ACT" => "T",
+        "ACC" => "T",
+        "ACA" => "T",
+        "ACG" => "T",
+        "AAT" => "N",
+        "AAC" => "N",
+        "AAA" => "K",
+        "AAG" => "K",
+        "AGT" => "S",
+        "AGC" => "S",
+        "AGA" => "R",
+        "AGG" => "R",
+        "GTT" => "V",
+        "GTC" => "V",
+        "GTA" => "V",
+        "GTG" => "V",
+        "GCT" => "A",
+        "GCC" => "A",
+        "GCA" => "A",
+        "GCG" => "A",
+        "GAT" => "D",
+        "GAC" => "D",
+        "GAA" => "E",
+        "GAG" => "E",
+        "GGT" => "G",
+        "GGC" => "G",
+        "GGA" => "G",
+        "GGG" => "G",
+    );
+    my $seq = shift @_;
+    my $gene = shift @_;
+    my $pep;
+    while ((length $seq) >= 3) {
+        $seq =~ s/(\w{3})//;
+        $pep .= $cds2pep{$1};
+    }
+	#print STDERR "Warning: CDS length of $gene is not multiple of 3\n" if (length $seq) > 0;
+	#print STDERR "Warning: Stop Codon appear in the middle of $gene\n" if $pep =~ m/\*\w/;
+    return $pep;
+}
