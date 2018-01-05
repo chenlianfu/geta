@@ -674,4 +674,4 @@ print STDERR "CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
 print STDERR "\n============================================\n";
-print STDERR "AAGGPP complete successfully!\n";
+print STDERR "GETA complete successfully!\n";
