@@ -87,3 +87,5 @@ This script was tested on CentOS 6.8 with such softwares can be run directly in 
 
 Version: 1.0
 
+4. testing of GETA
+we have compared the accuracy of GETA with other methods according to several species. the command line and output GFF3 files can be found at website: <a href="122.205.95.116/geta/" target="_noblank">122.205.95.116/geta/</a>
