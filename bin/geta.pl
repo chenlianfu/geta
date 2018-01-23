@@ -145,7 +145,7 @@ else {
 }
 # 检测samtools
 $software_info = `samtools --version`;
-if ($software_info =~ m/samtools 1.(\d+).(\d+)/) {
+if ($software_info =~ m/samtools 1.(\d+)/) {
     if ($1 >= 3) {
         print STDERR "samtools:\tOK\n";
     }
