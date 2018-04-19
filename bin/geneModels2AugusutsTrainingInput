@@ -1,0 +1,420 @@
+#!/usr/bin/perl
+use strict;
+use Getopt::Long;
+
+my $usage = <<USAGE;
+Usage:
+    $0 [options] geneModels.gff3 genome.fasta
+
+    输入GFF3格式的基因模型信息（尽可能包含最多的准确的基因模型，可以包含不完整的基因模型）和基因组序列；程序首先调用ncbi-blast+分析蛋白水平的相似性，对基因模型进行取冗余处理，得到的基因模型可以用下一步Augustus etraining；程序再对剩下的基因模型进行筛选，选取完整、多CDS、CDS总长度较长的基因模型，用于下一步Augustus training optimizing过程。
+
+    --out_prefix <string>    default: out
+    设置程序输出文件前缀。
+
+BLAST分析参数：
+    --cpu <int>    default: 8
+    设置进行blast分析时的并行化数。
+
+    --min_evalue <float>    default: 1e-9
+    设置使用blastp进行序列比对时使用的evalue阈值。
+
+    --min_identity <float>    default: 0.8
+    对blast结果进行分析时，若identity < 该值，则忽略比对结果。
+
+    --min_coverage_ratio <float>    default: 0.5
+    对blast结果进行分析，两个基因的proteins序列的匹配区域各自计算出一个覆盖度比例；若两个基因同时超过该比例，则去掉protein序列较短的基因模型。若只有一个基因超过该比例，则去掉该基因模型。
+
+
+最优基因模型选择参数：
+    --min_cds_num <int>    default: 2
+    最优基因模型的CDS数量不小于该值。
+
+    --min_cds_length <int>    default: 600
+    最优基因模型的CDS总长度不能小于该值。
+
+    --min_cds_exon_ratio <float>    default: 0.60
+    最优基因模型的CDS总长度/exon总长度不能小于该值。
+
+注意事项：
+    1. 输入的GFF3文件不能包含可变剪接；
+    2. 程序调用blast.pl使用ncbi-blast+的BLASTP命令对protein序列进行比对；
+    3. 输出文件out.filter1.gff3是去除了相似性较高冗余基因模型的结果，out.filter2.gff3是进一步挑的最优基因模型（挑取完整基因的方法是检测其起始密码子和终止密码子）。
+USAGE
+if (@ARGV==0){die $usage}
+
+my ($out_prefix, $cpu, $min_evalue, $min_identity, $min_coverage_ratio, $min_cds_num, $min_cds_length, $min_cds_exon_ratio);
+GetOptions(
+    "out_prefix:s" => \$out_prefix,
+    "cpu:i" => \$cpu,
+    "min_evalue:f" => \$min_evalue,
+    "min_identity:f" => \$min_identity,
+    "min_coverage_ratio:f" => \$min_coverage_ratio,
+    "min_cds_num:i" => \$min_cds_num,
+    "min_cds_length:i" => \$min_cds_length,
+    "min_cds_exon_ratio:f" => \$min_cds_exon_ratio,
+);
+$out_prefix ||= "out";
+$cpu ||= 8;
+$min_evalue ||= 1e-9;
+$min_identity ||= 0.8;
+$min_coverage_ratio ||= 0.5;
+$min_cds_num ||= 2;
+$min_cds_length ||= 600;
+$min_cds_exon_ratio ||= 0.60;
+
+# 先将GFF3文件转换成Proteins序列
+open IN, $ARGV[0] or die "Can not open file $ARGV[0], $!\n";
+my (%gff, $gene_id, %target_chr_of_gene, %strand_of_gene);
+while (<IN>) {
+    next if m/^#/;
+    next if m/^\s*$/;
+    if (m/\tgene\t.*ID=([^;]+)/) {
+        $gene_id = $1;
+        $gff{$gene_id} .= $_;
+        @_ = split /\t/;
+        $target_chr_of_gene{$gene_id} = $_[0];
+        $strand_of_gene{$gene_id} = $_[6];
+    }
+    else {
+        $gff{$gene_id} .= $_;
+    }
+}
+close IN;
+
+
+open IN, $ARGV[1] or die "Can not open file $ARGV[1], $!\n";
+my (%seq, $seq_id);
+while (<IN>) {
+    chomp;
+    if (m/^>(\S+)/) { $seq_id = $1; }
+    else { $seq{$seq_id} .= $_; }
+}
+close IN;
+
+open OUT, ">", "$out_prefix.proteins.fasta" or die "Cannot create file $out_prefix.proteins.fasta, $!\n";
+my %length;
+foreach my $gene_id (sort keys %gff) {
+    my $gff_info = $gff{$gene_id};
+    my @gff_info = split /\n/, $gff_info;
+    my @cds;
+    foreach (@gff_info) {
+        if (m/\tCDS\t/) {
+            @_ = split /\t/;
+            push @cds, "$_[3]\t$_[4]\t$_[7]";
+        }
+    }
+    @cds = sort {$a <=> $b} @cds;
+    my $cds_seq;
+    foreach (@cds) {
+        #print "$gene_id\t$target_chr_of_gene{$gene_id}\t$_\n";
+        @_ = split /\t/, $_;
+        $cds_seq .= substr($seq{$target_chr_of_gene{$gene_id}}, $_[0] - 1, $_[1] - $_[0] + 1);
+    }
+    if ($strand_of_gene{$gene_id} eq "+") {
+        my $frame = $1 if $cds[0] =~ m/(\d+)$/;
+        my $pep = &cds2pep($cds_seq, $frame);
+        $pep =~ s/\*$//;
+        print OUT ">$gene_id\n$pep\n";
+        $length{$gene_id} = length($pep);
+    }
+    elsif ($strand_of_gene{$gene_id} eq "-") {
+        $cds_seq = reverse $cds_seq;
+        $cds_seq =~ tr/ATCGatcgn/TAGCTAGCN/;
+        my $frame = $1 if $cds[-1] =~ m/(\d+)$/;
+        my $pep = &cds2pep($cds_seq, $frame);
+        $pep =~ s/\*$//;
+        print OUT ">$gene_id\n$pep\n";
+        $length{$gene_id} = length($pep);
+    }
+}
+close OUT;
+
+# 对proteins序列进行BLAST分析
+my $cmdString = "makeblastdb -in $out_prefix.proteins.fasta -dbtype prot -title $out_prefix -parse_seqids -out $out_prefix -logfile $out_prefix.makeblastdb.log";
+unless (-e "$out_prefix.makeblastdb.ok") {
+    print STDERR (localtime) . " CMD: $cmdString\n";
+    system ($cmdString) == 0 or die "Failed to execute: $!\n";
+    open OUT, ">", "$out_prefix.makeblastdb.ok"; close OUT;
+}
+else {
+    print STDERR "Skip CMD: $cmdString, for file $out_prefix.makeblastdb.ok exists\n\n";
+}
+
+$cmdString = "blast.pl blastp $out_prefix $out_prefix.proteins.fasta $min_evalue $cpu $out_prefix 6";
+unless (-e "$out_prefix.blast.ok") {
+    print STDERR (localtime) . " CMD: $cmdString\n";
+    system ($cmdString) == 0 or die "Failed to execute: $!\n";
+    open OUT, ">", "$out_prefix.blast.ok" unless -e "FailedCommands"; close OUT;
+}
+else {
+    print STDERR "Skip CMD: $cmdString, for file $out_prefix.blast.ok exists\n\n";
+}
+
+# 对BLAST结果进行分析，将需要去除的冗余基因模型ID存放到%delete中
+my %overlap;
+open IN, "$out_prefix.tab"  or die "Can not open file $out_prefix.tab, $!\n";
+while (<IN>) {
+    @_ = split /\t/;
+    next if $_[0] eq $_[1];
+    next if $_[2] < $min_identity;
+
+    my ($start, $end) = ($_[6], $_[7]);
+    ($start, $end) = ($_[7], $_[6]) if $_[7] < $_[6];
+    $overlap{"$_[0]\t$_[1]"}{$_[0]}{"$start\t$end"} = 1;
+    ($start, $end) = ($_[8], $_[9]);
+    ($start, $end) = ($_[9], $_[8]) if $_[9] < $_[8];
+    $overlap{"$_[0]\t$_[1]"}{$_[1]}{"$start\t$end"} = 1;
+}
+close IN;
+
+my %overlap_length;
+foreach my $two_id (keys %overlap) {
+    foreach my $id (keys %{$overlap{$two_id}}) {
+        my @region = sort {$a <=> $b} keys %{$overlap{$two_id}{$id}};
+        my ($start, $end) = split /\t/, $region[0];
+        shift @region;
+        my $length += $end - $start + 1;
+        foreach (@region) {
+            @_ = split /\t/;
+            if ($_[0] > $end) {
+                $length += $_[1] - $_[0] + 1;
+                ($start, $end) = @_;
+            }
+            elsif ($_[1] > $end) {
+                $length += $_[1] - $end;
+                $end = $_[1];
+            }
+        }
+        $overlap_length{$two_id}{$id} = $length;
+    }
+}
+
+my %delete;
+open OUT, ">", "$out_prefix.blast.out" or die "Can not create file $out_prefix.blast.out, $!\n";
+print OUT "gene_id\tgene_length\tmatch_coverage_ratio\tgene_id\tgene_length\tmatch_coverage_ratio\n";
+foreach my $two_id (keys %overlap) {
+    my @id = keys %{$overlap{$two_id}};
+    my $length0_seq = $length{$id[0]};
+    my $length0_ovr = $overlap_length{$two_id}{$id[0]};
+    my $length0_ratio = $length0_ovr / $length0_seq;
+    my $length1_seq = $length{$id[1]};
+    my $length1_ovr = $overlap_length{$two_id}{$id[1]};
+    my $length1_ratio = $length1_ovr / $length1_seq;
+
+    if (!exists $delete{$id[0]} && !exists $delete{$id[1]}) {
+        if ($length0_ratio >= $min_coverage_ratio && $length1_ratio >= $min_coverage_ratio) {
+            if ($length0_seq >= $length1_seq) { $delete{$id[1]} = 1; }
+            else { $delete{$id[0]} = 1; }
+        }
+        elsif ($length0_ratio >= $min_coverage_ratio) {
+            $delete{$id[0]} = 1;
+        }
+        elsif ($length1_ratio >= $min_coverage_ratio) {
+            $delete{$id[1]} = 1;
+        }
+    }
+    print OUT "$id[0]\t$length0_seq\t$length0_ratio\t$id[1]\t$length1_seq\t$length1_ratio\n";
+}
+close OUT;
+
+# 输出用于Augustus etrainig的基因模型
+open OUT, ">", "$out_prefix.filter1.gff3" or die "Cannot create file $out_prefix.filter1.gff3, $!\n";
+foreach my $gene_id (sort keys %gff) {
+    my $gff_info = $gff{$gene_id};
+    print OUT "$gff_info\n" unless exists $delete{$gene_id};
+}
+close OUT;
+
+# 进一步进行过滤
+my (%keep, $not_complete_num, $few_cds_num, $short_cds_num, $little_cds_exon_ration_num, $total_num, $redundant_num, $keep_num);
+foreach my $gene_id (sort keys %gff) {
+	$total_num ++;
+    if (exists $delete{$gene_id}) {
+		$redundant_num ++;
+		next;
+	}
+
+    my $gff_info = $gff{$gene_id};
+    my $if_complete = &if_complete($gff_info);
+    #next unless $gff_info =~ m/Integrity=complete/;
+    unless ($if_complete) {
+		$not_complete_num ++;
+		next;
+	}
+
+    my @cds_line = $gff_info =~ m/(CDS\t\d+?\t\d+?)\t/g;
+    my @exon_line = $gff_info =~ m/(exon\t\d+?\t\d+?)\t/g;
+    if (@cds_line < $min_cds_num) {
+		$few_cds_num ++;
+		next;
+	}
+
+    my ($cds_length, $exon_length);
+    foreach (@cds_line) {
+        m/CDS\t(\d+)\t(\d+)/;
+        $cds_length += ($2 - $1 + 1);
+    }
+    if ($cds_length < $min_cds_length) {
+		$short_cds_num ++;
+		next;
+	}
+
+    foreach (@exon_line) {
+        m/exon\t(\d+)\t(\d+)/;
+        $exon_length += ($2 - $1 + 1);
+    }
+
+	if ($exon_length) {
+		my $cdsRation = $cds_length / $exon_length;
+		if ($cdsRation < $min_cds_exon_ratio) {
+			$little_cds_exon_ration_num ++;
+			next;
+		}
+	}
+
+	$keep_num ++;
+    $keep{$gene_id} = 1;
+}
+
+print STDERR "
+Total gene models number: $total_num
+Redundant gene number:    $redundant_num
+Not complete gene number: $not_complete_num
+Few CDSs gene number:     $few_cds_num
+Short CDS length:         $short_cds_num
+Low CDS/exon ratio:       $little_cds_exon_ration_num\n";
+
+open OUT, ">", "$out_prefix.filter2.gff3" or die "Cannot create file $out_prefix.filter1.gff3, $!\n";
+foreach my $gene_id (sort keys %gff) {
+    if (exists $keep{$gene_id}) {
+        my $gff_info = $gff{$gene_id};
+        print OUT "$gff_info\n";
+    }
+}
+close OUT;
+
+sub if_complete {
+    # 输入一个genemodel的GFF3信息
+    my $if_complete = 0;
+    my $info = $_[0];
+    my @line = split /\n/, $info;
+    @_ = split /\t/, $line[0];
+    my ($seqID, $strand) = ($_[0], $_[6]);
+
+    my @cds;
+    foreach (@line) {
+        @_ = split /\t/;
+        push @cds, "$_[3]\t$_[4]\t$_[7]" if $_[2] eq 'CDS';
+    }
+
+    if ($strand eq "+") {
+        @cds = sort { $a <=> $b } @cds;
+        @_ = split /\t/, $cds[0];
+        my $frame = $_[2];
+        return $if_complete if $frame != 0;
+        my $start_codon = substr($seq{$seqID}, $_[0] - 1, 3);
+        return $if_complete if $start_codon ne "ATG";
+
+        @_ = split /\t/, $cds[-1];
+        my $stop_codon = substr($seq{$seqID}, $_[1] - 3, 3);
+        return $if_complete unless ($stop_codon eq "TAA" or $stop_codon eq "TGA" or $stop_codon eq "TAG");
+    }
+    elsif ($strand eq "-") {
+        @cds = sort { $b <=> $a } @cds;
+        @_ = split /\t/, $cds[0];
+        my $frame = $_[2];
+        return $if_complete if $frame != 0;
+        my $start_codon = substr($seq{$seqID},$_[1] - 3, 3);
+        $start_codon = reverse $start_codon;
+        $start_codon =~ tr/ATCGatcgn/TAGCTAGCN/;
+        return $if_complete if $start_codon ne "ATG";
+
+        @_ = split /\t/, $cds[-1];
+        my $stop_codon = substr($seq{$seqID}, $_[0] - 1, 3);
+        $stop_codon = reverse $stop_codon;
+        $stop_codon =~ tr/ATCGatcgn/TAGCTAGCN/;
+        return $if_complete unless ($stop_codon eq "TAA" or $stop_codon eq "TGA" or $stop_codon eq "TAG");
+    }
+
+    $if_complete = 1;
+    return $if_complete;
+}
+
+sub cds2pep {
+    my %cds2pep = (
+        "TTT" => "F",
+        "TTC" => "F",
+        "TTA" => "L",
+        "TTG" => "L",
+        "TCT" => "S",
+        "TCC" => "S",
+        "TCA" => "S",
+        "TCG" => "S",
+        "TAT" => "Y",
+        "TAC" => "Y",
+        "TAA" => "*",
+        "TAG" => "*",
+        "TGT" => "C",
+        "TGC" => "C",
+        "TGA" => "*",
+        "TGG" => "W",
+        "CTT" => "L",
+        "CTC" => "L",
+        "CTA" => "L",
+        "CTG" => "L",
+        "CCT" => "P",
+        "CCC" => "P",
+        "CCA" => "P",
+        "CCG" => "P",
+        "CAT" => "H",
+        "CAC" => "H",
+        "CAA" => "Q",
+        "CAG" => "Q",
+        "CGT" => "R",
+        "CGC" => "R",
+        "CGA" => "R",
+        "CGG" => "R",
+        "ATT" => "I",
+        "ATC" => "I",
+        "ATA" => "I",
+        "ATG" => "M",
+        "ACT" => "T",
+        "ACC" => "T",
+        "ACA" => "T",
+        "ACG" => "T",
+        "AAT" => "N",
+        "AAC" => "N",
+        "AAA" => "K",
+        "AAG" => "K",
+        "AGT" => "S",
+        "AGC" => "S",
+        "AGA" => "R",
+        "AGG" => "R",
+        "GTT" => "V",
+        "GTC" => "V",
+        "GTA" => "V",
+        "GTG" => "V",
+        "GCT" => "A",
+        "GCC" => "A",
+        "GCA" => "A",
+        "GCG" => "A",
+        "GAT" => "D",
+        "GAC" => "D",
+        "GAA" => "E",
+        "GAG" => "E",
+        "GGT" => "G",
+        "GGC" => "G",
+        "GGA" => "G",
+        "GGG" => "G",
+    );
+    my $seq = shift @_;
+    my $fram = shift @_;
+    my $gene = shift @_;
+    $seq =~ s/\w{$fram}//;
+    my $pep;
+    while ((length $seq) >= 3) {
+        $seq =~ s/(\w{3})//;
+        $pep .= $cds2pep{$1};
+    }
+    return $pep;
+}

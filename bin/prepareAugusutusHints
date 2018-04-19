@@ -1,336 +1,122 @@
 #!/usr/bin/perl
 use strict;
+use Getopt::Long;
 
 my $usage = <<USAGE;
 Usage:
-    perl $0 transfrag.genome.gff3 intron.txt genewise.filter.gff3
+    perl $0 bam2intronHints.gff transfrag.genome.gff3 genewise.gff3 > hints.gff
+
+    程序用于生成augustus hints文件：（1）利用bam2intronHints.gff文件信息生成类型为W的intron hints信息；（2）使用transfrag.genome.gff3文件信息生成类型为E的exonpart hints信息；（3）使用genewis.gff3文件生成类型为P的CDSpart和intron hints信息。
+
+    --margin <int>    default: 20
+    由基因模型的exon或cds信息得到exonpart或CDSpart hints信息：若exon或cds的长度超过80bp时，则exonpart或cdspart则是首尾各去除20bp后的区间；否则，exonpart或cdspart是中间一半的区间（首尾各去除四分之一）。
 
 USAGE
 if (@ARGV==0){die $usage}
 
-open IN, $ARGV[0] or die $!;
-my (%transcript, @transcript);
-while (<IN>) {
-	if (m/ID=(\w+)/) {
-		push @transcript, $1 unless exists $transcript{$1};
-		$transcript{$1} .= $_;
-	}
-}
-close IN;
+my ($margin);
+GetOptions(
+    "margin:s" => \$margin,
+);
+$margin ||= 20;
 
-open IN, $ARGV[1] or die $!;
-my %intron;
+my %hints;
+open IN, $ARGV[0] or die "Can not open the file $ARGV[0], $!\n";
 while (<IN>) {
 	chomp;
-	@_ = split /\t/;
-	$intron{$_[1]}{$_[2]}{"$_[3]\t$_[4]"} = $_[5];
+	s/src=\w/src=W/;
+	my $mult = 1;
+	$mult = $1 if m/mult=(\d+)/;
+	s/\t0\t/\t$mult\t/;
+	$hints{$_} = 1;
 }
 close IN;
 
-open IN, $ARGV[2] or die $!;
-my (%homolog, @homolog, $name, %name);
+open IN, $ARGV[1] or die "Can not open the file $ARGV[1], $!\n";
+my $gene_id;
 while (<IN>) {
-	if (m/\tgene\t.*Name=([^;]+)/) {
-		if (exists $name{$1}) {
-			$name = $1 . "_1";
-			my $number = 1;
-			while (exists $name{$name}) {
-				$number ++;
-				$name = "$1\_$number";
-			}
-		}
-		else {
-			$name = $1; 
-		}
-		push @homolog, $name;
-		$name{$name} = 1;
-	}
-	elsif (m/\tCDS\t/) {
-		@_ = split /\t/;
-		$homolog{$name} .= $_;
-	}
+    if (m/\tgene\t.*ID=([^;]+)/) {
+        $gene_id = $1;
+    }
+    elsif (m/\texon\t/) {
+        @_ = split /\t/;
+
+        my $margin_value = $margin;
+        my $length = $_[4] - $_[3] + 1;
+        if ($length < 80) {
+            $margin_value = int($length / 2);
+        }
+
+        if ($margin_value > 1) {
+            my $start = $_[3] + $margin_value;
+            my $end = $_[4] - $margin_value;
+            $hints{"$_[0]\t\.\texonpart\t$start\t$end\t\.\t$_[6]\t\.\tgrp=$gene_id;pri=4;src=E"} = 1;
+        }
+    }
 }
 close IN;
 
-my (%exon_part_info, %exon_part_info1, %exon_part_info2, %intron_info, %exon_info, %intron_for_delete);
-foreach (@transcript) {
-	$_ = $transcript{$_};
-	my @line = split /\n/;
-	@_ = split /\t/, $line[0];
-	my ($seq_id, $strand) = ($_[0], $_[6]);
-	$_[8] =~ m/ID=([^;]+)/;
-	my $ID = $1;
-	my %exon;
-	foreach (@line) {
-		if (m/\texon\t/) {
-			@_ = split /\t/;
-			$exon{"$_[3]\t$_[4]"} = 1;
-		}
-	}
-	my @exon = sort {$a <=> $b} keys %exon;
-	my @intron = &get_intron_by_exon(\@exon) if @exon >= 2;
+open IN, $ARGV[2] or die "Can not open the file $ARGV[2], $!\n";
+my %genewise_CDSs_for_gene;
+while (<IN>) {
+    if (m/\tgene\t.*ID=([^;]+)/) {
+        $gene_id = $1;
+    }
+    elsif (m/\tCDS\t/) {
+        @_ = split /\t/;
+        $genewise_CDSs_for_gene{$gene_id}{"$_[3]\t$_[4]\t$_[0]\t$_[6]"} = 1;
 
-	if (@exon == 1) {
-		print "$seq_id\t\.\tep\t$exon[0]\t\.\t$strand\t\.\tgrp=$ID;pri=4;src=E\n";
-		@_ = split /\t/, $exon[0];
-		my $index = int($_[0] / 10000) * 10000;
-		$exon_part_info{$seq_id}{$strand}{$index}{$exon[0]} = 1;
-	}
-	elsif (@exon == 2) {
-		print "$seq_id\t\.\tep\t$exon[0]\t\.\t$strand\t\.\tgrp=$ID;pri=4;src=E\n";
-		print "$seq_id\t\.\tep\t$exon[1]\t\.\t$strand\t\.\tgrp=$ID;pri=4;src=E\n";
-		@_ = split /\t/, $exon[0];
-		my $index = int($_[0] / 10000) * 10000;
-		$exon_part_info1{$seq_id}{$strand}{$index}{$exon[0]} = 1;
-		@_ = split /\t/, $exon[1];
-		$index = int($_[0] / 10000) * 10000;
-		$exon_part_info2{$seq_id}{$strand}{$index}{$exon[1]} = 1;
-	}
-	elsif (@exon >= 2) {
-		my $first = shift @exon;
-		my $last = pop @exon;
-		print "$seq_id\t\.\tep\t$first\t\.\t$strand\t\.\tgrp=$ID;pri=4;src=E\n";
-		print "$seq_id\t\.\tep\t$last\t\.\t$strand\t\.\tgrp=$ID;pri=4;src=E\n";
-		@_ = split /\t/, $first;
-		my $index = int($_[0] / 10000) * 10000;
-		$exon_part_info1{$seq_id}{$strand}{$index}{$first} = 1;
-		@_ = split /\t/, $last;
-		$index = int($_[0] / 10000) * 10000;
-		$exon_part_info2{$seq_id}{$strand}{$index}{$last} = 1;
-		foreach (@exon) {
-			print "$seq_id\t\.\texon\t$_\t\.\t$strand\t\.\tgrp=$ID;pri=4;src=E\n";
-			@_ = split /\t/;
-			$index = int($_[0] / 10000) * 10000;
-			$exon_info{$seq_id}{$strand}{$index}{$_} = 1;
-		}
-	}
+        my $margin_value = $margin;
+        my $length = $_[4] - $_[3] + 1;
+        if ($length < 80) { 
+            $margin_value = int($length / 2);
+        }
 
-	foreach (@intron) {
-		if (exists $intron{$seq_id}{$strand}{$_}) {
-			my $mult = $intron{$seq_id}{$strand}{$_};
-			print "$seq_id\t\.\tintron\t$_\t\.\t$strand\t\.\tmult=$mult;pri=4;src=E\n";
-			@_ = split /\t/;
-			my $index = int($_[0] / 10000) * 10000;
-			$intron_info{$seq_id}{$strand}{$index}{$_} = 1;
-			$intron_for_delete{$seq_id}{$strand}{$_} = 1;
-			#delete $intron{$seq_id}{$strand}{$_};
-		}
-		else {
-			warn "warning: $seq_id,$strand,$_ this intron info may not correct!\n";
-		}
-	}
+        if ($margin_value > 1) {
+            my $start = $_[3] + $margin_value;
+            my $end = $_[4] - $margin_value;
+            $hints{"$_[0]\t\.\tCDSpart\t$start\t$end\t\.\t$_[6]\t\.\tgrp=$gene_id;pri=4;src=P"} = 1;
+        }
+    }
+}
+close IN;
+
+foreach my $gene (keys %genewise_CDSs_for_gene) {
+    my @exon = sort {$a <=> $b} keys %{$genewise_CDSs_for_gene{$gene}};
+    if (@exon >= 2) {
+        @_ = split /\t/, $exon[0];
+        my @intron = &get_intron_by_exon(\@exon);
+        foreach (@intron) {
+            $hints{"$_[2]\t\.\tintron\t$_\t\.\t$_[3]\t\.\tgrp=$gene;pri=4;src=P"} = 1;
+        }
+    }
 }
 
-foreach my $seq_id (keys %intron) {
-	foreach my $strand (keys %{$intron{$seq_id}}) {
-		foreach (keys %{$intron{$seq_id}{$strand}}) {
-			unless (exists $intron_for_delete{$seq_id}{$strand}{$_}) {
-				my $mult = $intron{$seq_id}{$strand}{$_};
-				print "$seq_id\t\.\tintron\t$_\t\.\t$strand\t\.\tmult=$mult;pri=4;src=E\n";
-				@_ = split /\t/;
-				my $index = int($_[0] / 10000) * 10000;
-				$intron_info{$seq_id}{$strand}{$index}{$_} = 1;
-			}
-		}
-	}
+my (%sort1, %sort2, %sort3, %sort4);
+foreach (keys %hints) {
+    @_ = split /\t/;
+    $sort1{$_} = $_[0];
+    $sort2{$_} = $_[3];
+    $sort3{$_} = $_[4];
+    $sort4{$_} = $_[6];
 }
 
-foreach my $name (@homolog) {
-	#print "OK1:\t$name\n";
-	$_ = $homolog{$name};
-	my @line = split /\n/;
-	@_ = split /\t/, $line[0];
-	my ($seq_id, $strand) = ($_[0], $_[6]);
-	my %exon;
-	foreach (@line) {
-		if (m/\tCDS\t/) {
-			@_ = split /\t/;
-			$exon{"$_[3]\t$_[4]"} = 1;
-		}
-	}
-	my @exon = sort {$a <=> $b} keys %exon;
-	#foreach (@exon) { print "OK2:\t$seq_id\t$strand\t$name\t$_\n"; }
-	my @intron = &get_intron_by_exon(\@exon) if @exon >= 2;
-
-	my $out = 1;
-	if (@exon == 1) {
-		$out = &overlap_exon($exon[0], $seq_id, $strand);
-		print "$seq_id\t\.\tep\t$exon[0]\t\.\t$strand\t\.\tgrp=$name;pri=4;src=E\n" if $out == 1;
-	}
-	elsif (@exon == 2) {
-		$out = &overlap_exon($exon[0], $seq_id, $strand);
-		print "$seq_id\t\.\tep\t$exon[0]\t\.\t$strand\t\.\tgrp=$name;pri=4;src=E\n" if $out == 1;
-		$out = &overlap_exon($exon[1], $seq_id, $strand);
-		print "$seq_id\t\.\tep\t$exon[1]\t\.\t$strand\t\.\tgrp=$name;pri=4;src=E\n" if $out == 1;
-	}
-	elsif (@exon >= 2) {
-		my $first = shift @exon;
-		my $last = pop @exon;
-		$out = &overlap_exon($first, $seq_id, $strand);
-		print "$seq_id\t\.\tep\t$first\t\.\t$strand\t\.\tgrp=$name;pri=4;src=E\n" if $out == 1;
-		$out = &overlap_exon($last, $seq_id, $strand);
-		print "$seq_id\t\.\tep\t$last\t\.\t$strand\t\.\tgrp=$name;pri=4;src=E\n" if $out == 1;
-		foreach (@exon) {
-			$out = &overlap_exon($_, $seq_id, $strand);
-			print "$seq_id\t\.\texon\t$_\t\.\t$strand\t\.\tgrp=$name;pri=4;src=E\n" if $out == 1;
-		}
-	}
-
-	$out = 1;
-	foreach (@intron) {
-		$out = &overlap_intron($_, $seq_id, $strand);
-		print "$seq_id\t\.\tintron\t$_\t\.\t$strand\t\.\tgrp=$name;pri=4;src=E\n" if $out == 1;
-	}
-}
-
-sub overlap_intron {
-	my ($start, $end) = split /\t/, $_[0];
-	my $seq_id = $_[1];
-	my $strand = $_[2];
-	my $out = 1;
-
-	my $index1 = int ($start / 10000) - 1;
-	my $index2 = int ($start / 10000);
-	my $index3 = int ($start / 10000) + 1;
-	my @index = ($index1, $index2, $index3);
-
-	foreach (@index) {
-		my $index = $_ * 10000;
-		if (exists $exon_info{$seq_id}{$strand}{$index}) {
-			my @region = keys %{$exon_info{$seq_id}{$strand}{$index}};
-			foreach (@region) {
-				@_ = split /\t/;
-				if ($start <= $_[1] && $end >= $_[0]) {
-					$out = 0;
-					return $out;
-				}
-			}
-		}
-		if (exists $intron_info{$seq_id}{$strand}{$index}) {
-			my @region = keys %{$intron_info{$seq_id}{$strand}{$index}};
-			foreach (@region) {
-				@_ = split /\t/;
-				if ($start <= $_[1] && $end >= $_[0]) {
-					$out = 0;
-					return $out;
-				}
-			}
-		}
-		if (exists $exon_part_info1{$seq_id}{$strand}{$index}) {
-			my @region = keys %{$exon_part_info1{$seq_id}{$strand}{$index}};
-			foreach (@region) {
-				@_ = split /\t/;
-				if ($start <= $_[1] && $end >= $_[0]) {
-					$out = 0;
-					return $out;
-				}
-			}
-		}
-		if (exists $exon_part_info2{$seq_id}{$strand}{$index}) {
-			my @region = keys %{$exon_part_info2{$seq_id}{$strand}{$index}};
-			foreach (@region) {
-				@_ = split /\t/;
-				if ($start <= $_[1] && $end >= $_[0]) {
-					$out = 0;
-					return $out;
-				}
-			}
-		}
-		if (exists $exon_part_info{$seq_id}{$strand}{$index}) {
-			my @region = keys %{$exon_part_info{$seq_id}{$strand}{$index}};
-			foreach (@region) {
-				@_ = split /\t/;
-				if ($start <= $_[1] && $end >= $_[0]) {
-					$out = 0;
-					return $out;
-				}
-			}
-		}
-	}
-
-	return $out;
-}
-
-sub overlap_exon {
-	my ($start, $end) = split /\t/, $_[0];
-	my $seq_id = $_[1];
-	my $strand = $_[2];
-	my $out = 1;
-
-	my $index1 = int ($start / 10000) - 1;
-	my $index2 = int ($start / 10000);
-	my $index3 = int ($start / 10000) + 1;
-	my @index = ($index1, $index2, $index3);
-
-	foreach (@index) {
-		my $index = $_ * 10000;
-		if (exists $exon_info{$seq_id}{$strand}{$index}) {
-			my @region = keys %{$exon_info{$seq_id}{$strand}{$index}};
-			foreach (@region) {
-				@_ = split /\t/;
-				if ($start <= $_[1] && $end >= $_[0]) {
-					$out = 0;
-					return $out;
-				}
-			}
-		}
-		if (exists $intron_info{$seq_id}{$strand}{$index}) {
-			my @region = keys %{$intron_info{$seq_id}{$strand}{$index}};
-			foreach (@region) {
-				@_ = split /\t/;
-				if ($start <= $_[1] && $end >= $_[0]) {
-					$out = 0;
-					return $out;
-				}
-			}
-		}
-		if (exists $exon_part_info1{$seq_id}{$strand}{$index}) {
-			my @region = keys %{$exon_part_info1{$seq_id}{$strand}{$index}};
-			foreach (@region) {
-				@_ = split /\t/;
-				if ($start <= $_[1] && $start >= $_[0]) {
-					$out = 0;
-					return $out;
-				}
-			}
-		}
-		if (exists $exon_part_info2{$seq_id}{$strand}{$index}) {
-			my @region = keys %{$exon_part_info2{$seq_id}{$strand}{$index}};
-			foreach (@region) {
-				@_ = split /\t/;
-				if ($end >= $_[0] && $end <= $_[1]) {
-					$out = 0;
-					return $out;
-				}
-			}
-		}
-		if (exists $exon_part_info{$seq_id}{$strand}{$index}) {
-			my @region = keys %{$exon_part_info{$seq_id}{$strand}{$index}};
-			foreach (@region) {
-				@_ = split /\t/;
-				if ($start >= $_[0] && $end <= $_[1]) {
-					$out = 0;
-					return $out;
-				}
-			}
-		}
-	}
-
-	return $out;
+foreach (sort { $sort1{$a} cmp $sort1{$b} or $sort2{$a} <=> $sort2{$b} or $sort3{$a} <=> $sort3{$b} or $sort4{$a} cmp $sort4{$b} } keys %hints) {
+    print "$_\n";
 }
 
 sub get_intron_by_exon {
-	my @exon = @{$_[0]};
-	@_ = split /\t/, shift @exon;
-	my $intron_start = $_[1] + 1;
+   my @exon = @{$_[0]};
+   @_ = split /\t/, shift @exon;
+   my $intron_start = $_[1] + 1;
 
-	my @out;
-	while (@exon) {
-		@_ = split /\t/, shift @exon;
-		my $intron_end = $_[0] - 1;
-		push @out, "$intron_start\t$intron_end";
-		$intron_start = $_[1] + 1;
-	}
+   my @out;
+   while (@exon) {
+      @_ = split /\t/, shift @exon;
+      my $intron_end = $_[0] - 1;
+      push @out, "$intron_start\t$intron_end";
+      $intron_start = $_[1] + 1;
+   }
 
-	return @out;
+   return @out;
 }

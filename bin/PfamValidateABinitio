@@ -6,46 +6,61 @@ my $usage = <<USAGE;
 Usage:
     perl $0 [options] combine.2.gff3 genome.fasta > combine.filter.gff3
 
-	--cpu <int>    default: 1
-	设置进行pfam分析时的并行数
+    程序对combine.2.gff3文件中的基因模型进行过滤。首先，若基因模型的CDS总长度>=750且CDS个数>=2个，则保留该基因模型；再对剩下的基因模型使用PFAM数据库进行比对，若能比对上，则进行保留。
 
-	--evalue <float>    default: 1e-6
-	设置Pfam的evalue阈值
+    --out_prefix <string>    default: out
+    设置输出文件前缀。默认输出两个文件：out.filter_pass.gff3和out.filter_out.gff3。
 
-	--coverage <float>    default: 0.3
-	设置Pfam的覆盖度阈值
+    --CDS_length <int>    default:750
+    --CDS_num <int>    default: 2
+    CDS总长度不小于750，且CDS个数不小于2个，则保留该基因模型。
 
-	--pfam_db <string>    default: /opt/biosoft/hmmer-3.1b2/Pfam-AB.hmm
-	设置Pfam数据库路径
+    --cpu <int>    default: 1
+    设置进行pfam分析时的并行数
+
+    --evalue <float>    default: 1e-5
+    设置Pfam的evalue阈值
+
+    --coverage <float>    default: 0.25
+    设置Pfam的覆盖度阈值
+
+    --pfam_db <string>    default: /opt/biosoft/hmmer-3.1b2/Pfam-AB.hmm
+    设置Pfam数据库路径
 
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($cpu, $evalue, $coverage, $pfam_db);
+my ($out_prefix, $CDS_length, $CDS_num, $cpu, $evalue, $coverage, $pfam_db);
 GetOptions(
-	"cpu:i" => \$cpu,
-	"evalue:f" => \$evalue,
-	"coverage:f" => \$coverage,
-	"pfam_db:s" => \$pfam_db,
+    "out_prefix:s" => \$out_prefix,
+    "CDS_length:i" => \$CDS_length,
+    "CDS_num:i" => \$CDS_num,
+    "cpu:i" => \$cpu,
+    "evalue:f" => \$evalue,
+    "coverage:f" => \$coverage,
+    "pfam_db:s" => \$pfam_db,
 );
 
+$out_prefix ||= "out";
+$CDS_length ||= 750;
+$CDS_num ||= 2;
 $cpu ||= 1;
-$evalue ||= 1e-6;
-$coverage ||= 0.3;
+$evalue ||= 1e-5;
+$coverage ||= 0.25;
 $pfam_db ||= "/opt/biosoft/hmmer-3.1b2/Pfam-AB.hmm";
 
 open IN, $ARGV[0] or die $!;
 my (%gff, $id, @id, %id);
 while (<IN>) {
     if (m/\tgene\t.*ID=([^;\s]+)/) {
-		$id = $1;
+        $id = $1;
         push @id, $id unless exists $id{$id};
         $gff{$id} .= $_;
         $id{$id} = 1;
     }
-	else {
-		$gff{$id} .= $_;
-	}
+    else {
+        $gff{$id} .= $_;
+    }
 }
 close IN;
 
@@ -58,45 +73,61 @@ while (<IN>) {
 }
 close IN;
 
+my %gene_long;
+foreach my $gene_id (@id) {
+    my $gff_info = $gff{$gene_id};
+    my @CDS = $gff_info =~ m/\t(CDS\t\d+\t\d+)\t/g;
+    my $length = 0;
+    foreach (@CDS) {
+        @_ = split /\t/;
+        $length += $_[2] - $_[1] + 1;
+    }
+    #print STDERR "$gene_id\t$length\n";
+    if (@CDS >= $CDS_num && $length >= $CDS_length) {
+        $gene_long{$gene_id} = 1;
+    }
+}
+
 open FASTA, ">", "for_pfam_search.fasta" or die $!;
 open CMD, ">", "command.hmmscan.list" or die $!;
 mkdir "hmmscan.tmp" unless -e "hmmscan.tmp";
 foreach my $gene_id (@id) {
-	my @gff = split /\n/, $gff{$gene_id};
-	my @cds;
-	foreach (@gff) {
-		next unless $_;
-		@_ = split /\t/;
-		push @cds, "$_[3]\t$_[4]\t$_[0]\t$_[6]\t$_[7]" if m/\tCDS\t/i;
-	}
-	@_ = split /\t/, $cds[0];
-	my ($seqID, $strand, $frame) = ($_[2], $_[3], $_[4]);
-	@cds = sort {$a <=> $b} @cds;
+    my @gff = split /\n/, $gff{$gene_id};
+    my @cds;
+    foreach (@gff) {
+        next unless $_;
+        @_ = split /\t/;
+        push @cds, "$_[3]\t$_[4]\t$_[0]\t$_[6]\t$_[7]" if m/\tCDS\t/i;
+    }
+    @_ = split /\t/, $cds[0];
+    my ($seqID, $strand, $frame) = ($_[2], $_[3], $_[4]);
+    @cds = sort {$a <=> $b} @cds;
 
-	my $cds_seq;
-	foreach (@cds) {
-		@_ = split /\t/;
-		my $start = $_[0] - 1;
-		my $len = $_[1] - $start;
-		$cds_seq .= substr($seq{$seqID}, $start, $len);
-	}
+    my $cds_seq;
+    foreach (@cds) {
+        @_ = split /\t/;
+        my $start = $_[0] - 1;
+        my $len = $_[1] - $start;
+        $cds_seq .= substr($seq{$seqID}, $start, $len);
+    }
 
-	if ($strand eq "-") {
-		@_ = split /\t/, $cds[-1];
-		$frame = $_[4];
-		$cds_seq = reverse $cds_seq;
-		$cds_seq =~ tr/ATCGatcg/TAGCtagc/;
-	}
+    if ($strand eq "-") {
+        @_ = split /\t/, $cds[-1];
+        $frame = $_[4];
+        $cds_seq = reverse $cds_seq;
+        $cds_seq =~ tr/ATCGatcg/TAGCtagc/;
+    }
 
-	$cds_seq =~ s/^\w{$frame}//;
-	my $pep_seq = &cds2pep($cds_seq, $gene_id);
-	print FASTA ">$gene_id\n$pep_seq\n";
+    $cds_seq =~ s/^\w{$frame}//;
+    my $pep_seq = &cds2pep($cds_seq, $gene_id);
+    print FASTA ">$gene_id\n$pep_seq\n";
 
-	$pep_seq =~ s/\*$//;
-	open OUT, ">", "hmmscan.tmp/$gene_id.fasta" or die $!;
-	print OUT ">$gene_id\n$pep_seq\n";
-	close OUT;
-	print CMD "hmmscan -o hmmscan.tmp/$gene_id.txt --cpu 1 -E $evalue --domE $evalue --tblout hmmscan.tmp/$gene_id.tbl --domtblout hmmscan.tmp/$gene_id.domtbl $pfam_db hmmscan.tmp/$gene_id.fasta\n";
+    $pep_seq =~ s/\*$//;
+    open OUT, ">", "hmmscan.tmp/$gene_id.fasta" or die $!;
+    print OUT ">$gene_id\n$pep_seq\n";
+    close OUT;
+    print CMD "hmmscan -o hmmscan.tmp/$gene_id.txt --cpu 1 -E 1e-3 --domE 1e-3 --tblout hmmscan.tmp/$gene_id.tbl --domtblout hmmscan.tmp/$gene_id.domtbl $pfam_db hmmscan.tmp/$gene_id.fasta\n" unless exists $gene_long{$gene_id};
+	#print CMD "hmmscan -o hmmscan.tmp/$gene_id.txt --cpu 1 -E 1e-3 --domE 1e-3 --tblout hmmscan.tmp/$gene_id.tbl --domtblout hmmscan.tmp/$gene_id.domtbl $pfam_db hmmscan.tmp/$gene_id.fasta\n";
 }
 close FASTA;
 close CMD;
@@ -106,26 +137,116 @@ system ($cmdString) == 0 or die "Failed to execute: $cmdString\n$!";
 
 my %gene_ok;
 foreach my $gene_id (@id) {
-	open IN, "hmmscan.tmp/$gene_id.domtbl" or die $!;
-	while (<IN>) {
-		next if m/^#/;
-		@_ = split /\s+/;
-		my $ratio1 = abs($_[15] - $_[16]) / $_[2];
-        my $ratio2 = abs($_[17] - $_[18]) / $_[5];
-        if ($ratio1 >= $coverage or $ratio2 >= $coverage) {
-            $gene_ok{$gene_id} = 1;
-        }
+	next if exists $gene_long{$gene_id};
+    open IN, "hmmscan.tmp/$gene_id.domtbl" or die $!;
+	my (%hmmscan_info, %hmm_length, $query_length);
+    while (<IN>) {
+        next if m/^#/; next if m/^\s*$/;
+        @_ = split /\s+/;
+		$query_length = $_[5];
+		$hmm_length{$_[0]} = $_[2] unless exists $hmm_length{$_[0]};
+
+		if ($_[12] <= $evalue) {
+			$hmmscan_info{$_[3]}{$_[0]}{"hmm_coord"}{"$_[15]\t$_[16]"} = 1;
+			$hmmscan_info{$_[3]}{$_[0]}{"query_coord"}{"$_[17]\t$_[18]"} = 1;
+		}
 	}
 	close IN;
+
+	foreach my $query_id (sort keys %hmmscan_info) {
+		my @query_coord_all;
+		foreach my $hmm_id (sort keys %{$hmmscan_info{$query_id}}) {
+			my $hmm_length = $hmm_length{$hmm_id};
+			my @hmm_coord = sort {$a <=> $b} keys %{$hmmscan_info{$query_id}{$hmm_id}{"hmm_coord"}};
+			my @query_coord = sort {$a <=> $b} keys %{$hmmscan_info{$query_id}{$hmm_id}{"query_coord"}};
+			push @query_coord_all, @query_coord; 
+			my $aligned_length_hmm = &match_length(@hmm_coord);
+			my $aligned_ratio_hmm = $aligned_length_hmm / $hmm_length;
+			if ($aligned_ratio_hmm >= $coverage) {
+				$gene_ok{$gene_id} = 1;
+				print STDERR "$query_id\t$hmm_id\t$aligned_ratio_hmm\n";
+			}
+			$gene_ok{$gene_id} = 1 if $aligned_ratio_hmm >= $coverage;
+		}
+		my $aligned_length_query = &match_length(@query_coord_all);
+		my $aligned_ratio_query = $aligned_length_query / $query_length;
+		if ($aligned_ratio_query >= $coverage) {
+			$gene_ok{$gene_id} = 1;
+			print STDERR "$query_id\t$aligned_ratio_query\n";
+		}
+    }
+    close IN;
 }
 
-my $number1 = @id;
-my $number2 = keys %gene_ok;
-print STDERR "Genes for Pfam: $number1
-Pfam Search passed: $number2\n";
-
+my ($total_num, $long_num, $short_num, $long_ok_num, $short_ok_num) = (0, 0, 0, 0, 0);
+open OUT1, ">", "$out_prefix.filter_pass.gff3" or die "Can not create file $out_prefix.filter_pass.gff3, $!\n";
+open OUT2, ">", "$out_prefix.filter_out.gff3" or die "Can not create file $out_prefix.filter_out.gff3, $!\n";
 foreach (@id) {
-	print "$gff{$_}\n" if exists $gene_ok{$_};
+    $total_num ++;
+    if (exists $gene_long{$_}) {
+        $long_num ++;
+        print OUT1 "$gff{$_}\n";
+        if (exists $gene_ok{$_}) {
+            $long_ok_num ++;
+        }
+    }
+    else {
+        $short_num ++;
+        if (exists $gene_ok{$_}) {
+            $short_ok_num ++;
+            print OUT1 "$gff{$_}\n";
+        }
+        else {
+            print OUT2 "$gff{$_}\n";
+        }
+    }
+}
+close OUT1;
+close OUT2;
+
+my $ok_num = $long_ok_num + $short_ok_num;
+my $ratio = int(($ok_num / $total_num) * 100) / 100;
+my $long_ratio = 0;
+$long_ratio = int(($long_ok_num / $long_num) * 100) / 100 if $long_num;
+my $short_ratio = 0;
+$short_ratio = int(($short_ok_num / $short_num) * 100) / 100 if $short_num;
+print STDERR "
+              \tTotal gene\tLong gene\tShort gene
+Gene number   \t$total_num\t$long_num\t$short_num
+Pfam validated\t$ok_num\t$long_ok_num\t$short_ok_num
+Pfam ratio    \t$ratio\t$long_ratio\t$short_ratio\n
+note: Long Gene means (CDS number >= $CDS_num && CDS length >= $CDS_length)\n";
+
+sub match_length {
+    my @inter_sorted_site;
+    foreach (@_) {
+        my @aaa = $_ =~ m/(\d+)/g;
+        @aaa = sort { $a <=> $b } @aaa;
+        push @inter_sorted_site, "$aaa[0]\t$aaa[1]";
+    }
+    @inter_sorted_site = sort { $a <=> $b } @inter_sorted_site;
+
+    my $out_site_number;
+    my $former_region = shift @inter_sorted_site;
+    my @aaa = $former_region =~ m/(\d+)/g;
+    $out_site_number += ($aaa[1] - $aaa[0] + 1);
+    foreach (@inter_sorted_site) {
+        my @former_region = $former_region =~ m/(\d+)/g;
+        my @present_region = $_ =~ m/(\d+)/g;
+        
+        if ($present_region[0] > $former_region[1]) {
+            $out_site_number += ($present_region[1] - $present_region[0] + 1);
+            $former_region = $_;
+        }
+        elsif ($present_region[1] > $former_region[1]) {
+            $out_site_number += ($present_region[1] - $former_region[1]);
+            $former_region = $_;
+        }
+        else {
+            next
+        }
+    }
+    return $out_site_number;
 }
 
 sub cds2pep {
@@ -202,7 +323,7 @@ sub cds2pep {
         $seq =~ s/(\w{3})//;
         $pep .= $cds2pep{$1};
     }
-	#print STDERR "Warning: CDS length of $gene is not multiple of 3\n" if (length $seq) > 0;
-	#print STDERR "Warning: Stop Codon appear in the middle of $gene\n" if $pep =~ m/\*\w/;
+    #print STDERR "Warning: CDS length of $gene is not multiple of 3\n" if (length $seq) > 0;
+    #print STDERR "Warning: Stop Codon appear in the middle of $gene\n" if $pep =~ m/\*\w/;
     return $pep;
 }

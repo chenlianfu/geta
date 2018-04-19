@@ -1,0 +1,42 @@
+#!/usr/bin/perl
+use strict;
+use Getopt::Long;
+
+my $usage = <<USAGE;
+Usage:
+    $0 stringtie.gtf > hints.gtf
+
+	exonpart and intron hints for augustus can be create by this script.
+
+	--margin <int>    default: 20
+	exonpart hints were developed from the exons of transcripts of StringTie. if the exon length >= 80bp, the boundary of exonpart hints shold remove start 20bp and end 20bp of exons; else the exonpart hints retain half of the relative exons.
+
+USAGE
+if(@ARGV==0){die $usage}
+
+my $margin;
+GetOptions(
+	"margin:i" => \$margin,
+);
+$margin ||= 20;
+
+open IN, $ARGV[0] or die "Cannot open the file $ARGV[0], $!\n";
+my (%gtf_of_transcript, $strand_of_transcript);
+while (<IN>) {
+	if (m/\ttranscript\t/) {
+		@_ = split /\t/;
+		if (m/transcript_id \"(.*?)\"/) {
+			$strand_of_transcript{$1} = $_[6];
+		}
+	}
+	elsif (m/\texon\t/) {
+		if (m/transcript_id \"(.*?)\"/) {
+			$gtf_of_transcript{$1} .= $_;
+		}
+	}
+}
+close IN;
+
+foreach my $transcript_id (sort keys %gtf_of_transcript) {
+
+}

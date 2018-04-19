@@ -6,8 +6,10 @@ my $usage = <<USAGE;
 Usage:
     perl $0 [options] genome.fasta hints.gff
 
-	--gene_prefix <string>    default: augustus
-	设置基因ID前缀
+    程序将基因组序列和hints信息分成多份，然后调用augustus进行并行化计算，最后合并并行化结果，得到最终的GFF3结果文件。注意：输入的额hints.gff3文件必须按染色体名和位置进行排序。
+
+    --gene_prefix <string>    default: augustus
+    设置基因ID前缀
 
     --species <string>    default: None
     设置用于进行Augustus基因预测的HMM模型数据。
@@ -15,23 +17,31 @@ Usage:
     --cpu <int>    default: 1
     设置并行运行augustus命令的数目。
 
+    --segmentSize <int>    default: 5000000
+    --overlapSize <int>    default: 100000
+    程序将基因组序列分割成单条进行基因预测；若单条序列长度超过5Mb，则将单条序列进行切割，分割成5Mb的序列后再进行基因预测；此时，两条相邻的序列间重叠的长度为100kb。
+
     --tmp_dir <string>    default: aug_para_with_hints.tmp
     设置临时文件夹
 
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($species, $cpu, $tmp_dir, $gene_prefix);
+my ($species, $cpu, $tmp_dir, $gene_prefix, $segmentSize, $overlapSize);
 GetOptions(
     "species:s" => \$species,
     "cpu:i" => \$cpu,
     "tmp_dir:s" => \$tmp_dir,
-	"gene_prefix:s" => \$gene_prefix,
+    "gene_prefix:s" => \$gene_prefix,
+    "segmentSize:i" => \$segmentSize,
+    "overlapSize:i" => \$overlapSize,
 );
 
 $gene_prefix ||= "augustus";
 $cpu ||= 1;
 $tmp_dir ||= 'aug_para_with_hints.tmp';
+$segmentSize ||= 5000000;
+$overlapSize ||= 100000;
 die "The --species parameter not setted!\n" unless $species;
 
 open IN, $ARGV[0] or die $!;
@@ -46,106 +56,266 @@ close IN;
 open IN, $ARGV[1] or die $!;
 my %hints;
 while (<IN>) {
-	@_ = split /\t/;
-    $hints{$_[0]}{$_[6]} .= $_;
+   @_ = split /\t/;
+    $hints{$_[0]} .= $_;
 }
 close IN;
 
 # extrinsic.cfg
 my $extrinsic = '[SOURCES]
-M E W
+M RM E W P
 
 [SOURCE-PARAMETERS]
 
 [GENERAL]
-      start        1        1  M    1  1e+100  E 1    1    W 1    1
-       stop        1        1  M    1  1e+100  E 1    1    W 1    1
-        tss        1        1  M    1  1e+100  E 1    1    W 1    1
-        tts        1        1  M    1  1e+100  E 1    1    W 1    1
-        ass        1        1  M    1  1e+100  E 1    1    W 1    1
-        dss        1        1  M    1  1e+100  E 1    1    W 1    1
-   exonpart        1     .997  M    1  1e+100  E 1    1e2  W 1    1.05
-       exon        1        1  M    1  1e+100  E 1    1e4  W 1    1
- intronpart        1        1  M    1  1e+100  E 1    1    W 1    1
-     intron        1       .3  M    1  1e+100  E 1    1e6  W 1    1
-    CDSpart        1  1 0.985  M    1  1e+100  E 1    1	   W 1    1
-        CDS        1        1  M    1  1e+100  E 1    1    W 1    1
-    UTRpart        1    1 .96  M    1  1e+100  E 1    1    W 1    1
-        UTR        1        1  M    1  1e+100  E 1    1    W 1    1
-     irpart        1        1  M    1  1e+100  E 1    1    W 1    1
-nonexonpart        1        1  M    1  1e+100  E 1    1    W 1    1
-  genicpart        1        1  M    1  1e+100  E 1    1    W 1    1';
+      start      1        0.8  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1e3
+       stop      1        0.8  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1e3
+        tss      1          1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
+        tts      1          1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
+        ass      1  0.95  0.1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   100
+        dss      1  0.95  0.1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   100
+   exonpart      1  .992 .985  M    1  1e+100  RM  1     1    E 1    1e4  W 1    1    P   1   1
+       exon      1          1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
+ intronpart      1          1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
+     intron      1       0.34  M    1  1e+100  RM  1     1    E 1    1e6  W 1    100  P   1   1e4
+    CDSpart      1     1 .985  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1e5
+        CDS      1          1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
+    UTRpart      1     1    1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
+        UTR      1          1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
+     irpart      1          1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
+nonexonpart      1          1  M    1  1e+100  RM  1     1.15 E 1    1    W 1    1    P   1   1
+  genicpart      1          1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1';
 open OUT, ">", "extrinsic.cfg" or die $!;
-print OUT $extrinsic;
+print OUT "$extrinsic\n";
 close OUT;
 
 mkdir $tmp_dir unless -e $tmp_dir;
+my %out_id;
 open COM, ">", "command.augustus.list" or die $!;
-foreach (sort keys %seq) {
-    open OUT1, ">", "$tmp_dir/$_.fasta" or die $!;
-    open OUT2, ">", "$tmp_dir/$_.hint_plus.gff" or die $!;
-    open OUT3, ">", "$tmp_dir/$_.hint_minus.gff" or die $!;
-    print OUT1 ">$_\n$seq{$_}\n";
-    print OUT2 "$hints{$_}{'+'}";
-    print OUT3 "$hints{$_}{'-'}";
-    close OUT1;
-    close OUT2;
-	close OUT3;
+foreach my $seq_id (sort keys %seq) {
+    my $seq = $seq{$seq_id};
+    my $seq_length = length $seq;
+    my $hints_info = $hints{$seq_id};
+    my @hints_info = split /\n/, $hints_info;
 
-    print COM "augustus --gff3=on --strand=forward --species=$species --hintsfile=$tmp_dir/$_.hint_plus.gff --extrinsicCfgFile=extrinsic.cfg $tmp_dir/$_.fasta > $tmp_dir/$_.out_plus\n";
-    print COM "augustus --gff3=on --strand=backward --species=$species --hintsfile=$tmp_dir/$_.hint_minus.gff --extrinsicCfgFile=extrinsic.cfg $tmp_dir/$_.fasta > $tmp_dir/$_.out_minus\n";
+    if ($seq_length > $segmentSize) {
+        my @partion = &get_partition($seq_length, $segmentSize, $overlapSize);
+        my $last_end_hints;
+        foreach (@partion) {
+            my $start = $_ - 1;
+            my $end = $start + $segmentSize;
+            my $sub_seq = substr($seq, $start, $segmentSize);
+
+            open OUT, ">", "$tmp_dir/$seq_id.$start.fasta" or die "Can not create file $seq_id.$start.fasta, $!\n";
+            print OUT ">$seq_id\n$sub_seq\n";
+            close OUT;
+
+            open OUT, ">", "$tmp_dir/$seq_id.$start.gff" or die "Can not create file $seq_id.$start.gff, $!\n";
+    		if ($last_end_hints) {
+    			my @last_end_hints = split /\n/, $last_end_hints;
+    			foreach (@last_end_hints) {
+    				@_ = split /\t/;
+    				my $feature_start = $_[3] - $start;
+    				my $feature_end = $_[4] - $start;
+    				print OUT "$_[0]\t$_[1]\t$_[2]\t$feature_start\t$feature_end\t$_[5]\t$_[6]\t$_[7]\t$_[8]\n";
+    			}
+    		}
+            $last_end_hints = "";
+            my @info = @hints_info;
+            foreach (@info) {
+                @_ = split /\t/;
+                if ($_[4] <= $end) {
+    				my $feature_start = $_[3] - $start;
+    				my $feature_end = $_[4] - $start;
+                    print OUT "$_[0]\t$_[1]\t$_[2]\t$feature_start\t$feature_end\t$_[5]\t$_[6]\t$_[7]\t$_[8]\n";
+                    if ($_[3] >= ($end - $overlapSize + 1)) {
+                        $last_end_hints .= "$_\n";
+                    }
+                    shift @hints_info;
+                }
+                else {
+                    last;
+                }
+            }
+            close OUT;
+
+            print COM "augustus --gff3=on --species=$species --hintsfile=$tmp_dir/$seq_id.$start.gff --extrinsicCfgFile=extrinsic.cfg --allow_hinted_splicesites=gcag,atac --alternatives-from-evidence=true --min_intron_len=30 --softmasking=1 $tmp_dir/$seq_id.$start.fasta > $tmp_dir/$seq_id.$start.out\n";
+            $out_id{$seq_id}{"$seq_id.$start"} = $start;
+        }
+    }
+    else {
+        open OUT, ">", "$tmp_dir/$seq_id.0.fasta" or die "Can not create file $seq_id.0.fasta, $!\n";
+        print OUT ">$seq_id\n$seq\n";
+        close OUT;
+
+        open OUT, ">", "$tmp_dir/$seq_id.0.gff" or die "Can not create file $seq_id.0.gff, $!\n";
+        print OUT $hints_info;
+        close OUT;
+
+        print COM "augustus --gff3=on --species=$species --hintsfile=$tmp_dir/$seq_id.0.gff --extrinsicCfgFile=extrinsic.cfg --allow_hinted_splicesites=gcag,atac --alternatives-from-evidence=true --min_intron_len=30 --softmasking=1 $tmp_dir/$seq_id.0.fasta > $tmp_dir/$seq_id.0.out\n";
+        $out_id{$seq_id}{"$seq_id.0"} = 1;
+    }
 }
 close COM;
 
 my $cmdString = "ParaFly -c command.augustus.list -CPU $cpu &> command.augustus.log";
 system ($cmdString) == 0 or die "Failed to execute: $cmdString\n$!\n";
 
-my (%out, $info);
-foreach my $seq_id (sort keys %seq) {
-    open IN, "$tmp_dir/$seq_id.out_plus" or die "Can not open the file $tmp_dir/$_.out_minus ! $!\n";
-	while (<IN>) {
-		next if m/^#/;
-		next if m/^\s*$/;
-		if (m/\tgene\t/) {
-			@_ = split /\t/;
-			$info = "$_[0]\t$_[6]\t$_[3]\t$_[4]";
-		}
-		$out{$info} .= $_;
-	}
-    close IN;
+my (%out, $info, %hints_supporting_ratio, %intron_supporting_info);
+foreach my $seq_id (sort keys %out_id) {
+    my @partition = sort {$out_id{$seq_id}{$a} <=> $out_id{$seq_id}{$b}} keys %{$out_id{$seq_id}};
+    # foreach (@partition) { print "$seq_id\t$_\n"; }
 
-    open IN, "$tmp_dir/$seq_id.out_minus" or die "Can not open the file $tmp_dir/$_.out_minus ! $!\n";
-	while (<IN>) {
-		next if m/^#/;
-		next if m/^\s*$/;
-		if (m/\tgene\t/) {
-			@_ = split /\t/;
-			$info = "$_[0]\t$_[6]\t$_[3]\t$_[4]";
-		}
-		$out{$info} .= $_;
-	}
-    close IN;
+    if (@partition > 1) {
+    	my (@margin_geneModels, %geneModels, @overlap_geneModels);
+    	open IN, "$tmp_dir/$partition[0].out" or die "Can not open file $tmp_dir/$partition[0].out, $!\n";
+    	while (<IN>) {
+			if (m/^# \% of transcript supported by hints \(any source\)\: (\S+)/) {
+				$hints_supporting_ratio{$info} = $1;
+			}
+			if (m/^# CDS introns\: (\S+)/) {
+				$intron_supporting_info{$info} = $1;
+			}
+    		next if m/^#/; next if m/^\s*$/;
+    		if (m/\tgene\t/) {
+    			@_ = split /\t/;
+    			$info = "$_[0]\t$_[6]\t$_[3]\t$_[4]";
+    			#print STDERR "$info\n";
+    			$geneModels{$info} = 1;
+    		}
+    		$out{$info} .= $_;
+    	}
+    	close IN;
+    	push @margin_geneModels, $info;
+    	#delete $out{$gene[-1]};
+    	shift @partition;
+
+    	foreach (@partition) {
+    		my $locus = $1 if m/\.(\d+)$/;
+    		open IN, "$tmp_dir/$_.out" or die "Can not open file $tmp_dir/$_.out, $!\n";
+    		my @gene;
+    		my $keep = 1;
+    		while (<IN>) {
+				if (m/^# \% of transcript supported by hints \(any source\)\: (\S+)/) {
+					$hints_supporting_ratio{$info} = $1;
+				}
+				if (m/^# CDS introns\: (\S+)/) {
+					$intron_supporting_info{$info} = $1;
+				}
+    			next if m/^#/; next if m/^\s*$/;
+    			@_ = split /\t/;
+    			my $start = $_[3] + $locus;
+    			my $end = $_[4] + $locus;
+    			if ($_[2] eq "gene") {
+    				$info = "$_[0]\t$_[6]\t$start\t$end";
+    				#print STDERR "NEXT:$info\n";
+    				if (exists $out{$info}) {
+    					$keep = 0;
+    				}
+    				else {
+    					$keep = 1;
+    					push @overlap_geneModels, $info if $_[3] <= $overlapSize;
+    				}
+    				push @gene, $info;
+    				$geneModels{$info} = 1;
+    			}
+    			$out{$info} .= "$_[0]\t$_[1]\t$_[2]\t$start\t$end\t$_[5]\t$_[6]\t$_[7]\t$_[8]" if $keep == 1;
+    		}
+    		close IN;
+    		push @margin_geneModels, $gene[0];
+    		push @margin_geneModels, $gene[-1];
+    		#delete $out{$gene_ID[0]};
+    	}
+
+
+    	# 若序列首尾的gene models和其它gene models有重叠，则删除它。
+    	foreach my $gene (@margin_geneModels) {
+    		#print STDERR "Margin Gene: $gene\n";
+    		my @gene_info = split /\t/, $gene;
+    		foreach (keys %geneModels) {
+    			next if $gene eq $_;
+    			@_ = split /\t/, $_;
+    			if ($gene_info[2] <= $_[3] && $gene_info[3] >= $_[2]) {
+    				#print STDERR "Margin Gene deleted: $gene || $_\n";
+    				delete $out{$gene};
+    				delete $geneModels{$gene};
+    			}
+    		}
+    	}
+
+    	# 若两条序列重叠部分的gene models预测不一致，则删除后一条序列前端的基因模型
+    	foreach my $gene (@overlap_geneModels) {
+    		#print STDERR "Overlap Gene: $gene\n";
+    		my @gene_info = split /\t/, $gene;
+    		foreach (keys %geneModels) {
+    			next if $gene eq $_;
+    			@_ = split /\t/, $_;
+    			if ($gene_info[2] <= $_[3] && $gene_info[3] >= $_[2]) {
+    				#print STDERR "Overlap Gene deleted: $gene || $_\n";
+    				delete $out{$gene};
+    			}
+    		}
+    	}
+    }
+    else {
+    	open IN, "$tmp_dir/$seq_id.0.out" or die "Can not open file $tmp_dir/$seq_id.0.out, $!\n";
+    	while (<IN>) {
+			if (m/^# \% of transcript supported by hints \(any source\)\: (\S+)/) {
+				$hints_supporting_ratio{$info} = $1;
+			}
+			if (m/^# CDS introns\: (\S+)/) {
+				$intron_supporting_info{$info} = $1;
+			}
+    		next if m/^#/;
+    		next if m/^\s*$/;
+    		if (m/\tgene\t/) {
+    			@_ = split /\t/;
+    			$info = "$_[0]\t$_[6]\t$_[3]\t$_[4]";
+    		}
+    		$out{$info} .= $_;
+    	}
+    	close IN;
+    }
 }
 
 my (%sort1, %sort2, %sort3, %sort4);
 foreach (keys %out) {
-	@_ = split /\t/;
-	$sort1{$_} = $_[0];
-	$sort2{$_} = $_[1];
-	$sort3{$_} = $_[2];
-	$sort4{$_} = $_[3];
+   @_ = split /\t/;
+   $sort1{$_} = $_[0];
+   $sort2{$_} = $_[1];
+   $sort3{$_} = $_[2];
+   $sort4{$_} = $_[3];
 }
 
 my $num = 0;
 my @out = sort { $sort1{$a} cmp $sort1{$b} or $sort3{$a} <=> $sort3{$b} or $sort4{$a} <=> $sort4{$b} or $sort2{$a} cmp $sort2{$b} } keys %out;
 foreach (@out) {
-	$num ++;
-	my $gene_id = $gene_prefix . '0' x (length(@out) - length($num)) . $num;
-	my @line = split /\n/, $out{$_};
-	foreach (@line) {
-		s/ID=g\d+/ID=$gene_id/;
-		s/Parent=g\d+/Parent=$gene_id/;
-		print "$_\n";
-	}
-	print "\n";
+	my $info = $_;
+    $num ++;
+    my $gene_id = $gene_prefix . '0' x (length(@out) - length($num)) . $num;
+    my @line = split /\n/, $out{$_};
+    foreach (@line) {
+	   if (/\tgene\t/) {
+		   s/(ID=[^;]+)/$1;hintRatio=$hints_supporting_ratio{$info};intronSupport=$intron_supporting_info{$info}/;
+	   }
+       s/\ttranscript\t/\tmRNA\t/;
+       s/ID=g\d+/ID=$gene_id/;
+       s/Parent=g\d+/Parent=$gene_id/;
+       print "$_\n";
+   }
+   print "\n";
+}
+
+sub get_partition {
+    my ($length, $ss, $os) = @_;
+    my @out;
+
+    my $pos = 1;
+    push @out, $pos;
+    while (($pos + $ss - 1) < $length) {
+        $pos = $pos + $ss - 1 - $os + 1;
+        push @out, $pos;
+    }
+
+    return @out;
 }
