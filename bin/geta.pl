@@ -739,15 +739,15 @@ unless (-e "5.augustus.ok") {
             while (<IN>) {
                 if (m/^nucleotide level/) {
                     @_ = split /[\s\|]+/;
-                    $accuracy_value += ($1 * 3 + $2 * 2);
+                    $accuracy_value += ($_[-2] * 3 + $_[-1] * 2);
                 }
                 elsif (m/^exon level/) {
                     @_ = split /[\s\|]+/;
-                    $accuracy_value += ($1 * 4 + $2 * 3);
+                    $accuracy_value += ($_[-2] * 4 + $_[-1] * 3);
                 }
                 elsif (m/^gene level/) {
                     @_ = split /[\s\|]+/;
-                    $accuracy_value += ($1 * 2 + $2 * 1);
+                    $accuracy_value += ($_[-2] * 2 + $_[-1] * 1);
                 }
             }
             close IN;
@@ -758,15 +758,15 @@ unless (-e "5.augustus.ok") {
             while (<IN>) {
                 if (m/^nucleotide level/) {
                     @_ = split /[\s\|]+/;
-                    $accuracy_value += ($1 * 3 + $2 * 2);
+                    $accuracy_value += ($_[-2] * 3 + $_[-1] * 2);
                 }
                 elsif (m/^exon level/) {
                     @_ = split /[\s\|]+/;
-                    $accuracy_value += ($1 * 4 + $2 * 3);
+                    $accuracy_value += ($_[-2] * 4 + $_[-1] * 3);
                 }
                 elsif (m/^gene level/) {
                     @_ = split /[\s\|]+/;
-                    $accuracy_value += ($1 * 2 + $2 * 1);
+                    $accuracy_value += ($_[-2] * 2 + $_[-1] * 1);
                 }
             }
             close IN;
