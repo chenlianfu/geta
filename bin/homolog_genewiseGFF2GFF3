@@ -166,9 +166,18 @@ foreach my $gene_id (sort keys %gff) {
     @line = split /\n/, $info;
     foreach (@line) {
         if (m/\tCDS\t/) {
-            print "$_\n";
-            s/CDS/exon/g;
-            print "$_\n";
+            @_ = split /\t/;
+            if ($_[3] <= $_[4]) {
+                print "$_\n";
+                s/CDS/exon/g;
+                print "$_\n";
+            }
+            else {
+                $_ = "$_[0]\t$_[1]\t$_[2]\t$_[4]\t$_[3]\t$_[5]\t$_[6]\t$_[7]\t$_[8]";
+                print "$_\n";
+                s/CDS/exon/g;
+                print "$_\n";
+            }
         }
         else {
             print "$_\n";
