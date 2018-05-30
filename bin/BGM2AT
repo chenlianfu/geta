@@ -6,7 +6,7 @@ my $usage = <<USAGE;
 Usage:
     perl $0 best_candidates.lowIdentity.gff3 genome.fasta species_name
 
-    程序输入best_candidates.lowIdentity.gff3文件中包含准确的基因模型，且这些基因模型满足一些要求，例如：多CDS、CDS总长度较长、CDS长度占转录本序列比例较高、intron长度较短、CDS总长度不能太长。这些基因模型适合用来做HMM准确性检测。
+    程序输入best_candidates.lowIdentity.gff3文件中包含完整且准确的基因模型（来源于转录本或同源蛋白的比对结果），且这些基因模型满足一些要求，例如：多CDS、CDS总长度较长、CDS长度占转录本序列比例较高、intron长度较短。这些基因模型适合用来做HMM准确性检测。
 
     --flanking_length <int>    default: auto_calculated_value
     该参数用于转换得到genebank格式基因模型时，在gene两端添加的侧翼序列长度。若不添加该参数，则程序根据best_candidates.lowIdentity.gff3文件得到gene长度，取其median值作为该参数的值。若添加该参数，则使用该参素指定的值。
@@ -61,7 +61,7 @@ $CPU ||= 8;
 open IN, $ARGV[0] or die $!;
 my @gene_length;
 while (<IN>) {
-    push @gene_length, $2 - $1 if m/\tgene\t(\d+)\t(\d+)/;
+    push @gene_length, $2 - $1 + 1 if m/\tgene\t(\d+)\t(\d+)/;
 }
 @gene_length = sort {$a <=> $b} @gene_length;
 $flanking_length = $gene_length[@gene_length/2] unless $flanking_length;
@@ -74,14 +74,14 @@ print STDERR "CMD: $cmdString\n";
 
 if ($onlytrain_GFF3) {
     $cmdString = "gff2gbSmallDNA.pl $onlytrain_GFF3 $ARGV[1] $flanking_length genes.all.gb &> gff2gbSmallDNA.all.log";
-     print STDERR "CMD: $cmdString\n";
-     (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+    print STDERR "CMD: $cmdString\n";
+    (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 }
 
 # 去除错误的基因模型
 $cmdString = `echo \$AUGUSTUS_CONFIG_PATH`;
 $cmdString =~ s/^/rm -rf /;
-$cmdString =~ s/$/species\/for_bad_genes_removing/;
+$cmdString =~ s/$/\/species\/for_bad_genes_removing/;
 print STDERR "CMD: $cmdString";
 (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 $cmdString = "new_species.pl --species=for_bad_genes_removing &> new_species.1.log";
@@ -107,7 +107,7 @@ while (<IN>) {
 }
 close IN;
 print STDERR "$gene_models_number gene models were prepared for Augustus Training\n";
-open IN, "genes.all.gb" or die $!;
+open IN, "genes.all.gb";
 open OUT, ">", "genes.only_train.gb" or die $!;
 while (<IN>) {
     if (m/gene=\"(.*?)\"/ && ! exists $gene_filter{$1}) {
@@ -180,6 +180,10 @@ $cmdString = "mv $ARGV[2]_parameters.cfg $species_config_dir/$ARGV[2]_parameters
 print STDERR "CMD: $cmdString\n";
 (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 print STDERR "the parameters of the frequecy of three stop codons were changed in file $species_config_dir/$ARGV[2]_parameters.cfg\n";
+# 备份hmm文件
+$cmdString = "cp -a $species_config_dir hmm_files_bak01";
+print STDERR "CMD: $cmdString\n";
+(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 
 # 进行第一次准确性检测
 $cmdString = "augustus --species=$ARGV[2] genes.gb.test > firsttest.out";
@@ -270,9 +274,65 @@ unless ($allowStartCodonBesidesATG) {
 	print STDERR "Start Codon was set only allow ATG, and the file $exon_probs_file_path was modified!\n";
 }
 
+# 备份hmm文件
+$cmdString = "cp -a $species_config_dir hmm_files_bak02";
+print STDERR "CMD: $cmdString\n";
+(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+
 # 进行第二次准确性检测
 $cmdString = "augustus --species=$ARGV[2] genes.gb.test > secondtest.out";
 print STDERR "CMD: $cmdString\n";
 (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 
 print STDERR "the Augustus training completed\n";
+
+# 两次准确性结果比较
+my $accuracy_value = 0;
+open IN, "firsttest.out" or die "Can not open file firsttest.out, $!\n";
+while (<IN>) {
+	if (m/^nucleotide level/) {
+		@_ = split /[\s\|]+/;
+		$accuracy_value += ($_[-2] * 3 + $_[-1] * 2);
+	}
+	elsif (m/^exon level/) {
+		@_ = split /[\s\|]+/;
+		$accuracy_value += ($_[-2] * 4 + $_[-1] * 3);
+	}
+	elsif (m/^gene level/) {
+		@_ = split /[\s\|]+/;
+		$accuracy_value += ($_[-2] * 2 + $_[-1] * 1);
+	}
+}
+close IN;
+my $first_accuracy = $accuracy_value / 15;
+my $accuracy_value = 0;
+open IN, "secondtest.out" or die "Can not open file secondtest.out, $!\n";
+while (<IN>) {
+	if (m/^nucleotide level/) {
+		@_ = split /[\s\|]+/;
+		$accuracy_value += ($_[-2] * 3 + $_[-1] * 2);
+	}
+	elsif (m/^exon level/) {
+		@_ = split /[\s\|]+/;
+		$accuracy_value += ($_[-2] * 4 + $_[-1] * 3);
+	}
+	elsif (m/^gene level/) {
+		@_ = split /[\s\|]+/;
+		$accuracy_value += ($_[-2] * 2 + $_[-1] * 1);
+	}
+}
+close IN;
+my $second_accuracy = $accuracy_value / 15;
+print STDERR "The first tested accuracy value of augustus training is: $first_accuracy\n";
+print STDERR "The second tested accuracy value of augustus training is: $second_accuracy\n";
+if ($second_accuracy < $first_accuracy) {
+	print STDERR "The optimizing step could not increase the accuracy of augustus training! and the hmm files will be rolled back!\n";
+	$cmdString = "rm -rf $species_config_dir && cp -a hmm_files_bak01 $species_config_dir && ln -sf hmm_files_bak01 hmm_files_bak";
+	print STDERR "CMD: $cmdString\n";
+	(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+}
+else {
+	$cmdString = "ln -sf hmm_files_bak02 hmm_files_bak";
+	print STDERR "CMD: $cmdString\n";
+	(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+}
