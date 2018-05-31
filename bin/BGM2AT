@@ -33,8 +33,8 @@ Usage:
     --allowStartCodonBesidesATG
     若设置该参数后，则允许CTG和TTG可以作为起始密码子。
 
-	--stopAfterFirstEtraining
-	在进行第一次etraining和准确性检测后，即终止程序运行。
+    --stopAfterFirstEtraining
+    在进行第一次etraining和准确性检测后，即终止程序运行。
 
 USAGE
 if (@ARGV==0){die $usage}
@@ -49,7 +49,7 @@ GetOptions(
     "onlytrain_GFF3:s" => \$onlytrain_GFF3,
     "CPU:i" => \$CPU,
     "allowStartCodonBesidesATG!" => \$allowStartCodonBesidesATG,
-	"stopAfterFirstEtraining!" => \$stopAfterFirstEtraining,
+    "stopAfterFirstEtraining!" => \$stopAfterFirstEtraining,
 );
 $min_gene_number_for_augustus_training ||= 500;
 $gene_number_for_accuracy_detection ||= 200;
@@ -180,24 +180,25 @@ $cmdString = "mv $ARGV[2]_parameters.cfg $species_config_dir/$ARGV[2]_parameters
 print STDERR "CMD: $cmdString\n";
 (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 print STDERR "the parameters of the frequecy of three stop codons were changed in file $species_config_dir/$ARGV[2]_parameters.cfg\n";
-# 备份hmm文件
-$cmdString = "cp -a $species_config_dir hmm_files_bak01";
-print STDERR "CMD: $cmdString\n";
-(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 
 # 进行第一次准确性检测
 $cmdString = "augustus --species=$ARGV[2] genes.gb.test > firsttest.out";
 unless (-e "firsttest.ok") {
+    print STDERR "CMD: $cmdString\n";
+    (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+    open OUT, ">", "firsttest.ok" or die $!; close OUT;
+
+	# 备份hmm文件
+	$cmdString = "cp -a $species_config_dir hmm_files_bak01";
 	print STDERR "CMD: $cmdString\n";
 	(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
-	open OUT, ">", "firsttest.ok" or die $!; close OUT;
 }
 else {
-	print STDERR "CMD(Skipped): $cmdString\n";
+    print STDERR "CMD(Skipped): $cmdString\n";
 }
 
 if ($stopAfterFirstEtraining) {
-	exit;
+    exit;
 }
 
 # 进行augustus training优化
@@ -219,12 +220,12 @@ print STDERR "CMD: $cmdString\n";
 (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 $cmdString = "optimize_augustus.pl --species=$ARGV[2] --rounds=5 --cpus=$cpus --kfold=$cpus --onlytrain=training.gb.onlytrain genes.gb.train.train > optimize.out";
 unless (-e "optimize_augustus.ok") {
-	print STDERR "CMD: $cmdString\n";
-	(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
-	open OUT, ">", "optimize_augustus.ok" or die $!; close OUT;
+    print STDERR "CMD: $cmdString\n";
+    (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+    open OUT, ">", "optimize_augustus.ok" or die $!; close OUT;
 }
 else {
-	print STDERR "CMD(Skipped): $cmdString\n";
+    print STDERR "CMD(Skipped): $cmdString\n";
 }
 
 # 进行第二次augustus training
@@ -271,18 +272,24 @@ unless ($allowStartCodonBesidesATG) {
     open OUT, ">", $exon_probs_file_path or die "Can not write to file $exon_probs_file_path, $!\n";
     print OUT $exon_probs_info;
     close OUT;
-	print STDERR "Start Codon was set only allow ATG, and the file $exon_probs_file_path was modified!\n";
+    print STDERR "Start Codon was set only allow ATG, and the file $exon_probs_file_path was modified!\n";
 }
-
-# 备份hmm文件
-$cmdString = "cp -a $species_config_dir hmm_files_bak02";
-print STDERR "CMD: $cmdString\n";
-(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 
 # 进行第二次准确性检测
 $cmdString = "augustus --species=$ARGV[2] genes.gb.test > secondtest.out";
-print STDERR "CMD: $cmdString\n";
-(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+unless (-e "secondtest.ok") {
+	print STDERR "CMD: $cmdString\n";
+	(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+	open OUT, ">", "secondtest.ok" or die $!; close OUT;
+
+	# 备份hmm文件
+	$cmdString = "cp -a $species_config_dir hmm_files_bak02";
+	print STDERR "CMD: $cmdString\n";
+	(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+}
+else {
+	print STDERR "CMD(Skipped): $cmdString\n";
+}
 
 print STDERR "the Augustus training completed\n";
 
@@ -290,49 +297,49 @@ print STDERR "the Augustus training completed\n";
 my $accuracy_value = 0;
 open IN, "firsttest.out" or die "Can not open file firsttest.out, $!\n";
 while (<IN>) {
-	if (m/^nucleotide level/) {
-		@_ = split /[\s\|]+/;
-		$accuracy_value += ($_[-2] * 3 + $_[-1] * 2);
-	}
-	elsif (m/^exon level/) {
-		@_ = split /[\s\|]+/;
-		$accuracy_value += ($_[-2] * 4 + $_[-1] * 3);
-	}
-	elsif (m/^gene level/) {
-		@_ = split /[\s\|]+/;
-		$accuracy_value += ($_[-2] * 2 + $_[-1] * 1);
-	}
+    if (m/^nucleotide level/) {
+        @_ = split /[\s\|]+/;
+        $accuracy_value += ($_[-2] * 3 + $_[-1] * 2);
+    }
+    elsif (m/^exon level/) {
+        @_ = split /[\s\|]+/;
+        $accuracy_value += ($_[-2] * 4 + $_[-1] * 3);
+    }
+    elsif (m/^gene level/) {
+        @_ = split /[\s\|]+/;
+        $accuracy_value += ($_[-2] * 2 + $_[-1] * 1);
+    }
 }
 close IN;
 my $first_accuracy = $accuracy_value / 15;
 my $accuracy_value = 0;
 open IN, "secondtest.out" or die "Can not open file secondtest.out, $!\n";
 while (<IN>) {
-	if (m/^nucleotide level/) {
-		@_ = split /[\s\|]+/;
-		$accuracy_value += ($_[-2] * 3 + $_[-1] * 2);
-	}
-	elsif (m/^exon level/) {
-		@_ = split /[\s\|]+/;
-		$accuracy_value += ($_[-2] * 4 + $_[-1] * 3);
-	}
-	elsif (m/^gene level/) {
-		@_ = split /[\s\|]+/;
-		$accuracy_value += ($_[-2] * 2 + $_[-1] * 1);
-	}
+    if (m/^nucleotide level/) {
+        @_ = split /[\s\|]+/;
+        $accuracy_value += ($_[-2] * 3 + $_[-1] * 2);
+    }
+    elsif (m/^exon level/) {
+        @_ = split /[\s\|]+/;
+        $accuracy_value += ($_[-2] * 4 + $_[-1] * 3);
+    }
+    elsif (m/^gene level/) {
+        @_ = split /[\s\|]+/;
+        $accuracy_value += ($_[-2] * 2 + $_[-1] * 1);
+    }
 }
 close IN;
 my $second_accuracy = $accuracy_value / 15;
 print STDERR "The first tested accuracy value of augustus training is: $first_accuracy\n";
 print STDERR "The second tested accuracy value of augustus training is: $second_accuracy\n";
 if ($second_accuracy < $first_accuracy) {
-	print STDERR "The optimizing step could not increase the accuracy of augustus training! and the hmm files will be rolled back!\n";
-	$cmdString = "rm -rf $species_config_dir && cp -a hmm_files_bak01 $species_config_dir && ln -sf hmm_files_bak01 hmm_files_bak";
-	print STDERR "CMD: $cmdString\n";
-	(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+    print STDERR "The optimizing step could not increase the accuracy of augustus training! and the hmm files will be rolled back!\n";
+    $cmdString = "rm -rf $species_config_dir && cp -a hmm_files_bak01 $species_config_dir && ln -sf -T hmm_files_bak01 hmm_files_bak";
+    print STDERR "CMD: $cmdString\n";
+    (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 }
 else {
-	$cmdString = "ln -sf hmm_files_bak02 hmm_files_bak";
-	print STDERR "CMD: $cmdString\n";
-	(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+    $cmdString = "ln -sf -T hmm_files_bak02 hmm_files_bak";
+    print STDERR "CMD: $cmdString\n";
+    (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 }

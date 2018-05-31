@@ -8,7 +8,7 @@ Usage:
     perl $0 [options]
 
 For example:
-    perl $0 --RM_species Embryophyta --genome genome.fasta -1 liba.1.fq.gz,libb.1.fq.gz -2 liba.2.fq.gz,libb.2.fq.gz --protein homolog.fasta --augustus_species oryza_sativa_20171120 --out_prefix out --config conf.txt --cpu 80 --pfam_db /opt/biosoft/hmmer-3.1b2/Pfam-AB.hmm --gene_prefix OS01Gene
+    perl $0 --RM_species Embryophyta --genome genome.fasta -1 liba.1.fq.gz,libb.1.fq.gz -2 liba.2.fq.gz,libb.2.fq.gz --protein homolog.fasta --augustus_species oryza_sativa_20171120 --out_prefix out --config conf.txt --cpu 80 --gene_prefix OS01Gene --pfam_db /opt/biosoft/hmmer-3.1b2/Pfam-AB.hmm
 
 Parameters:
 [required]
@@ -225,6 +225,8 @@ my %config = (
     'BGM2AT' => '--min_gene_number_for_augustus_training 500 --gene_number_for_accuracy_detection 200 --min_gene_number_of_optimize_augustus_chunk 50 --max_gene_number_of_optimize_augustus_chunk 200',
     'prepareAugusutusHints' => '--margin 20',
     'paraAugusutusWithHints' => '--gene_prefix augustus --min_intron_len 30 --alternatives_from_evidence',
+	'paraCombineGeneModels' => '--overlap 30 --min_augustus_transcriptSupport_percentage 10.0 --min_augustus_intronSupport_number 1 --min_augustus_intronSupport_ratio 0.01',
+	'PfamValidateABinitio' => '--CDS_length 750 --CDS_num 2 --evalue 1e-5 --coverage 0.25',
 );
 if ($config) {
     open IN, $config or die "Can not open file $config, $!\n";
@@ -285,7 +287,10 @@ unless (-e "0.RepeatMasker.ok") {
         unless (-e "RepeatModeler.ok") {
             print STDERR (localtime) . ": CMD: $cmdString\n";
             system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-           open OUT, ">", "RepeatModeler.ok" or die $!; close OUT;
+            open OUT, ">", "RepeatModeler.ok" or die $!; close OUT;
+        }
+        else {
+            print STDERR "CMD(Skipped): $cmdString\n";
         }
         $cmdString = "RepeatMasker $config{'RepeatMasker'} -pa $cpu -lib RM_\*/\*.classified -dir ./ $genome &> repeatmasker.log";
     }
@@ -629,9 +634,19 @@ print STDERR "Step 5: Augustus/HMM Trainning\n";
 mkdir "5.augustus" unless -e "5.augustus";
 unless (-e "5.augustus.ok") {
     chdir "5.augustus";
+    $pwd = `pwd`; print STDERR "PWD: $pwd";
 
     # 第一次 Augustus HMM Training
-    mkdir "training" unless -e "training";
+    unless (-e "training") {
+        mkdir "training";
+        my $species_config_dir = `echo \$AUGUSTUS_CONFIG_PATH`;
+        chomp($species_config_dir);
+        $species_config_dir = "$species_config_dir/species/$augustus_species";
+        $cmdString = "rm -rf $species_config_dir";
+        print STDERR "CMD: $cmdString\n";
+        (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+        unlink "training.ok" if (-e "training.ok");
+    }
     unless (-e "training.ok") {
         chdir "training";
         $pwd = `pwd`; print STDERR "PWD: $pwd";
@@ -657,13 +672,6 @@ unless (-e "5.augustus.ok") {
         }
 
         # 进行Augustus training
-		my $species_config_dir = `echo \$AUGUSTUS_CONFIG_PATH`;
-		chomp($species_config_dir);
-		$species_config_dir = "$species_config_dir/species/$augustus_species";
-		$cmdString = "rm -rf $species_config_dir";
-		print STDERR "CMD: $cmdString\n";
-		(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
-
         my (%gene_info, @flanking_length, $flanking_length, @gene_length);
         open IN, "geneModels.gff3" or die $!;
         while (<IN>) {
@@ -756,19 +764,33 @@ unless (-e "5.augustus.ok") {
 
     # augustus_training_iteration
     unless ($no_augustus_training_iteration) {
-        mkdir "training_again" unless -e "training_again";
+        unless (-e "training_again") {
+            mkdir "training_again";
+            my $species_config_dir = `echo \$AUGUSTUS_CONFIG_PATH`;
+            chomp($species_config_dir);
+            $species_config_dir = "$species_config_dir/species/$augustus_species";
+            $cmdString = "rm -rf $species_config_dir && cp -a ./training/hmm_files_bak/ $species_config_dir";
+            print STDERR "CMD: $cmdString\n";
+            (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+            unlink "training_again.ok" if (-e "training_again.ok");
+        }
         unless (-e "training_again.ok") {
             chdir "training_again";
             $pwd = `pwd`; print STDERR "PWD: $pwd";
 
-            # 准备Augustus training的输入文件
+            # 准备Augustus training的输入文件，注意需要去除Augustus结果中的可变剪接。
             open OUT, ">", "geneModels.gff3" or die "Cannot create file geneModels.gff3, $!\n";
             open IN, "../augustus.1.gff3" or die "Can not open file ../augustus.1.gff3, $!\n";
             my ($keep, $keep_num, $total_num) = (0, 0, 0);
+            my (%augustus_gene_model_gene, %augustus_gene_model_mRNA, %augustus_mRNA_score, $augustus_gene_id, $augustus_mRNA_id, @keep);
             while (<IN>) {
+                next if m/^\s*$/;
+                next if m/^#/;
                 if (m/\tgene\t/) {
                     $total_num ++;
                     @_ = split /\s+/;
+                    $augustus_gene_id = $1 if $_[8] =~ /ID=([^;\s]+)/;
+                    $augustus_gene_model_gene{$augustus_gene_id} = $_;
                     my %attr = $_[8] =~ m/([^;=]+)=([^;=]+)/g;
                     if ($attr{"hintRatio"} >= 95) {
                         $keep = 1;
@@ -781,8 +803,24 @@ unless (-e "5.augustus.ok") {
                     else {
                         $keep = 0;
                     }
+                    push @keep, $augustus_gene_id if $keep == 1;
                 }
-                print OUT if $keep == 1;
+                elsif (m/\tmRNA\t/) {
+                    @_ = split /\s+/;
+                    $augustus_mRNA_id = $1 if $_[8] =~ /ID=([^;\s]+)/;
+                    $augustus_gene_model_mRNA{$augustus_gene_id}{$augustus_mRNA_id} .= $_;
+                    $augustus_mRNA_score{$augustus_gene_id}{$augustus_mRNA_id} = $_[5];
+                }
+                else {
+                    $augustus_gene_model_mRNA{$augustus_gene_id}{$augustus_mRNA_id} .= $_;
+                }
+            }
+            close IN;
+            foreach my $gene_id (@keep) {
+                print OUT $augustus_gene_model_gene{$gene_id};
+                my @mRNA_id = sort {$augustus_mRNA_score{$gene_id}{$b} <=> $augustus_mRNA_score{$gene_id}{$a}} keys %{$augustus_gene_model_mRNA{$gene_id}};
+                print OUT $augustus_gene_model_mRNA{$gene_id}{$mRNA_id[0]};
+                print OUT "\n";
             }
             close OUT;
             print STDERR "Total genes predicted by Augustus: $total_num\nGood genes picked for next traning: $keep_num\n";
@@ -915,7 +953,7 @@ unless (-e "5.augustus.ok") {
                 my $species_config_dir = `echo \$AUGUSTUS_CONFIG_PATH`;
                 chomp($species_config_dir);
                 $species_config_dir = "$species_config_dir/species/$augustus_species";
-                $cmdString = "rm -rf $species_config_dir && cp -a ./training/hmm_files_bak $species_config_dir";
+                $cmdString = "rm -rf $species_config_dir && cp -a ./training/hmm_files_bak/ $species_config_dir";
                 print STDERR "CMD: $cmdString\n";
                 (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 
@@ -953,7 +991,7 @@ unless (-e "6.combineGeneModels.ok") {
     chdir "6.combineGeneModels";
     $pwd = `pwd`; print STDERR "PWD: $pwd";
 
-    $cmdString = "$dirname/bin/paraCombineGeneModels --cpu $cpu ../5.augustus/augustus.gff3 ../3.transcript/transfrag.genome.gff3 ../4.homolog/genewise.gff3 ../5.augustus/hints.gff &> /dev/null";
+    $cmdString = "$dirname/bin/paraCombineGeneModels $config{'paraCombineGeneModels'} --cpu $cpu ../5.augustus/augustus.gff3 ../3.transcript/transfrag.genome.gff3 ../4.homolog/genewise.gff3 ../5.augustus/hints.gff &> /dev/null";
     unless (-e "paraCombineGeneModels.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -964,7 +1002,7 @@ unless (-e "6.combineGeneModels.ok") {
     }
 
     if ($pfam_db) {
-        $cmdString = "$dirname/bin/PfamValidateABinitio --out_prefix combine2 --cpu $cpu --pfam_db $pfam_db combine.2.gff3 $genome 2> PfamValidateABinitio.log";
+        $cmdString = "$dirname/bin/PfamValidateABinitio --out_prefix combine2 --cpu $cpu --pfam_db $pfam_db $config{'PfamValidateABinitio'} combine.2.gff3 $genome 2> PfamValidateABinitio.log";
         unless (-e "PfamValidateABinitio.ok") {
             print STDERR (localtime) . ": CMD: $cmdString\n";
             system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -1012,6 +1050,7 @@ else {
     print STDERR "Skip Step 6 for the file 6.combineGeneModels.ok exists\n";
 }
 
+=cut
 # Step 7: Add Alternative Splicing
 print STDERR "\n============================================\n";
 print STDERR "Step 7: Add Alternative Splicing\n";
@@ -1044,19 +1083,20 @@ unless (-e "7.addAlternativeSplicing.ok") {
 else {
     print STDERR "Skip Step 7 for the file 7.addAlternativeSplicing.ok exists\n";
 }
+=cut
 
-# Step 8: OutPut
+# Step 7: OutPut
 print STDERR "\n============================================\n";
-print STDERR "Step 8: OutPut\n";
+print STDERR "Step 7: OutPut\n";
 chdir "../";
 $pwd = `pwd`; print STDERR "PWD: $pwd";
 
-#$cmdString = "$dirname/bin/GFF3Clear --gene_prefix $gene_prefix --genome $genome $out_prefix.tmp/6.combineGeneModels/genome.completed.gff3 > $out_prefix.gff3";
-$cmdString = "cp $out_prefix.tmp/7.addAlternativeSplicing/genome.addAS.gff3 $out_prefix.gff3";
+$cmdString = "$dirname/bin/GFF3Clear --gene_prefix $gene_prefix --genome $genome --no_attr_add $out_prefix.tmp/6.combineGeneModels/genome.completed.gff3 > $out_prefix.gff3";
+#$cmdString = "cp $out_prefix.tmp/7.addAlternativeSplicing/genome.addAS.gff3 $out_prefix.gff3";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
-$cmdString = "$dirname/bin/gff3ToGtf.pl $genome $out_prefix.gff3 > $out_prefix.gtf 2> /dev/null";
+$cmdString = "$dirname/bin/gff3ToGtf.pl $genome $out_prefix.gff3 > $out_prefix.gtf 2> gff3ToGtf.log";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 

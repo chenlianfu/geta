@@ -166,7 +166,12 @@ foreach my $seq_id (sort keys %seq) {
         print OUT $hints_info;
         close OUT;
 
-        print COM "augustus --gff3=on --species=$species --hintsfile=$tmp_dir/$seq_id.0.gff --extrinsicCfgFile=extrinsic.cfg --allow_hinted_splicesites=gcag,atac --alternatives-from-evidence=true --min_intron_len=30 --softmasking=1 $tmp_dir/$seq_id.0.fasta > $tmp_dir/$seq_id.0.out\n";
+		if ($alternatives_from_evidence) {
+			print COM "augustus --gff3=on --species=$species --hintsfile=$tmp_dir/$seq_id.0.gff --extrinsicCfgFile=extrinsic.cfg --allow_hinted_splicesites=gcag,atac --alternatives-from-evidence=true --min_intron_len=30 --softmasking=1 $tmp_dir/$seq_id.0.fasta > $tmp_dir/$seq_id.0.out\n";
+		}
+		else {
+			print COM "augustus --gff3=on --species=$species --hintsfile=$tmp_dir/$seq_id.0.gff --extrinsicCfgFile=extrinsic.cfg --allow_hinted_splicesites=gcag,atac --min_intron_len=30 --softmasking=1 $tmp_dir/$seq_id.0.fasta > $tmp_dir/$seq_id.0.out\n";
+		}
         $out_id{$seq_id}{"$seq_id.0"} = 1;
     }
 }

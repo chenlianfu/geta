@@ -6,10 +6,10 @@ my $usage = <<USAGE;
 Usage:
     perl $0 [options] augustus.gff3 transfrag.gff3 genewise.gff3 intron.gff
 
-    输入的augustus.gff3是进行augustus基因预测的结果，标准的GFF3文件格式，不能包含可变剪接信息，主要利用其CDS,exon,start_codon和stop_codon信息；
+    输入的augustus.gff3是进行augustus基因预测的结果，标准的GFF3文件格式，可以包含可变剪接信息，主要利用其CDS,exon,start_codon和stop_codon信息；
     输入transfrag.gff3是使用转录本信息进行基因预测的结果，标准的GFF3文件格式，不能包含可变剪接信息，主要利用其exon和CDS信息；
     输入genewise.gff3是使用同源蛋白进行基因预测的结果，标准的GFF3文件格式，不能包含可变剪接信息，主要利用CDS Feature信息；
-    输入intron.gff包含intron信息，主要利用intron Featrue信息。
+    输入intron.gff包含intron信息，主要利用intron Featrue信息。用于得到augustus的转录本序列intron支持度信息。
     输入的3个GFF3文件gene Feature的ID必须都是独一无二的。
     本程序输入的是一条序列单条链（正链或负链）的数据信息，对其进行整合。
 
@@ -17,7 +17,7 @@ Usage:
 
     整合算法：
     1. 根据3种基因预测结果的重叠，得到一个个基因区域，再单独对每个基因区域进行整合。
-    2. 基因区域中若存在augustus的基因预测结果，则以augustus的基因预测结果为准，对其进行UTR添加和intron支持度分析；若无intron支持，则对编码蛋白氨基酸长度较低的基因使用Pfam数据库进行过滤。
+    2. 基因区域中若存在augustus的基因预测结果，则以augustus的基因预测结果为准，对其进行UTR添加和intron支持度分析；根据其augustus预测的hints支持信息，其支持度低于指定阈值，则认为其结果不可靠；或者根据intron.gff信息，转录本序列中没有intron支持，则认为其结果不可靠；不可靠结果属于ab initio预测结果，需要进一步验证。
     3. 基因区域中若不存在augustus的基因预测结果，则以transfrag的基因预测结果为准，最后以genewise的基因预测结果为准。
 
     整合算法中为什么以augustus的结果为准：进行augustus预测的时候，添加了exon信息和intron信息，augustus对有这些有evidence支持的基因预测极其准确。可能augustus的预测结果与输入的transfrag有冲突，但根据可变剪接的intron信息，发现augustus的预测结果是正确的，且其protein编码区域预测的很长，而在transfrag中，cds的区域却比较短。
@@ -25,23 +25,40 @@ Usage:
     --overlap <int>    default: 30
     程序先整合3种基因预测结果的基因区域。若两个基因模型的区域重叠超过此指定长度（30bp），则认为是同一个基因区域。再分别对基因区域上的基因模型进行整合。
 
+    --min_augustus_transcriptSupport_percentage <float>    default: 10.0
+    --min_augustus_intronSupport_number <int>    default: 1
+    --min_augustus_intronSupport_ratio <float>    default: 0.01
+    Augustus预测的基因模型结果中包含有hints支持信息。默认阈值下：若基因模型中转录本序列 >=10.0% 区域有hints支持，或 (>= 1个intron有hints支持 && >= 0.01比例的intron有hints支持), 则认为接受该基因模型作为可靠的结果。否则，认为该基因模型属于ab initio预测结果，需要进一步验证。
+
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($overlap);
+my ($overlap, $min_augustus_transcriptSupport_percentage, $min_augustus_intronSupport_number, $min_augustus_intronSupport_ratio);
 GetOptions(
     "overlap:i" => \$overlap,
+    "min_augustus_transcriptSupport_percentage:f" => \$min_augustus_transcriptSupport_percentage,
+    "min_augustus_intronSupport_number:i" => \$min_augustus_intronSupport_number,
+    "min_augustus_intronSupport_ratio:f" => \$min_augustus_intronSupport_ratio,
 );
 $overlap ||= 30;
+$min_augustus_transcriptSupport_percentage ||= 10.0;
+$min_augustus_intronSupport_number ||= 1;
+$min_augustus_intronSupport_ratio ||= 0.01;
 
 # 读取augustus.gff3, transfrag.gff3, genewise.gff3 文件
-my (%augustus, %transfrag, %genewise, $id, %intron, %geneRegion);
+my (%augustus, %transfrag, %genewise, $id, %intron, %geneRegion, %aug_gene, @aug_gene, $aug_gene, %aug_gene_info);
 open IN, $ARGV[0] or die $!;
 while (<IN>) {
     next if m/^#/;
     next if m/^\s*$/;
-    if (m/\tgene\t.*ID=([^;\s]+)/) {
+    if (/\tgene\t.*ID=([^;\s]+)/) {
+        $aug_gene = $1;
+        push @aug_gene, $aug_gene;
+        $aug_gene_info{$aug_gene} = $_;
+    }
+    elsif (m/\tmRNA\t.*ID=([^;\s]+)/) {
         $id = $1;
+        $aug_gene{$aug_gene}{$id} = 1;
         @_ = split /\t/;
         $geneRegion{"$_[3]\t$_[4]"}{$id} = 1;
     }
@@ -81,7 +98,7 @@ while (<IN>) {
     next if m/^\s*$/;
     if (m/\tintron\t/) {
         @_ = split /\t/;
-        $intron{"$_[3]\t$_[4]"} = 1;
+        $intron{"$_[0]\t$_[3]\t$_[4]"} = 1;
     }
 }
 close IN;
@@ -137,6 +154,7 @@ foreach my $region (sort {$a <=> $b} keys %region) {
     if ($status_augustus == 1) {
         foreach my $gene_id (@ID) {
             if (exists $augustus{$gene_id}) {
+				#print STDERR "$gene_id\n";
                 my $intron_support = &intron_support($gene_id);
                 #print "OK2:\t$gene_id\t$intron_support\n";
                 my %gff3_out = &add_UTR($gene_id, @ID);
@@ -147,13 +165,17 @@ foreach my $region (sort {$a <=> $b} keys %region) {
                 foreach (keys %{$gff3_out{$gene_id}{"exon"}}) {
                     $gene_out{$gene_id}{"exon"}{$_} = 1;
                 }
-                $gene_out{$gene_id}{"start_codon"} = $gff3_out{$gene_id}{"start_codon"};
-                $gene_out{$gene_id}{"stop_codon"} = $gff3_out{$gene_id}{"stop_codon"};
+                #foreach (keys %{$gff3_out{$gene_id}{"start_codon"}}) {
+                #    $gene_out{$gene_id}{"start_codon"}{$_} = 1;
+                #}
+                #foreach (keys %{$gff3_out{$gene_id}{"stop_codon"}}) {
+                #        $gene_out{$gene_id}{"stop_codon"}{$_} = 1;
+                #}
                 $gene_out{$gene_id}{"strand"} = $gff3_out{$gene_id}{"strand"};
                 $gene_out{$gene_id}{"chr"} = $gff3_out{$gene_id}{"chr"};
                 $gene_out{$gene_id}{"intron_support"} = $intron_support;
 
-				#if ($intron_support =~ m/^0/ && $status_transfrag != 1 && $status_genewise != 1) {
+                #if ($intron_support =~ m/^0/ && $status_transfrag != 1 && $status_genewise != 1) {
                 if ($intron_support =~ m/^0/) {
                     $gene_out{$gene_id}{"pfam"} = 1;
                     #print "OK3:\t$region\t$ID\n";
@@ -198,23 +220,114 @@ foreach my $region (sort {$a <=> $b} keys %region) {
     }
 }
 
+foreach my $gene_id (@aug_gene) {
+    my ($out, %gene_pos, $if_intron_support);
+
+    @_ = split /\t/, $aug_gene_info{$gene_id};
+    my ($chr, $strand, $gene_score) = ($_[0], $_[6], $_[5]);
+    my ($augustus_transcriptSupport_percentage, $augustus_intronSupport_number, $augustus_intronSupport_ratio, $augustus_intronSupport);
+    if ($_[8] =~ m/hintRatio=([^;\s]+)/) {
+        $augustus_transcriptSupport_percentage = $1;
+    }
+    if ($_[8] =~ m/intronSupport=(\d+)\/(\d+)/) {
+        $augustus_intronSupport_number = $1;
+        $augustus_intronSupport = "$1/$2";
+        if ($2 == 0) {
+            $augustus_intronSupport_ratio = 0;
+        }
+        else {
+            $augustus_intronSupport_ratio = $1 / $2;
+        }
+    }
+
+    my $mRNA_number = 0;
+    foreach my $mRNA_id (sort keys %{$aug_gene{$gene_id}}) {
+        $if_intron_support = 1 if (! exists $gene_out{$mRNA_id}{"pfam"});
+        my (%out, %position);
+        $mRNA_number ++;
+
+        if ($strand eq "+") {
+            my $number = 0;
+            foreach (sort {$a <=> $b} keys %{$gene_out{$mRNA_id}{"CDS"}}) {
+                $number ++;
+                @_ = split /\t/; 
+                $position{$_[0]} = 1; $gene_pos{$_[0]} = 1;
+                $position{$_[1]} = 1; $gene_pos{$_[1]} = 1;
+                $out{"$chr\t\.\tCDS\t$_\tID=$mRNA_id.CDS$number;Parent=$mRNA_id;"} = $_[0];
+            }
+            $number = 0;
+            foreach (sort {$a <=> $b} keys %{$gene_out{$mRNA_id}{"exon"}}) {
+                $number ++;
+                @_ = split /\t/; 
+                $position{$_[0]} = 1; $gene_pos{$_[0]} = 1;
+                $position{$_[1]} = 1; $gene_pos{$_[1]} = 1;
+                $out{"$chr\t\.\texon\t$_\t\.\t$strand\t\.\tID=$mRNA_id.exon$number;Parent=$mRNA_id;"} = $_[0];
+            }
+        }
+        elsif ($strand eq "-") {
+            my $number = 0;
+            foreach (sort {$b <=> $a} keys %{$gene_out{$mRNA_id}{"CDS"}}) {
+                $number ++;
+                @_ = split /\t/; 
+                $position{$_[0]} = 1; $gene_pos{$_[0]} = 1;
+                $position{$_[1]} = 1; $gene_pos{$_[1]} = 1;
+                $out{"$chr\t\.\tCDS\t$_\tID=$mRNA_id.CDS$number;Parent=$mRNA_id;"} = $_[0];
+            }
+            $number = 0;
+            foreach (sort {$b <=> $a} keys %{$gene_out{$mRNA_id}{"exon"}}) {
+                $number ++;
+                @_ = split /\t/; 
+                $position{$_[0]} = 1; $gene_pos{$_[0]} = 1;
+                $position{$_[1]} = 1; $gene_pos{$_[1]} = 1;
+                $out{"$chr\t\.\texon\t$_\t\.\t$strand\t\.\tID=$mRNA_id.exon$number;Parent=$mRNA_id;"} = $_[0];
+            }
+        }
+
+        foreach (keys %position) { delete $position{$_} unless $_; }
+        my @position = sort {$a <=> $b} keys %position;
+        my $intron_support = $gene_out{$mRNA_id}{'intron_support'};
+        my $intron_support_out;
+        $intron_support_out = "IntronSupport=$intron_support;" if $intron_support;
+
+        my $mRNA_info = $augustus{$mRNA_id};
+        my $mRNA_score = '.';
+        $mRNA_score = $1 if $mRNA_info =~ m/\tmRNA\t\d+\t\d+\t(\S+)\t/;
+        $out .= "$chr\t\.\tmRNA\t$position[0]\t$position[-1]\t$mRNA_score\t$strand\t\.\tID=$mRNA_id;Parent=$gene_id;$intron_support_out\n";
+
+        my @out;
+        if ($strand eq "+") {
+            @out = sort {$out{$a} <=> $out{$b} or $b cmp $a} keys %out;
+        }
+        elsif ($strand eq "-") {
+            @out = sort {$out{$b} <=> $out{$a} or $b cmp $a} keys %out;
+        }
+        $out .= join "\n", @out;
+        $out .= "\n";
+
+        delete $gene_out{$mRNA_id};
+    }
+
+    foreach (keys %gene_pos) { delete $gene_pos{$_} unless $_; }
+    my @gene_pos = sort {$a <=> $b} keys %gene_pos;
+    $out = "$chr\t\.\tgene\t$gene_pos[0]\t$gene_pos[-1]\t$gene_score\t$strand\t\.\tID=$gene_id;Augustus_transcriptSupport_percentage=$augustus_transcriptSupport_percentage;Augustus_intronSupport=$augustus_intronSupport;\n" . $out;
+
+    if ( ($augustus_transcriptSupport_percentage >= $min_augustus_transcriptSupport_percentage) or ($augustus_intronSupport_number >= $min_augustus_intronSupport_number && $augustus_intronSupport_ratio >= $min_augustus_intronSupport_ratio) ) {
+        print "$out\n";
+    }
+    elsif ($if_intron_support == 1) {
+        $out =~ s/(\tgene\t.*?);?\n/$1;NeedRevise=1;\n/;
+        print "$out\n";
+    }
+    else {
+        print STDERR "$out\n";
+    }
+}
+
 foreach my $gene_id (sort keys %gene_out) {
     my %out;
     my $chr = $gene_out{$gene_id}{'chr'};
-    my $intron_support = $gene_out{$gene_id}{'intron_support'};
     my $strand = $gene_out{$gene_id}{'strand'};
     my %position;
-
-    my $start_codon = $gene_out{$gene_id}{'start_codon'};
-    @_ = split /\t/, $start_codon;
-    $position{$_[0]} = 1;
-    $position{$_[1]} = 1;
-    $out{"$chr\t\.\tstart_codon\t$start_codon\tID=$gene_id.t1.start_codon;Parent=$gene_id.t1;"} = $_[0] if $start_codon;
-    my $stop_codon = $gene_out{$gene_id}{'stop_codon'};
-    @_ = split /\t/, $stop_codon;
-    $position{$_[0]} = 1;
-    $position{$_[1]} = 1;
-    $out{"$chr\t\.\tstop_codon\t$stop_codon\tID=$gene_id.t1.stop_codon;Parent=$gene_id.t1;"} = $_[0] if $stop_codon;
 
     if ($strand eq "+") {
         my $number = 0;
@@ -255,16 +368,8 @@ foreach my $gene_id (sort keys %gene_out) {
 
     foreach (keys %position) { delete $position{$_} unless $_; }
     my @position = sort {$a <=> $b} keys %position;
-    my $intron_support_out;
-    $intron_support_out = "IntronSupport=$intron_support;" if $intron_support;
-    if ($gene_out{$gene_id}{"pfam"} == 1) {
-        print STDERR "$chr\t\.\tgene\t$position[0]\t$position[-1]\t\.\t$strand\t\.\tID=$gene_id;$intron_support_out\n";
-        print STDERR "$chr\t\.\tmRNA\t$position[0]\t$position[-1]\t\.\t$strand\t\.\tID=$gene_id.t1;Parent=$gene_id;\n";
-    }
-    else {
-        print "$chr\t\.\tgene\t$position[0]\t$position[-1]\t\.\t$strand\t\.\tID=$gene_id;$intron_support_out\n";
-        print "$chr\t\.\tmRNA\t$position[0]\t$position[-1]\t\.\t$strand\t\.\tID=$gene_id.t1;Parent=$gene_id;\n";
-    }
+    print "$chr\t\.\tgene\t$position[0]\t$position[-1]\t\.\t$strand\t\.\tID=$gene_id;\n";
+    print "$chr\t\.\tmRNA\t$position[0]\t$position[-1]\t\.\t$strand\t\.\tID=$gene_id.t1;Parent=$gene_id;\n";
 
     my @out;
     if ($strand eq "+") {
@@ -274,12 +379,7 @@ foreach my $gene_id (sort keys %gene_out) {
         @out = sort {$out{$b} <=> $out{$a} or $b cmp $a} keys %out;
     }
     foreach (@out) {
-        if ($gene_out{$gene_id}{"pfam"} == 1) {
-            print STDERR "$_\n";
-        }
-        else {
-            print "$_\n";
-        }
+        print "$_\n";
     }
 }
 
@@ -335,7 +435,7 @@ sub combine_transfrag_and_genewise {
                         if ($_[0] < $cds_first[0] && $_[1] >= $cds_first[0]) {
                             my $frame = ($cds_first[0] - $_[0] - $_[2]) % 3;
                             $frame = 1 if $frame == 2;
-							$frame = 2 if $frame == 1;
+                            $frame = 2 if $frame == 1;
 =cut
        =================        cds_first
    21021021
@@ -441,7 +541,7 @@ sub combine_transfrag_and_genewise {
                         @_ = split /\t/;
                         if ($_[1] > $cds_last[1] && $_[0] <= $cds_last[1]) {
                             if ($_[0] > $cds_last[0]) {
-								my $frame = ($_[0] - $cds_last[0] - $cds_last[2]) % 3;
+                                my $frame = ($_[0] - $cds_last[0] - $cds_last[2]) % 3;
                                 $frame = 1 if $frame == 2;
                                 $frame = 2 if $frame == 1;
 =cut
@@ -459,9 +559,9 @@ sub combine_transfrag_and_genewise {
                                 }
                             }
                             else {
-								my $frame = ($cds_last[0] - $_[0] - $_[2]) % 3;
-								$frame = 1 if $frame == 2;
-								$frame = 2 if $frame == 1;
+                                my $frame = ($cds_last[0] - $_[0] - $_[2]) % 3;
+                                $frame = 1 if $frame == 2;
+                                $frame = 2 if $frame == 1;
                                 if ($frame == $cds_last[2]) {
                                     push @cds_ok, "$cds_last[0]\t$_[1]\t$cds_last[2]";
                                     $merge = 1;
@@ -499,7 +599,7 @@ sub combine_transfrag_and_genewise {
                         @_ = split /\t/;
                         if ($_[0] < $cds_last[0] && $_[1] >= $cds_last[0]) {
                             if ($_[1] > $cds_last[1]) {
-								my $frame = ($_[1] - $cds_last[1] - $_[2]) % 3;
+                                my $frame = ($_[1] - $cds_last[1] - $_[2]) % 3;
                                 $frame = 1 if $frame == 2;
                                 $frame = 2 if $frame == 1;
 =cut
@@ -516,7 +616,7 @@ sub combine_transfrag_and_genewise {
                                 }
                             }
                             else {
-								my $frame = ($cds_last[1] - $_[1] - $cds_last[2]) % 3;
+                                my $frame = ($cds_last[1] - $_[1] - $cds_last[2]) % 3;
                                 $frame = 1 if $frame == 2;
                                 $frame = 2 if $frame == 1;
                                 if ($frame == $_[2]) {
@@ -588,7 +688,7 @@ sub add_UTR {
     my $augustus_info = $augustus{$augustus_id};
     my (%gff3_out, $gene_id, $strand, @augustus_CDS);
 
-    if ($augustus_info =~ m/(\S+?)\t\S+?\tgene\t\d+?\t\d+?\t\S+?\t(\S+?)\t\S+?\tID=([^;\s]+)/) {
+    if ($augustus_info =~ m/(\S+?)\t\S+?\tmRNA\t\d+?\t\d+?\t\S+?\t(\S+?)\t\S+?\tID=([^;\s]+)/) {
         $gene_id = $3;
         $strand = $2;
         $gff3_out{$gene_id}{"chr"} = $1;
@@ -599,10 +699,10 @@ sub add_UTR {
     foreach my $line (split /\n/, $augustus_info) {
         @_ = split /\t/, $line;
         if ($_[2] eq "start_codon") {
-            $gff3_out{$gene_id}{"start_codon"} = "$_[3]\t$_[4]\t$_[5]\t$_[6]\t$_[7]";
+            $gff3_out{$gene_id}{"start_codon"}{"$_[3]\t$_[4]\t$_[5]\t$_[6]\t$_[7]"} = 1;
         }
         elsif ($_[2] eq "stop_codon") {
-            $gff3_out{$gene_id}{"stop_codon"} = "$_[3]\t$_[4]\t$_[5]\t$_[6]\t$_[7]";
+            $gff3_out{$gene_id}{"stop_codon"}{"$_[3]\t$_[4]\t$_[5]\t$_[6]\t$_[7]"} = 1;
         }
         elsif ($_[2] eq "CDS") {
             $gff3_out{$gene_id}{"CDS"}{"$_[3]\t$_[4]\t$_[5]\t$_[6]\t$_[7]"} = 1;
@@ -697,15 +797,19 @@ sub add_UTR {
 }
 
 sub intron_support {
-    my $augustus_info = $augustus{$_[0]};
+	my $gene_id = $_[0];
+    my $augustus_info = $augustus{$gene_id};
+	my @augustus_info = split /\n/, $augustus_info;
     my ($total_num, $support_num) = (0, 0);
-    foreach (split /\n/, $augustus_info) {
-        if (m/\tintron\t(\d+)\t(\d+)/) {
+    foreach (@augustus_info) {
+        if (m/\tintron\t/) {
             $total_num ++;
-            if (exists $intron{"$1\t$2"}) {
+			@_ = split /\t/;
+            if (exists $intron{"$_[0]\t$_[3]\t$_[4]"}) {
                 $support_num ++;
             }
         }
     }
+	#print STDERR "$gene_id\t$support_num\t$total_num\n";
     return "$support_num/$total_num";
 }

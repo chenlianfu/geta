@@ -55,3 +55,11 @@ TruSeq3-PE-2.fa:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:50 TOPHRE
 [paraAugusutusWithHints]
 --gene_prefix augustus --min_intron_len 30 --alternatives_from_evidence
 # During the step of paraAugusutusWithHints: --species was passed by --augustus_species; --cpu was passed by --CPU; --segmentSize and --overlapSize were automatically calculated.
+
+[paraCombineGeneModels]
+--overlap 30 --min_augustus_transcriptSupport_percentage 10.0 --min_augustus_intronSupport_number 1 --min_augustus_intronSupport_ratio 0.01
+# During the step of paraAugusutusWithHints: --cpu was passed by --CPU.
+
+[PfamValidateABinitio]
+--CDS_length 750 --CDS_num 2 --evalue 1e-5 --coverage 0.25
+# During the step of PfamValidateABinitio: --pfam_db was passed by --pfam_db; --cpu was passed by --CPU; --out_prefix was fixed to "combine2".

@@ -4,9 +4,9 @@ use Getopt::Long;
 
 my $usage = <<USAGE;
 Usage:
-    perl $0 [options] combine.2.gff3 genome.fasta > combine.filter.gff3
+    perl $0 [options] combine.2.gff3 genome.fasta 2> PfamValidateABinitio.log
 
-    程序对combine.2.gff3文件中的基因模型进行过滤。首先，若基因模型的CDS总长度>=750且CDS个数>=2个，则保留该基因模型；再对剩下的基因模型使用PFAM数据库进行比对，若能比对上，则进行保留。
+    程序对combine.2.gff3文件中的基因模型进行过滤。首先，若基因模型的CDS总长度>=750且CDS个数>=2个，则保留该基因模型；再对剩下的基因模型使用PFAM数据库进行比对，若能比对上，则进行保留。若combine.2.gff3文件包含可变剪接，则使用其ORF最长的转录本进行分析。
 
     --out_prefix <string>    default: out
     设置输出文件前缀。默认输出两个文件：out.filter_pass.gff3和out.filter_out.gff3。
@@ -64,6 +64,22 @@ while (<IN>) {
 }
 close IN;
 
+my (%gene_CDS_length, %gene_CDS_number, %gene_CDS_info);
+foreach my $gene_id (@id) {
+	my $mRNA_id;
+	foreach (split /\n/, $gff{$gene_id}) {
+		if (m/\tmRNA\t.*ID=([^;\s]+)/) {
+			$mRNA_id = $1;
+		}
+		elsif (m/\tCDS\t/) {
+			@_ = split /\t/;
+			$gene_CDS_length{$gene_id}{$mRNA_id} += ($_[4] - $_[3] + 1);
+			$gene_CDS_number{$gene_id}{$mRNA_id} ++;
+			$gene_CDS_info{$gene_id}{$mRNA_id} .= "$_[3]\t$_[4]\t$_[0]\t$_[6]\t$_[7]\n";
+		}
+	}
+}
+
 open IN, $ARGV[1] or die $!;
 my (%seq, $seq_id);
 while (<IN>) {
@@ -75,15 +91,12 @@ close IN;
 
 my %gene_long;
 foreach my $gene_id (@id) {
-    my $gff_info = $gff{$gene_id};
-    my @CDS = $gff_info =~ m/\t(CDS\t\d+\t\d+)\t/g;
-    my $length = 0;
-    foreach (@CDS) {
-        @_ = split /\t/;
-        $length += $_[2] - $_[1] + 1;
-    }
-    #print STDERR "$gene_id\t$length\n";
-    if (@CDS >= $CDS_num && $length >= $CDS_length) {
+	my @mRNA_id = sort {$gene_CDS_length{$gene_id}{$b} <=> $gene_CDS_length{$gene_id}{$a}} keys %{$gene_CDS_length{$gene_id}};
+	my $gene_CDS_length = $gene_CDS_length{$gene_id}{$mRNA_id[0]};
+	@mRNA_id = sort {$gene_CDS_number{$gene_id}{$b} <=> $gene_CDS_number{$gene_id}{$a}} keys %{$gene_CDS_number{$gene_id}};
+	my $gene_CDS_number = $gene_CDS_number{$gene_id}{$mRNA_id[0]};
+    #print STDERR "$gene_id\t$gene_CDS_length\t$gene_CDS_number\n";
+    if ($gene_CDS_number >= $CDS_num && $gene_CDS_length >= $CDS_length) {
         $gene_long{$gene_id} = 1;
     }
 }
@@ -92,16 +105,13 @@ open FASTA, ">", "for_pfam_search.fasta" or die $!;
 open CMD, ">", "command.hmmscan.list" or die $!;
 mkdir "hmmscan.tmp" unless -e "hmmscan.tmp";
 foreach my $gene_id (@id) {
-    my @gff = split /\n/, $gff{$gene_id};
-    my @cds;
-    foreach (@gff) {
-        next unless $_;
-        @_ = split /\t/;
-        push @cds, "$_[3]\t$_[4]\t$_[0]\t$_[6]\t$_[7]" if m/\tCDS\t/i;
-    }
+	my @mRNA_id = sort {$gene_CDS_length{$gene_id}{$b} <=> $gene_CDS_length{$gene_id}{$a}} keys %{$gene_CDS_length{$gene_id}};
+	my $gene_CDS_info = $gene_CDS_info{$gene_id}{$mRNA_id[0]};
+	chomp($gene_CDS_info); chomp($gene_CDS_info);
+	my @cds = split /\n/, $gene_CDS_info;
+
     @_ = split /\t/, $cds[0];
     my ($seqID, $strand, $frame) = ($_[2], $_[3], $_[4]);
-    @cds = sort {$a <=> $b} @cds;
 
     my $cds_seq;
     foreach (@cds) {
