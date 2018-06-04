@@ -4,9 +4,9 @@ use Getopt::Long;
 
 my $usage = <<USAGE;
 Usage:
-    perl $0 bam2intronHints.gff transfrag.genome.gff3 genewise.gff3 > hints.gff
+    perl $0 bam2intronHints.gff transfrag.genome.gff3 genewise.gff3 genewise.start_stop_hints.gff > hints.gff
 
-    程序用于生成augustus hints文件：（1）利用bam2intronHints.gff文件信息生成类型为W的intron hints信息；（2）使用transfrag.genome.gff3文件信息生成类型为E的exonpart hints信息；（3）使用genewis.gff3文件生成类型为P的CDSpart和intron hints信息。
+    程序用于生成augustus hints文件：（1）利用bam2intronHints.gff文件信息生成类型为W的intron hints信息；（2）使用transfrag.genome.gff3文件信息生成类型为E的exonpart hints信息；（3）使用genewis.gff3文件生成类型为P的CDSpart和intron hints信息; （4）根据transfrag.genome.gff3文件中的Form和Integrity信息提取start和stop信息。
 
     --margin <int>    default: 20
     由基因模型的exon或cds信息得到exonpart或CDSpart hints信息：若exon或cds的长度超过80bp时，则exonpart或cdspart则是首尾各去除20bp后的区间；否则，exonpart或cdspart是中间一半的区间（首尾各去除四分之一）。
@@ -23,20 +23,23 @@ $margin ||= 20;
 my %hints;
 open IN, $ARGV[0] or die "Can not open the file $ARGV[0], $!\n";
 while (<IN>) {
-	chomp;
-	s/src=\w/src=W/;
-	my $mult = 1;
-	$mult = $1 if m/mult=(\d+)/;
-	s/\t0\t/\t$mult\t/;
-	$hints{$_} = 1;
+    chomp;
+    s/src=\w/src=W/;
+    my $mult = 1;
+    $mult = $1 if m/mult=(\d+)/;
+    s/\t0\t/\t$mult\t/;
+    $hints{$_} = 1;
 }
 close IN;
 
 open IN, $ARGV[1] or die "Can not open the file $ARGV[1], $!\n";
-my $gene_id;
+my ($gene_id, %cds, %strand, %chr, @gene_id, %integrity, %form);
 while (<IN>) {
     if (m/\tgene\t.*ID=([^;]+)/) {
         $gene_id = $1;
+        push @gene_id, $gene_id;
+        $integrity{$gene_id} = $1 if m/Integrity=([^;\s]+)/;
+        $form{$gene_id} = $1 if m/Form=([^;\s]+)/;
     }
     elsif (m/\texon\t/) {
         @_ = split /\t/;
@@ -53,8 +56,83 @@ while (<IN>) {
             $hints{"$_[0]\t\.\texonpart\t$start\t$end\t\.\t$_[6]\t\.\tgrp=$gene_id;pri=4;src=E"} = 1;
         }
     }
+    elsif (m/\tCDS\t/) {
+        @_ = split /\t/;
+        $cds{$gene_id}{"$_[3]\t$_[4]"} = 1;
+        $strand{$gene_id} = $_[6];
+        $chr{$gene_id} = $_[0];
+    }
 }
 close IN;
+
+foreach my $id (@gene_id) {
+    my @cds = sort {$a <=> $b} keys %{$cds{$id}};
+    my $strand = $strand{$id};
+    my $chr = $chr{$id};
+    my $integrity = $integrity{$id};
+    my $form = $form{$id};
+
+    if ($form eq "one_transcript_get_1_gene_model_num1") {
+        if ($integrity eq "complete") {
+            if ($strand eq "+") {
+                my ($ss1, $ss2) = split /\t/, $cds[0];
+                if ($ss2 - $ss1 >= 2) {
+                    my $ss3 = $ss1 + 2;
+                    $hints{"$chr\t\.\tstart\t$ss1\t$ss3\t\.\t$strand\t0\tgrp=$id;pri=4;src=E"} = 1;
+                }
+                ($ss1, $ss2) = split /\t/, $cds[-1];
+                if ($ss2 - $ss1 >= 2) {
+                    my $ss3 = $ss2 - 2;
+                    $hints{"$chr\t\.\tstop\t$ss3\t$ss2\t\.\t$strand\t0\tgrp=$id;pri=4;src=E"} = 1;
+                }
+            }
+            elsif ($strand eq "-") {
+                my ($ss1, $ss2) = split /\t/, $cds[-1];
+                if ($ss2 - $ss1 >= 2) {
+                    my $ss3 = $ss2 - 2;
+                    $hints{"$chr\t\.\tstart\t$ss3\t$ss2\t\.\t$strand\t0\tgrp=$id;pri=4;src=E"} = 1;
+                }
+                ($ss1, $ss2) = split /\t/, $cds[0];
+                if ($ss2 - $ss1 >= 2) {
+                    my $ss3 = $ss1 + 2;
+                    $hints{"$chr\t\.\tstop\t$ss1\t$ss3\t\.\t$strand\t0\tgrp=$id;pri=4;src=E"} = 1;
+                }
+            }
+        }
+        elsif ($integrity eq "5prime_partial") {
+            if ($strand eq "+") {
+                my ($ss1, $ss2) = split /\t/, $cds[-1];
+                if ($ss2 - $ss1 >= 2) {
+                    my $ss3 = $ss2 - 2;
+                    $hints{"$chr\t\.\tstop\t$ss3\t$ss2\t\.\t$strand\t0\tgrp=$id;pri=4;src=E"} = 1;
+                }
+            }
+            elsif ($strand eq "-") {
+                my ($ss1, $ss2) = split /\t/, $cds[0];
+                if ($ss2 - $ss1 >= 2) {
+                    my $ss3 = $ss1 + 2;
+                    $hints{"$chr\t\.\tstop\t$ss1\t$ss3\t\.\t$strand\t0\tgrp=$id;pri=4;src=E"} = 1;
+                }
+            }
+        }
+        elsif ($integrity eq "3prime_partial") {
+            if ($strand eq "+") {
+                my ($ss1, $ss2) = split /\t/, $cds[0];
+                if ($ss2 - $ss1 >= 2) {
+                    my $ss3 = $ss1 + 2;
+                    $hints{"$chr\t\.\tstart\t$ss1\t$ss3\t\.\t$strand\t0\tgrp=$id;pri=4;src=E"} = 1;
+                }
+            }
+            elsif ($strand eq "-") {
+                my ($ss1, $ss2) = split /\t/, $cds[-1];
+                if ($ss2 - $ss1 >= 2) {
+                    my $ss3 = $ss2 - 2;
+                    $hints{"$chr\t\.\tstart\t$ss3\t$ss2\t\.\t$strand\t0\tgrp=$id;pri=4;src=E"} = 1;
+                }
+            }
+        }
+    }    
+}
 
 open IN, $ARGV[2] or die "Can not open the file $ARGV[2], $!\n";
 my %genewise_CDSs_for_gene;
@@ -78,6 +156,13 @@ while (<IN>) {
             $hints{"$_[0]\t\.\tCDSpart\t$start\t$end\t\.\t$_[6]\t\.\tgrp=$gene_id;pri=4;src=P"} = 1;
         }
     }
+}
+close IN;
+
+open IN, $ARGV[3] or die "Can not open the file $ARGV[3], $!\n";
+while (<IN>) {
+    chomp;
+    $hints{$_} = 1;
 }
 close IN;
 

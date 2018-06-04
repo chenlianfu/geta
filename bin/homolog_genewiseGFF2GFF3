@@ -21,33 +21,56 @@ Usage:
     --filterMiddleStopCodon
     加入该参数，过滤中间有终止密码子的基因模型。
 
+    --input_genewise_start_info <string>    default: None
+    输入根据genewise比对结果得到的起始密码子位点信息。该文件至少包含两列信息：第一列是序列名；第二列是可能的起始密码子的起始位点。
+
+    --output_start_and_stop_hints_of_augustus <string>    default: None
+    输出起始密码子和终止密码子的hints信息。若输入该参数，则必须要输入上一个参数。
+
+
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($genome, $min_score, $gene_prefix, $filterMiddleStopCodon);
+my ($genome, $min_score, $gene_prefix, $filterMiddleStopCodon, $input_genewise_start_info, $output_start_and_stop_hints_of_augustus);
 GetOptions(
     "genome:s" => \$genome,
     "min_score:i" => \$min_score,
     "gene_prefix:s" => \$gene_prefix,
     "filterMiddleStopCodon!" => \$filterMiddleStopCodon,
+    "input_genewise_start_info:s" => \$input_genewise_start_info,
+    "output_start_and_stop_hints_of_augustus:s" => \$output_start_and_stop_hints_of_augustus,
 );
 
 $min_score ||= 15;
 $gene_prefix ||= "genewise";
+die "The parameter --genome should be set.\n" unless $genome;
 
-my (%seq, $seq_id);
-if ($genome) {
-    open IN, $genome or die "Can not open file $genome, $!\n";
+if ($output_start_and_stop_hints_of_augustus) {
+    die "You had given a value to --output_start_and_stop_hints_of_augustus. So, the parameter --input_genewise_start_info should be set.\n" unless $input_genewise_start_info;
+    open OUT, ">", $output_start_and_stop_hints_of_augustus or die "Can not create file $output_start_and_stop_hints_of_augustus, $!\n";
+    close OUT;
+}
+
+my %tss;
+if ($input_genewise_start_info) {
+    open IN, $input_genewise_start_info or die "Can not open file $input_genewise_start_info, $!\n";
     while (<IN>) {
         chomp;
-        if (m/>(\S+)/) { $seq_id = $1 }
-        else { $seq{$seq_id} .= $_; }
+        @_ = split /\s+/;
+        $tss{"$_[0]\t$_[1]"} = 1;
     }
     close IN;
 }
-else {
-    die "The parameter --genome should be set!\n";
+
+my (%seq, $seq_id);
+open IN, $genome or die "Can not open file $genome, $!\n";
+while (<IN>) {
+    chomp;
+    if (m/>(\S+)/) { $seq_id = $1 }
+    else { $seq{$seq_id} .= $_; }
 }
+close IN;
+
 
 my (%info, %score, %sort1, %sort2, %sort3, %sort4);
 open IN, $ARGV[0] or die $!;
@@ -110,6 +133,19 @@ foreach my $gene_id (sort keys %gff) {
     @cds = sort { $a <=> $b } @cds;
 
     if ($strand eq "+") {
+        if ($output_start_and_stop_hints_of_augustus) {
+            open OUT, ">>", $output_start_and_stop_hints_of_augustus;
+            my ($tss1, $tss2) = split /\t/, $cds[0];
+            if ( (exists $tss{"$seqID\t$tss1"}) && (($tss2 - $tss1) >= 2) ) {
+                my $codon = substr($seq{$seqID}, $tss1 - 1, 3);
+                if ($codon eq "ATG") {
+                    my $tss3 = $tss1 + 2;
+                    print OUT "$seqID\t\.\tstart\t$tss1\t$tss3\t\.\t$strand\t0\tgrp=$gene_id;pri=4;src=P\n";
+                }
+            }
+            close OUT;
+        }
+
         my ($start, $end, $frame) = split /\t/, $cds[-1];
         my $frame = ($end + 1 - $start - $frame) % 3;
         $frame = 1 if $frame == 2;
@@ -120,10 +156,30 @@ foreach my $gene_id (sort keys %gff) {
                 my $end3 = $end + 3;
                 $info =~ s/^(\S+\t\S+\t\S+\t\d+)\t$end\t/$1\t$end3\t/g;
                 print STDERR "Gene end with stop codon:$gene_id\t$strand\n";
+                if ($output_start_and_stop_hints_of_augustus) {
+                    open OUT, ">>", $output_start_and_stop_hints_of_augustus;
+                    print OUT "$seqID\t\.\tstop\t$end\t$end3\t\.\t$strand\t0\tgrp=$gene_id;pri=4;src=P\n";
+                    close OUT;
+                }
             }
         }
     }
     elsif ($strand eq "-") {
+        if ($output_start_and_stop_hints_of_augustus) {
+            open OUT, ">>", $output_start_and_stop_hints_of_augustus;
+            my ($tss1, $tss2) = split /\t/, $cds[-1];
+            if ( (exists $tss{"$seqID\t$tss2"}) && (($tss2 - $tss1) >= 2) ) {
+                my $codon = substr($seq{$seqID}, $tss2 - 3, 3);
+                $codon = reverse $codon;
+                $codon =~ tr/ATCGatcgn/TAGCTAGCN/;
+                if ($codon eq "ATG") {
+                    my $tss3 = $tss2 - 2;
+                    print OUT "$seqID\t\.\tstart\t$tss3\t$tss2\t\.\t$strand\t0\tgrp=$gene_id;pri=4;src=P\n";
+                }
+            }
+            close OUT;
+        }
+
         my ($start, $end, $frame) = split /\t/, $cds[0];
         my $frame = ($end + 1 - $start - $frame) % 3;
         $frame = 1 if $frame == 2;
@@ -134,8 +190,13 @@ foreach my $gene_id (sort keys %gff) {
             $codon =~ tr/ATCGatcgn/TAGCTAGCN/;
             if ($codon eq "TAA" or $codon eq "TGA" or $codon eq "TAG") {
                 my $start3 = $start - 3;
-				$info =~ s/^(\S+\t\S+\t\S+)\t$start\t/$1\t$start3\t/mg;
+                $info =~ s/^(\S+\t\S+\t\S+)\t$start\t/$1\t$start3\t/mg;
                 print STDERR "Gene end with stop codon:$gene_id\t$strand\n";
+                if ($output_start_and_stop_hints_of_augustus) {
+                    open OUT, ">>", $output_start_and_stop_hints_of_augustus;
+                    print OUT "$seqID\t\.\tstop\t$start3\t$start\t.\t$strand\t0\tgrp=$gene_id;pri=4;src=P\n";
+                    close OUT;
+                }
             }
         }
     }

@@ -32,6 +32,7 @@ foreach my $seq_id (@seqID) {
     close FASTA;
 
     print COM "$program -query $outPrefix.tmp/$_.fa -db $db -evalue $evalue -num_threads 1 -outfmt $outfmt -out $outPrefix.tmp/$_.out\n";
+	#print COM "$program -query $outPrefix.tmp/$_.fa -db $db -evalue $evalue -num_threads 1 -max_target_seqs 10 -outfmt $outfmt -out $outPrefix.tmp/$_.out\n";
 }
 
 my $cmdString = "ParaFly -c $outPrefix.command -CPU $threads > /dev/null";

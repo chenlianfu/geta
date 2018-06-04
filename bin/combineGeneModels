@@ -154,7 +154,7 @@ foreach my $region (sort {$a <=> $b} keys %region) {
     if ($status_augustus == 1) {
         foreach my $gene_id (@ID) {
             if (exists $augustus{$gene_id}) {
-				#print STDERR "$gene_id\n";
+                #print STDERR "$gene_id\n";
                 my $intron_support = &intron_support($gene_id);
                 #print "OK2:\t$gene_id\t$intron_support\n";
                 my %gff3_out = &add_UTR($gene_id, @ID);
@@ -797,19 +797,19 @@ sub add_UTR {
 }
 
 sub intron_support {
-	my $gene_id = $_[0];
+    my $gene_id = $_[0];
     my $augustus_info = $augustus{$gene_id};
-	my @augustus_info = split /\n/, $augustus_info;
+    my @augustus_info = split /\n/, $augustus_info;
     my ($total_num, $support_num) = (0, 0);
     foreach (@augustus_info) {
         if (m/\tintron\t/) {
             $total_num ++;
-			@_ = split /\t/;
+            @_ = split /\t/;
             if (exists $intron{"$_[0]\t$_[3]\t$_[4]"}) {
                 $support_num ++;
             }
         }
     }
-	#print STDERR "$gene_id\t$support_num\t$total_num\n";
+    #print STDERR "$gene_id\t$support_num\t$total_num\n";
     return "$support_num/$total_num";
 }

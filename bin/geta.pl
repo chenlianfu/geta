@@ -617,7 +617,7 @@ unless (-e "4.homolog.ok") {
         print STDERR "CMD(Skipped): $cmdString\n";
     }
 
-    $cmdString = "$dirname/bin/homolog_genewiseGFF2GFF3 $config{'homolog_genewiseGFF2GFF3'} --genome $genome genewise.gff > genewise.gff3 2> genewise.gene_id_with_stop_codon.txt";
+    $cmdString = "$dirname/bin/homolog_genewiseGFF2GFF3 $config{'homolog_genewiseGFF2GFF3'} --input_genewise_start_info genewise.start_info.txt --output_start_and_stop_hints_of_augustus genewise.start_stop_hints.gff --genome $genome genewise.gff > genewise.gff3 2> genewise.gene_id_with_stop_codon.txt";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
@@ -721,7 +721,7 @@ unless (-e "5.augustus.ok") {
     else {
         print STDERR "CMD(Skipped): $cmdString\n";
     }
-    $cmdString = "$dirname/bin/prepareAugusutusHints $config{'prepareAugusutusHints'} bam2intronHints.gff ../3.transcript/transfrag.genome.gff3 ../4.homolog/genewise.gff3 > hints.gff";
+    $cmdString = "$dirname/bin/prepareAugusutusHints $config{'prepareAugusutusHints'} bam2intronHints.gff ../3.transcript/transfrag.genome.gff3 ../4.homolog/genewise.gff3 ../4.homolog/genewise.start_stop_hints.gff > hints.gff";
     unless (-e "prepareAugusutusHints.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -871,42 +871,45 @@ unless (-e "5.augustus.ok") {
             my $accuracy_value = 0;
             open IN, "../training/secondtest.out" or die "Can not open file ../training/secondtest.out, $!\n";
             while (<IN>) {
-                if (m/^nucleotide level/) {
-                    @_ = split /[\s\|]+/;
-                    $accuracy_value += ($_[-2] * 3 + $_[-1] * 2);
-                }
-                elsif (m/^exon level/) {
-                    @_ = split /[\s\|]+/;
-                    $accuracy_value += ($_[-2] * 4 + $_[-1] * 3);
-                }
-                elsif (m/^gene level/) {
-                    @_ = split /[\s\|]+/;
-                    $accuracy_value += ($_[-2] * 2 + $_[-1] * 1);
+				#if (m/^nucleotide level/) {
+				#    @_ = split /[\s\|]+/;
+				#    $accuracy_value += ($_[-2] * 3 + $_[-1] * 2);
+				#}
+				#elsif (m/^exon level/) {
+				#    @_ = split /[\s\|]+/;
+				#    $accuracy_value += ($_[-2] * 4 + $_[-1] * 3);
+				#}
+				if (m/^gene level/) {
+				    @_ = split /[\s\|]+/;
+				    $accuracy_value += ($_[-2] * 2 + $_[-1] * 1);
                 }
             }
             close IN;
-            my $first_accuracy = $accuracy_value / 15;
+			#my $first_accuracy = $accuracy_value / 15;
+			my $first_accuracy = $accuracy_value / 3;
 
             my $accuracy_value = 0;
             open IN, "firsttest.out" or die "Can not open file firsttest.out, $!\n";
             while (<IN>) {
-                if (m/^nucleotide level/) {
-                    @_ = split /[\s\|]+/;
-                    $accuracy_value += ($_[-2] * 3 + $_[-1] * 2);
-                }
-                elsif (m/^exon level/) {
-                    @_ = split /[\s\|]+/;
-                    $accuracy_value += ($_[-2] * 4 + $_[-1] * 3);
-                }
-                elsif (m/^gene level/) {
+				#if (m/^nucleotide level/) {
+				#    @_ = split /[\s\|]+/;
+				#    $accuracy_value += ($_[-2] * 3 + $_[-1] * 2);
+				#}
+				#elsif (m/^exon level/) {
+				#    @_ = split /[\s\|]+/;
+				#    $accuracy_value += ($_[-2] * 4 + $_[-1] * 3);
+				#}
+                if (m/^gene level/) {
                     @_ = split /[\s\|]+/;
                     $accuracy_value += ($_[-2] * 2 + $_[-1] * 1);
                 }
             }
             close IN;
-            my $second_accuracy = $accuracy_value / 15;
-            print STDERR "The accuracy value of augustus training is: $first_accuracy\n";
-            print STDERR "The accuracy value of augustus training iteration is: $second_accuracy\n";
+			#my $second_accuracy = $accuracy_value / 3;
+			my $second_accuracy = $accuracy_value;
+			print STDERR "The accuracy value on gene level was calculated by: (sensitivity * 2 + specificity * 1) / 3 .\n";
+            print STDERR "The accuracy value on gene level of augustus training is: $first_accuracy\n";
+            print STDERR "The accuracy value on gene level of augustus training iteration is: $second_accuracy\n";
 
             if ($second_accuracy > $first_accuracy) {
                 $cmdString = "$dirname/bin/BGM2AT $config{'BGM2AT'} --flanking_length $flanking_length --CPU $cpu --onlytrain_GFF3 ati.filter1.gff3 ati.filter2.gff3 $genome $augustus_species &>> BGM2AT.log";
@@ -1093,6 +1096,10 @@ $pwd = `pwd`; print STDERR "PWD: $pwd";
 
 $cmdString = "$dirname/bin/GFF3Clear --gene_prefix $gene_prefix --genome $genome --no_attr_add $out_prefix.tmp/6.combineGeneModels/genome.completed.gff3 > $out_prefix.gff3";
 #$cmdString = "cp $out_prefix.tmp/7.addAlternativeSplicing/genome.addAS.gff3 $out_prefix.gff3";
+print STDERR (localtime) . ": CMD: $cmdString\n";
+system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+
+$cmdString = "$dirname/bin/GFF3Clear --gene_prefix ${gene_prefix}Broken --genome $genome --no_attr_add $out_prefix.tmp/6.combineGeneModels/genome.partial.gff3 > $out_prefix.incomplete_geneModels.gff3";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 

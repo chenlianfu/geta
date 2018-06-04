@@ -3,7 +3,9 @@ use strict;
 
 my $usage = <<USAGE;
 Usage:
-    perl $0 genome_seq.fasta homolog_proteins.fasta homolog_gene_region.tab flanking_length CPUs
+    perl $0 genome_seq.fasta homolog_proteins.fasta homolog_gene_region.tab flanking_length CPUs > genewise.gff 2> genewise.start_info.txt
+
+    genewise.start_info.txty有三列：chr、start site of start-codon、genwise_score。该文件用于生成augustus的start hint。
 
 For example:
     perl $0 genome_seq.fasta homolog_proteins.fasta homolog_gene_region.tab 2000 24
@@ -53,10 +55,10 @@ while (<IN>) {
 
     my $strand = $_[4];
     if ($strand eq "plus") {
-        print COMMAND "genewise geneRegion_genewise.tmp/$_[3].fasta geneRegion_genewise.tmp/$_[0].$_[1]\_$_[2].fasta -tfor -gff -quiet -silent > geneRegion_genewise.tmp/$_[0].$_[1]\_$_[2].gff\n";
+        print COMMAND "genewise geneRegion_genewise.tmp/$_[3].fasta geneRegion_genewise.tmp/$_[0].$_[1]\_$_[2].fasta -tfor -gff -quiet -silent -sum > geneRegion_genewise.tmp/$_[0].$_[1]\_$_[2].gff\n";
     }
     else {
-        print COMMAND "genewise geneRegion_genewise.tmp/$_[3].fasta geneRegion_genewise.tmp/$_[0].$_[1]\_$_[2].fasta -trev -gff -quiet -silent > geneRegion_genewise.tmp/$_[0].$_[1]\_$_[2].gff\n";
+        print COMMAND "genewise geneRegion_genewise.tmp/$_[3].fasta geneRegion_genewise.tmp/$_[0].$_[1]\_$_[2].fasta -trev -gff -quiet -silent -sum > geneRegion_genewise.tmp/$_[0].$_[1]\_$_[2].gff\n";
     }
 }
 close COMMAND;
@@ -68,7 +70,23 @@ unless (-e "FailedCommands") {
         @_ = split /\t/;
         my ($seq, $region, $proteinID, $pos) = ($_[0], $_[1], $_[2], $_[3]);
         open IN, "geneRegion_genewise.tmp/$seq.$region.gff" or die $!;
-        while (<IN>) {
+        $/ = "//\n";
+        my $align = <IN>;
+        my $gff = <IN>;
+        close IN;
+        $/ = "\n";
+
+        my @align = split /\n/, $align;
+        foreach (@align) {
+            next if m/\/\//;
+            next if m/^Bits/;
+            @_ = split /\s+/;
+            my $locus = $_[5] + $pos;
+            print STDERR "$seq\t$locus\t$_[0]\n" if $_[2] == 1;
+        }
+
+        my @lines = split /\n/, $gff;
+        foreach (@lines) {
             next if m/\/\//;
             @_ = split /\t/;
             my $start = $_[3] + $pos;

@@ -87,15 +87,15 @@ while (<IN>) {
     next if m/^\s*$/;
     @_ = split /\t/;
     $chr{$_[0]} = 1;
-	if ($_[2] eq "intron") {
-		if ($_[6] eq '.') {
-			$intron{$_[0]}{'+'} .= $_;
-			$intron{$_[0]}{'-'} .= $_;
-		}
-		else {
-			$intron{$_[0]}{$_[6]} .= $_;
-		}
-	}
+    if ($_[2] eq "intron") {
+        if ($_[6] eq '.') {
+            $intron{$_[0]}{'+'} .= $_;
+            $intron{$_[0]}{'-'} .= $_;
+        }
+        else {
+            $intron{$_[0]}{$_[6]} .= $_;
+        }
+    }
 }
 close IN;
 
