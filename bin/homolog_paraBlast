@@ -14,16 +14,15 @@ if (@ARGV != 7){die $usage}
 
 my ($program, $db, $fasta, $evalue, $threads, $outPrefix, $outfmt) = @ARGV;
 open IN, $fasta or die $!;
-my ($seqID, @seqID, %seq);
+my ($seqID, @seqID, %seq, %length);
 while (<IN>) {
     chomp;
     if (/^>(\S+)/) { $seqID = $1; push @seqID, $seqID; }
-    else           { $seq{$seqID} .= $_ }
+    else           { $seq{$seqID} .= $_; $length{$seqID} += length($_); }
 }
 
 mkdir "$outPrefix.tmp" unless -e "$outPrefix.tmp";
-open COM, '>', "$outPrefix.command" or die $!;
-
+my %command;
 foreach my $seq_id (@seqID) {
     $_ = $seq_id;
     s/\|/\\\|/;
@@ -31,10 +30,16 @@ foreach my $seq_id (@seqID) {
     print FASTA ">$seq_id\n$seq{$seq_id}\n";
     close FASTA;
 
-    print COM "$program -query $outPrefix.tmp/$_.fa -db $db -evalue $evalue -num_threads 1 -outfmt $outfmt -out $outPrefix.tmp/$_.out\n";
+    $command{"$program -query $outPrefix.tmp/$_.fa -db $db -evalue $evalue -num_threads 1 -max_target_seqs 20 -outfmt $outfmt -out $outPrefix.tmp/$_.out\n"} = 1;
 }
 
-my $cmdString = "ParaFly -c $outPrefix.command -CPU $threads > /dev/null";
+open COM, '>', "command.blast.list" or die $!;
+foreach (sort {$length{$b} <=> $length{$a}} keys %command) {
+    print COM;
+}
+close COM;
+
+my $cmdString = "ParaFly -c command.blast.list -CPU $threads &> /dev/null";
 (system $cmdString) == 0 or die "Failed to excute: $cmdString\n";
 
 if ($outfmt == 5) { open OUT, '>', "$outPrefix.xml" or die $! }
@@ -42,10 +47,7 @@ else              { open OUT, '>', "$outPrefix.tab" or die $! }
 
 foreach (@seqID) {
     open IN, "$outPrefix.tmp/$_.out" or die $!;
-    print OUT <IN>;
+    foreach (<IN>) {
+        print OUT;
+    }
 }
-
-#$cmdString = "rm -rf $outPrefix.tmp";
-#(system $cmdString) == 0 or die "Failed to excute: $cmdString\n";
-#unlink "$outPrefix.command";
-#unlink "$outPrefix.command.completed";

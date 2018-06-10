@@ -221,12 +221,12 @@ my %config = (
     'TransDecoder.Predict' => '--retain_long_orfs 900',
     'homolog_genewise' => '--coverage_ratio 0.4 --evalue 1e-9',
     'homolog_genewiseGFF2GFF3' => '--min_score 15 --gene_prefix genewise --filterMiddleStopCodon',
-    'geneModels2AugusutsTrainingInput' => '--min_evalue 1e-9 --min_identity 0.8 --min_coverage_ratio 0.5 --min_cds_num 2 --min_cds_length 600 --min_cds_exon_ratio 0.60',
+    'geneModels2AugusutsTrainingInput' => '--min_evalue 1e-9 --min_identity 0.8 --min_coverage_ratio 0.6 --min_cds_num 2 --min_cds_length 600 --min_cds_exon_ratio 0.60',
     'BGM2AT' => '--min_gene_number_for_augustus_training 500 --gene_number_for_accuracy_detection 200 --min_gene_number_of_optimize_augustus_chunk 50 --max_gene_number_of_optimize_augustus_chunk 200',
     'prepareAugusutusHints' => '--margin 20',
     'paraAugusutusWithHints' => '--gene_prefix augustus --min_intron_len 30 --alternatives_from_evidence',
-	'paraCombineGeneModels' => '--overlap 30 --min_augustus_transcriptSupport_percentage 10.0 --min_augustus_intronSupport_number 1 --min_augustus_intronSupport_ratio 0.01',
-	'PfamValidateABinitio' => '--CDS_length 750 --CDS_num 2 --evalue 1e-5 --coverage 0.25',
+    'paraCombineGeneModels' => '--overlap 30 --min_augustus_transcriptSupport_percentage 10.0 --min_augustus_intronSupport_number 1 --min_augustus_intronSupport_ratio 0.01',
+    'PfamValidateABinitio' => '--CDS_length 750 --CDS_num 2 --evalue 1e-5 --coverage 0.25',
 );
 if ($config) {
     open IN, $config or die "Can not open file $config, $!\n";
@@ -248,6 +248,26 @@ $dirname =~ s/bin$//;
 # 生成临时文件夹
 mkdir "$out_prefix.tmp" unless -e "$out_prefix.tmp";
 chdir "$out_prefix.tmp";
+$pwd = `pwd`; print STDERR "PWD: $pwd";
+unless (-e "genome.fasta") {
+	open OUT, ">", "genome.fasta" or die "Can not create file genome.fasta, $!\n";
+	open IN, $genome or die "Can not open file $genome, $!\n";
+	$_ = <IN>;
+	print OUT;
+	while (<IN>) {
+		if (m/^>/) {
+		    print OUT "\n$_";
+		}
+		else {
+		    s/\s+?$//g;
+	        print OUT;
+	    }
+	}
+	close IN;
+	close OUT;
+}
+$pwd = `pwd`; chomp($pwd);
+$genome = "$pwd/genome.fasta";
 
 # Step 0: RepeatMasker and RepeatModeler
 print STDERR "\n============================================\n";
@@ -607,7 +627,26 @@ unless (-e "4.homolog.ok") {
     chdir "4.homolog";
     $pwd = `pwd`; print STDERR "PWD: $pwd";
 
-    $cmdString = "$dirname/bin/homolog_genewise --cpu $cpu $config{'homolog_genewise'} $protein ../0.RepeatMasker/genome.masked.fasta &> homolog_genewise.log";
+    my $max_gene_length = 20000;
+    open IN, "../3.transcript/transfrag.genome.gff3" or die "Can not open the file ../3.transcript/transfrag.genome.gff3, $!\n";
+    my @gene_length;
+    while (<IN>) {
+        if (m/\tgene\t(\d+)\t(\d+)\t/) {
+            push @gene_length, $2 - $1 + 1;
+        }
+    }
+    @gene_length = sort {$a <=> $b} @gene_length;
+    $max_gene_length = $gene_length[-1] if $gene_length[-1] > $max_gene_length;
+	my ($segmentSize, $overlapSize) = (1000000, 100000);
+	if ($max_gene_length * 4 > $overlapSize) {
+		$overlapSize = $max_gene_length * 4;
+		my $overlapSize_length = length($overlapSize);
+		$overlapSize_length --;
+		$overlapSize_length --;
+		$overlapSize = int(($overlapSize / (10 ** $overlapSize_length)) + 1) * (10 ** $overlapSize_length);
+		$segmentSize = $overlapSize * 10;
+	}
+    $cmdString = "$dirname/bin/homolog_genewise --cpu $cpu --max_gene_length $max_gene_length --segmentSize $segmentSize --overlapSize $overlapSize $config{'homolog_genewise'} $protein ../0.RepeatMasker/genome.masked.fasta &> homolog_genewise.log";
     unless (-e "homolog_genewise.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -652,14 +691,17 @@ unless (-e "5.augustus.ok") {
         $pwd = `pwd`; print STDERR "PWD: $pwd";
 
         # 准备Augustus training的输入文件
-        open OUT, ">", "geneModels.gff3" or die "Cannot create file geneModels.gff3, $!\n";
-        open IN, "../../3.transcript/transfrag.genome.gff3" or die "Can not open file ../../3.transcript/transfrag.genome.gff3, $!\n";
-        while (<IN>) { print OUT; }
-        close IN;
-        open IN, "../../4.homolog/genewise.gff3" or die "Can not open file ../../4.homolog/genewise.gff3, $!\n";
-        while (<IN>) { print OUT; }
-        close IN;
-        close OUT;
+		open OUT, ">", "blank.augustus.gff3" or die "Can not create file blank.augustus.gff3, $!\n";
+		close OUT;
+		open OUT, ">", "blank.intron.gff" or die "Can not create file blank.intron.gff, $!\n";
+		close OUT;
+		$cmdString = "$dirname/bin/paraCombineGeneModels --cpu $cpu $config{'paraCombineGeneModels'} blank.augustus.gff3 ../../3.transcript/transfrag.genome.gff3 ../../4.homolog/genewise.gff3 blank.intron.gff";
+		print STDERR (localtime) . ": CMD: $cmdString\n";
+		system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+
+		$cmdString = "$dirname/bin/GFF3Clear --genome $genome combine.1.gff3 > geneModels.gff3 2> GFF3Clear.log";
+		print STDERR (localtime) . ": CMD: $cmdString\n";
+		system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
         $cmdString = "$dirname/bin/geneModels2AugusutsTrainingInput $config{'geneModels2AugusutsTrainingInput'} --out_prefix ati --cpu $cpu geneModels.gff3 $genome &> geneModels2AugusutsTrainingInput.log";
         unless (-e "geneModels2AugusutsTrainingInput.ok") {
@@ -825,7 +867,7 @@ unless (-e "5.augustus.ok") {
             close OUT;
             print STDERR "Total genes predicted by Augustus: $total_num\nGood genes picked for next traning: $keep_num\n";
 
-            $cmdString = "$dirname/bin/geneModels2AugusutsTrainingInput --out_prefix ati --cpu $cpu geneModels.gff3 $genome &> geneModels2AugusutsTrainingInput.log";
+            $cmdString = "$dirname/bin/geneModels2AugusutsTrainingInput --out_prefix ati --cpu $cpu $config{'geneModels2AugusutsTrainingInput'} geneModels.gff3 $genome &> geneModels2AugusutsTrainingInput.log";
             unless (-e "geneModels2AugusutsTrainingInput.ok") {
                 print STDERR (localtime) . ": CMD: $cmdString\n";
                 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -865,51 +907,53 @@ unless (-e "5.augustus.ok") {
             $flanking_length = int($flanking_length[@flanking_length/2] / 8);
             $flanking_length = $gene_length[@gene_length/2] if $flanking_length >= $gene_length[@gene_length/2];
             $cmdString = "$dirname/bin/BGM2AT $config{'BGM2AT'} --flanking_length $flanking_length --CPU $cpu --onlytrain_GFF3 ati.filter1.gff3 --stopAfterFirstEtraining ati.filter2.gff3 $genome $augustus_species &> BGM2AT.log";
-            print STDERR (localtime) . ": CMD: $cmdString\n";
-            system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+            unless (-e "firsttest.out") {
+                print STDERR (localtime) . ": CMD: $cmdString\n";
+                system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+            }
+            else {
+                print STDERR "CMD(Skipped): $cmdString\n";
+            }
 
             my $accuracy_value = 0;
             open IN, "../training/secondtest.out" or die "Can not open file ../training/secondtest.out, $!\n";
             while (<IN>) {
-				#if (m/^nucleotide level/) {
-				#    @_ = split /[\s\|]+/;
-				#    $accuracy_value += ($_[-2] * 3 + $_[-1] * 2);
-				#}
-				#elsif (m/^exon level/) {
-				#    @_ = split /[\s\|]+/;
-				#    $accuracy_value += ($_[-2] * 4 + $_[-1] * 3);
-				#}
-				if (m/^gene level/) {
-				    @_ = split /[\s\|]+/;
-				    $accuracy_value += ($_[-2] * 2 + $_[-1] * 1);
+                if (m/^nucleotide level/) {
+                    @_ = split /[\s\|]+/;
+                    $accuracy_value += ($_[-2] * 3 + $_[-1] * 2);
                 }
-            }
-            close IN;
-			#my $first_accuracy = $accuracy_value / 15;
-			my $first_accuracy = $accuracy_value / 3;
-
-            my $accuracy_value = 0;
-            open IN, "firsttest.out" or die "Can not open file firsttest.out, $!\n";
-            while (<IN>) {
-				#if (m/^nucleotide level/) {
-				#    @_ = split /[\s\|]+/;
-				#    $accuracy_value += ($_[-2] * 3 + $_[-1] * 2);
-				#}
-				#elsif (m/^exon level/) {
-				#    @_ = split /[\s\|]+/;
-				#    $accuracy_value += ($_[-2] * 4 + $_[-1] * 3);
-				#}
-                if (m/^gene level/) {
+                elsif (m/^exon level/) {
+                    @_ = split /[\s\|]+/;
+                    $accuracy_value += ($_[-2] * 4 + $_[-1] * 3);
+                }
+                elsif (m/^gene level/) {
                     @_ = split /[\s\|]+/;
                     $accuracy_value += ($_[-2] * 2 + $_[-1] * 1);
                 }
             }
             close IN;
-			#my $second_accuracy = $accuracy_value / 3;
-			my $second_accuracy = $accuracy_value;
-			print STDERR "The accuracy value on gene level was calculated by: (sensitivity * 2 + specificity * 1) / 3 .\n";
-            print STDERR "The accuracy value on gene level of augustus training is: $first_accuracy\n";
-            print STDERR "The accuracy value on gene level of augustus training iteration is: $second_accuracy\n";
+            my $first_accuracy = $accuracy_value / 15;
+
+            my $accuracy_value = 0;
+            open IN, "firsttest.out" or die "Can not open file firsttest.out, $!\n";
+            while (<IN>) {
+                if (m/^nucleotide level/) {
+                    @_ = split /[\s\|]+/;
+                    $accuracy_value += ($_[-2] * 3 + $_[-1] * 2);
+                }
+                elsif (m/^exon level/) {
+                    @_ = split /[\s\|]+/;
+                    $accuracy_value += ($_[-2] * 4 + $_[-1] * 3);
+                }
+                elsif (m/^gene level/) {
+                    @_ = split /[\s\|]+/;
+                    $accuracy_value += ($_[-2] * 2 + $_[-1] * 1);
+                }
+            }
+            close IN;
+            my $second_accuracy = $accuracy_value / 15;
+            print STDERR "The accuracy value of augustus training is: $first_accuracy\n";
+            print STDERR "The accuracy value of augustus training iteration is: $second_accuracy\n";
 
             if ($second_accuracy > $first_accuracy) {
                 $cmdString = "$dirname/bin/BGM2AT $config{'BGM2AT'} --flanking_length $flanking_length --CPU $cpu --onlytrain_GFF3 ati.filter1.gff3 ati.filter2.gff3 $genome $augustus_species &>> BGM2AT.log";
@@ -1021,7 +1065,7 @@ unless (-e "6.combineGeneModels.ok") {
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
     }
 
-    $cmdString = "$dirname/bin/GFF3Clear --gene_prefix $gene_prefix --genome $genome combine.1.gff3 combine2.filter_pass.gff3 > genome.gff3";
+    $cmdString = "$dirname/bin/GFF3Clear --gene_prefix $gene_prefix --genome $genome combine.1.gff3 combine2.filter_pass.gff3 > genome.gff3 2> GFF3Clear.log";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
@@ -1094,12 +1138,12 @@ print STDERR "Step 7: OutPut\n";
 chdir "../";
 $pwd = `pwd`; print STDERR "PWD: $pwd";
 
-$cmdString = "$dirname/bin/GFF3Clear --gene_prefix $gene_prefix --genome $genome --no_attr_add $out_prefix.tmp/6.combineGeneModels/genome.completed.gff3 > $out_prefix.gff3";
+$cmdString = "$dirname/bin/GFF3Clear --gene_prefix $gene_prefix --genome $genome --no_attr_add $out_prefix.tmp/6.combineGeneModels/genome.completed.gff3 > $out_prefix.gff3 2> GFF3Clear.1.log";
 #$cmdString = "cp $out_prefix.tmp/7.addAlternativeSplicing/genome.addAS.gff3 $out_prefix.gff3";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
-$cmdString = "$dirname/bin/GFF3Clear --gene_prefix ${gene_prefix}Broken --genome $genome --no_attr_add $out_prefix.tmp/6.combineGeneModels/genome.partial.gff3 > $out_prefix.incomplete_geneModels.gff3";
+$cmdString = "$dirname/bin/GFF3Clear --gene_prefix ${gene_prefix}Broken --genome $genome --no_attr_add $out_prefix.tmp/6.combineGeneModels/genome.partial.gff3 > $out_prefix.incomplete_geneModels.gff3 2> GFF3Clear.2.log";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 

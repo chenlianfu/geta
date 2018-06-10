@@ -5,7 +5,7 @@ use Getopt::Long;
 
 my $usage = <<USAGE;
 Usage:
-    perl $0 [options] homolog_proteins.fasta genome_seq.fasta CPUs coverage_ratio e-value
+    perl $0 [options] homolog_proteins.fasta genome_seq.fasta
 
 For example:
     perl $0 homolog_proteins.fasta genome_seq.fasta 24 0.4 1e-9
@@ -18,6 +18,11 @@ For example:
 
     .ok 后缀的文件用于表明其步骤运行完毕。若重新运行时，检测到 .ok 文件存在，则跳过相应的步骤。
 
+    --segmentSize <int>    default: 1000000
+    --overlapSize <int>    default: 100000
+    程序将基因组序列分割成单条进行blast数据库构建；若单条序列长度超过1Mb， 则将单条序列进行切割，分割成1Mb的序列后再进行blast数据库构建；此时，两条相邻的序列间重叠的长度为100kb。
+    若不进行分割，tblasn进行比对时，有些序列能比对到基因组上很多不同的位置。即使设置很低的-max_target_seqs参数值，使比对结果的目标序列少，但是一条很长的序列上可以数百上千的匹配位点，导致比对非常耗时。
+
     --cpu <int>    default: 8
     设置blast和genewise命令的并行化运行数量。
 
@@ -27,29 +32,91 @@ For example:
     --evalue <float>    default: 1e-9
     进行tblastn分析时，要求对同源蛋白的evalue值不大于该值。
 
+    --max_gene_length <int>    default: 2000
+    程序调用homolog_blast2geneRegion进行分析时，需要设置该参数。一个蛋白序列与某条基因组序列若存在多个BLAST匹配区域，若相邻匹配区之间的距离低于此参数值，则认为这两个匹配区隶属于一个基因。
+
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($cpu, $coverage_ratio, $evalue);
+my ($cpu, $coverage_ratio, $evalue, $max_gene_length, $segmentSize, $overlapSize);
 GetOptions(
     "cpu:i" => \$cpu,
     "coverage_ratio:f" => \$coverage_ratio,
     "evalue:f" => \$evalue,
+    "max_gene_length:i" => \$max_gene_length,
+    "segmentSize:i" => \$segmentSize,
+    "overlapSize:i" => \$overlapSize,
 );
 $cpu ||= 8;
 $coverage_ratio ||= 0.4;
 $evalue ||= 1e-9;
+$max_gene_length ||= 20000;
+$segmentSize ||= 1000000;
+$overlapSize ||= 100000;
 
 my $homologProteinFastaFile = $ARGV[0];
 my $genomeFastaFile = $ARGV[1];
 my $path = dirname($0);
 
-my $cmdString = "makeblastdb -in $genomeFastaFile -dbtype nucl -title genome -parse_seqids -out genome &> makeblastdb.log";
+open IN, $genomeFastaFile or die $!;
+my (%seq, $id);
+while (<IN>) {
+    chomp;
+    if (/>(\S+)/) { $id = $1; }
+    else { $seq{$id} .= $_; }
+}
+close IN;
+
+# 对基因组序列进行分割。
+unless (-e "genome.splitting_and_joining.fasta") {
+    mkdir "tmp_for_genome_splitting_and_joining" unless -e "tmp_for_genome_splitting_and_joining";
+    my @info_of_genome_splitting_and_joining;
+    foreach my $seq_id (sort keys %seq) {
+        my $seq = $seq{$seq_id};
+        my $seq_length = length $seq;
+        if ($seq_length > $segmentSize) {
+            my @partion = &get_partition($seq_length, $segmentSize, $overlapSize);
+            foreach (@partion) {
+                my $start = $_ - 1;
+                my $end = $start + $segmentSize;
+                my $sub_seq = substr($seq, $start, $segmentSize);
+
+                open OUT, ">", "tmp_for_genome_splitting_and_joining/$seq_id.$start.fasta" or die "Can not create file $seq_id.$start.fasta, $!\n";
+                print OUT ">$seq_id\_start_$start\n$sub_seq\n";
+                close OUT;
+                push @info_of_genome_splitting_and_joining, "tmp_for_genome_splitting_and_joining/$seq_id.$start.fasta";
+            }
+        }
+        else {
+            open OUT, ">", "tmp_for_genome_splitting_and_joining/$seq_id.0.fasta" or die "Can not create file $seq_id.0.fasta, $!\n";
+            print OUT ">$seq_id\_start_0\n$seq\n";
+            close OUT;
+            push @info_of_genome_splitting_and_joining, "tmp_for_genome_splitting_and_joining/$seq_id.0.fasta";
+        }
+    }
+
+    open OUT, ">", "genome.splitting_and_joining.fasta" or die "Can not create file genome.splitting_and_joining.fasta, $!\n";
+    foreach (@info_of_genome_splitting_and_joining) {
+        open IN, $_ or die "Can not open file $_, $!\n";
+        while (<IN>) {
+            print OUT;
+        }
+        close IN;
+    }
+    close OUT;
+
+    print STDERR "The genome sequences were splitted and joined, and the new genome file was created: genome.splitting_and_joining.fasta.\n";
+}
+else {
+    print STDERR "The splitted and joined genome file genome.splitting_and_joining.fasta was existsed and used again\n";
+}
+
+my $cmdString = "makeblastdb -in genome.splitting_and_joining.fasta -dbtype nucl -title genome -parse_seqids -out genome &> makeblastdb.log";
 print "CMD 1/4: $cmdString\n";
 unless (-e "makeblastdb.ok") {
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
     open OUT, ">", "makeblastdb.ok" or die $!; close OUT;
-    print "1. Successfully Make Blast Database of $genomeFastaFile\n\n";
+    print "1. Successfully Make Blast Database of genome.splitting_and_joining.fasta\n\n";
 }
 else {
     print "1. Skip CMD 1/4 for file makeblastdb.ok exists\n\n";
@@ -61,6 +128,26 @@ unless (-e "blast.ok") {
     unlink "FailedCommands" if -e "FailedCommands";
     system("$cmdString") == 0 or die "failed to execute: $!\n";
     if ( -e "FailedCommands" ) { die "failed to execute: $cmdString\n"; }
+
+    open IN, "out.tab" or die "Can not open file out.tab, $!\n";
+    open OUT, ">", "out.correct.tab" or die "Can not create file out.correct.tab, $!\n";
+    while (<IN>) {
+        @_ = split /\t/;
+        my $pos = 0;
+        $pos = $1 if $_[1] =~ s/_start_(\d+)//;
+        
+        my $keep = 1;
+        if ($_[8] < 1000) { $keep = 0; }
+        if ($_[9] < 1000) { $keep = 0; }
+        if (($segmentSize - $_[8] + 1) < 1000) { $keep = 0; }
+        if (($segmentSize - $_[9] + 1) < 1000) { $keep = 0; }
+
+        $_[8] += $pos;
+        $_[9] += + $pos;
+        print OUT (join "\t", @_);
+    }
+    close OUT;
+
     open OUT, ">", "blast.ok" or die $!; close OUT;
     print "2. Successfully align homolog to genome by tblastn\n\n";
 }
@@ -68,7 +155,7 @@ else {
     print "2. Skip CMD 2/4: for file blast.ok exists\n\n";
 }
 
-$cmdString = "$path/homolog_blast2geneRegion out.tab $homologProteinFastaFile $coverage_ratio $evalue > homolog_gene_region.tab";
+$cmdString = "$path/homolog_blast2geneRegion out.correct.tab $homologProteinFastaFile $coverage_ratio $evalue $max_gene_length > homolog_gene_region.tab";
 print "CMD 3/4: $cmdString\n";
 unless (-e "blast2geneRegion.ok") {
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -94,3 +181,17 @@ print "CMD 4/4: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 print "4. Successfully run genewise parally\n\n";
 print "The final result file : genewise.gff\n\n";
+
+sub get_partition {
+    my ($length, $ss, $os) = @_;
+    my @out;
+
+    my $pos = 1;
+    push @out, $pos;
+    while (($pos + $ss - 1) < $length) {
+        $pos = $pos + $ss - 1 - $os + 1;
+        push @out, $pos;
+    }
+
+    return @out;
+}

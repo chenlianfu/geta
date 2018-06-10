@@ -5,7 +5,7 @@ my $usage = <<USAGE;
 Usage:
     perl $0 genome_seq.fasta homolog_proteins.fasta homolog_gene_region.tab flanking_length CPUs > genewise.gff 2> genewise.start_info.txt
 
-    genewise.start_info.txty有三列：chr、start site of start-codon、genwise_score。该文件用于生成augustus的start hint。
+    genewise.start_info.txt有三列：chr、start site of start-codon、genwise_score。该文件用于生成augustus的start hint。
 
 For example:
     perl $0 genome_seq.fasta homolog_proteins.fasta homolog_gene_region.tab 2000 24
@@ -36,7 +36,7 @@ close IN;
 mkdir "geneRegion_genewise.tmp" unless -e "geneRegion_genewise.tmp";
 open IN, $ARGV[2] or die $!;
 open COMMAND, ">", "command.genewise.list" or die $!;
-my @out;
+my (@out, %command);
 while (<IN>) {
     @_ = split /\t/;
     my $length = $_[2] - $_[1] + 1 + $ARGV[3] + $ARGV[3];
@@ -52,14 +52,20 @@ while (<IN>) {
     my $homolog_seq = $homolog_seq{$_[3]};
     open OUT, ">", "geneRegion_genewise.tmp/$_[3].fasta" or die $!;
     print OUT ">$_[3]\n$homolog_seq\n";
+	close OUT;
 
     my $strand = $_[4];
     if ($strand eq "plus") {
-        print COMMAND "genewise geneRegion_genewise.tmp/$_[3].fasta geneRegion_genewise.tmp/$_[0].$_[1]\_$_[2].fasta -tfor -gff -quiet -silent -sum > geneRegion_genewise.tmp/$_[0].$_[1]\_$_[2].gff\n";
+		my $command =  "genewise geneRegion_genewise.tmp/$_[3].fasta geneRegion_genewise.tmp/$_[0].$_[1]\_$_[2].fasta -tfor -gff -quiet -silent -sum > geneRegion_genewise.tmp/$_[0].$_[1]\_$_[2].gff\n";
+		$command{$command} = $length;
     }
     else {
-        print COMMAND "genewise geneRegion_genewise.tmp/$_[3].fasta geneRegion_genewise.tmp/$_[0].$_[1]\_$_[2].fasta -trev -gff -quiet -silent -sum > geneRegion_genewise.tmp/$_[0].$_[1]\_$_[2].gff\n";
+        my $command = "genewise geneRegion_genewise.tmp/$_[3].fasta geneRegion_genewise.tmp/$_[0].$_[1]\_$_[2].fasta -trev -gff -quiet -silent -sum > geneRegion_genewise.tmp/$_[0].$_[1]\_$_[2].gff\n";
+		$command{$command} = $length;
     }
+}
+foreach (sort {$command{$b} <=> $command{$a}} keys %command) {
+	print COMMAND;
 }
 close COMMAND;
 

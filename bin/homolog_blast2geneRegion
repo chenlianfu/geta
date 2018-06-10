@@ -3,10 +3,10 @@ use strict;
 
 my $usage = <<USAGE;
 Usage:
-    perl $0 tblastn.format6.tab homolog_proteins.fasta coverage_ratio E_value > homolog_gene_region.tab
+    perl $0 tblastn.format6.tab homolog_proteins.fasta coverage_ratio E_value max_gene_length > homolog_gene_region.tab
 
 For example:
-    perl $0 blast.tab homolog.fasta 0.4 1e-9 > homolog_gene_region.tab
+    perl $0 blast.tab homolog.fasta 0.4 1e-9 20000 > homolog_gene_region.tab
 
     首先，将homolog蛋白质序列通过tblastn比对到基因组序列，得到format6格式的结果；
     本程序通过分析比对结果找到基因组序列上的基因区域及其对应的最优homolog蛋白序列ID。
@@ -50,7 +50,7 @@ foreach my $query (keys %stats) {
         my $number = 0;
         my $end = $1 if $firt_subject_regions =~ m/(\d+)/;
         foreach (@blast_subject_regions) {
-            if (m/(\d+)/ && (abs($1 - $end)) >= 20000) { $number ++; $end = $1; }
+            if (m/(\d+)/ && (abs($1 - $end)) >= $ARGV[4]) { $number ++; $end = $1; }
             push @{$split[$number]}, $_;
         }
 

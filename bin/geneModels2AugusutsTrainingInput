@@ -7,6 +7,7 @@ Usage:
     $0 [options] geneModels.gff3 genome.fasta
 
     输入GFF3格式的基因模型信息（尽可能包含最多的准确的基因模型，可以包含不完整的基因模型）和基因组序列；程序首先调用ncbi-blast+分析蛋白水平的相似性，对基因模型进行取冗余处理，得到的基因模型可以用下一步Augustus etraining；程序再对剩下的基因模型进行筛选，选取完整、多CDS、CDS总长度较长的基因模型，用于下一步Augustus training optimizing过程。
+    去冗余处理过程：（1）首先，对蛋白序列进行两两比对，若一个蛋白序列全长(匹配区覆盖率>=95%)被另外一个蛋白(匹配区覆盖率<80%)包含，且Identity高于设置的阈值，则去除被包含的基因。（2）两两比对中，若两个蛋白序列的匹配区覆盖率同时不低于--min_coverage_ratio设置的值，且Identity不低于--min_identity设置的值，则认为这两个基因之间有重复。（3）对重复基因对进行聚类分析，然后分别对每类基因进行分析：逐个去除该类中节点数(和n个其它基因重复，则节点数是n)最大的基因，且优先去除genewise的基因(保留transfrag基因)，再优先去除incomplete类型的基因，最后保证该类中所有基因的节点数为1若剩下1对1的重复基因，按照优先去除genewise的基因(保留transfrag基因)，再优先去除incomplete类型的基因，再去除蛋白序列较短的原则，去除其中一个。（4）此外，若GFF3文件中不含有Source=genewise/transfrag和Integrity=incomplete/complete信息，则统一按transfrag和complete处理。
 
     --out_prefix <string>    default: out
     设置程序输出文件前缀。
@@ -21,8 +22,8 @@ BLAST分析参数：
     --min_identity <float>    default: 0.8
     对blast结果进行分析时，若identity < 该值，则忽略比对结果。
 
-    --min_coverage_ratio <float>    default: 0.5
-    对blast结果进行分析，两个基因的proteins序列的匹配区域各自计算出一个覆盖度比例；若两个基因同时超过该比例，则去掉protein序列较短的基因模型。若只有一个基因超过该比例，则去掉该基因模型。
+    --min_coverage_ratio <float>    default: 0.6
+    对blast结果进行分析，两个基因的proteins序列的匹配区域各自计算出一个覆盖度比例；若两个基因同时超过该比例，则认为这两个基因之间有重复。根据log信息，若out.filter2.gff3文件中基因模型过少，则推荐提高该值。
 
 
 最优基因模型选择参数：
@@ -33,16 +34,20 @@ BLAST分析参数：
     最优基因模型的CDS总长度不能小于该值。
 
     --min_cds_exon_ratio <float>    default: 0.60
-    最优基因模型的CDS总长度/exon总长度不能小于该值。
+    最优基因模型的CDS总长度/exon总长度不能小于该值。根据log信息，若out.filter2.gff3文件中基因模型过少，则推荐降低该值。
+
+    --keep_ratio_for_excluding_too_long_gene <float>    deault: 0.95
+    最后，将基因模型按蛋白序列长度进行排序，按照该比例保留较短的基因模型。有些大基因组物种（例如：人类、小鼠等）的基因长度和蛋白序列极其长（>30k aa），若含有此类基因模型，不利于后续augustus optimizing的准确性检测评估，并且时间消耗极大，此时，推荐按比例去除掉过长的基因模型。
 
 注意事项：
     1. 输入的GFF3文件不能包含可变剪接；
     2. 程序调用blast.pl使用ncbi-blast+的BLASTP命令对protein序列进行比对；
     3. 输出文件out.filter1.gff3是去除了相似性较高冗余基因模型的结果，out.filter2.gff3是进一步挑的最优基因模型（挑取完整基因的方法是检测其起始密码子和终止密码子）。
+
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($out_prefix, $cpu, $min_evalue, $min_identity, $min_coverage_ratio, $min_cds_num, $min_cds_length, $min_cds_exon_ratio);
+my ($out_prefix, $cpu, $min_evalue, $min_identity, $min_coverage_ratio, $min_cds_num, $min_cds_length, $min_cds_exon_ratio, $keep_ratio_for_excluding_too_long_gene);
 GetOptions(
     "out_prefix:s" => \$out_prefix,
     "cpu:i" => \$cpu,
@@ -52,19 +57,21 @@ GetOptions(
     "min_cds_num:i" => \$min_cds_num,
     "min_cds_length:i" => \$min_cds_length,
     "min_cds_exon_ratio:f" => \$min_cds_exon_ratio,
+    "keep_ratio_for_excluding_too_long_gene:f" => \$keep_ratio_for_excluding_too_long_gene,
 );
 $out_prefix ||= "out";
 $cpu ||= 8;
 $min_evalue ||= 1e-9;
 $min_identity ||= 0.8;
-$min_coverage_ratio ||= 0.5;
+$min_coverage_ratio ||= 0.6;
 $min_cds_num ||= 2;
 $min_cds_length ||= 600;
 $min_cds_exon_ratio ||= 0.60;
+$keep_ratio_for_excluding_too_long_gene ||= 0.95;
 
 # 先将GFF3文件转换成Proteins序列
 open IN, $ARGV[0] or die "Can not open file $ARGV[0], $!\n";
-my (%gff, $gene_id, %target_chr_of_gene, %strand_of_gene);
+my (%gff, $gene_id, %target_chr_of_gene, %strand_of_gene, %source, %integrity);
 while (<IN>) {
     next if m/^#/;
     next if m/^\s*$/;
@@ -74,6 +81,10 @@ while (<IN>) {
         @_ = split /\t/;
         $target_chr_of_gene{$gene_id} = $_[0];
         $strand_of_gene{$gene_id} = $_[6];
+        $source{$gene_id} = "transfrag";
+        $source{$gene_id} = "genewise" if m/Source=genewise/;
+        $integrity{$gene_id} = "complete";
+        $integrity{$gene_id} = "incomplete" if m/Integrity=incomplete/;
     }
     else {
         $gff{$gene_id} .= $_;
@@ -189,7 +200,7 @@ foreach my $two_id (keys %overlap) {
     }
 }
 
-my %delete;
+my (%delete, %overlap_gene);
 open OUT, ">", "$out_prefix.blast.out" or die "Can not create file $out_prefix.blast.out, $!\n";
 print OUT "gene_id\tgene_length\tmatch_coverage_ratio\tgene_id\tgene_length\tmatch_coverage_ratio\n";
 foreach my $two_id (keys %overlap) {
@@ -201,21 +212,106 @@ foreach my $two_id (keys %overlap) {
     my $length1_ovr = $overlap_length{$two_id}{$id[1]};
     my $length1_ratio = $length1_ovr / $length1_seq;
 
-    if (!exists $delete{$id[0]} && !exists $delete{$id[1]}) {
-        if ($length0_ratio >= $min_coverage_ratio && $length1_ratio >= $min_coverage_ratio) {
-            if ($length0_seq >= $length1_seq) { $delete{$id[1]} = 1; }
-            else { $delete{$id[0]} = 1; }
-        }
-        elsif ($length0_ratio >= $min_coverage_ratio) {
-            $delete{$id[0]} = 1;
-        }
-        elsif ($length1_ratio >= $min_coverage_ratio) {
-            $delete{$id[1]} = 1;
-        }
+    # 若一个蛋白序列全长(匹配区覆盖率>=95%)被另外一个蛋白(匹配区覆盖率<80%)包含，则去除被包含的基因。
+    if ($length0_ratio >= 0.95 && $length1_ratio < 0.80) {
+        $delete{$id[0]} = 1;
     }
+    elsif ($length0_ratio < 0.80 && $length1_ratio >= 0.95) {
+        $delete{$id[1]} = 1;
+    }
+    elsif ($length0_ratio >= $min_coverage_ratio && $length1_ratio >= $min_coverage_ratio) {
+        $overlap_gene{$id[0]}{$id[1]} = 1;
+        $overlap_gene{$id[1]}{$id[0]} = 1;
+    }
+
     print OUT "$id[0]\t$length0_seq\t$length0_ratio\t$id[1]\t$length1_seq\t$length1_ratio\n";
 }
 close OUT;
+
+# 对重复基因信息进行聚类分析
+my %cluster;
+my %overlap_gene01 = %overlap_gene;
+while (%overlap_gene01) {
+    my @overlap_gene01 = keys %overlap_gene01;
+    my $one = $overlap_gene01[0];
+    my @one;
+    push @one, $one;
+    my %cluster01;
+
+    while (@one) {
+        $one = shift @one;
+        $cluster01{$one} = 1;
+        foreach (keys %{$overlap_gene01{$one}}) {
+            push @one, $_;
+        }
+        delete $overlap_gene01{$one};
+    }
+
+    my $cluster01 = join "\t", keys %cluster01;
+    #print STDERR "$cluster01\n";
+    $cluster{$cluster01} = 1;
+}
+
+# 对每类进行去重复
+foreach (keys %cluster) {
+    my @genes = split /\t/;
+    my (%type_score, %genes, %node_num, %overlap_gene_cluster);
+
+    foreach my $gene (@genes) {
+        $genes{$gene} = 1;
+        my $score = 1;
+        $score += 2 if $source{$gene} eq "transfrag";
+        $score += 1 if $integrity{$gene} eq "complete";
+        $type_score{$gene} = $score;
+
+        foreach (keys %{$overlap_gene{$gene}}) {
+            $overlap_gene_cluster{$gene}{$_} = 1;
+            $node_num{$gene} ++;
+        }
+    }
+
+    my @node_num = sort {$b <=> $a} values %node_num;
+    my $node_num = $node_num[0];
+    while ($node_num > 1) {
+        my @node_genes = sort {$node_num{$b} <=> $node_num{$a} or $type_score{$a} <=> $type_score{$b} or $length{$a} <=> $length{$b}} keys %genes;
+        #print STDERR (join ",", @node_genes) . ": delete $node_genes[0]\n";
+        delete $genes{$node_genes[0]};
+        $delete{$node_genes[0]} = 1;
+
+        %node_num = ();
+        %overlap_gene_cluster = ();
+        foreach my $genes (keys %genes) {
+            foreach (keys %{$overlap_gene{$genes}}) {
+                if (exists $genes{$_}) {
+                    $node_num{$genes} ++;
+                    $overlap_gene_cluster{$genes}{$_} = 1;
+                }
+            }
+        }
+        @node_num = sort {$b <=> $a} values %node_num;
+        $node_num = $node_num[0];
+    }
+
+    while (%genes) {
+        my @gene_pairs = keys %genes;
+        my $pairs1 = shift @gene_pairs;
+        if (exists $overlap_gene_cluster{$pairs1}) {
+            my @pairs2 = keys %{$overlap_gene_cluster{$pairs1}};
+            my $pairs2 = $pairs2[0];
+            my @pairs = ($pairs1, $pairs2);
+            @pairs = sort {$type_score{$a} <=> $type_score{$b} or $length{$a} <=> $length{$b}} @pairs;
+            #print STDERR (join ",", @pairs) . ": delete $pairs[0]\n";
+            $delete{$pairs[0]} = 1;
+            delete $genes{$pairs[0]};
+            delete $genes{$pairs[1]};
+        }
+        else {
+            delete $genes{$pairs1};
+        }
+    }
+
+    #print STDERR "\n\n";
+}
 
 # 输出用于Augustus etrainig的基因模型
 open OUT, ">", "$out_prefix.filter1.gff3" or die "Cannot create file $out_prefix.filter1.gff3, $!\n";
@@ -226,28 +322,28 @@ foreach my $gene_id (sort keys %gff) {
 close OUT;
 
 # 进一步进行过滤
-my (%keep, $not_complete_num, $few_cds_num, $short_cds_num, $little_cds_exon_ration_num, $total_num, $redundant_num, $keep_num);
+my (%keep, $not_complete_num, $few_cds_num, $short_cds_num, $little_cds_exon_ration_num, $total_num, $redundant_num, $long_cds_num, $keep_num);
 foreach my $gene_id (sort keys %gff) {
-	$total_num ++;
+    $total_num ++;
     if (exists $delete{$gene_id}) {
-		$redundant_num ++;
-		next;
-	}
+        $redundant_num ++;
+        next;
+    }
 
     my $gff_info = $gff{$gene_id};
     my $if_complete = &if_complete($gff_info);
     #next unless $gff_info =~ m/Integrity=complete/;
     unless ($if_complete) {
-		$not_complete_num ++;
-		next;
-	}
+        $not_complete_num ++;
+        next;
+    }
 
     my @cds_line = $gff_info =~ m/(CDS\t\d+?\t\d+?)\t/g;
     my @exon_line = $gff_info =~ m/(exon\t\d+?\t\d+?)\t/g;
     if (@cds_line < $min_cds_num) {
-		$few_cds_num ++;
-		next;
-	}
+        $few_cds_num ++;
+        next;
+    }
 
     my ($cds_length, $exon_length);
     foreach (@cds_line) {
@@ -255,26 +351,45 @@ foreach my $gene_id (sort keys %gff) {
         $cds_length += ($2 - $1 + 1);
     }
     if ($cds_length < $min_cds_length) {
-		$short_cds_num ++;
-		next;
-	}
+        $short_cds_num ++;
+        next;
+    }
 
     foreach (@exon_line) {
         m/exon\t(\d+)\t(\d+)/;
         $exon_length += ($2 - $1 + 1);
     }
 
-	if ($exon_length) {
-		my $cdsRation = $cds_length / $exon_length;
-		if ($cdsRation < $min_cds_exon_ratio) {
-			$little_cds_exon_ration_num ++;
-			next;
-		}
-	}
+    if ($exon_length) {
+        my $cdsRation = $cds_length / $exon_length;
+        if ($cdsRation < $min_cds_exon_ratio) {
+            $little_cds_exon_ration_num ++;
+            next;
+        }
+    }
 
-	$keep_num ++;
     $keep{$gene_id} = 1;
 }
+
+
+my @keep_gene = sort {$length{$a} <=> $length{$b}} keys %keep;
+my $longest_length = $length{$keep_gene[$keep_ratio_for_excluding_too_long_gene * @keep_gene]};
+my $the_longest_length = $length{$keep_gene[-1]};
+
+open OUT, ">", "$out_prefix.filter2.gff3" or die "Cannot create file $out_prefix.filter1.gff3, $!\n";
+foreach my $gene_id (sort keys %gff) {
+    if (exists $keep{$gene_id}) {
+        if ($length{$gene_id} <= $longest_length) {
+            my $gff_info = $gff{$gene_id};
+            print OUT "$gff_info\n";
+            $keep_num ++;
+        }
+        else {
+            $long_cds_num ++;
+        }
+    }
+}
+close OUT;
 
 print STDERR "
 Total gene models number: $total_num
@@ -282,16 +397,9 @@ Redundant gene number:    $redundant_num
 Not complete gene number: $not_complete_num
 Few CDSs gene number:     $few_cds_num
 Short CDS length:         $short_cds_num
-Low CDS/exon ratio:       $little_cds_exon_ration_num\n";
-
-open OUT, ">", "$out_prefix.filter2.gff3" or die "Cannot create file $out_prefix.filter1.gff3, $!\n";
-foreach my $gene_id (sort keys %gff) {
-    if (exists $keep{$gene_id}) {
-        my $gff_info = $gff{$gene_id};
-        print OUT "$gff_info\n";
-    }
-}
-close OUT;
+Low CDS/exon ratio:       $little_cds_exon_ration_num
+Too long CDS gene number: $long_cds_num        # Longest protein length was set to $longest_length/$the_longest_length
+Best gene Models number:  $keep_num\n";
 
 sub if_complete {
     # 输入一个genemodel的GFF3信息

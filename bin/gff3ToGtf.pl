@@ -61,6 +61,7 @@ foreach my $gene_id (sort keys %gene) {
 		my @three = split /\t/, $cds[-2];
 		my @four = split /\t/, $cds[-1];
 		my $strand = $_[6];
+		print STDERR "$strand\t$mRNA_id\n";
 		if ($strand eq "+") {
 			# start codon
 			my $start_codon_bases;
