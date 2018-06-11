@@ -61,6 +61,10 @@ This script was tested on CentOS 6.8 with such softwares can be run directly in 
 3. HISAT2 version 2.1.0
 4. samtools Version: 1.3.1
 5. hmmer-3.1b2
+6. NCBI-Blast+
+7. RepeatMasker
+8. RepeatModeler
+9. genewise
 
 Version: 2.2
 
@@ -271,7 +275,7 @@ $genome = "$pwd/genome.fasta";
 
 # Step 0: RepeatMasker and RepeatModeler
 print STDERR "\n============================================\n";
-print STDERR "Step 0: RepeatMasker and RepeatModeler\n";
+print STDERR "Step 0: RepeatMasker and RepeatModeler " . "(" . (localtime) . ")" . "\n";
 mkdir "0.RepeatMasker" unless -e "0.RepeatMasker";
 unless (-e "0.RepeatMasker.ok") {
     chdir "0.RepeatMasker";
@@ -347,7 +351,7 @@ else {
 
 # Step 1: Trimmomatic
 print STDERR "\n============================================\n";
-print STDERR "Step 1: Trimmomatic\n";
+print STDERR "Step 1: Trimmomatic " . "(" . (localtime) . ")" . "\n";
 mkdir "1.trimmomatic" unless -e "1.trimmomatic";
 unless (-e "1.trimmomatic.ok") {
     chdir "1.trimmomatic";
@@ -407,7 +411,7 @@ else {
 
 # Step 2: HISAT2
 print STDERR "\n============================================\n";
-print STDERR "Step 2: HISAT2\n";
+print STDERR "Step 2: HISAT2 " . "(" . (localtime) . ")" . "\n";
 mkdir "2.hisat2" unless -e "2.hisat2";
 unless (-e "2.hisat2.ok") {
     chdir "2.hisat2";
@@ -461,7 +465,7 @@ else {
 
 # Step 3: Transcript
 print STDERR "\n============================================\n";
-print STDERR "Step 3: Transcript\n";
+print STDERR "Step 3: Transcript " . "(" . (localtime) . ")" . "\n";
 mkdir "3.transcript" unless -e "3.transcript";
 unless (-e "3.transcript.ok") {
     chdir "3.transcript";
@@ -621,7 +625,7 @@ else {
 
 # Step 4: Homolog
 print STDERR "\n============================================\n";
-print STDERR "Step 4: Homolog\n";
+print STDERR "Step 4: Homolog " . "(" . (localtime) . ")" . "\n";
 mkdir "4.homolog" unless -e "4.homolog";
 unless (-e "4.homolog.ok") {
     chdir "4.homolog";
@@ -669,7 +673,7 @@ else {
 
 # Step 5: Augustus gene prediction
 print STDERR "\n============================================\n";
-print STDERR "Step 5: Augustus/HMM Trainning\n";
+print STDERR "Step 5: Augustus/HMM Trainning " . "(" . (localtime) . ")" . "\n";
 mkdir "5.augustus" unless -e "5.augustus";
 unless (-e "5.augustus.ok") {
     chdir "5.augustus";
@@ -1032,7 +1036,7 @@ else {
 
 # Step 6: CombineGeneModels
 print STDERR "\n============================================\n";
-print STDERR "Step 6: CombineGeneModels\n";
+print STDERR "Step 6: CombineGeneModels " . "(" . (localtime) . ")" . "\n";
 mkdir "6.combineGeneModels" unless -e "6.combineGeneModels";
 unless (-e "6.combineGeneModels.ok") {
     chdir "6.combineGeneModels";
@@ -1134,7 +1138,7 @@ else {
 
 # Step 7: OutPut
 print STDERR "\n============================================\n";
-print STDERR "Step 7: OutPut\n";
+print STDERR "Step 7: OutPut " . "(" . (localtime) . ")" . "\n";
 chdir "../";
 $pwd = `pwd`; print STDERR "PWD: $pwd";
 
@@ -1156,4 +1160,4 @@ print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
 print STDERR "\n============================================\n";
-print STDERR "GETA complete successfully!\n";
+print STDERR "GETA complete successfully! " . "(" . (localtime) . ")" . "\n";
