@@ -1,4 +1,4 @@
-#GETA
+GETA
 ============
 GETA is an automatic genome-wide annotation tool (GWAT) with improved accuracy and gene integrity for eukaryotes written by Lianfu Chen, Congcong Liu, Lei Deng and so on.
 
@@ -10,18 +10,23 @@ GETA is a multi-threaded, automatic, and memory-saving GWAT, which effectively i
 
 Installation
 ============
-1.unpack
+1. unpack
 
-2.install dependencies:
+2. install dependencies:
 
+    RepeatMasker and RepeatModeler
+    Java (version: jre1.8.0_45)
+    HISAT2 (version: 2.1.0)
+    Samtools (version: 1.8)
+    genewise (version: 2.4.1)
+    NCBI-Blast+ (version: 2.6.0+)
+    AUGUSTUS (version: 3.3.1) *Note, bam2hints should be compiled correctly*
+    HMMER (version: 3.1b2)
     ParaFly
-    java 1.8.0_144
-    HISAT2 2.1.0
-    samtools 1.3.1
-    hmmer 3.1b2
-    Augustus
 
-3.add these directories of the executables to the PATH environment variable
+3. add these directories of the executables to the PATH environment variable
+
+4. the detail command lines of installation of all the dependency softwares and GETA: INSTALL.
 
 Usage of the main script geta.pl
 =================
@@ -78,14 +83,15 @@ Usage of the main script geta.pl
 
     This script was tested on CentOS 6.8 with such softwares can be run directly in terminal:
     1. ParaFly
-    2. java version "1.8.0_144"
-    3. HISAT2 version 2.1.0
-    4. samtools Version: 1.3.1
-    5. hmmer-3.1b2
-    6. NCBI-Blast+
-    7. RepeatMasker
-    8. RepeatModeler
-    9. genewise
+    2. java (version: 1.8.0_172)
+    3. hisat2 (version: 2.1.0)
+    4. samtools (version: 1.8)
+    5. hmmscan (version: 3.1b2)
+    6. makeblastdb/tblastn/blastp (version: 2.6.0)
+    7. RepeatMasker (version: 4.0.7)
+    8. RepeatModeler (version: 1.0.11)
+    9. genewise (version: 2.4.1)
+    10. augustus/etraining (version: 3.3.1)
 
     Version: 2.4.0
 

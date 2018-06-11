@@ -57,16 +57,17 @@ Parameters:
 
 This script was tested on CentOS 6.8 with such softwares can be run directly in terminal:
 1. ParaFly
-2. java version "1.8.0_144"
-3. HISAT2 version 2.1.0
-4. samtools Version: 1.3.1
-5. hmmer-3.1b2
-6. NCBI-Blast+
-7. RepeatMasker
-8. RepeatModeler
-9. genewise
+2. java (version: 1.8.0_172)
+3. hisat2 (version: 2.1.0)
+4. samtools (version: 1.8)
+5. hmmscan (version: 3.1b2)
+6. makeblastdb/tblastn/blastp (version: 2.6.0)
+7. RepeatMasker (version: 4.0.7)
+8. RepeatModeler (version: 1.0.11)
+9. genewise (version: 2.4.1)
+10. augustus/etraining (version: 3.3.1)
 
-Version: 2.2
+Version: 2.4.0
 
 USAGE
 if (@ARGV==0){die $usage}
