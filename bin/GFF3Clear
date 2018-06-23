@@ -460,7 +460,7 @@ sub cdsIncludeStopCodon_and_integrity {
             $frame = ($end + 1 - $start - $frame) % 3;
             $frame = 1 if $frame == 2;
             $frame = 2 if $frame == 1;
-            if ($frame == 0) {
+            if ($frame == 0 && $start > 3) {
                 my $codon = substr($seq{$seqID}, ($start - 4), 3);
                 $codon = reverse $codon;
                 $codon =~ tr/ATCGatcg/TAGCTAGC/;

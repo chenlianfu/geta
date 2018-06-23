@@ -32,7 +32,7 @@ echo 'export C_INCLUDE_PATH=/opt/sysoft/gcc-4.9.4/include:$C_INCLUDE_PATH' >> /h
 echo 'export PATH=/opt/sysoft/gcc-4.9.4/bin/:$PATH' >> /home/train/.bashrc.gcc
 
 
-## 2. Installing NCBI-Blast+
+## 2. Installing NCBI-Blast+ and rmblastn
 cd /home/train/
 wget ftp://ftp.ncbi.nlm.nih.gov/blast/executables/blast+/2.6.0/ncbi-blast-2.6.0+-src.tar.gz -P ~/software
 wget http://www.repeatmasker.org/isb-2.6.0+-changes-vers2.patch.gz -P ~/software
@@ -212,7 +212,7 @@ echo 'PATH=$PATH:/opt/sysoft/parafly-r2013-01-21/bin/" >> ~/.bashrc
 source ~/.bashrc
 
 
-## 11. Install Java
+## 11. Installing Java
 wget http://download.oracle.com/otn-pub/java/jdk/8u172-b11/a58eab1ec242421181065cdc37240b08/jre-8u172-linux-x64.tar.gz -P ~/software
 tar zxf ~/software/jre-8u172-linux-x64.tar.gz -C /opt/sysoft/
 echo 'PATH=/opt/sysoft/jre1.8.0_172/bin/:$PATH' >> ~/.bashrc
