@@ -72,5 +72,5 @@ TruSeq3-PE-2.fa:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:50 TOPHRE
 # During the step of remove_genes_in_repeats: --filtered_gene_models was fixed to "genome.completed.genes_in_repeats.gff3".
 
 [remove_short_genes]
---cds_length 300
+--cds_length 150
 # at last, the short gene models was filtered by PfamValidateABinitio.

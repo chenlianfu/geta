@@ -233,7 +233,7 @@ my %config = (
     'paraCombineGeneModels' => '--overlap 30 --min_augustus_transcriptSupport_percentage 10.0 --min_augustus_intronSupport_number 1 --min_augustus_intronSupport_ratio 0.01',
     'PfamValidateABinitio' => '--CDS_length 750 --CDS_num 2 --evalue 1e-5 --coverage 0.25',
     'remove_genes_in_repeats' => '--ratio 0.8',
-    'remove_short_genes' => '--cds_length 300',
+    'remove_short_genes' => '--cds_length 150',
 );
 if ($config) {
     open IN, $config or die "Can not open file $config, $!\n";
@@ -1108,8 +1108,14 @@ unless (-e "6.combineGeneModels.ok") {
     }
 
     $cmdString = "$dirname/bin/GFF3Clear --gene_prefix $gene_prefix --genome $genome combine.1.gff3 combine2.filter_pass.gff3 > genome.gff3 2> GFF3Clear.1.log";
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+	unless (-e "GFF3Clear.1.ok") {
+		print STDERR (localtime) . ": CMD: $cmdString\n";
+		system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+		open OUT, ">", "GFF3Clear.1.ok" or die $!; close OUT;
+	}
+	else {
+		print STDERR "CMD(Skipped): $cmdString\n";
+	}
 
     open OUT1, ">", "genome.completed.gff3" or die $!;
     open OUT2, ">", "genome.partial.gff3" or die $!;
@@ -1168,8 +1174,14 @@ unless (-e "6.combineGeneModels.ok") {
         }
 
         $cmdString = "$dirname/bin/GFF3Clear --gene_prefix $gene_prefix --genome $genome --no_attr_add genome.completed.rm_genes_in_repeats.remove_short_genes.gff3 remove_short_genes.filter_pass.gff3 > genome.filter.gff3 2> GFF3Clear.2.log";
-        print STDERR (localtime) . ": CMD: $cmdString\n";
-        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+		unless (-e "GFF3Clear.2.ok") {
+			print STDERR (localtime) . ": CMD: $cmdString\n";
+			system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+			open OUT, ">", "GFF3Clear.2.ok" or die $!; close OUT;
+		}
+		else {
+			print STDERR "CMD(Skipped): $cmdString\n";
+		}
     }
     else {
         $cmdString = "cp genome.completed.rm_genes_in_repeats.gff3 genome.filter.gff3";

@@ -215,7 +215,8 @@ close OUT1;
 close OUT2;
 
 my $ok_num = $long_ok_num + $short_ok_num;
-my $ratio = int(($ok_num / $total_num) * 100) / 100;
+my $ratio = 0;
+$ratio = int(($ok_num / $total_num) * 100) / 100 if $total_num;
 my $long_ratio = 0;
 $long_ratio = int(($long_ok_num / $long_num) * 100) / 100 if $long_num;
 my $short_ratio = 0;
