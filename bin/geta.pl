@@ -67,7 +67,7 @@ This script was tested on CentOS 6.8 with such softwares can be run directly in 
 9. genewise (version: 2.4.1)
 10. augustus/etraining (version: 3.3.1)
 
-Version: 2.4.0
+Version: 2.4.1
 
 USAGE
 if (@ARGV==0){die $usage}
@@ -232,6 +232,7 @@ my %config = (
     'paraAugusutusWithHints' => '--gene_prefix augustus --min_intron_len 30 --alternatives_from_evidence',
     'paraCombineGeneModels' => '--overlap 30 --min_augustus_transcriptSupport_percentage 10.0 --min_augustus_intronSupport_number 1 --min_augustus_intronSupport_ratio 0.01',
     'PfamValidateABinitio' => '--CDS_length 750 --CDS_num 2 --evalue 1e-5 --coverage 0.25',
+    'remove_genes_in_repeats' => '--ratio 0.80',
 );
 if ($config) {
     open IN, $config or die "Can not open file $config, $!\n";
@@ -255,21 +256,21 @@ mkdir "$out_prefix.tmp" unless -e "$out_prefix.tmp";
 chdir "$out_prefix.tmp";
 $pwd = `pwd`; print STDERR "PWD: $pwd";
 unless (-e "genome.fasta") {
-	open OUT, ">", "genome.fasta" or die "Can not create file genome.fasta, $!\n";
-	open IN, $genome or die "Can not open file $genome, $!\n";
-	$_ = <IN>;
-	print OUT;
-	while (<IN>) {
-		if (m/^>/) {
-		    print OUT "\n$_";
-		}
-		else {
-		    s/\s+?$//g;
-	        print OUT;
-	    }
-	}
-	close IN;
-	close OUT;
+    open OUT, ">", "genome.fasta" or die "Can not create file genome.fasta, $!\n";
+    open IN, $genome or die "Can not open file $genome, $!\n";
+    $_ = <IN>;
+    print OUT;
+    while (<IN>) {
+        if (m/^>/) {
+            print OUT "\n$_";
+        }
+        else {
+            s/\s+?$//g;
+            print OUT;
+        }
+    }
+    close IN;
+    close OUT;
 }
 $pwd = `pwd`; chomp($pwd);
 $genome = "$pwd/genome.fasta";
@@ -641,16 +642,16 @@ unless (-e "4.homolog.ok") {
         }
     }
     @gene_length = sort {$a <=> $b} @gene_length;
-    $max_gene_length = $gene_length[-1] if $gene_length[-1] > $max_gene_length;
-	my ($segmentSize, $overlapSize) = (1000000, 100000);
-	if ($max_gene_length * 4 > $overlapSize) {
-		$overlapSize = $max_gene_length * 4;
-		my $overlapSize_length = length($overlapSize);
-		$overlapSize_length --;
-		$overlapSize_length --;
-		$overlapSize = int(($overlapSize / (10 ** $overlapSize_length)) + 1) * (10 ** $overlapSize_length);
-		$segmentSize = $overlapSize * 10;
-	}
+    $max_gene_length = $gene_length[@gene_length * 0.99] if $gene_length[@gene_length * 0.99] > $max_gene_length;
+    my ($segmentSize, $overlapSize) = (1000000, 100000);
+    if ($max_gene_length * 4 > $overlapSize) {
+        $overlapSize = $max_gene_length * 4;
+        my $overlapSize_length = length($overlapSize);
+        $overlapSize_length --;
+        $overlapSize_length --;
+        $overlapSize = int(($overlapSize / (10 ** $overlapSize_length)) + 1) * (10 ** $overlapSize_length);
+        $segmentSize = $overlapSize * 10;
+    }
     $cmdString = "$dirname/bin/homolog_genewise --cpu $cpu --max_gene_length $max_gene_length --segmentSize $segmentSize --overlapSize $overlapSize $config{'homolog_genewise'} $protein ../0.RepeatMasker/genome.masked.fasta &> homolog_genewise.log";
     unless (-e "homolog_genewise.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
@@ -696,17 +697,17 @@ unless (-e "5.augustus.ok") {
         $pwd = `pwd`; print STDERR "PWD: $pwd";
 
         # 准备Augustus training的输入文件
-		open OUT, ">", "blank.augustus.gff3" or die "Can not create file blank.augustus.gff3, $!\n";
-		close OUT;
-		open OUT, ">", "blank.intron.gff" or die "Can not create file blank.intron.gff, $!\n";
-		close OUT;
-		$cmdString = "$dirname/bin/paraCombineGeneModels --cpu $cpu $config{'paraCombineGeneModels'} blank.augustus.gff3 ../../3.transcript/transfrag.genome.gff3 ../../4.homolog/genewise.gff3 blank.intron.gff";
-		print STDERR (localtime) . ": CMD: $cmdString\n";
-		system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+        open OUT, ">", "blank.augustus.gff3" or die "Can not create file blank.augustus.gff3, $!\n";
+        close OUT;
+        open OUT, ">", "blank.intron.gff" or die "Can not create file blank.intron.gff, $!\n";
+        close OUT;
+        $cmdString = "$dirname/bin/paraCombineGeneModels --cpu $cpu $config{'paraCombineGeneModels'} blank.augustus.gff3 ../../3.transcript/transfrag.genome.gff3 ../../4.homolog/genewise.gff3 blank.intron.gff";
+        print STDERR (localtime) . ": CMD: $cmdString\n";
+        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
-		$cmdString = "$dirname/bin/GFF3Clear --genome $genome combine.1.gff3 > geneModels.gff3 2> GFF3Clear.log";
-		print STDERR (localtime) . ": CMD: $cmdString\n";
-		system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+        $cmdString = "$dirname/bin/GFF3Clear --genome $genome combine.1.gff3 > geneModels.gff3 2> GFF3Clear.log";
+        print STDERR (localtime) . ": CMD: $cmdString\n";
+        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
         $cmdString = "$dirname/bin/geneModels2AugusutsTrainingInput $config{'geneModels2AugusutsTrainingInput'} --out_prefix ati --cpu $cpu geneModels.gff3 $genome &> geneModels2AugusutsTrainingInput.log";
         unless (-e "geneModels2AugusutsTrainingInput.ok") {
@@ -1018,6 +1019,37 @@ unless (-e "5.augustus.ok") {
         }
         else {
             print STDERR "Skip Augustus training again for file training_again.ok exists\n";
+
+            unless (-e "augustus.gff3") {
+                # Get the longest gene length
+                open IN, "augustus.1.gff3" or die "Can not open the file augustus.1.gff3, $!\n";
+                my @gene_length;
+                while (<IN>) {
+                    if (m/\tgene\t(\d+)\t(\d+)\t/) { 
+                        push @gene_length, $2 - $1 + 1;
+                    }
+                }
+                @gene_length = sort {$a <=> $b} @gene_length;
+
+                my ($segmentSize, $overlapSize) = (5000000, 100000);
+                if ($gene_length[-1] * 4 > $overlapSize) {
+                    $overlapSize = $gene_length[-1] * 4;
+                    my $overlapSize_length = length($overlapSize);
+                    $overlapSize_length --;
+                    $overlapSize_length --;
+                    $overlapSize = int(($overlapSize / (10 ** $overlapSize_length)) + 1) * (10 ** $overlapSize_length);
+                    $segmentSize = $overlapSize * 50;
+                }
+
+                # Augustus gene prediction
+                $cmdString = "$dirname/bin/paraAugusutusWithHints $config{'paraAugusutusWithHints'} --species $augustus_species --cpu $cpu --segmentSize $segmentSize --overlapSize $overlapSize --tmp_dir aug_para_with_hints.tmp2 ../0.RepeatMasker/genome.softmask.fasta hints.gff > augustus.2.gff3";
+                print STDERR (localtime) . ": CMD: $cmdString\n";
+                system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+
+                $cmdString = "ln -sf augustus.2.gff3 augustus.gff3";
+                print STDERR (localtime) . ": CMD: $cmdString\n";
+                system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+            }
         }
     }
     else {
@@ -1095,6 +1127,10 @@ unless (-e "6.combineGeneModels.ok") {
         print OUT2 if $complete_keep == 0;
     }
 
+    $cmdString = "$dirname/bin/remove_genes_in_repeats $config{'remove_genes_in_repeats'} --filtered_gene_models genome.completed.genes_in_repeats.gff3 ../0.RepeatMasker/genome.repeat.gff3 genome.completed.gff3 > genome.completed.rm_genes_in_repeats.gff3 2> remove_genes_in_repeats.txt";
+    print STDERR (localtime) . ": CMD: $cmdString\n";
+    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+
     chdir "../";
     open OUT, ">", "6.combineGeneModels.ok" or die $!; close OUT;
 }
@@ -1143,12 +1179,16 @@ print STDERR "Step 7: OutPut " . "(" . (localtime) . ")" . "\n";
 chdir "../";
 $pwd = `pwd`; print STDERR "PWD: $pwd";
 
-$cmdString = "$dirname/bin/GFF3Clear --gene_prefix $gene_prefix --genome $genome --no_attr_add $out_prefix.tmp/6.combineGeneModels/genome.completed.gff3 > $out_prefix.gff3 2> GFF3Clear.1.log";
+$cmdString = "$dirname/bin/GFF3Clear --gene_prefix $gene_prefix --genome $genome --no_attr_add $out_prefix.tmp/6.combineGeneModels/genome.completed.rm_genes_in_repeats.gff3 > $out_prefix.gff3 2> GFF3Clear.1.log";
 #$cmdString = "cp $out_prefix.tmp/7.addAlternativeSplicing/genome.addAS.gff3 $out_prefix.gff3";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
 $cmdString = "$dirname/bin/GFF3Clear --gene_prefix ${gene_prefix}Broken --genome $genome --no_attr_add $out_prefix.tmp/6.combineGeneModels/genome.partial.gff3 > $out_prefix.incomplete_geneModels.gff3 2> GFF3Clear.2.log";
+print STDERR (localtime) . ": CMD: $cmdString\n";
+system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+
+$cmdString = "$dirname/bin/GFF3Clear --gene_prefix ${gene_prefix}InRepeatRegion --genome $genome --no_attr_add $out_prefix.tmp/6.combineGeneModels/genome.completed.genes_in_repeats.gff3 > $out_prefix.InRepeatRegion_geneModels.gff3 2> GFF3Clear.3.log";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 

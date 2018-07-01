@@ -7,9 +7,6 @@ my $usage = <<USAGE;
 Usage:
     perl $0 [options] homolog_proteins.fasta genome_seq.fasta
 
-For example:
-    perl $0 homolog_proteins.fasta genome_seq.fasta 24 0.4 1e-9
-
     程序分4步运行：
     1. 将genome_seq.fasta文件使用makeblastdb构建数据库。成功运行后生成文件makeblastdb.ok。
     2. 运行程序同目录下的homolog_paraBlast程序并行化调用tblastn将homolog_proteins.fasta比对到数据库（阈值为evalue<=1e-9且覆盖率>=0.4）。成功运行后生成文件blast.ok和结果文件out.tab。
@@ -167,13 +164,13 @@ else {
 }
 
 open IN, "homolog_gene_region.tab";
-my ($gene_total_length, $gene_number, $gene_avg_length);
+my ($gene_total_length, $gene_number, $gene_avg_length) = (0, 0, 0);
 while (<IN>) {
     @_ = split /\t/;
     $gene_total_length += ($_[2] - $_[1] + 1);
     $gene_number ++;
 }
-$gene_avg_length = int($gene_total_length / $gene_number);
+$gene_avg_length = int($gene_total_length / $gene_number) if $gene_number != 0;
 print "    $gene_number gene regions, with average gene length $gene_avg_length\n";
 
 $cmdString = "$path/homolog_geneRegion2genewise $genomeFastaFile $homologProteinFastaFile homolog_gene_region.tab $gene_avg_length $cpu > genewise.gff 2> genewise.start_info.txt";

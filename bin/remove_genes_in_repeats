@@ -1,0 +1,132 @@
+#!/usr/bin/perl
+use strict;
+use Getopt::Long;
+
+my $usage = <<USAGE;
+Usage:
+    $0 repeat.gff3 genome.gff3 > genome.filter.gff3 2> genes_in_repeat.txt
+
+    the gene models overlapped with repeats will be removed.
+
+    --ratio <float>    default: 0.8
+    The number of bases was calculated from the overlap region between the CDS of gene models and repeats. If the ratio of CDS_overlap_region_base_number / CDS_total_base_number >= 0.8, the gene models will be removed.
+    If this value was set > 1.0, None gene models would be removed.
+
+    --filtered_gene_models <string>    default: None
+    Output the filtered gene Models in GFF3 format.
+
+USAGE
+if (@ARGV==0){die $usage}
+
+my ($ratio, $filtered_gene_models);
+GetOptions(
+    "ratio:f" => \$ratio,
+    "filtered_gene_models:s" => \$filtered_gene_models,
+);
+$ratio ||= 0.8;
+
+open IN, $ARGV[0] or die "Can not open file $ARGV[0], $!\n";
+my %repeat;
+while (<IN>) {
+    next if m/^#/;
+    next if m/^\s*$/;
+
+    @_ = split /\t/;
+    my $index1 = int($_[3] / 1000);
+    my $index2 = int($_[4] / 1000);
+    foreach ($index1 .. $index2) {
+        $repeat{$_[0]}{$_}{"$_[3]\t$_[4]"} = 1;
+        #print "$_[0]\t$_\t$_[3]\t$_[4]\n";
+    }
+}
+close IN;
+
+open IN, $ARGV[1] or die "Can not open file $ARGV[1], $!\n";
+my (%gene, @gene_id, $gene_id);
+while (<IN>) {
+    if (m/\tgene\t.*ID=([^\s;]+)/) {
+        $gene_id = $1;
+        push @gene_id, $gene_id;
+    }
+    $gene{$gene_id} .= $_;
+}
+close IN;
+
+if ($filtered_gene_models) {
+    open OUT, ">", $filtered_gene_models or die "Can not create file $filtered_gene_models, $!\n";
+    close OUT;
+}
+
+foreach my $gene (@gene_id) {
+    my @line = split /\n/, $gene{$gene};
+    my @CDS = grep { m/\tCDS\t/ } @line;
+
+    my ($total_length, $overlap_length) = (0, 0);
+    foreach (@CDS) {
+        @_ = split /\t/;
+        $overlap_length += &cal_overlap_length("$_[0]\t$_[3]\t$_[4]");
+        $total_length += ($_[4] - $_[3] + 1);
+    }
+
+    my $coverage = $overlap_length / $total_length;
+    if ($coverage >= $ratio) {
+        print STDERR "$gene\t$overlap_length\t$total_length\n";
+        if ($filtered_gene_models) {
+            open OUT, ">>", $filtered_gene_models or die $!;
+            print OUT $gene{$gene};
+        }
+    }
+    else {
+        print $gene{$gene};
+    }
+}
+
+sub cal_overlap_length {
+    my @i = split /\t/, $_[0];
+    my $length;
+
+    my $index1 = int($i[1] / 1000);
+    my $index2 = int($i[2] / 1000);
+    my %repeat_info;
+    foreach ($index1 .. $index2) {
+        foreach (keys %{$repeat{$i[0]}{$_}}) {
+            $repeat_info{$_} = 1;
+        }
+    }
+    my @repeat = sort {$a <=> $b} keys %repeat_info;
+
+    my $start = $i[1];
+    foreach (@repeat) {
+        #print "OK1: $i[0]\t$i[1]\t$i[2]\t$_\n";
+        @_ = split /\t/;
+        if ($_[0] <= $i[2] && $_[1] >= $start) {
+#CDS:   ($start)============($i[2])
+#repeat:     ($_[0])============($_[1])
+#repeat:            ======
+#repeat:     ======================
+#repeat:     ============
+            if ($start <= $_[0]) {
+                if ($i[2] < $_[1]) {
+                    $length += ($i[2] - $_[0] + 1);
+                    last;
+                }
+                else {
+                    $length += ($_[1] - $_[0] + 1);
+                    $start = $_[1] + 1;
+                }
+            }
+            else {
+                if ($i[2] < $_[1]) {
+                    $length += ($i[2] - $start + 1);
+                    last;
+                }
+                else {
+                    $length += ($_[1] - $start + 1);
+                    $start = $_[1] + 1;
+                }
+            }
+        }
+    }
+
+    return $length;
+}

@@ -50,7 +50,11 @@ foreach my $query (keys %stats) {
         my $number = 0;
         my $end = $1 if $firt_subject_regions =~ m/(\d+)/;
         foreach (@blast_subject_regions) {
-            if (m/(\d+)/ && (abs($1 - $end)) >= $ARGV[4]) { $number ++; $end = $1; }
+			if (m/(\d+)/) {
+				$number ++ if (abs($1 - $end) >= $ARGV[4]);
+				$end = $1;
+			}
+			#if (m/(\d+)/ && (abs($1 - $end)) >= $ARGV[4]) { $number ++; $end = $1; }
             push @{$split[$number]}, $_;
         }
 

@@ -65,3 +65,8 @@ TruSeq3-PE-2.fa:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:50 TOPHRE
 [PfamValidateABinitio]
 --CDS_length 750 --CDS_num 2 --evalue 1e-5 --coverage 0.25
 # During the step of PfamValidateABinitio: --pfam_db was passed by --pfam_db; --cpu was passed by --CPU; --out_prefix was fixed to "combine2".
+
+[remove_genes_in_repeats]
+--ratio 0.8
+# The gene models overlapping with repeats was removed if the overlap ratio of CDS region >= 0.8 . If this value was set > 1.0, the gene models overlapping with repeats would not be removed.
+# During the step of remove_genes_in_repeats: --filtered_gene_models was fixed to "genome.completed.genes_in_repeats.gff3".

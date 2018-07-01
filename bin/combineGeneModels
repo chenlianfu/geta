@@ -314,10 +314,10 @@ foreach my $gene_id (@aug_gene) {
     if ( ($augustus_transcriptSupport_percentage >= $min_augustus_transcriptSupport_percentage) or ($augustus_intronSupport_number >= $min_augustus_intronSupport_number && $augustus_intronSupport_ratio >= $min_augustus_intronSupport_ratio) ) {
         print "$out\n";
     }
-    elsif ($if_intron_support == 1) {
-        $out =~ s/(\tgene\t.*?);?\n/$1;NeedRevise=1;\n/;
-        print "$out\n";
-    }
+	#elsif ($if_intron_support == 1) {
+	#    $out =~ s/(\tgene\t.*?);?\n/$1;NeedRevise=1;\n/;
+	#    print "$out\n";
+	#}
     else {
         print STDERR "$out\n";
     }
