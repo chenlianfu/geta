@@ -67,7 +67,7 @@ This script was tested on CentOS 6.8 with such softwares can be run directly in 
 9. genewise (version: 2.4.1)
 10. augustus/etraining (version: 3.3.1)
 
-Version: 2.4.1
+Version: 2.4.2
 
 USAGE
 if (@ARGV==0){die $usage}
@@ -232,7 +232,8 @@ my %config = (
     'paraAugusutusWithHints' => '--gene_prefix augustus --min_intron_len 30 --alternatives_from_evidence',
     'paraCombineGeneModels' => '--overlap 30 --min_augustus_transcriptSupport_percentage 10.0 --min_augustus_intronSupport_number 1 --min_augustus_intronSupport_ratio 0.01',
     'PfamValidateABinitio' => '--CDS_length 750 --CDS_num 2 --evalue 1e-5 --coverage 0.25',
-    'remove_genes_in_repeats' => '--ratio 0.80',
+    'remove_genes_in_repeats' => '--ratio 0.8',
+    'remove_short_genes' => '--cds_length 300',
 );
 if ($config) {
     open IN, $config or die "Can not open file $config, $!\n";
@@ -1086,11 +1087,15 @@ unless (-e "6.combineGeneModels.ok") {
     }
 
     if ($pfam_db) {
-        $cmdString = "$dirname/bin/PfamValidateABinitio --out_prefix combine2 --cpu $cpu --pfam_db $pfam_db $config{'PfamValidateABinitio'} combine.2.gff3 $genome 2> PfamValidateABinitio.log";
-        unless (-e "PfamValidateABinitio.ok") {
+		$cmdString = "rm -rf command.hmmscan.list* hmmscan.tmp for_pfam_search.fasta";
+		print STDERR (localtime) . ": CMD: $cmdString\n";
+		system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+
+        $cmdString = "$dirname/bin/PfamValidateABinitio --out_prefix combine2 --cpu $cpu --pfam_db $pfam_db $config{'PfamValidateABinitio'} combine.2.gff3 $genome 2> PfamValidateABinitio.1.log";
+        unless (-e "PfamValidateABinitio1.ok") {
             print STDERR (localtime) . ": CMD: $cmdString\n";
             system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-            open OUT, ">", "PfamValidateABinitio.ok" or die $!; close OUT;
+            open OUT, ">", "PfamValidateABinitio1.ok" or die $!; close OUT;
         }
         else {
             print STDERR "CMD(Skipped): $cmdString\n";
@@ -1102,7 +1107,7 @@ unless (-e "6.combineGeneModels.ok") {
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
     }
 
-    $cmdString = "$dirname/bin/GFF3Clear --gene_prefix $gene_prefix --genome $genome combine.1.gff3 combine2.filter_pass.gff3 > genome.gff3 2> GFF3Clear.log";
+    $cmdString = "$dirname/bin/GFF3Clear --gene_prefix $gene_prefix --genome $genome combine.1.gff3 combine2.filter_pass.gff3 > genome.gff3 2> GFF3Clear.1.log";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
@@ -1128,8 +1133,49 @@ unless (-e "6.combineGeneModels.ok") {
     }
 
     $cmdString = "$dirname/bin/remove_genes_in_repeats $config{'remove_genes_in_repeats'} --filtered_gene_models genome.completed.genes_in_repeats.gff3 ../0.RepeatMasker/genome.repeat.gff3 genome.completed.gff3 > genome.completed.rm_genes_in_repeats.gff3 2> remove_genes_in_repeats.txt";
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+    unless (-e "remove_genes_in_repeats.ok") {
+        print STDERR (localtime) . ": CMD: $cmdString\n";
+        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+        open OUT, ">", "remove_genes_in_repeats.ok" or die $!; close OUT;
+    }
+    else {
+        print STDERR "CMD(Skipped): $cmdString\n";
+    }
+
+    if ($pfam_db) {
+		$cmdString = "rm -rf command.hmmscan.list* hmmscan.tmp for_pfam_search.fasta";
+		print STDERR (localtime) . ": CMD: $cmdString\n";
+		system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+
+        $cmdString = "$dirname/bin/remove_short_genes $config{'remove_short_genes'} genome.completed.rm_genes_in_repeats.gff3 > genome.completed.rm_genes_in_repeats.remove_short_genes.gff3 2> genome.completed.rm_genes_in_repeats.short_genes.gff3";
+        unless (-e "remove_short_genes.ok") {
+            print STDERR (localtime) . ": CMD: $cmdString\n";
+            system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+            open OUT, ">", "remove_short_genes.ok" or die $!; close OUT;
+        }
+        else {
+            print STDERR "CMD(Skipped): $cmdString\n";
+        }
+
+        $cmdString = "$dirname/bin/PfamValidateABinitio --out_prefix remove_short_genes --cpu $cpu --pfam_db $pfam_db $config{'PfamValidateABinitio'} genome.completed.rm_genes_in_repeats.short_genes.gff3 $genome 2> PfamValidateABinitio.2.log";
+        unless (-e "PfamValidateABinitio2.ok") {
+            print STDERR (localtime) . ": CMD: $cmdString\n";
+            system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+            open OUT, ">", "PfamValidateABinitio2.ok" or die $!; close OUT;
+        }
+        else {
+            print STDERR "CMD(Skipped): $cmdString\n";
+        }
+
+        $cmdString = "$dirname/bin/GFF3Clear --gene_prefix $gene_prefix --genome $genome --no_attr_add genome.completed.rm_genes_in_repeats.remove_short_genes.gff3 remove_short_genes.filter_pass.gff3 > genome.filter.gff3 2> GFF3Clear.2.log";
+        print STDERR (localtime) . ": CMD: $cmdString\n";
+        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+    }
+    else {
+        $cmdString = "cp genome.completed.rm_genes_in_repeats.gff3 genome.filter.gff3";
+        print STDERR (localtime) . ": CMD: $cmdString\n";
+        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+    }
 
     chdir "../";
     open OUT, ">", "6.combineGeneModels.ok" or die $!; close OUT;
@@ -1179,7 +1225,7 @@ print STDERR "Step 7: OutPut " . "(" . (localtime) . ")" . "\n";
 chdir "../";
 $pwd = `pwd`; print STDERR "PWD: $pwd";
 
-$cmdString = "$dirname/bin/GFF3Clear --gene_prefix $gene_prefix --genome $genome --no_attr_add $out_prefix.tmp/6.combineGeneModels/genome.completed.rm_genes_in_repeats.gff3 > $out_prefix.gff3 2> GFF3Clear.1.log";
+$cmdString = "$dirname/bin/GFF3Clear --gene_prefix $gene_prefix --genome $genome --no_attr_add $out_prefix.tmp/6.combineGeneModels/genome.filter.gff3 > $out_prefix.gff3 2> GFF3Clear.1.log";
 #$cmdString = "cp $out_prefix.tmp/7.addAlternativeSplicing/genome.addAS.gff3 $out_prefix.gff3";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -1191,6 +1237,12 @@ system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 $cmdString = "$dirname/bin/GFF3Clear --gene_prefix ${gene_prefix}InRepeatRegion --genome $genome --no_attr_add $out_prefix.tmp/6.combineGeneModels/genome.completed.genes_in_repeats.gff3 > $out_prefix.InRepeatRegion_geneModels.gff3 2> GFF3Clear.3.log";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+
+if ($pfam_db) {
+    $cmdString = "$dirname/bin/GFF3Clear --gene_prefix ${gene_prefix}ShortGene --genome $genome --no_attr_add $out_prefix.tmp/6.combineGeneModels/remove_short_genes.filter_out.gff3 > $out_prefix.ShortCDS_geneModels.gff3 2> GFF3Clear.4.log";
+    print STDERR (localtime) . ": CMD: $cmdString\n";
+    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+}
 
 $cmdString = "$dirname/bin/gff3ToGtf.pl $genome $out_prefix.gff3 > $out_prefix.gtf 2> gff3ToGtf.log";
 print STDERR (localtime) . ": CMD: $cmdString\n";
