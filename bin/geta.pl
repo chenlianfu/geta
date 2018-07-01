@@ -1092,10 +1092,10 @@ unless (-e "6.combineGeneModels.ok") {
 		system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
         $cmdString = "$dirname/bin/PfamValidateABinitio --out_prefix combine2 --cpu $cpu --pfam_db $pfam_db $config{'PfamValidateABinitio'} combine.2.gff3 $genome 2> PfamValidateABinitio.1.log";
-        unless (-e "PfamValidateABinitio1.ok") {
+        unless (-e "PfamValidateABinitio.1.ok") {
             print STDERR (localtime) . ": CMD: $cmdString\n";
             system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-            open OUT, ">", "PfamValidateABinitio1.ok" or die $!; close OUT;
+            open OUT, ">", "PfamValidateABinitio.1.ok" or die $!; close OUT;
         }
         else {
             print STDERR "CMD(Skipped): $cmdString\n";
@@ -1164,10 +1164,10 @@ unless (-e "6.combineGeneModels.ok") {
         }
 
         $cmdString = "$dirname/bin/PfamValidateABinitio --out_prefix remove_short_genes --cpu $cpu --pfam_db $pfam_db $config{'PfamValidateABinitio'} genome.completed.rm_genes_in_repeats.short_genes.gff3 $genome 2> PfamValidateABinitio.2.log";
-        unless (-e "PfamValidateABinitio2.ok") {
+        unless (-e "PfamValidateABinitio.2.ok") {
             print STDERR (localtime) . ": CMD: $cmdString\n";
             system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-            open OUT, ">", "PfamValidateABinitio2.ok" or die $!; close OUT;
+            open OUT, ">", "PfamValidateABinitio.2.ok" or die $!; close OUT;
         }
         else {
             print STDERR "CMD(Skipped): $cmdString\n";
