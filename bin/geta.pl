@@ -72,7 +72,7 @@ Version: 2.4.2
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($RM_species, $RM_lib, $genome, $out_prefix, $pe1, $pe2, $single_end, $protein, $cpu, $trimmomatic, $hisat2, $strand_specific, $sam2transfrag, $ORF2bestGeneModels, $augustus_species, $pfam_db, $gene_prefix, $cmdString, $no_augustus_training_iteration, $config);
+my ($RM_species, $RM_lib, $genome, $out_prefix, $pe1, $pe2, $single_end, $protein, $cpu, $trimmomatic, $strand_specific, $sam2transfrag, $ORF2bestGeneModels, $augustus_species, $pfam_db, $gene_prefix, $cmdString, $no_augustus_training_iteration, $config);
 GetOptions(
     "RM_species:s" => \$RM_species,
     "RM_lib:s" => \$RM_lib,
@@ -443,7 +443,7 @@ unless (-e "2.hisat2.ok") {
     $cmdString = "hisat2 -x genome -p $cpu $input -S hisat2.sam $config{'hisat2'} 2> hisat2.log";
     unless (-e "hisat2.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
-        print STDERR "Warning: The HISAT2 parameter --rna-strandness may not set corretly !" if ( ($hisat2 =~ m/RF/) == 0 && $strand_specific);
+        print STDERR "Warning: The HISAT2 parameter --rna-strandness may not set corretly !" if ( ($config{'hisat2'} =~ m/RF/) == 0 && $strand_specific);
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
         open OUT, ">", "hisat2.ok" or die $!; close OUT;
     }
