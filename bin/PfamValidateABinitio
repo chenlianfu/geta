@@ -104,6 +104,7 @@ foreach my $gene_id (@id) {
 open FASTA, ">", "for_pfam_search.fasta" or die $!;
 open CMD, ">", "command.hmmscan.list" or die $!;
 mkdir "hmmscan.tmp" unless -e "hmmscan.tmp";
+my %gene_length_0;
 foreach my $gene_id (@id) {
 	my @mRNA_id = sort {$gene_CDS_length{$gene_id}{$b} <=> $gene_CDS_length{$gene_id}{$a}} keys %{$gene_CDS_length{$gene_id}};
 	my $gene_CDS_info = $gene_CDS_info{$gene_id}{$mRNA_id[0]};
@@ -133,11 +134,16 @@ foreach my $gene_id (@id) {
     print FASTA ">$gene_id\n$pep_seq\n";
 
     $pep_seq =~ s/\*$//;
-    open OUT, ">", "hmmscan.tmp/$gene_id.fasta" or die $!;
-    print OUT ">$gene_id\n$pep_seq\n";
-    close OUT;
-    print CMD "hmmscan -o hmmscan.tmp/$gene_id.txt --cpu 1 -E 1e-3 --domE 1e-3 --tblout hmmscan.tmp/$gene_id.tbl --domtblout hmmscan.tmp/$gene_id.domtbl $pfam_db hmmscan.tmp/$gene_id.fasta\n" unless exists $gene_long{$gene_id};
-	#print CMD "hmmscan -o hmmscan.tmp/$gene_id.txt --cpu 1 -E 1e-3 --domE 1e-3 --tblout hmmscan.tmp/$gene_id.tbl --domtblout hmmscan.tmp/$gene_id.domtbl $pfam_db hmmscan.tmp/$gene_id.fasta\n";
+	if (length($pep_seq) > 0) {
+		open OUT, ">", "hmmscan.tmp/$gene_id.fasta" or die $!;
+		print OUT ">$gene_id\n$pep_seq\n";
+		close OUT;
+		print CMD "hmmscan -o hmmscan.tmp/$gene_id.txt --cpu 1 -E 1e-3 --domE 1e-3 --tblout hmmscan.tmp/$gene_id.tbl --domtblout hmmscan.tmp/$gene_id.domtbl $pfam_db hmmscan.tmp/$gene_id.fasta\n" unless exists $gene_long{$gene_id};
+		#print CMD "hmmscan -o hmmscan.tmp/$gene_id.txt --cpu 1 -E 1e-3 --domE 1e-3 --tblout hmmscan.tmp/$gene_id.tbl --domtblout hmmscan.tmp/$gene_id.domtbl $pfam_db hmmscan.tmp/$gene_id.fasta\n";
+	}
+	else {
+		$gene_length_0{$gene_id} = 1;
+	}
 }
 close FASTA;
 close CMD;
@@ -148,6 +154,7 @@ system ($cmdString) == 0 or die "Failed to execute: $cmdString\n$!";
 my %gene_ok;
 foreach my $gene_id (@id) {
 	next if exists $gene_long{$gene_id};
+	next if exists $gene_length_0{$gene_id};
     open IN, "hmmscan.tmp/$gene_id.domtbl" or die $!;
 	my (%hmmscan_info, %hmm_length, $query_length);
     while (<IN>) {
