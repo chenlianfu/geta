@@ -30,7 +30,7 @@ TruSeq3-PE-2.fa:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:50 TOPHRE
 # note: the strand specific parameter -S will be set automatically if transcripts had introns which could determinated the direction.
 
 [TransDecoder.Predict]
---retain_long_orfs 900
+--retain_long_orfs_mode dynamic
 # note: when predicting the ORF of transfrag with single exon, the parameter --train will be set automatically to the result of transfrag with multi exons.
 
 [homolog_genewise]

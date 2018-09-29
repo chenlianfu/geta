@@ -41,7 +41,7 @@ BLAST分析参数：
 
 注意事项：
     1. 输入的GFF3文件不能包含可变剪接；
-    2. 程序调用blast.pl使用ncbi-blast+的BLASTP命令对protein序列进行比对；
+    2. 程序调用homolog_paraBlast使用ncbi-blast+的BLASTP命令对protein序列进行比对；
     3. 输出文件out.filter1.gff3是去除了相似性较高冗余基因模型的结果，out.filter2.gff3是进一步挑的最优基因模型（挑取完整基因的方法是检测其起始密码子和终止密码子）。
 
 USAGE
@@ -151,7 +151,7 @@ else {
     print STDERR "Skip CMD: $cmdString, for file $out_prefix.makeblastdb.ok exists\n\n";
 }
 
-$cmdString = "blast.pl blastp $out_prefix $out_prefix.proteins.fasta $min_evalue $cpu $out_prefix 6";
+$cmdString = "homolog_paraBlast blastp $out_prefix $out_prefix.proteins.fasta $min_evalue $cpu $out_prefix 6";
 unless (-e "$out_prefix.blast.ok") {
     print STDERR (localtime) . " CMD: $cmdString\n";
     system ($cmdString) == 0 or die "Failed to execute: $!\n";

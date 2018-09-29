@@ -7,7 +7,7 @@ Usage:
     7 parameters should be given, and the final result is outPrefix.xml or outPrefix.tab
 
 For example:
-    perl blast.pl blastp nr proteins.fa 1e-3 24 nr 5
+    perl homolog_paraBlast blastp nr proteins.fa 1e-3 24 nr 5
 
 USAGE
 if (@ARGV != 7){die $usage}

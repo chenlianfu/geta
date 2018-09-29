@@ -10,7 +10,7 @@ For Example:
     perl $0 best_candidates.gff3 best_candidates.fasta 24 0.80 > best_candidates.lowIdentity.gff3
 
     1. 程序对best_candidates.fasta进行分析，挑选出best_candidates.gff3中基因模型所对应的proteins序列，去除序列尾部可能存在的*字符，将序列信息写入到文件for_all_vs_all_blast.proteins.fasta中。
-    2. 程序调用了ncbi-blast构建蛋白质数据库，然后进行了all vs all blast（evalue阈值为1e-6）；需要ncbi blast +和程序同目录下的 blast.pl 程序支持。blast 运行过程中使用24个CPU线程做并行化计算。
+    2. 程序调用了ncbi-blast构建蛋白质数据库，然后进行了all vs all blast（evalue阈值为1e-6）；需要ncbi blast +和程序同目录下的 homolog_paraBlast 程序支持。blast 运行过程中使用24个CPU线程做并行化计算。
     3. 根据blast结果，若identity高于0.80，则去掉序列长度较短的蛋白质。
     4. 根据需要去除的蛋白信息，保留 best_candidates.gff3 中其余相似性较低的基因模型信息。
 
@@ -73,7 +73,7 @@ else {
     print STDERR "Skip CMD 1/2, for file makeblastdb.ok exists\n\n";
 }
 
-my $cmdString = "$path/blast.pl blastp protein $pwd/for_all_vs_all_blast.proteins.fasta 1e-6 $ARGV[2] out 6";
+my $cmdString = "$path/homolog_paraBlast blastp protein $pwd/for_all_vs_all_blast.proteins.fasta 1e-6 $ARGV[2] out 6";
 print STDERR "CMD 2/2: $cmdString\n";
 unless (-e "blast.ok") {
     system ($cmdString) == 0 or die "Failed to execute: $!\n";

@@ -223,7 +223,7 @@ my %config = (
     'hisat2' => '--min-intronlen 20 --max-intronlen 20000 --dta --score-min L,0.0,-0.4',
     'sam2transfrag' => '--fraction 0.05 --min_expressed_base_depth 2 --max_expressed_base_depth 50 --min_junction_depth 2 --max_junction_depth 50 --min_fragment_count_per_transfrags 10 --min_intron_length 20',
     'TransDecoder.LongOrfs' => '-m 100 -G universal',
-    'TransDecoder.Predict' => '--retain_long_orfs 900',
+    'TransDecoder.Predict' => '--retain_long_orfs_mode dynamic',
     'homolog_genewise' => '--coverage_ratio 0.4 --evalue 1e-9',
     'homolog_genewiseGFF2GFF3' => '--min_score 15 --gene_prefix genewise --filterMiddleStopCodon',
     'geneModels2AugusutsTrainingInput' => '--min_evalue 1e-9 --min_identity 0.8 --min_coverage_ratio 0.6 --min_cds_num 2 --min_cds_length 600 --min_cds_exon_ratio 0.60',
@@ -342,9 +342,9 @@ unless (-e "0.RepeatMasker.ok") {
     $cmdString = "$dirname/bin/maskedByGff.pl genome.repeat.gff3 $genome > genome.masked.fasta";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-    $cmdString = "$dirname/bin/maskedByGff.pl --mask_type softmask genome.repeat.gff3 $genome > genome.softmask.fasta";
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+	#$cmdString = "$dirname/bin/maskedByGff.pl --mask_type softmask genome.repeat.gff3 $genome > genome.softmask.fasta";
+	#print STDERR (localtime) . ": CMD: $cmdString\n";
+	#system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
     chdir "../";
     open OUT, ">", "0.RepeatMasker.ok" or die $!; close OUT;
 }
@@ -451,7 +451,7 @@ unless (-e "2.hisat2.ok") {
         print STDERR "CMD(Skipped): $cmdString\n";
     }
 
-    $cmdString = "samtools sort -@ $cpu -o hisat2.sorted.bam -O BAM hisat2.sam";
+    $cmdString = "samtools sort  -o hisat2.sorted.bam -O BAM hisat2.sam";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
@@ -499,7 +499,7 @@ unless (-e "3.transcript.ok") {
     close IN;
 
     # 批量并行化进行transcripts计算
-    $cmdString = "ParaFly -c command.sam2transfrag.list -CPU $cpu &> /dev/null";
+    $cmdString = "ParaFly -c command.sam2transfrag.list -CPU 4 &> /dev/null";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
@@ -534,20 +534,20 @@ unless (-e "3.transcript.ok") {
 
     # 对transcripts序列使用Transdecoder进行ORF分析
     unless (-e "TransDecoder.ok") {
-        $cmdString = "$dirname/TransDecoder-2.0.1/TransDecoder.LongOrfs $config{'TransDecoder.LongOrfs'} -t transfrag.strand.fasta -S &> /dev/null";
+        $cmdString = "$dirname/TransDecoder-v5.3.0/TransDecoder.LongOrfs $config{'TransDecoder.LongOrfs'} -t transfrag.strand.fasta -S &> /dev/null";
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-        $cmdString = "$dirname/TransDecoder-2.0.1/TransDecoder.Predict $config{'TransDecoder.Predict'}  -t transfrag.strand.fasta &> /dev/null";
+        $cmdString = "$dirname/TransDecoder-v5.3.0/TransDecoder.Predict $config{'TransDecoder.Predict'}  -t transfrag.strand.fasta &> /dev/null";
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
         $cmdString = "cp transfrag.strand.fasta.transdecoder.gff3 transfrag.transdecoder.gff3";
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
         unless ($strand_specific) {
-            $cmdString = "$dirname/TransDecoder-2.0.1/TransDecoder.LongOrfs $config{'TransDecoder.LongOrfs'} -t transfrag.noStrand.fasta &> /dev/null";
+            $cmdString = "$dirname/TransDecoder-v5.3.0/TransDecoder.LongOrfs $config{'TransDecoder.LongOrfs'} -t transfrag.noStrand.fasta &> /dev/null";
             print STDERR (localtime) . ": CMD: $cmdString\n";
             system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-            $cmdString = "$dirname/TransDecoder-2.0.1/TransDecoder.Predict $config{'TransDecoder.Predict'} -t transfrag.noStrand.fasta --train transfrag.strand.fasta.transdecoder_dir/longest_orfs.cds.top_500_longest &> /dev/null";
+            $cmdString = "$dirname/TransDecoder-v5.3.0/TransDecoder.Predict $config{'TransDecoder.Predict'} -t transfrag.noStrand.fasta --train transfrag.strand.fasta.transdecoder_dir/longest_orfs.cds.top_500_longest &> /dev/null";
             print STDERR (localtime) . ": CMD: $cmdString\n";
             system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
             $cmdString = "cat transfrag.noStrand.fasta.transdecoder.gff3 >> transfrag.transdecoder.gff3";
@@ -557,16 +557,16 @@ unless (-e "3.transcript.ok") {
         open OUT, ">", "TransDecoder.ok" or die $!; close OUT;
     }
     else {
-        $cmdString = "$dirname/TransDecoder-2.0.1/TransDecoder.LongOrfs $config{'TransDecoder.LongOrfs'} -t transfrag.strand.fasta -S &> /dev/null";
+        $cmdString = "$dirname/TransDecoder-v5.3.0/TransDecoder.LongOrfs $config{'TransDecoder.LongOrfs'} -t transfrag.strand.fasta -S &> /dev/null";
         print STDERR "CMD(Skipped): $cmdString\n";
-        $cmdString = "$dirname/TransDecoder-2.0.1/TransDecoder.Predict $config{'TransDecoder.Predict'} -t transfrag.strand.fasta &> /dev/null";
+        $cmdString = "$dirname/TransDecoder-v5.3.0/TransDecoder.Predict $config{'TransDecoder.Predict'} -t transfrag.strand.fasta &> /dev/null";
         print STDERR "CMD(Skipped): $cmdString\n";
         $cmdString = "cp transfrag.strand.fasta.transdecoder.gff3 transfrag.transdecoder.gff3";
         print STDERR "CMD(Skipped): $cmdString\n";
         unless ($strand_specific) {
-            $cmdString = "$dirname/TransDecoder-2.0.1/TransDecoder.LongOrfs $config{'TransDecoder.LongOrfs'} -t transfrag.noStrand.fasta &> /dev/null";
+            $cmdString = "$dirname/TransDecoder-v5.3.0/TransDecoder.LongOrfs $config{'TransDecoder.LongOrfs'} -t transfrag.noStrand.fasta &> /dev/null";
             print STDERR "CMD(Skipped): $cmdString\n";
-            $cmdString = "$dirname/TransDecoder-2.0.1/TransDecoder.Predict $config{'TransDecoder.Predict'} -t transfrag.noStrand.fasta --train transfrag.strand.fasta.transdecoder_dir/longest_orfs.cds.top_500_longest &> /dev/null";
+            $cmdString = "$dirname/TransDecoder-v5.3.0/TransDecoder.Predict $config{'TransDecoder.Predict'} -t transfrag.noStrand.fasta --train transfrag.strand.fasta.transdecoder_dir/longest_orfs.cds.top_500_longest &> /dev/null";
             print STDERR "CMD(Skipped): $cmdString\n";
             $cmdString = "cat transfrag.noStrand.fasta.transdecoder.gff3 >> transfrag.transdecoder.gff3";
             print STDERR "CMD(Skipped): $cmdString\n";
@@ -800,7 +800,7 @@ unless (-e "5.augustus.ok") {
         $segmentSize = $overlapSize * 50;
     }
     # 第一次 Augustus gene prediction
-    $cmdString = "$dirname/bin/paraAugusutusWithHints $config{'paraAugusutusWithHints'} --species $augustus_species --cpu $cpu --segmentSize $segmentSize --overlapSize $overlapSize --tmp_dir aug_para_with_hints.tmp1  ../0.RepeatMasker/genome.softmask.fasta hints.gff > augustus.1.gff3";
+    $cmdString = "$dirname/bin/paraAugusutusWithHints $config{'paraAugusutusWithHints'} --species $augustus_species --cpu $cpu --segmentSize $segmentSize --overlapSize $overlapSize --tmp_dir aug_para_with_hints.tmp1  ../0.RepeatMasker/genome.masked.fasta hints.gff > augustus.1.gff3";
     unless (-e "first_augustus.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -992,7 +992,7 @@ unless (-e "5.augustus.ok") {
                 }
 
                 # Augustus gene prediction
-                $cmdString = "$dirname/bin/paraAugusutusWithHints $config{'paraAugusutusWithHints'} --species $augustus_species --cpu $cpu --segmentSize $segmentSize --overlapSize $overlapSize --tmp_dir aug_para_with_hints.tmp2 ../0.RepeatMasker/genome.softmask.fasta hints.gff > augustus.2.gff3";
+                $cmdString = "$dirname/bin/paraAugusutusWithHints $config{'paraAugusutusWithHints'} --species $augustus_species --cpu $cpu --segmentSize $segmentSize --overlapSize $overlapSize --tmp_dir aug_para_with_hints.tmp2 ../0.RepeatMasker/genome.masked.fasta hints.gff > augustus.2.gff3";
                 print STDERR (localtime) . ": CMD: $cmdString\n";
                 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
@@ -1043,7 +1043,7 @@ unless (-e "5.augustus.ok") {
                 }
 
                 # Augustus gene prediction
-                $cmdString = "$dirname/bin/paraAugusutusWithHints $config{'paraAugusutusWithHints'} --species $augustus_species --cpu $cpu --segmentSize $segmentSize --overlapSize $overlapSize --tmp_dir aug_para_with_hints.tmp2 ../0.RepeatMasker/genome.softmask.fasta hints.gff > augustus.2.gff3";
+                $cmdString = "$dirname/bin/paraAugusutusWithHints $config{'paraAugusutusWithHints'} --species $augustus_species --cpu $cpu --segmentSize $segmentSize --overlapSize $overlapSize --tmp_dir aug_para_with_hints.tmp2 ../0.RepeatMasker/genome.masked.fasta hints.gff > augustus.2.gff3";
                 print STDERR (localtime) . ": CMD: $cmdString\n";
                 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
