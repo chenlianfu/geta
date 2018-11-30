@@ -76,69 +76,75 @@ foreach my $query (keys %stats) {
             $strand = "minus" if $1 > $2;
             @evalue = sort {$a <=> $b} @evalue;
             @score = sort {$b <=> $a} @score;
-            $result{$subject}{$region}{$query}{"coverage"} = $coverage;
-            $result{$subject}{$region}{$query}{"evalue"} = $evalue[0];
-            $result{$subject}{$region}{$query}{"score"} = $score[0];
-            $result{$subject}{$region}{$query}{"strand"} = $strand;
+            $result{$subject}{$strand}{$region}{$query}{"coverage"} = $coverage;
+            $result{$subject}{$strand}{$region}{$query}{"evalue"} = $evalue[0];
+            $result{$subject}{$strand}{$region}{$query}{"score"} = $score[0];
+            $result{$subject}{$strand}{$region}{$query}{"strand"} = $strand;
+			#print "T1\t$subject\t$region\t$query\t$coverage\t$evalue[0]\t$score[0]\t$strand\n";
         }
     }
 }
 
 my %intergration1;
 foreach my $subject (sort keys %result) {
-    foreach my $region (sort {$a <=> $b} keys %{$result{$subject}}) {
-        foreach my $query (sort keys %{$result{$subject}{$region}}) {
-            my $coverage = $result{$subject}{$region}{$query}{"coverage"};
-            my $evalue = $result{$subject}{$region}{$query}{"evalue"};
-            my $score = $result{$subject}{$region}{$query}{"score"};
-            my $strand = $result{$subject}{$region}{$query}{"strand"};
-            if ($coverage >= $ARGV[2] && $evalue <= $ARGV[3]) {
-                $intergration1{$subject}{$region}{"$query\t$strand\t$coverage\t$evalue\t$score"} = 1;
-            }
-            #print "$subject\t$region\t$query\t$strand\t$coverage\t$evalue\t$score\n";
+	foreach my $strand (sort keys %{$result{$subject}}) {
+		foreach my $region (sort {$a <=> $b} keys %{$result{$subject}{$strand}}) {
+			foreach my $query (sort keys %{$result{$subject}{$strand}{$region}}) {
+				my $coverage = $result{$subject}{$strand}{$region}{$query}{"coverage"};
+				my $evalue = $result{$subject}{$strand}{$region}{$query}{"evalue"};
+				my $score = $result{$subject}{$strand}{$region}{$query}{"score"};
+				if ($coverage >= $ARGV[2] && $evalue <= $ARGV[3]) {
+					$intergration1{$subject}{$strand}{$region}{"$query\t$strand\t$coverage\t$evalue\t$score"} = 1;
+					#print "T2:\t$subject\t$region\t$query\t$strand\t$coverage\t$evalue\t$score\n";
+				}
+			}
         }
     }
 }
 
 my %intergration;
 foreach my $subject (sort keys %intergration1) {
-    my @region = sort {$a <=> $b} keys %{$intergration1{$subject}};
+	foreach my $strand (sort keys %{$intergration1{$subject}}) {
+		my @region = sort {$a <=> $b} keys %{$intergration1{$subject}{$strand}};
 
-    my %aligments;
-    my $first_region = shift @region;
-    foreach (keys %{$intergration1{$subject}{$first_region}}) {
-        $aligments{$_} = 1;
-    }
-    my ($start, $end) = ($1, $2) if $first_region =~ m/(\d+)\t(\d+)/;
-    foreach my $region (@region) {
-        $region =~ m/(\d+)\t(\d+)/;
-        if ($1 <= $end) {
-            $end = $2 if $end < $2;
-            foreach (keys %{$intergration1{$subject}{$region}}) { $aligments{$_} = 1; }
-        }
-        else {
-            my %sort;
-            foreach (keys %aligments) {
-                m/(\S+)$/;
-                $sort{$_} = $1;
-            }
-            my @aligments =  sort {$sort{$b} <=> $sort{$a}} keys %aligments;
-            $intergration{$subject}{"$start\t$end"} = $aligments[0];
-            #print "$subject\t$start\t$end\t$aligments[0]\n";
-            %aligments = ();
-            foreach (keys %{$intergration1{$subject}{$region}}) { $aligments{$_} = 1; }
-            ($start, $end) = ($1, $2);
-        }
-    }
-    my %sort;
-    foreach (keys %aligments) { m/(\S+)$/; $sort{$_} = $1; }
-    my @aligments =  sort {$sort{$b} <=> $sort{$a}} keys %aligments;
-    $intergration{$subject}{"$start\t$end"} = $aligments[0];
+		my %aligments;
+		my $first_region = shift @region;
+		foreach (keys %{$intergration1{$subject}{$strand}{$first_region}}) {
+			$aligments{$_} = 1;
+		}
+		my ($start, $end) = ($1, $2) if $first_region =~ m/(\d+)\t(\d+)/;
+		foreach my $region (@region) {
+			$region =~ m/(\d+)\t(\d+)/;
+			if ($1 <= $end) {
+			    $end = $2 if $end < $2;
+			    foreach (keys %{$intergration1{$subject}{$strand}{$region}}) { $aligments{$_} = 1; }
+			}
+			else {
+				my %sort;
+				foreach (keys %aligments) {
+					m/(\S+)$/;
+					$sort{$_} = $1;
+				}
+				my @aligments =  sort {$sort{$b} <=> $sort{$a}} keys %aligments;
+				$intergration{$subject}{$strand}{"$start\t$end"} = $aligments[0];
+				#print "T3:\t$subject\t$start\t$end\t$aligments[0]\n";
+				%aligments = ();
+				foreach (keys %{$intergration1{$subject}{$strand}{$region}}) { $aligments{$_} = 1; }
+				($start, $end) = ($1, $2);
+			}
+		}
+		my %sort;
+		foreach (keys %aligments) { m/(\S+)$/; $sort{$_} = $1; }
+		my @aligments =  sort {$sort{$b} <=> $sort{$a}} keys %aligments;
+		$intergration{$subject}{$strand}{"$start\t$end"} = $aligments[0];
+	}
 }
 
 foreach my $subject (sort keys %intergration) {
-    foreach (sort {$a <=> $b} keys %{$intergration{$subject}}) {
-            print "$subject\t$_\t$intergration{$subject}{$_}\n";
+	foreach my $strand (sort keys %{$intergration{$subject}}) {
+		foreach (sort {$a <=> $b} keys %{$intergration{$subject}{$strand}}) {
+            print "$subject\t$_\t$intergration{$subject}{$strand}{$_}\n";
+		}
     }
 }
 
