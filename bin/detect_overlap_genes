@@ -1,0 +1,66 @@
+#!/usr/bin/perl
+use strict;
+use Getopt::Long;
+
+my $usage = <<USAGE;
+Usage:
+    $0 [options] genome.gff3 > overlap_genes.txt
+
+    基因预测完毕后，有些基因在基因组同一侧链上有重叠。比如AUGUSTUS预测了两个CDS区没有重叠的基因，而转录组测序数据得到的cDNA序列却同时跨跨这两个临近的基因。GETA软件在进行UTR添加时，一个转录本序列仅得到一个ORF的话，GETA则仅将UTR分配给对应ORF的基因，另外一个基因就没有添加UTR信息（转录本序列预测的ORF和AUGUSTUS预测基因的CDS匹配，才进行UTR的添加，以提高准确性）。
+    这两个临近的基因由于不具有共同的CDS区，其蛋白序列差异大，一般具有不同的功能，GETA软件认为其属于两个不同的基因，并没有算作一个基因不同的可变剪接。此时，可以考虑使用本程序检测重叠基因具体信息。
+    程序将结果信息输出到标准输出。结果信息分6列，表示有重叠的两个基因的信息。
+
+    --ratio <float>    default: 0.10
+    若基因组序列同一側链上两个相邻基因重叠部分长度占较短基因序列比例不低于此阈值，则认为两个基因有重叠。
+
+USAGE
+if (@ARGV==0){die $usage}
+
+my $ratio;
+GetOptions(
+    "ratio:f" => \$ratio,
+);
+$ratio ||= 0.10;
+
+open IN, $ARGV[0] or die "Can not open file $ARGV[0], $!\n";
+my %gene;
+while (<IN>) {
+    if (m/\tgene\t/) {
+        @_ = split /\t/;
+        my $id = $1 if m/ID=([^;\s]+)/;
+        $gene{$_[0]}{$_[6]}{"$_[3]\t$_[4]"} = $id;
+    }
+}
+close IN;
+
+my %stats;
+foreach my $chr (keys %gene) {
+    foreach my $strand (keys %{$gene{$chr}}) {
+        my @region = sort {$a <=> $b} keys %{$gene{$chr}{$strand}};
+        my ($start, $end) = split /\t/, $region[0];
+        shift @region;
+        foreach (@region) {
+            #print STDERR "$chr\t$strand\t$_\t$start\t$end\n";
+            @_ = split /\t/;
+            if ($_[0] <= $end && $_[1] >= $start) {
+                my $overlap_length = $end - $_[0] + 1;
+                $overlap_length = $_[1] - $_[0] + 1 if $_[1] < $end;
+                my $length = $end - $start + 1;
+                $length = ($_[1] - $_[0] + 1) if $length > ($_[1] - $_[0] + 1);
+                my $overlap_ratio = $overlap_length / $length;
+                #print STDERR "$chr\t$strand\t$_\t$start\t$end\t$overlap_length\t$length\n";
+                if ($overlap_ratio >= $ratio) {
+                    my $out = "$chr\t$strand\t" . $gene{$chr}{$strand}{"$start\t$end"} . "\t$start\t$end\t$gene{$chr}{$strand}{$_}\t$_\t$overlap_ratio";
+                    $stats{$chr}{$out} = $start;
+                }
+            }
+            ($start, $end) = @_;
+        }
+    }
+}
+
+foreach my $chr (sort keys %stats) {
+    foreach (sort {$stats{$chr}{$a} <=> $stats{$chr}{$b}} keys %{$stats{$chr}}) {
+        print "$_\n";
+    }
+}

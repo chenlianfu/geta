@@ -55,6 +55,7 @@ while (<IN>) {
         $aug_gene = $1;
         push @aug_gene, $aug_gene;
         $aug_gene_info{$aug_gene} = $_;
+		next;
     }
     elsif (m/\tmRNA\t.*ID=([^;\s]+)/) {
         $id = $1;
@@ -731,10 +732,11 @@ sub add_UTR {
             foreach my $line (split /\n/, $transfrag_info) {
                 @_ = split /\t/, $line;
                 if ($_[2] eq "CDS") {
-                    if ($_[3] <= $utr5_cds[0] && $_[4] >= $utr5_cds[1]) {
+					# 转录本预测的CDS能和AUGUSTUS预测的首端第一个CDS有重叠，前者起始位点一般等于后者的起始位点。AUGUSTUS经常预测的起始密码子可能靠后，导致前者起始位点更小。
+                    if ($_[3] <= $utr5_cds[0] && $_[4] >= $utr5_cds[0]) {
                         $utr5_ok = 1;
                     }
-                    if ($_[3] <= $utr3_cds[0] && $_[4] >= $utr3_cds[1]) {
+                    if ($_[3] <= $utr3_cds[1] && $_[4] >= $utr3_cds[1]) {
                         $utr3_ok = 1;
                     }
                 }
@@ -748,8 +750,8 @@ sub add_UTR {
             if ($utr5_ok == 1) {
                 foreach (@transfrag_exon) {
                     @_ = split /\t/;
-                    if ($_[0] <= $utr5_cds[1]) {
-                        if ($_[1] > $utr5_cds[1]) {
+                    if ($_[0] <= $utr5_cds[0]) {
+                        if ($_[1] >= $utr5_cds[0]) {
                             $gff3_out{$gene_id}{"exon"}{"$_[0]\t$utr5_cds[1]"} = 1;
                         }
                         else {
@@ -763,8 +765,8 @@ sub add_UTR {
             if ($utr3_ok == 1) {
                 foreach (@transfrag_exon) {
                     @_ = split /\t/;
-                    if ($_[1] >= $utr3_cds[0]) {
-                        if ($_[0] < $utr5_cds[0]) {
+                    if ($_[1] >= $utr3_cds[1]) {
+                        if ($_[0] <= $utr5_cds[1]) {
                             $gff3_out{$gene_id}{"exon"}{"$utr5_cds[0]\t$_[1]"} = 1;
                         }
                         else {
@@ -793,7 +795,34 @@ sub add_UTR {
         print "$gff3_out{$gene_id}{'chr'}\t\.\texon\t$_\t\.\t$gff3_out{$gene_id}{'strand'}\t\.\tID=$gene_id.t1.exon;Parent=$gene_id.t1\n";
     }
 =cut
-    return %gff3_out;
+
+	my %gff3_exons;
+	# 若是单CDS基因，则可能生成两个重叠的exon信息，需要合并重叠的exons
+	foreach my $geneID (keys %gff3_out) {
+		my @exons = sort {$a <=> $b} keys %{$gff3_out{$geneID}{"exon"}};
+		my ($start, $end) = split /\t/, $exons[0];
+		shift @exons;
+		foreach (@exons) {
+			@_ = split /\t/, $_;
+			if ($_[0] <= $end && $_[1] >= $start) {
+				$end = $_[1] if $_[1] > $end;
+			}
+			else {
+				$gff3_exons{$geneID}{"exon"}{"$start\t$end"} = 1;
+				($start, $end) = @_;
+			}
+		}
+		$gff3_exons{$geneID}{"exon"}{"$start\t$end"} = 1;
+		delete $gff3_out{$geneID}{"exon"};
+	}
+
+	foreach my $geneID (keys %gff3_exons) {
+		foreach (keys %{$gff3_exons{$geneID}{"exon"}}) {
+			$gff3_out{$geneID}{"exon"}{$_} = 1;
+		}
+	}
+
+	return %gff3_out;
 }
 
 sub intron_support {

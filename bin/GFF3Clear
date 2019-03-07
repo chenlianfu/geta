@@ -94,7 +94,7 @@ foreach (@ARGV) {
                         @_ = split /\t/;
                         if ($_[1] >= $2 && $_[0] <= $3 && $gene_id ne $cds{$1}{$4}{$index}{$_}) {
                             $overlap{$gene_id}{$cds{$1}{$4}{$index}{$_}} = 1;
-							#print STDERR "$gene_id\t$2\t$3\t$cds{$1}{$4}{$index}{$_}\t$_[0]\t$_[1]\n";
+                            #print STDERR "$gene_id\t$2\t$3\t$cds{$1}{$4}{$index}{$_}\t$_[0]\t$_[1]\n";
                         }
                     }    
                 }
@@ -132,43 +132,43 @@ foreach (@ARGV) {
         shift @genes;
         foreach (@genes) {
             delete $gff_info{$_};
-			print STDERR "$cluster: delete $_\n";
+            print STDERR "$cluster: delete $_\n";
         }
     }
 
-	my @gene_id = keys %gff_info;
-	foreach my $gene_id (@gene_id) {
-		my $gff_info = $gff_info{$gene_id};
-		foreach (split /\n/, $gff_info) {
-			if (m/^(\S+?)\t.*\tCDS\t(\d+?)\t(\d+?)\t.*?\t(.*?)\t/) {
-				my $index1 = int($2 / 1000); 
-				my $index2 = int($3 / 1000); 
-				foreach my $index ( $index1 .. $index2 ) {
-					foreach (keys %{$CDS{$1}{$4}{$index}}) {
-						@_ = split /\t/;
-						if ($_[1] >= $2 && $_[0] <= $3 && $gene_id ne $CDS{$1}{$4}{$index}{$_}) {
-							delete $gff_info{$gene_id};
-							print STDERR "$gene_id\t$CDS{$1}{$4}{$index}{$_}: delete: $gene_id\n";
-						}
-					}
-				}
-			}
-		}
-	}
+    my @gene_id = keys %gff_info;
+    foreach my $gene_id (@gene_id) {
+        my $gff_info = $gff_info{$gene_id};
+        foreach (split /\n/, $gff_info) {
+            if (m/^(\S+?)\t.*\tCDS\t(\d+?)\t(\d+?)\t.*?\t(.*?)\t/) {
+                my $index1 = int($2 / 1000); 
+                my $index2 = int($3 / 1000); 
+                foreach my $index ( $index1 .. $index2 ) {
+                    foreach (keys %{$CDS{$1}{$4}{$index}}) {
+                        @_ = split /\t/;
+                        if ($_[1] >= $2 && $_[0] <= $3 && $gene_id ne $CDS{$1}{$4}{$index}{$_}) {
+                            delete $gff_info{$gene_id};
+                            print STDERR "$gene_id\t$CDS{$1}{$4}{$index}{$_}: delete: $gene_id\n";
+                        }
+                    }
+                }
+            }
+        }
+    }
 
-	foreach my $chr (keys %cds) {
-		foreach my $strand (keys %{$cds{$chr}}) {
-			foreach my $index (keys %{$cds{$chr}{$strand}}) {
-				foreach (keys %{$cds{$chr}{$strand}{$index}}) {
-					$CDS{$chr}{$strand}{$index}{$_} = $cds{$chr}{$strand}{$index}{$_};
-				}
-			}
-		}
-	}
+    foreach my $chr (keys %cds) {
+        foreach my $strand (keys %{$cds{$chr}}) {
+            foreach my $index (keys %{$cds{$chr}{$strand}}) {
+                foreach (keys %{$cds{$chr}{$strand}{$index}}) {
+                    $CDS{$chr}{$strand}{$index}{$_} = $cds{$chr}{$strand}{$index}{$_};
+                }
+            }
+        }
+    }
 
-	foreach (keys %gff_info) {
-		$gff{$_} = $gff_info{$_};
-	}
+    foreach (keys %gff_info) {
+        $gff{$_} = $gff_info{$_};
+    }
 }
 
 # 对基因按位置进行排序
@@ -361,6 +361,14 @@ sub addUTR {
                 elsif ($start == $_[0] && $end > $_[1]) {
                     my $utr_start = $_[1] + 1;
                     my $utr_end = $end;
+                    push @utr, "$utr_start\t$utr_end";
+                }
+                elsif ($start < $_[0] && $end > $_[1] && @cds == 1) {
+                    my $utr_start = $start;
+                    my $utr_end = $_[0] - 1;
+                    push @utr, "$utr_start\t$utr_end";
+                    $utr_start = $_[1] + 1;
+                    $utr_end = $end;
                     push @utr, "$utr_start\t$utr_end";
                 }
             }

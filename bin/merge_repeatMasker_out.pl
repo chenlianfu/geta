@@ -33,10 +33,20 @@ foreach (@ARGV) {
 
         my $ratio;
         if ($aaa[12] =~ m/\((\d+)\)/) {
-            $ratio = ($aaa[13] - $aaa[14] + 1) / ($1 + $aaa[13]);
+			if (($1 + $aaa[13]) == 0) {
+				$ratio = 0;
+			}
+			else {
+				$ratio = ($aaa[13] - $aaa[14] + 1) / ($1 + $aaa[13]);
+			}
         }
         elsif ($aaa[14] =~ m/\((\d+)\)/) {
-            $ratio = ($aaa[13] - $aaa[12] + 1) / ($aaa[13] + $1);
+			if (($aaa[13] + $1) == 0) {
+				$ratio = 0;
+			}
+			else {
+				$ratio = ($aaa[13] - $aaa[12] + 1) / ($aaa[13] + $1);
+			}
         }
         next if $ratio < $min_coverge_ratio;
 
