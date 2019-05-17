@@ -52,6 +52,7 @@ my (%gff, %sort1, %sort2, %sort3, %sort4, %CDS);
 foreach (@ARGV) {
     open IN, $_ or die $!;
     my (%gff_info, $id, %gene_length);
+	my $keep = 0;
     while (<IN>) {
         next if m/^#/;
         next if m/^\s*$/;
@@ -63,14 +64,22 @@ foreach (@ARGV) {
             $sort3{$id} = $_[4];
             $sort4{$id} = $_[6];
             $gene_length{$id} = $_[4] - $_[3] + 1;
+			$keep = 1;
         }
-        $gff_info{$id} .= $_;
+		elsif (! m/Parent=/) {
+			$keep = 0;
+		}
+        $gff_info{$id} .= $_ if $keep == 1;
     }
     close IN;
 
     my %cds;
     foreach my $gene_id (keys %gff_info) {
         my $gff_info = $gff_info{$gene_id};
+		unless ($gff_info =~ m/\tCDS\t/) {
+			delete $gff_info{$gene_id};
+			next;
+		}
         foreach (split /\n/, $gff_info) {
             if (m/^(\S+?)\t.*\tCDS\t(\d+?)\t(\d+?)\t.*?\t(.*?)\t/) {
                 my $index1 = int($2 / 1000); 
@@ -94,7 +103,7 @@ foreach (@ARGV) {
                         @_ = split /\t/;
                         if ($_[1] >= $2 && $_[0] <= $3 && $gene_id ne $cds{$1}{$4}{$index}{$_}) {
                             $overlap{$gene_id}{$cds{$1}{$4}{$index}{$_}} = 1;
-                            #print STDERR "$gene_id\t$2\t$3\t$cds{$1}{$4}{$index}{$_}\t$_[0]\t$_[1]\n";
+							#print STDERR "$gene_id\t$2\t$3\t$cds{$1}{$4}{$index}{$_}\t$_[0]\t$_[1]\n";
                         }
                     }    
                 }
@@ -132,43 +141,43 @@ foreach (@ARGV) {
         shift @genes;
         foreach (@genes) {
             delete $gff_info{$_};
-            print STDERR "$cluster: delete $_\n";
+			print STDERR "$cluster: delete $_\n";
         }
     }
 
-    my @gene_id = keys %gff_info;
-    foreach my $gene_id (@gene_id) {
-        my $gff_info = $gff_info{$gene_id};
-        foreach (split /\n/, $gff_info) {
-            if (m/^(\S+?)\t.*\tCDS\t(\d+?)\t(\d+?)\t.*?\t(.*?)\t/) {
-                my $index1 = int($2 / 1000); 
-                my $index2 = int($3 / 1000); 
-                foreach my $index ( $index1 .. $index2 ) {
-                    foreach (keys %{$CDS{$1}{$4}{$index}}) {
-                        @_ = split /\t/;
-                        if ($_[1] >= $2 && $_[0] <= $3 && $gene_id ne $CDS{$1}{$4}{$index}{$_}) {
-                            delete $gff_info{$gene_id};
-                            print STDERR "$gene_id\t$CDS{$1}{$4}{$index}{$_}: delete: $gene_id\n";
-                        }
-                    }
-                }
-            }
-        }
-    }
+	my @gene_id = keys %gff_info;
+	foreach my $gene_id (@gene_id) {
+		my $gff_info = $gff_info{$gene_id};
+		foreach (split /\n/, $gff_info) {
+			if (m/^(\S+?)\t.*\tCDS\t(\d+?)\t(\d+?)\t.*?\t(.*?)\t/) {
+				my $index1 = int($2 / 1000); 
+				my $index2 = int($3 / 1000); 
+				foreach my $index ( $index1 .. $index2 ) {
+					foreach (keys %{$CDS{$1}{$4}{$index}}) {
+						@_ = split /\t/;
+						if ($_[1] >= $2 && $_[0] <= $3 && $gene_id ne $CDS{$1}{$4}{$index}{$_}) {
+							delete $gff_info{$gene_id};
+							print STDERR "$gene_id\t$CDS{$1}{$4}{$index}{$_}: delete: $gene_id\n";
+						}
+					}
+				}
+			}
+		}
+	}
 
-    foreach my $chr (keys %cds) {
-        foreach my $strand (keys %{$cds{$chr}}) {
-            foreach my $index (keys %{$cds{$chr}{$strand}}) {
-                foreach (keys %{$cds{$chr}{$strand}{$index}}) {
-                    $CDS{$chr}{$strand}{$index}{$_} = $cds{$chr}{$strand}{$index}{$_};
-                }
-            }
-        }
-    }
+	foreach my $chr (keys %cds) {
+		foreach my $strand (keys %{$cds{$chr}}) {
+			foreach my $index (keys %{$cds{$chr}{$strand}}) {
+				foreach (keys %{$cds{$chr}{$strand}{$index}}) {
+					$CDS{$chr}{$strand}{$index}{$_} = $cds{$chr}{$strand}{$index}{$_};
+				}
+			}
+		}
+	}
 
-    foreach (keys %gff_info) {
-        $gff{$_} = $gff_info{$_};
-    }
+	foreach (keys %gff_info) {
+		$gff{$_} = $gff_info{$_};
+	}
 }
 
 # 对基因按位置进行排序
@@ -179,14 +188,16 @@ my $number;
 
 # 读取基因的exon和CDS信息，添加UTR信息。也适用于含有可变剪接的GFF3文件。
 foreach my $gene_id (@id) {
+	next unless $gene_id;
+    my $gff_info = $gff{$gene_id};
+	next unless $gff_info =~ m/\tCDS\t/;
     my $out;
     $number ++;
 
     # 对gene的ID进行修改
-    my $gff_info = $gff{$gene_id};
     my $id_out = $gene_prefix . 0 x ($total_number - (length $number)) . $number;
     $gff_info =~ s/(\tgene\t.*\tID=)$gene_id/$1$id_out/;
-    $gff_info =~ s/;?$/;/;
+    $gff_info =~ s/;?\n/;\n/;
     $gff_info =~ s/(\tgene\t.*)/${1}Source=$gene_id;/ unless $no_attr_add;
     my $gene_integrity = "incomplete";
 
@@ -209,6 +220,8 @@ foreach my $gene_id (@id) {
     # 对mRNA信息进行分析：验证是否完整、修改ID、添加UTR
     my $mRNA_number = 0;
     foreach (@mRNA_id) {
+        my $gff_mRNA = $gff_mRNA{$_};
+		next unless $gff_mRNA =~ m/\tCDS\t/;
         $mRNA_number ++;
 
         # 修改mRNA的ID和Parent信息。
@@ -219,7 +232,6 @@ foreach my $gene_id (@id) {
         $mRNA_line =~ s/\t([^\t]*)$/\tID=$transcript_id;Parent=$id_out;$1/;
 
         # 修改CDS和exon的ID和Parent信息。若没有exon信息，则根据CDS信息得到exon信息。
-        my $gff_mRNA = $gff_mRNA{$_};
         $gff_mRNA = &change_id($gff_mRNA, $transcript_id);
 
         # 进行基因完整性验证。
@@ -361,14 +373,6 @@ sub addUTR {
                 elsif ($start == $_[0] && $end > $_[1]) {
                     my $utr_start = $_[1] + 1;
                     my $utr_end = $end;
-                    push @utr, "$utr_start\t$utr_end";
-                }
-                elsif ($start < $_[0] && $end > $_[1] && @cds == 1) {
-                    my $utr_start = $start;
-                    my $utr_end = $_[0] - 1;
-                    push @utr, "$utr_start\t$utr_end";
-                    $utr_start = $_[1] + 1;
-                    $utr_end = $end;
                     push @utr, "$utr_start\t$utr_end";
                 }
             }

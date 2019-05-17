@@ -108,7 +108,7 @@ foreach my $gene_id (keys %gene) {
 #print "$total_gene_number\t$total_CDS_number\t$total_bp_number\n";
 
 # 进行positive分析
-my ($query_gene_number, $positive_gene_number, $query_CDS_number, $positive_CDS_number, $query_bp_number, $positive_bp_number, %positive_gene);
+my ($query_gene_number, $positive_gene_number, $query_CDS_number, $positive_CDS_number, $query_bp_number, $positive_bp_number, $positive_bp_number_ref, %positive_gene);
 foreach my $gene_id (keys %gene_query) {
     my $gene_desc = $gene_query{$gene_id};
     @_ = split /\t/, $gene_desc;
@@ -178,34 +178,48 @@ foreach my $gene_id (keys %gene_query) {
 		}
 	}
 
-	foreach my $target_gene_id (keys %target_gene_id) {
-		my @CDS_target = keys %{$gene_info{$target_gene_id}};
-		CDS_COMPARE: foreach my $CDS_target (@CDS_target) {
-			my $same = 0;
-			if ($strand eq "+") {
-				$CDS_target =~ s/\d+//;
-			}
-			elsif ($strand eq "-") {
-				$CDS_target =~ s/\d+$//;
-			}
-			foreach (keys %transcript_CDS) {
+    my (%positive_CDS, %positive_CDS_ref);
+	my $same = 0;
+	foreach (keys %transcript_CDS) {
+		my $transcript_CDS =  $_;
+		if ($strand eq "+") {
+			$_ =~ s/\d+//;
+		}
+		elsif ($strand eq "-") {
+			$_ =~ s/\d+$//;
+		}
+		my $transcript_CDS_for_validation = $_;
+
+		CDS_COMPARE: foreach my $target_gene_id (keys %target_gene_id) {
+			my @CDS_target = keys %{$gene_info{$target_gene_id}};
+			foreach my $CDS_target (@CDS_target) {
+				my $CDS_target_orig = $CDS_target;
 				if ($strand eq "+") {
-					$_ =~ s/\d+//;
+					$CDS_target =~ s/\d+//;
 				}
 				elsif ($strand eq "-") {
-					$_ =~ s/\d+$//;
+					$CDS_target =~ s/\d+$//;
 				}
-				if ($_ eq $CDS_target) {
+
+				if ($transcript_CDS_for_validation eq $CDS_target) {
 					$same = 1;
-					$positive_gene_number ++;
+					my @transcript_CDS = split /\n/, $transcript_CDS;
+					foreach (@transcript_CDS) {
+						$positive_CDS{$_} = 1;
+					}
+					foreach (split /\n/, $CDS_target_orig) {
+						$positive_CDS_ref{$_} = 1;
+					}
+
 					print STDERR "$gene_id\t$target_gene_id\n";
 					last CDS_COMPARE;
 				}
 			}
 		}
 	}
+	$positive_gene_number ++ if $same == 1;
 
-	my @bp_cds;
+	my %bp_cds;
 	foreach my $cds (keys %CDS) {
 		foreach (keys %target_CDS) {
 			@_ = split /\t/;
@@ -215,17 +229,23 @@ foreach my $gene_id (keys %gene_query) {
 				push @cds_region, @_;
 				push @cds_region, @cds;
 				@cds_region = sort {$a <=> $b} @cds_region;
-				push @bp_cds, "$cds_region[1]\t$cds_region[2]";
+				$bp_cds{"$cds_region[1]\t$cds_region[2]"} = 1;
 			}
 
 			if ($_ eq $cds) {
-				$positive_CDS_number ++;
+				$positive_CDS{$cds} = 1;
 				last;
 			}
 		}
 	}
+	$positive_CDS_number += keys %positive_CDS;
 
-	@bp_cds = sort {$a <=> $b} @bp_cds;
+	my (%bp_cds_query, %bp_cds_ref);
+	foreach (keys %bp_cds) { $bp_cds_query{$_} = 1; $bp_cds_ref{$_} = 1; }
+	foreach (keys %positive_CDS) { $bp_cds_query{$_} = 1; }
+	foreach (keys %positive_CDS_ref) { $bp_cds_ref{$_} = 1; }
+
+	my @bp_cds = sort {$a <=> $b} keys %bp_cds_query;
 	my ($start, $end) = split /\t/, $bp_cds[0];
 	$positive_bp_number += $end - $start + 1;
 	shift @bp_cds;
@@ -242,13 +262,31 @@ foreach my $gene_id (keys %gene_query) {
 			}
 		}
 	}
+
+	my @bp_cds = sort {$a <=> $b} keys %bp_cds_ref;
+	my ($start, $end) = split /\t/, $bp_cds[0];
+	$positive_bp_number_ref += $end - $start + 1;
+	shift @bp_cds;
+	foreach (@bp_cds) {
+		@_ = split /\t/, $_;
+		if ($_[0] > $end) {
+			$positive_bp_number_ref += $_[1] - $_[0] + 1;
+			($start, $end) = @_;
+		}
+		else { 
+			if ($_[1] > $end) {
+				$positive_bp_number_ref += $_[1] - $end;
+				$end = $_[1];
+			}
+		}
+	}
 }
 
 #print "$total_gene_number\t$total_CDS_number\t$total_bp_number\n";
 #print "$query_gene_number\t$positive_gene_number\t$query_CDS_number\t$positive_CDS_number\t$query_bp_number\t$positive_bp_number\n";
 my $sensitivity_gene = $positive_gene_number  * 100 / $total_gene_number;
 my $sensitivity_CDS = $positive_CDS_number * 100 / $total_CDS_number;
-my $sensitivity_bp = $positive_bp_number * 100 / $total_bp_number;
+my $sensitivity_bp = $positive_bp_number_ref * 100 / $total_bp_number;
 my $specificity_gene = $positive_gene_number * 100 / $query_gene_number;
 my $specificity_CDS = $positive_CDS_number * 100 / $query_CDS_number;
 my $specificity_bp = $positive_bp_number * 100 / $query_bp_number;

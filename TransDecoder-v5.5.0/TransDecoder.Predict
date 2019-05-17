@@ -23,7 +23,7 @@ use DelimParser;
 
 
 #my $VERSION = "__BLEEDING_EDGE__";
-my $VERSION = "5.3.0";
+my $VERSION = "5.5.0";
 
 my $RETAIN_LONG_ORFS_MIN_LENGTH = 1000000; # so essentially, off by default
 
@@ -66,15 +66,16 @@ my $usage = <<__EOUSAGE__;
 #
 #   --single_best_only                     Retain only the single best orf per transcript (prioritized by homology then orf length)
 #
+#   --output_dir | -O  <string>            output directory from the TransDecoder.LongOrfs step (default: basename( -t val ) + ".transdecoder_dir")
+#
 #   -G <string>                            genetic code (default: universal; see PerlDoc; options: Euplotes, Tetrahymena, Candida, Acetabularia, ...)
 #
 #   --no_refine_starts                     start refinement identifies potential start codons for 5' partial ORFs using a PWM, process on by default.
 #
 ##  Advanced options
-#  
 #    --train                                FASTA file with ORFs to train Markov Mod for protein identification; otherwise longest non-redundant ORFs used
 #
-#    -T <int>                               If no --train, top longest ORFs to train Markov Model (hexamer stats) (default: 500)
+#    -T <int>                            Top longest ORFs to train Markov Model (hexamer stats) (default: 500)
 #                                        Note, 10x this value are first selected for removing redundancies,
 #                                        and then this -T value of longest ORFs are selected from the non-redundant set.
 #  Genetic Codes
@@ -157,8 +158,10 @@ my $single_best_flag = 0;
 
 my $NO_REFINE_START_CODONS_FLAG = 0;
 
+my $output_dir;
 
 my $show_version_flag;
+
 
 &GetOptions( 't=s' => \$transcripts_file,
              'train:s' => \$train_file,
@@ -187,7 +190,8 @@ my $show_version_flag;
              'no_refine_starts' => \$NO_REFINE_START_CODONS_FLAG,
 
              'version' => \$show_version_flag,
-             
+
+             'output_dir|O=s' => \$output_dir,
                           
              );
 
@@ -232,7 +236,10 @@ main: {
         $transcripts_file = $uncompressed_transcripts_file;
     }
     
-    my $workdir = basename($transcripts_file) . ".transdecoder_dir"; 
+    my $workdir = $output_dir;
+    unless ($workdir) {
+        $workdir = basename($transcripts_file) . ".transdecoder_dir"; 
+    }
     
     unless (-d $workdir) {
         die "Error, cannot find directory: $workdir,  be sure to first run TransDecoder.LongOrfs before TransDecoder.Predict\n\n";
@@ -253,7 +260,7 @@ main: {
 
     ## Train a Markov model based on user-provided file or longest candidate CDS sequences, score all candidates, and select the final set.
     
-    my $top_cds_file;
+	my $top_cds_file;
 	if ($train_file) {
 		if (! -s $train_file) {
 			die "Error, cannot locate train file: $train_file";
@@ -262,6 +269,9 @@ main: {
 	}
 	else {
 		$top_cds_file = "$cds_file.top_${top_ORFs_train}_longest";
+	}
+
+    {
         
         # to speed things up only check for redundancy up to x the number of entries we want
         my $red_num = $top_ORFs_train * 10;
@@ -346,7 +356,7 @@ main: {
         $pipeliner->add_commands(new Command($cmd, "train_start_PWM.$checkpoint_hashcode.ok", "Training start codon pattern recognition"));
         
         my $revised_orf_gff3_file = "$target_final_file.revised_starts.gff3";
-        $cmd = "$UTIL_DIR/start_codon_refinement.pl --transcripts $transcripts_file --gff3_file $target_final_file > $revised_orf_gff3_file";
+        $cmd = "$UTIL_DIR/start_codon_refinement.pl --transcripts $transcripts_file --gff3_file $target_final_file --workdir $workdir > $revised_orf_gff3_file";
         $pipeliner->add_commands(new Command($cmd, "revise_starts.$checkpoint_hashcode.ok", "Refining start codon selections."));
                 
         $target_final_file = $revised_orf_gff3_file;
@@ -390,16 +400,16 @@ main: {
 
 ####
 sub process_cmd {
-	my ($cmd) = @_;
+    my ($cmd) = @_;
 
-	print "CMD: $cmd\n";
-	my $ret = system($cmd);
+    print "CMD: $cmd\n";
+    my $ret = system($cmd);
 
-	if ($ret) {
-		die "Error, cmd: $cmd died with ret $ret";
-	}
-	
-	return;
+    if ($ret) {
+        die "Error, cmd: $cmd died with ret $ret";
+    }
+    
+    return;
 
 }
 

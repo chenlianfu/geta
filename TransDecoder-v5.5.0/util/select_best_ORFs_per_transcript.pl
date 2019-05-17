@@ -13,6 +13,7 @@ use List::Util qw (max);
 use Getopt::Long qw(:config posix_default no_ignore_case bundling pass_through);
 require "overlapping_nucs.ph";
 
+srand(1234);
 
 my $min_length_auto_accept = 1000000; # infinity effectively
 
@@ -204,8 +205,7 @@ main: {
             
             @gene_entries = ($gene_entries[0]);
         }
-        
-        
+                
         foreach my $gene_entry (@gene_entries) {
             
             my $gene_obj = $gene_entry->{gene_obj};
@@ -249,7 +249,7 @@ sub parse_pfam_hits_file {
         die "Error, cannot find pfam hits file: $pfam_hits_file";
     }
 
-    print "PFAM output found and processing...\n";
+    print STDERR "PFAM output found ($pfam_hits_file) and processing...\n";
     # capture those proteins having pfam hits
     open (my $fh, $pfam_hits_file) or die "Error, cannot open file: $pfam_hits_file";
     while (my $ln=<$fh>) {
@@ -275,7 +275,7 @@ sub parse_blastp_hits_file {
     unless (-e $blastp_file) {
         die "Error, cannot find file $blastp_file";
     }
-
+    print STDERR "blastp output found ($blastp_file) and processing...\n";
     my %blastp_hits;
 
     open (my $fh, $blastp_file) or die "Error, cannot open file $blastp_file";
@@ -348,12 +348,12 @@ sub has_sufficient_overlap {
 
 
     my $gene_obj = $gene_entry->{gene_obj};
-    my ($lend, $rend) = sort {$a<=>$b} $gene_obj->get_coords();
+    my ($lend, $rend) = sort {$a<=>$b} $gene_obj->get_model_span();
     my $gene_len = $rend - $lend + 1; 
     
     foreach my $other_entry (@$other_entries_aref) {
-        my ($other_lend, $other_rend) = sort {$a<=>$b} $other_entry->{gene_obj}->get_coords();
-
+        my ($other_lend, $other_rend) = sort {$a<=>$b} $other_entry->{gene_obj}->get_model_span();
+        
         my $other_len = $other_rend - $other_lend + 1;
 
         if (&coordsets_overlap([$lend, $rend], [$other_lend, $other_rend])) {

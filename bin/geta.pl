@@ -120,7 +120,7 @@ else {
 }
 # 检测JAVA
 my $software_info = `java -version 2>&1`;
-if ($software_info =~ m/java version \"(1.(\d).*?)\"/) {
+if ($software_info =~ m/version \"(1.(\d).*?)\"/) {
     if ($2 == 8) {
         print STDERR "java:\tOK\n";
     }
@@ -367,7 +367,7 @@ unless (-e "1.trimmomatic.ok") {
             $number ++;
             my $code = "0" x ( length($pe_reads_num) - length($number) ) . $number;
             @_ = split /\t/;
-            $cmdString = "java -jar $dirname/Trimmomatic-0.36/trimmomatic-0.36.jar PE -threads $cpu $_[0] $_[1] reads$code.1.fastq reads$code.1.unpaired.fastq reads$code.2.fastq reads$code.2.unpaired.fastq ILLUMINACLIP:$dirname/Trimmomatic-0.36/adapters/$config{'trimmomatic'} &> trimmomatic.pe.log";
+            $cmdString = "java -jar $dirname/Trimmomatic-0.38/trimmomatic-0.38.jar PE -threads $cpu $_[0] $_[1] reads$code.1.fastq reads$code.1.unpaired.fastq reads$code.2.fastq reads$code.2.unpaired.fastq ILLUMINACLIP:$dirname/Trimmomatic-0.38/adapters/$config{'trimmomatic'} &> trimmomatic.pe.log";
             print STDERR (localtime) . ": CMD: $cmdString\n";
             system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
         }
@@ -390,7 +390,7 @@ unless (-e "1.trimmomatic.ok") {
             $number ++;
             my $code = "0" x ( length($se_reads_num) - length($number) ) . $number;
             @_ = split /\t/;
-            $cmdString = "java -jar $dirname/Trimmomatic-0.36/trimmomatic-0.36.jar SE -threads $cpu $single_end reads$code.fastq ILLUMINACLIP:$dirname/Trimmomatic-0.36/adapters/$config{'trimmomatic'} &> trimmomatic.single.log";
+            $cmdString = "java -jar $dirname/Trimmomatic-0.38/trimmomatic-0.38.jar SE -threads $cpu $single_end reads$code.fastq ILLUMINACLIP:$dirname/Trimmomatic-0.38/adapters/$config{'trimmomatic'} &> trimmomatic.single.log";
             print STDERR (localtime) . ": CMD: $cmdString\n";
             system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
         }
@@ -534,20 +534,20 @@ unless (-e "3.transcript.ok") {
 
     # 对transcripts序列使用Transdecoder进行ORF分析
     unless (-e "TransDecoder.ok") {
-        $cmdString = "$dirname/TransDecoder-v5.3.0/TransDecoder.LongOrfs $config{'TransDecoder.LongOrfs'} -t transfrag.strand.fasta -S &> /dev/null";
+        $cmdString = "$dirname/TransDecoder-v5.5.0/TransDecoder.LongOrfs $config{'TransDecoder.LongOrfs'} -t transfrag.strand.fasta -S &> /dev/null";
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-        $cmdString = "$dirname/TransDecoder-v5.3.0/TransDecoder.Predict $config{'TransDecoder.Predict'}  -t transfrag.strand.fasta &> /dev/null";
+        $cmdString = "$dirname/TransDecoder-v5.5.0/TransDecoder.Predict $config{'TransDecoder.Predict'}  -t transfrag.strand.fasta &> /dev/null";
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
         $cmdString = "cp transfrag.strand.fasta.transdecoder.gff3 transfrag.transdecoder.gff3";
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
         unless ($strand_specific) {
-            $cmdString = "$dirname/TransDecoder-v5.3.0/TransDecoder.LongOrfs $config{'TransDecoder.LongOrfs'} -t transfrag.noStrand.fasta &> /dev/null";
+            $cmdString = "$dirname/TransDecoder-v5.5.0/TransDecoder.LongOrfs $config{'TransDecoder.LongOrfs'} -t transfrag.noStrand.fasta &> /dev/null";
             print STDERR (localtime) . ": CMD: $cmdString\n";
             system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-            $cmdString = "$dirname/TransDecoder-v5.3.0/TransDecoder.Predict $config{'TransDecoder.Predict'} -t transfrag.noStrand.fasta --train transfrag.strand.fasta.transdecoder_dir/longest_orfs.cds.top_500_longest &> /dev/null";
+            $cmdString = "$dirname/TransDecoder-v5.5.0/TransDecoder.Predict $config{'TransDecoder.Predict'} -t transfrag.noStrand.fasta --train transfrag.strand.fasta.transdecoder_dir/longest_orfs.cds.top_500_longest &> /dev/null";
             print STDERR (localtime) . ": CMD: $cmdString\n";
             system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
             $cmdString = "cat transfrag.noStrand.fasta.transdecoder.gff3 >> transfrag.transdecoder.gff3";
@@ -557,16 +557,16 @@ unless (-e "3.transcript.ok") {
         open OUT, ">", "TransDecoder.ok" or die $!; close OUT;
     }
     else {
-        $cmdString = "$dirname/TransDecoder-v5.3.0/TransDecoder.LongOrfs $config{'TransDecoder.LongOrfs'} -t transfrag.strand.fasta -S &> /dev/null";
+        $cmdString = "$dirname/TransDecoder-v5.5.0/TransDecoder.LongOrfs $config{'TransDecoder.LongOrfs'} -t transfrag.strand.fasta -S &> /dev/null";
         print STDERR "CMD(Skipped): $cmdString\n";
-        $cmdString = "$dirname/TransDecoder-v5.3.0/TransDecoder.Predict $config{'TransDecoder.Predict'} -t transfrag.strand.fasta &> /dev/null";
+        $cmdString = "$dirname/TransDecoder-v5.5.0/TransDecoder.Predict $config{'TransDecoder.Predict'} -t transfrag.strand.fasta &> /dev/null";
         print STDERR "CMD(Skipped): $cmdString\n";
         $cmdString = "cp transfrag.strand.fasta.transdecoder.gff3 transfrag.transdecoder.gff3";
         print STDERR "CMD(Skipped): $cmdString\n";
         unless ($strand_specific) {
-            $cmdString = "$dirname/TransDecoder-v5.3.0/TransDecoder.LongOrfs $config{'TransDecoder.LongOrfs'} -t transfrag.noStrand.fasta &> /dev/null";
+            $cmdString = "$dirname/TransDecoder-v5.5.0/TransDecoder.LongOrfs $config{'TransDecoder.LongOrfs'} -t transfrag.noStrand.fasta &> /dev/null";
             print STDERR "CMD(Skipped): $cmdString\n";
-            $cmdString = "$dirname/TransDecoder-v5.3.0/TransDecoder.Predict $config{'TransDecoder.Predict'} -t transfrag.noStrand.fasta --train transfrag.strand.fasta.transdecoder_dir/longest_orfs.cds.top_500_longest &> /dev/null";
+            $cmdString = "$dirname/TransDecoder-v5.5.0/TransDecoder.Predict $config{'TransDecoder.Predict'} -t transfrag.noStrand.fasta --train transfrag.strand.fasta.transdecoder_dir/longest_orfs.cds.top_500_longest &> /dev/null";
             print STDERR "CMD(Skipped): $cmdString\n";
             $cmdString = "cat transfrag.noStrand.fasta.transdecoder.gff3 >> transfrag.transdecoder.gff3";
             print STDERR "CMD(Skipped): $cmdString\n";

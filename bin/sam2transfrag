@@ -512,7 +512,7 @@ sub find_isoforms {
     }
 
     my (@site, %depth);
-    foreach (sort {$a <=> $b} keys %siteee) {
+    foreach (sort {$a <=> $b} sort %siteee) {
         if ($depth_raw{$_} >= $expressed_base_depth_threshold) {
             push @site, $_;
             $depth{$_} = $depth_raw{$_};
