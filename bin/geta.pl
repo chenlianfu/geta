@@ -28,7 +28,10 @@ Parameters:
     homologous protein sequences (derived from multiple species would be recommended) file in fasta format.
 
     --augustus_species <string>
-    species identifier for Augustus. the relative hmm files of augustus training will be created with this prefix.
+    species identifier for Augustus. the relative hmm files of augustus training will be created with this prefix. if the relative hmm files of augustus training exists, the program will delete the hmm files directory firstly, and then start the augustus training steps.
+
+    --use_existed_augustus_species <string>
+    species identifier for Augustus. This parameter is conflict with --augustus_species. When this parameter set, the --augustus_species parameter will be invalid, and the relative hmm files of augustus training should exists, and the augustus training step will be skipped (this will save lots of runing time).
 
 [other]
     --out_prefix <string>    default: out
@@ -72,7 +75,7 @@ Version: 2.4.2
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($RM_species, $RM_lib, $genome, $out_prefix, $pe1, $pe2, $single_end, $protein, $cpu, $trimmomatic, $strand_specific, $sam2transfrag, $ORF2bestGeneModels, $augustus_species, $pfam_db, $gene_prefix, $cmdString, $no_augustus_training_iteration, $config);
+my ($RM_species, $RM_lib, $genome, $out_prefix, $pe1, $pe2, $single_end, $protein, $cpu, $trimmomatic, $strand_specific, $sam2transfrag, $ORF2bestGeneModels, $augustus_species, $pfam_db, $gene_prefix, $cmdString, $no_augustus_training_iteration, $config, $use_existed_augustus_species);
 GetOptions(
     "RM_species:s" => \$RM_species,
     "RM_lib:s" => \$RM_lib,
@@ -85,6 +88,7 @@ GetOptions(
     "cpu:s" => \$cpu,
     "strand_specific!" => \$strand_specific,
     "augustus_species:s" => \$augustus_species,
+    "use_existed_augustus_species:s" => \$use_existed_augustus_species,
     "pfam_db:s" => \$pfam_db,
     "gene_prefix:s" => \$gene_prefix,
     "no_augustus_training_iteration!" => \$no_augustus_training_iteration,
@@ -180,7 +184,16 @@ die "No genome fasta input\n" unless $genome;
 $genome =~ s/^/$pwd\// unless $genome =~ m/^\//;
 die "No homolog fasta input\n" unless $protein;
 $protein  =~ s/^/$pwd\// unless $protein =~ m/^\//;
-die "No Augustus species provided\n" unless $augustus_species;
+die "No Augustus species provided\n" unless ($augustus_species or $use_existed_augustus_species);
+my $species_config_dir = `echo \$AUGUSTUS_CONFIG_PATH`;
+chomp($species_config_dir);
+$species_config_dir = "$species_config_dir/species/$use_existed_augustus_species";
+if (-e $species_config_dir) {
+    $augustus_species = $use_existed_augustus_species;
+}
+else {
+    die "The AUGUSUTS HMM files of $use_existed_augustus_species does not exists!\n";
+}
 if ($RM_lib) {
     $RM_lib =~ s/^/$pwd\// unless $RM_lib =~ m/^\//;
 }
@@ -342,9 +355,9 @@ unless (-e "0.RepeatMasker.ok") {
     $cmdString = "$dirname/bin/maskedByGff.pl genome.repeat.gff3 $genome > genome.masked.fasta";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-	#$cmdString = "$dirname/bin/maskedByGff.pl --mask_type softmask genome.repeat.gff3 $genome > genome.softmask.fasta";
-	#print STDERR (localtime) . ": CMD: $cmdString\n";
-	#system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+    #$cmdString = "$dirname/bin/maskedByGff.pl --mask_type softmask genome.repeat.gff3 $genome > genome.softmask.fasta";
+    #print STDERR (localtime) . ": CMD: $cmdString\n";
+    #system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
     chdir "../";
     open OUT, ">", "0.RepeatMasker.ok" or die $!; close OUT;
 }
@@ -682,6 +695,12 @@ unless (-e "5.augustus.ok") {
     chdir "5.augustus";
     $pwd = `pwd`; print STDERR "PWD: $pwd";
 
+    if ($use_existed_augustus_species) {
+        mkdir "training";
+        open OUT, ">", "training.ok" or die $!;
+        print STDERR "Skip Augustus training for --use_existed_augustus_species paramter set\n";
+    }
+
     # 第一次 Augustus HMM Training
     unless (-e "training") {
         mkdir "training";
@@ -757,7 +776,7 @@ unless (-e "5.augustus.ok") {
         open OUT, ">", "training.ok" or die $!;
     }
     else {
-        print STDERR "Skip Augustus training for file training.ok exists\n";
+        print STDERR "Skip Augustus training for file training.ok exists\n" unless $use_existed_augustus_species;
     }
 
     # Augustus Hint Preparing
@@ -812,7 +831,7 @@ unless (-e "5.augustus.ok") {
     }
 
     # augustus_training_iteration
-    unless ($no_augustus_training_iteration) {
+    unless ($no_augustus_training_iteration or $use_existed_augustus_species) {
         unless (-e "training_again") {
             mkdir "training_again";
             my $species_config_dir = `echo \$AUGUSTUS_CONFIG_PATH`;
@@ -1087,9 +1106,9 @@ unless (-e "6.combineGeneModels.ok") {
     }
 
     if ($pfam_db) {
-		$cmdString = "rm -rf command.hmmscan.list* hmmscan.tmp for_pfam_search.fasta";
-		print STDERR (localtime) . ": CMD: $cmdString\n";
-		system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+        $cmdString = "rm -rf command.hmmscan.list* hmmscan.tmp for_pfam_search.fasta";
+        print STDERR (localtime) . ": CMD: $cmdString\n";
+        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
         $cmdString = "$dirname/bin/PfamValidateABinitio --out_prefix combine2 --cpu $cpu --pfam_db $pfam_db $config{'PfamValidateABinitio'} combine.2.gff3 $genome 2> PfamValidateABinitio.1.log";
         unless (-e "PfamValidateABinitio.1.ok") {
@@ -1108,14 +1127,14 @@ unless (-e "6.combineGeneModels.ok") {
     }
 
     $cmdString = "$dirname/bin/GFF3Clear --gene_prefix $gene_prefix --genome $genome combine.1.gff3 combine2.filter_pass.gff3 > genome.gff3 2> GFF3Clear.1.log";
-	unless (-e "GFF3Clear.1.ok") {
-		print STDERR (localtime) . ": CMD: $cmdString\n";
-		system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-		open OUT, ">", "GFF3Clear.1.ok" or die $!; close OUT;
-	}
-	else {
-		print STDERR "CMD(Skipped): $cmdString\n";
-	}
+    unless (-e "GFF3Clear.1.ok") {
+        print STDERR (localtime) . ": CMD: $cmdString\n";
+        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+        open OUT, ">", "GFF3Clear.1.ok" or die $!; close OUT;
+    }
+    else {
+        print STDERR "CMD(Skipped): $cmdString\n";
+    }
 
     open OUT1, ">", "genome.completed.gff3" or die $!;
     open OUT2, ">", "genome.partial.gff3" or die $!;
@@ -1149,9 +1168,9 @@ unless (-e "6.combineGeneModels.ok") {
     }
 
     if ($pfam_db) {
-		$cmdString = "rm -rf command.hmmscan.list* hmmscan.tmp for_pfam_search.fasta";
-		print STDERR (localtime) . ": CMD: $cmdString\n";
-		system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+        $cmdString = "rm -rf command.hmmscan.list* hmmscan.tmp for_pfam_search.fasta";
+        print STDERR (localtime) . ": CMD: $cmdString\n";
+        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
         $cmdString = "$dirname/bin/remove_short_genes $config{'remove_short_genes'} genome.completed.rm_genes_in_repeats.gff3 > genome.completed.rm_genes_in_repeats.remove_short_genes.gff3 2> genome.completed.rm_genes_in_repeats.short_genes.gff3";
         unless (-e "remove_short_genes.ok") {
@@ -1174,14 +1193,14 @@ unless (-e "6.combineGeneModels.ok") {
         }
 
         $cmdString = "$dirname/bin/GFF3Clear --gene_prefix $gene_prefix --genome $genome --no_attr_add genome.completed.rm_genes_in_repeats.remove_short_genes.gff3 remove_short_genes.filter_pass.gff3 > genome.filter.gff3 2> GFF3Clear.2.log";
-		unless (-e "GFF3Clear.2.ok") {
-			print STDERR (localtime) . ": CMD: $cmdString\n";
-			system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-			open OUT, ">", "GFF3Clear.2.ok" or die $!; close OUT;
-		}
-		else {
-			print STDERR "CMD(Skipped): $cmdString\n";
-		}
+        unless (-e "GFF3Clear.2.ok") {
+            print STDERR (localtime) . ": CMD: $cmdString\n";
+            system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+            open OUT, ">", "GFF3Clear.2.ok" or die $!; close OUT;
+        }
+        else {
+            print STDERR "CMD(Skipped): $cmdString\n";
+        }
     }
     else {
         $cmdString = "cp genome.completed.rm_genes_in_repeats.gff3 genome.filter.gff3";

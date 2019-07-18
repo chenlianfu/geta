@@ -13,7 +13,7 @@ open FASTA, '<', $ARGV[0] or die $!;
 while (<FASTA>) {
 	chomp;
 	if (/>(\S+)/) { $fasta_id = $1; }
-	else { $fasta{$fasta_id} .= $_; }
+	else { $_ = uc($_); $fasta{$fasta_id} .= $_; }
 }
 close FASTA;
 

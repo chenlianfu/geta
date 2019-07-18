@@ -16,6 +16,7 @@ For example:
     2. 将有重叠的区域合并成一个区域，代表着一个基因；
     3. 一个基因若有多个homolog蛋白序列，则仅选择其中最优的一个homolog蛋白序列；
     4. 选择最优的原则是，coverage_ratio超过指定阈值，同时blast evalue优于指定阈值，再选择blast得分最高的。
+    5. 此外，分别对正义链和负义链的比对结果进行分析。以免分别位于正负链上有重叠的基因合并成一个区域，仅得到一个基因结果，甚至基因稠密时，原本的多个基因也仅得到一个基因结果。
 
 USAGE
 if (@ARGV == 0){die $usage}
@@ -50,11 +51,11 @@ foreach my $query (keys %stats) {
         my $number = 0;
         my $end = $1 if $firt_subject_regions =~ m/(\d+)/;
         foreach (@blast_subject_regions) {
-			if (m/(\d+)/) {
-				$number ++ if (abs($1 - $end) >= $ARGV[4]);
-				$end = $1;
-			}
-			#if (m/(\d+)/ && (abs($1 - $end)) >= $ARGV[4]) { $number ++; $end = $1; }
+            if (m/(\d+)/) {
+                $number ++ if (abs($1 - $end) >= $ARGV[4]);
+                $end = $1;
+            }
+            #if (m/(\d+)/ && (abs($1 - $end)) >= $ARGV[4]) { $number ++; $end = $1; }
             push @{$split[$number]}, $_;
         }
 
@@ -76,69 +77,75 @@ foreach my $query (keys %stats) {
             $strand = "minus" if $1 > $2;
             @evalue = sort {$a <=> $b} @evalue;
             @score = sort {$b <=> $a} @score;
-            $result{$subject}{$region}{$query}{"coverage"} = $coverage;
-            $result{$subject}{$region}{$query}{"evalue"} = $evalue[0];
-            $result{$subject}{$region}{$query}{"score"} = $score[0];
-            $result{$subject}{$region}{$query}{"strand"} = $strand;
+            $result{$subject}{$strand}{$region}{$query}{"coverage"} = $coverage;
+            $result{$subject}{$strand}{$region}{$query}{"evalue"} = $evalue[0];
+            $result{$subject}{$strand}{$region}{$query}{"score"} = $score[0];
         }
     }
 }
 
 my %intergration1;
 foreach my $subject (sort keys %result) {
-    foreach my $region (sort {$a <=> $b} keys %{$result{$subject}}) {
-        foreach my $query (sort keys %{$result{$subject}{$region}}) {
-            my $coverage = $result{$subject}{$region}{$query}{"coverage"};
-            my $evalue = $result{$subject}{$region}{$query}{"evalue"};
-            my $score = $result{$subject}{$region}{$query}{"score"};
-            my $strand = $result{$subject}{$region}{$query}{"strand"};
-            if ($coverage >= $ARGV[2] && $evalue <= $ARGV[3]) {
-                $intergration1{$subject}{$region}{"$query\t$strand\t$coverage\t$evalue\t$score"} = 1;
+    foreach my $strand (keys %{$result{$subject}}) {
+        foreach my $region (sort {$a <=> $b} keys %{$result{$subject}{$strand}}) {
+            foreach my $query (sort keys %{$result{$subject}{$strand}{$region}}) {
+                my $coverage = $result{$subject}{$strand}{$region}{$query}{"coverage"};
+                my $evalue = $result{$subject}{$strand}{$region}{$query}{"evalue"};
+                my $score = $result{$subject}{$strand}{$region}{$query}{"score"};
+                if ($coverage >= $ARGV[2] && $evalue <= $ARGV[3]) {
+                    $intergration1{$subject}{$strand}{$region}{"$query\t$strand\t$coverage\t$evalue\t$score"} = 1;
+                    #print "$subject\t$region\t$query\t$strand\t$coverage\t$evalue\t$score\n";
+                }
             }
-            #print "$subject\t$region\t$query\t$strand\t$coverage\t$evalue\t$score\n";
         }
     }
 }
 
 my %intergration;
 foreach my $subject (sort keys %intergration1) {
-    my @region = sort {$a <=> $b} keys %{$intergration1{$subject}};
+    foreach my $strand (keys %{$intergration1{$subject}}) {
+        my @region = sort {$a <=> $b} keys %{$intergration1{$subject}{$strand}};
 
-    my %aligments;
-    my $first_region = shift @region;
-    foreach (keys %{$intergration1{$subject}{$first_region}}) {
-        $aligments{$_} = 1;
-    }
-    my ($start, $end) = ($1, $2) if $first_region =~ m/(\d+)\t(\d+)/;
-    foreach my $region (@region) {
-        $region =~ m/(\d+)\t(\d+)/;
-        if ($1 <= $end) {
-            $end = $2 if $end < $2;
-            foreach (keys %{$intergration1{$subject}{$region}}) { $aligments{$_} = 1; }
+        my %aligments;
+        my $first_region = shift @region;
+        foreach (keys %{$intergration1{$subject}{$strand}{$first_region}}) {
+            $aligments{$_} = 1;
         }
-        else {
-            my %sort;
-            foreach (keys %aligments) {
-                m/(\S+)$/;
-                $sort{$_} = $1;
+        my ($start, $end) = ($1, $2) if $first_region =~ m/(\d+)\t(\d+)/;
+        foreach my $region (@region) {
+            $region =~ m/(\d+)\t(\d+)/;
+            if ($1 <= $end) {
+                $end = $2 if $end < $2;
+                foreach (keys %{$intergration1{$subject}{$strand}{$region}}) { $aligments{$_} = 1; }
             }
-            my @aligments =  sort {$sort{$b} <=> $sort{$a}} keys %aligments;
-            $intergration{$subject}{"$start\t$end"} = $aligments[0];
-            #print "$subject\t$start\t$end\t$aligments[0]\n";
-            %aligments = ();
-            foreach (keys %{$intergration1{$subject}{$region}}) { $aligments{$_} = 1; }
-            ($start, $end) = ($1, $2);
+            else {
+                my %sort;
+                foreach (keys %aligments) {
+                    m/(\S+)$/;
+                    $sort{$_} = $1;
+                }
+                my @aligments =  sort {$sort{$b} <=> $sort{$a}} keys %aligments;
+                $intergration{$subject}{$strand}{"$start\t$end"} = $aligments[0];
+                #print "$subject\t$start\t$end\t$aligments[0]\n";
+                %aligments = ();
+                foreach (keys %{$intergration1{$subject}{$strand}{$region}}) { $aligments{$_} = 1; }
+                ($start, $end) = ($1, $2);
+            }
         }
+
+        my %sort;
+        foreach (keys %aligments) { m/(\S+)$/; $sort{$_} = $1; }
+        my @aligments =  sort {$sort{$b} <=> $sort{$a}} keys %aligments;
+        $intergration{$subject}{$strand}{"$start\t$end"} = $aligments[0];
+        #print "$subject\t$start\t$end\t$aligments[0]\n";
     }
-    my %sort;
-    foreach (keys %aligments) { m/(\S+)$/; $sort{$_} = $1; }
-    my @aligments =  sort {$sort{$b} <=> $sort{$a}} keys %aligments;
-    $intergration{$subject}{"$start\t$end"} = $aligments[0];
 }
 
 foreach my $subject (sort keys %intergration) {
-    foreach (sort {$a <=> $b} keys %{$intergration{$subject}}) {
-            print "$subject\t$_\t$intergration{$subject}{$_}\n";
+    foreach my $strand (keys %{$intergration{$subject}}) {
+        foreach (sort {$a <=> $b} keys %{$intergration{$subject}{$strand}}) {
+            print "$subject\t$_\t$intergration{$subject}{$strand}{$_}\n";
+        }
     }
 }
 

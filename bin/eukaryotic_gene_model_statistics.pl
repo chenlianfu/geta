@@ -48,7 +48,7 @@ my (%seq, $seq_id);
 while (<IN>) {
     chomp;
     if (m/^>(\S+)/) { $seq_id = $1; }
-    else { $seq{$seq_id} .= $_; }
+    else { $_ = uc($_); $seq{$seq_id} .= $_; }
 }
 close IN;
 

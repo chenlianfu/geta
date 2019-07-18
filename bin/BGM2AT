@@ -26,6 +26,9 @@ Usage:
     进行Augustus优化时，会将基因模型分成多份数据，每份数据包含 x 个基因模型，程序会自动计算该 x 值。按默认设置：首先，程序设定该值为50，从而计算出基因模型的份数(optimize_augustus.pl命令--cps参数的值)；若份数超过了--CPU设定的值，则基因模型将被分成--CPU指定的份数；每份数据包含的基因模型数量若超过了200，则强制使每份数据的基因模型数量为200。
     这两个参数要根据能用于AUGUSTUS training的基因模型个数和能利用的CPU线程数综合判断。
 
+    --optimize_augustus_rounds <int>    default: 5
+    进行Augustus优化时，对HMM参数进行5轮修正。
+
     --onlytrain_GFF3 <string>    default: None
     输入一个GFF3文件，该GFF3中的基因模型是全基因组中所有准确的基因模型，可以包含不完整的基因模型。该GFF3文件也包含输入文件best_candidates.lowIdentity.gff3中所有的基因模型。
     若使用该参数，则程序会使用该文件中的基因模型（best_candidates.lowIdentity.gff3文件得到的genes.gb中的基因模型除外）仅用作etraining。
@@ -39,7 +42,7 @@ Usage:
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($flanking_length, $min_gene_number_for_augustus_training, $gene_number_for_accuracy_detection, $min_gene_number_of_optimize_augustus_chunk, $max_gene_number_of_optimize_augustus_chunk, $onlytrain_GFF3, $CPU, $allowStartCodonBesidesATG, $stopAfterFirstEtraining);
+my ($flanking_length, $min_gene_number_for_augustus_training, $gene_number_for_accuracy_detection, $min_gene_number_of_optimize_augustus_chunk, $max_gene_number_of_optimize_augustus_chunk, $onlytrain_GFF3, $CPU, $allowStartCodonBesidesATG, $stopAfterFirstEtraining, $optimize_augustus_rounds);
 GetOptions(
     "flanking_length:i" => \$flanking_length,
     "min_gene_number_for_augustus_training:i" => \$min_gene_number_for_augustus_training,
@@ -50,12 +53,14 @@ GetOptions(
     "CPU:i" => \$CPU,
     "allowStartCodonBesidesATG!" => \$allowStartCodonBesidesATG,
     "stopAfterFirstEtraining!" => \$stopAfterFirstEtraining,
+    "optimize_augustus_rounds:i" => \$optimize_augustus_rounds,
 );
 $min_gene_number_for_augustus_training ||= 500;
 $gene_number_for_accuracy_detection ||= 200;
 $min_gene_number_of_optimize_augustus_chunk ||= 50;
 $max_gene_number_of_optimize_augustus_chunk ||= 200;
 $CPU ||= 8;
+$optimize_augustus_rounds ||= 5;
 
 # 计算gene长度
 open IN, $ARGV[0] or die $!;
@@ -83,9 +88,9 @@ my $for_bad_genes_removing = `echo \$AUGUSTUS_CONFIG_PATH`;
 chomp($for_bad_genes_removing);
 $for_bad_genes_removing = "$for_bad_genes_removing/species/for_bad_genes_removing";
 if (-e $for_bad_genes_removing) {
-	$cmdString = "rm -rf $for_bad_genes_removing";
-	print STDERR "CMD: $cmdString\n";
-	(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+    $cmdString = "rm -rf $for_bad_genes_removing";
+    print STDERR "CMD: $cmdString\n";
+    (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 }
 $cmdString = "new_species.pl --species=for_bad_genes_removing &> new_species.1.log";
 print STDERR "CMD: $cmdString\n";
@@ -194,10 +199,10 @@ unless (-e "firsttest.ok") {
     (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
     open OUT, ">", "firsttest.ok" or die $!; close OUT;
 
-	# 备份hmm文件
-	$cmdString = "cp -a $species_config_dir hmm_files_bak01";
-	print STDERR "CMD: $cmdString\n";
-	(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+    # 备份hmm文件
+    $cmdString = "cp -a $species_config_dir hmm_files_bak01";
+    print STDERR "CMD: $cmdString\n";
+    (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 }
 else {
     print STDERR "CMD(Skipped): $cmdString\n";
@@ -224,7 +229,7 @@ print STDERR "CMD: $cmdString\n";
 $cmdString = "cat genes.gb.train.test genes.only_train.gb > training.gb.onlytrain";
 print STDERR "CMD: $cmdString\n";
 (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
-$cmdString = "optimize_augustus.pl --species=$ARGV[2] --rounds=5 --cpus=$cpus --kfold=$cpus --onlytrain=training.gb.onlytrain genes.gb.train.train > optimize.out";
+$cmdString = "optimize_augustus.pl --species=$ARGV[2] --rounds=$optimize_augustus_rounds --cpus=$cpus --kfold=$cpus --onlytrain=training.gb.onlytrain genes.gb.train.train > optimize.out";
 unless (-e "optimize_augustus.ok") {
     print STDERR "CMD: $cmdString\n";
     (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
@@ -284,17 +289,17 @@ unless ($allowStartCodonBesidesATG) {
 # 进行第二次准确性检测
 $cmdString = "augustus --species=$ARGV[2] genes.gb.test > secondtest.out";
 unless (-e "secondtest.ok") {
-	print STDERR "CMD: $cmdString\n";
-	(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
-	open OUT, ">", "secondtest.ok" or die $!; close OUT;
+    print STDERR "CMD: $cmdString\n";
+    (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+    open OUT, ">", "secondtest.ok" or die $!; close OUT;
 
-	# 备份hmm文件
-	$cmdString = "cp -a $species_config_dir hmm_files_bak02";
-	print STDERR "CMD: $cmdString\n";
-	(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+    # 备份hmm文件
+    $cmdString = "cp -a $species_config_dir hmm_files_bak02";
+    print STDERR "CMD: $cmdString\n";
+    (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 }
 else {
-	print STDERR "CMD(Skipped): $cmdString\n";
+    print STDERR "CMD(Skipped): $cmdString\n";
 }
 
 print STDERR "the Augustus training completed\n";

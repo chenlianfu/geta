@@ -59,6 +59,9 @@ foreach ( @geneSym ) {
 my @geneSym_new;
 foreach (@geneSym) {
 	my @mRNA_id = keys %{$gff3_parent1{$_}};
+	my $mRNA_info;
+	foreach (@mRNA_id) { $mRNA_info .= $gff3_featrue_info{$_} };
+	next unless $mRNA_info =~ m/\tCDS\t/;
 	push @geneSym_new, $_ if @mRNA_id >= 1;
 }
 
@@ -89,6 +92,8 @@ foreach my $gene_id (@geneSym_new) {
 	my @mRNA_id = sort {$gff3_parent1{$gene_id}{$a} <=> $gff3_parent1{$gene_id}{$b} or $gff3_parent2{$gene_id}{$a} <=> $gff3_parent2{$gene_id}{$b}} keys %{$gff3_parent1{$gene_id}};
 	my $transcriptIdNum;
 	foreach my $mRNA_id (@mRNA_id) {
+		my $mRNA_info = $gff3_featrue_info{$mRNA_id};
+		next unless $mRNA_info =~ m/\tCDS\t/;
 		$transcriptIdNum ++;
 		my $mRNA_info = $gff3_mRNA_info{$mRNA_id};
 		@_ = split /\t/, $mRNA_info;

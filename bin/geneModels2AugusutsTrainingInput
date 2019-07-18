@@ -144,7 +144,7 @@ close OUT;
 my $cmdString = "makeblastdb -in $out_prefix.proteins.fasta -dbtype prot -title $out_prefix -parse_seqids -out $out_prefix -logfile $out_prefix.makeblastdb.log";
 unless (-e "$out_prefix.makeblastdb.ok") {
     print STDERR (localtime) . " CMD: $cmdString\n";
-    system ($cmdString) == 0 or die "Failed to execute: $!\n";
+    system ($cmdString) == 0 or die "Failed to execute: $cmdString $!\n";
     open OUT, ">", "$out_prefix.makeblastdb.ok"; close OUT;
 }
 else {
@@ -154,7 +154,7 @@ else {
 $cmdString = "homolog_paraBlast blastp $out_prefix $out_prefix.proteins.fasta $min_evalue $cpu $out_prefix 6";
 unless (-e "$out_prefix.blast.ok") {
     print STDERR (localtime) . " CMD: $cmdString\n";
-    system ($cmdString) == 0 or die "Failed to execute: $!\n";
+    system ($cmdString) == 0 or die "Failed to execute: $cmdString $!\n";
     open OUT, ">", "$out_prefix.blast.ok" unless -e "FailedCommands"; close OUT;
 }
 else {

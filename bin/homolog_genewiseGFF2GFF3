@@ -154,7 +154,7 @@ foreach my $gene_id (sort keys %gff) {
             my $codon = substr($seq{$seqID}, $end, 3);
             if ($codon eq "TAA" or $codon eq "TGA" or $codon eq "TAG") {
                 my $end3 = $end + 3;
-                $info =~ s/^(\S+\t\S+\t\S+\t\d+)\t$end\t/$1\t$end3\t/g;
+                $info =~ s/^(\S+\t\S+\t\S+\t\d+)\t$end\t/$1\t$end3\t/mg;
                 print STDERR "Gene end with stop codon:$gene_id\t$strand\n";
                 if ($output_start_and_stop_hints_of_augustus) {
                     open OUT, ">>", $output_start_and_stop_hints_of_augustus;
