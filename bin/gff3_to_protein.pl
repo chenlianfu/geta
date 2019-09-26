@@ -11,45 +11,45 @@ if (@ARGV==0){die $usage}
 open IN, $ARGV[0] or die $!;
 my (%seq, $seq_id);
 while (<IN>) {
-	chomp;
-	if (m/^>(\S+)/) { $seq_id = $1; }
-	else { $seq{$seq_id} .= $_; }
+    chomp;
+    if (m/^>(\S+)/) { $seq_id = $1; }
+    else { $seq{$seq_id} .= $_; }
 }
 close IN;
 
 open IN, $ARGV[1] or die $!;
 my (%cds, %locus, %strand);
 while (<IN>) {
-	if (/\tCDS\t/) {
-		@_ = split /\t/;
-		$_[8] =~ m/Parent=([^;\s]+)/;
-		$cds{$1}{"$_[3]\t$_[4]\t$_[7]"} = $_[3];
-		$locus{$1} = $_[0];
-		$strand{$1} = $_[6];
-	}
+    if (/\tCDS\t/) {
+        @_ = split /\t/;
+        $_[8] =~ m/Parent=([^;\s]+)/;
+        $cds{$1}{"$_[3]\t$_[4]\t$_[7]"} = $_[3];
+        $locus{$1} = $_[0];
+        $strand{$1} = $_[6];
+    }
 }
 close IN;
 
 foreach my $id (sort keys %cds) {
-	my @cds = sort {$cds{$id}{$a} <=> $cds{$id}{$b}} keys %{$cds{$id}};
-	my $cds_seq;
-	foreach (@cds) {
-		@_ = split /\t/, $_;
-		$cds_seq .= substr($seq{$locus{$id}}, $_[0] - 1, $_[1] - $_[0] + 1);
-	}
-	if ($strand{$id} eq "+") {
-		my $frame = $1 if $cds[0] =~ m/(\d+)$/;
-		print STDERR "Warning: $id\tthe frame not equal 0\n" if $frame != 0;
-		my $pep = &cds2pep($cds_seq, $frame);
-		print ">$id\n$pep\n";
-	}
-	elsif ($strand{$id} eq "-") {
-		$cds_seq = &rc($cds_seq);
-		my $frame = $1 if $cds[-1] =~ m/(\d+)$/;
-		print STDERR "Warning: $id\tthe frame not equal 0\n" if $frame != 0;
-		my $pep = &cds2pep($cds_seq, $frame);
-		print ">$id\n$pep\n";
-	}
+    my @cds = sort {$cds{$id}{$a} <=> $cds{$id}{$b}} keys %{$cds{$id}};
+    my $cds_seq;
+    foreach (@cds) {
+        @_ = split /\t/, $_;
+        $cds_seq .= substr($seq{$locus{$id}}, $_[0] - 1, $_[1] - $_[0] + 1);
+    }
+    if ($strand{$id} eq "+") {
+        my $frame = $1 if $cds[0] =~ m/(\d+)$/;
+        print STDERR "Warning: $id\tthe frame not equal 0\n" if $frame != 0;
+        my $pep = &cds2pep($cds_seq, $frame);
+        print ">$id\n$pep\n";
+    }
+    elsif ($strand{$id} eq "-") {
+        $cds_seq = &rc($cds_seq);
+        my $frame = $1 if $cds[-1] =~ m/(\d+)$/;
+        print STDERR "Warning: $id\tthe frame not equal 0\n" if $frame != 0;
+        my $pep = &cds2pep($cds_seq, $frame);
+        print ">$id\n$pep\n";
+    }
 }
 
 sub rc {
@@ -133,7 +133,12 @@ sub cds2pep {
     my $pep;
     while ((length $seq) >= 3) {
         $seq =~ s/(\w{3})//;
-        $pep .= $cds2pep{$1};
+        if (exists $cds2pep{$1}) {
+            $pep .= $cds2pep{$1};
+        }
+        else {
+            $pep .= 'X';
+        }
     }
     return $pep;
 }

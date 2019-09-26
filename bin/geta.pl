@@ -185,14 +185,16 @@ $genome =~ s/^/$pwd\// unless $genome =~ m/^\//;
 die "No homolog fasta input\n" unless $protein;
 $protein  =~ s/^/$pwd\// unless $protein =~ m/^\//;
 die "No Augustus species provided\n" unless ($augustus_species or $use_existed_augustus_species);
-my $species_config_dir = `echo \$AUGUSTUS_CONFIG_PATH`;
-chomp($species_config_dir);
-$species_config_dir = "$species_config_dir/species/$use_existed_augustus_species";
-if (-e $species_config_dir) {
-    $augustus_species = $use_existed_augustus_species;
-}
-else {
-    die "The AUGUSUTS HMM files of $use_existed_augustus_species does not exists!\n";
+if ($use_existed_augustus_species) {
+    my $species_config_dir = `echo \$AUGUSTUS_CONFIG_PATH`;
+    chomp($species_config_dir);
+    $species_config_dir = "$species_config_dir/species/$use_existed_augustus_species";
+    if (-e $species_config_dir) {
+        $augustus_species = $use_existed_augustus_species;
+    }
+    else {
+        die "The AUGUSUTS HMM files of $use_existed_augustus_species does not exists!\n";
+    }
 }
 if ($RM_lib) {
     $RM_lib =~ s/^/$pwd\// unless $RM_lib =~ m/^\//;

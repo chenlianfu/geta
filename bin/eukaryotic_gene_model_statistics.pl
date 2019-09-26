@@ -13,7 +13,7 @@ Usage:
     outPrefix.geneModels.statistics    对每个基因的统计信息，表格文件
     outPrefix.gene.fasta               基因正义链上的序列
     outPrefix.cDNA.fasta               cDNA序列
-    outPrefix.cds.fasta                CDS序列
+    outPrefix.cds.fasta                CDS序列 (若转录本的第一个CDS的Frame值不是0，这时程序会去除相应的1~2个碱基，以保证CDS序列的第一个碱基是密码子的第一个位点。这样能和蛋白质的氨基酸序列一致，有利于后续的一些运用。)
     outPrefix.pep.fasta                蛋白序列
 
     此外，程序对以上统计信息的中位数和算术平均数进行了分析，并将结果输出到标准输出。
@@ -144,10 +144,11 @@ foreach my $scaffold_id (sort keys %scaffold) {
         if ($strand eq "+") {
             print GENE ">$gene_id\n$gene_seq\n";
             print CDNA ">$gene_id\n$cDNA_seq\n";
-            print CDS ">$gene_id\n$cds_seq\n";
             my $frame = $1 if $cds[0] =~ m/(\d+)$/;
             my $pep = &cds2pep($cds_seq, $frame);
             print PEP ">$gene_id\n$pep\n";
+            $cds_seq =~ s/\w{$frame}// if $frame > 0;
+            print CDS ">$gene_id\n$cds_seq\n";
         }
         elsif ($strand eq "-") {
             $gene_seq = &rc($gene_seq);
@@ -155,10 +156,11 @@ foreach my $scaffold_id (sort keys %scaffold) {
             $cds_seq = &rc($cds_seq);
             print GENE ">$gene_id\n$gene_seq\n";
             print CDNA ">$gene_id\n$cDNA_seq\n";
-            print CDS ">$gene_id\n$cds_seq\n";
             my $frame = $1 if $cds[-1] =~ m/(\d+)$/;
             my $pep = &cds2pep($cds_seq, $frame, $gene_id);
             print PEP ">$gene_id\n$pep\n";
+            $cds_seq =~ s/\w{$frame}// if $frame > 0;
+            print CDS ">$gene_id\n$cds_seq\n";
         }
     }
 }
@@ -172,12 +174,12 @@ open IN, "$ARGV[2].geneModels.statistics" or die $!;
 <IN>;
 my (@gene_length, @isoform_number, @intergenic_length, @exon_size, @exon_num, @cds_size, @cds_num, @intron_size, @intron_num, @exon_len, @cds_len, @intron_len, $overlap_gene_number);
 while (<IN>) {
-	chomp;
+    chomp;
     @_ = split /\t/;
     push @gene_length, $_[4];
     push @isoform_number, $_[6];
     push @intergenic_length, $_[7] if $_[7] ne "NULL" && $_[7] >= 0;
-	$overlap_gene_number ++ if $_[7] ne "NULL" && $_[7] < 0;
+    $overlap_gene_number ++ if $_[7] ne "NULL" && $_[7] < 0;
     push @exon_size, $_[8];
     push @exon_num, $_[9];
     push @cds_size, $_[10];
@@ -334,7 +336,12 @@ sub cds2pep {
     my $pep;
     while ((length $seq) >= 3) {
         $seq =~ s/(\w{3})//;
-        $pep .= $cds2pep{$1};
+        if (exists $cds2pep{$1}) {
+            $pep .= $cds2pep{$1};
+        }
+        else {
+            $pep .= 'X';
+        }
     }
     return $pep;
 }

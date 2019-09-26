@@ -339,7 +339,12 @@ sub cds2pep {
     my $pep;
     while ((length $seq) >= 3) {
         $seq =~ s/(\w{3})//;
-        $pep .= $cds2pep{$1};
+        if (exists $cds2pep{$1}) {
+            $pep .= $cds2pep{$1};
+        }
+        else {
+            $pep .= 'X';
+        }
     }
     #print STDERR "Warning: CDS length of $gene is not multiple of 3\n" if (length $seq) > 0;
     #print STDERR "Warning: Stop Codon appear in the middle of $gene\n" if $pep =~ m/\*\w/;
