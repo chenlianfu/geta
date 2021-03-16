@@ -49,6 +49,9 @@ while (<GFF>) {
         if (m/Name=Unknown/) {
             substr($fasta{$id},$start,$length) =~ tr/ATCGN/atcgn/;
         }
+	elsif (m/Name=Unspecified/) {
+            substr($fasta{$id},$start,$length) =~ tr/ATCGN/atcgn/;
+        }
         elsif (m/Name=Other/) {
             substr($fasta{$id},$start,$length) =~ tr/ATCGN/atcgn/;
         }
