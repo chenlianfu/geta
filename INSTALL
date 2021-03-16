@@ -1,148 +1,143 @@
 ## the detail command lines of installation of all the dependency softwares and GETA.
 
-# All of below command lines were excuted on CentOS 6.9 system with normal user "train" or super user "root".
+# All of below command lines were excuted on CentOS system with normal user "train" and super user "root".
 
-## 0. Preparing folders
+## 1. Preparing folders
 # switch user to "root"
 mkdir /opt/biosoft/ /opt/sysoft/ 
 chmod 1777 /opt/biosoft/ /opt/sysoft/
 
-# switch user to "train"
+# switch user to a normal user "train"
 mkdir ~/software
-
-
-## 1. Installing GCC Version 4.9.4 (Only used for the compilation of NCBI-Blast+)
-cd /home/train/
-wget http://mirrors-usa.go-parts.com/gcc/releases/gcc-4.9.4/gcc-4.9.4.tar.bz2 -P ~/software/
-tar jxf ~/software/gcc-4.9.4.tar.bz2
-cd gcc-4.9.4/
-./contrib/download_prerequisites
-sudo yum install glibc-devel.i686
-mkdir ../gcc-build
-cd ../gcc-build
-../gcc-4.9.4/configure --prefix=/opt/sysoft/gcc-4.9.4 --enable-multilib --with-system-zlib
-# switch user to "root"
-make -j 8
-# switch user to "train"
-make install
-cd ../ && rm gcc-build/ gcc-4.9.4/ -rf
-echo 'export PKG_CONFIG_PATH=/opt/sysoft/gcc-4.9.4/lib/pkgconfig:$PKG_CONFIG_PATH' > /home/train/.bashrc.gcc
-echo 'export LD_LIBRARY_PATH=/opt/sysoft/gcc-4.9.4/lib64:/opt/sysoft/gcc-4.9.4/lib:$LD_LIBRARY_PATH' >> /home/train/.bashrc.gcc
-echo 'export C_INCLUDE_PATH=/opt/sysoft/gcc-4.9.4/include:$C_INCLUDE_PATH' >> /home/train/.bashrc.gcc
-echo 'export PATH=/opt/sysoft/gcc-4.9.4/bin/:$PATH' >> /home/train/.bashrc.gcc
 
 
 ## 2. Installing NCBI-Blast+ and rmblastn
 cd /home/train/
-wget ftp://ftp.ncbi.nlm.nih.gov/blast/executables/blast+/2.6.0/ncbi-blast-2.6.0+-src.tar.gz -P ~/software
-wget http://www.repeatmasker.org/isb-2.6.0+-changes-vers2.patch.gz -P ~/software
-tar zxf ~/software/ncbi-blast-2.6.0+-src.tar.gz
-cd ncbi-blast-2.6.0+-src/
-gzip -dc ~/software/isb-2.6.0+-changes-vers2.patch.gz > isb-2.6.0+-changes-vers2.patch
-patch -p1 < isb-2.6.0+-changes-vers2.patch
-cd c++/
-source ~/.bashrc.gcc
-./configure --with-mt --prefix=/opt/biosoft/ncbi-blast-2.6.0+ --without-debug
-make -j 4
-make install
-cd ../  && rm -rf ncbi-blast-2.6.0+-src/
-echo 'PATH=$PATH:/opt/biosoft/ncbi-blast-2.6.0+/bin/' >> ~/.bashrc
+wget http://www.repeatmasker.org/rmblast-2.10.0+-x64-linux.tar.gz -P ~/software
+tar zxf ~/software/rmblast-2.10.0+-x64-linux.tar.gz -C /opt/biosoft
+mv /opt/biosoft/rmblast-2.10.0 /opt/biosoft/ncbi-rmblast-2.10.0+
+echo 'PATH=/opt/biosoft/ncbi-rmblast-2.10.0+/bin/:$PATH' >> ~/.bashrc
 source ~/.bashrc
 
 
 ## 3. Installing HMMER and Pfam database
 # exit user "train", and open a new terminal to load user "train", so as to load the default GCC with old version.
 cd /home/train/
-wget http://eddylab.org/software/hmmer3/3.1b2/hmmer-3.1b2.tar.gz -P ~/software
-tar zxf ~/software/hmmer-3.1b2.tar.gz 
-cd hmmer-3.1b2/
-./configure --prefix=/opt/biosoft/hmmer-3.1b2 && make -j 4 && make install
-cd ../ && rm -rf hmmer-3.1b2
-echo 'PATH=$PATH:/opt/biosoft/hmmer-3.1b2/bin/' >> ~/.bashrc
+wget http://eddylab.org/software/hmmer/hmmer-3.3.2.tar.gz -P ~/software/
+tar zxf ~/software/hmmer-3.3.2.tar.gz 
+cd hmmer-3.3.2/
+./configure --prefix=/opt/biosoft/hmmer-3.3.2 && make -j 4 && make install
+cd .. && rm -rf hmmer-3.3.2
+echo 'PATH=/opt/biosoft/hmmer-3.3.2/bin/:$PATH' >> ~/.bashrc
 source ~/.bashrc
-
 wget ftp://ftp.ebi.ac.uk/pub/databases/Pfam/releases/Pfam27.0/Pfam-A.hmm.gz -P ~/software
 wget ftp://ftp.ebi.ac.uk/pub/databases/Pfam/releases/Pfam27.0/Pfam-B.hmm.gz -P ~/software
-cd /opt/biosoft/hmmer-3.1b2/
+cd /opt/biosoft/hmmer-3.3.2/
 gzip -dc ~/software/Pfam-A.hmm.gz > Pfam-AB.hmm
 gzip -dc ~/software/Pfam-B.hmm.gz >> Pfam-AB.hmm
 hmmpress Pfam-AB.hmm
 
 
 ## 4. Installing RepeatMasker
-wget http://www.repeatmasker.org/RepeatMasker-open-4-0-7.tar.gz -P ~/software
-wget --user=chenlianfu_china --password=chenlianfu https://www.girinst.org/server/RepBase/protected/repeatmaskerlibraries/RepBaseRepeatMaskerEdition-20170127.tar.gz -P ~/software
-wget http://tandem.bu.edu/trf/downloads/trf404.linux64 -P ~/software
-tar zxf ~/software/RepeatMasker-open-4-0-7.tar.gz -C /opt/biosoft/
-cp ~/software/trf404.linux64 /opt/biosoft/RepeatMasker/trf
-chmod 755 /opt/biosoft/RepeatMasker/trf
+wget http://www.repeatmasker.org/RepeatMasker-4.1.0.tar.gz -P ~/software
+wget --http-user=chenlianfu_china --http-password=u2o7rn https://www.girinst.org/server/RepBase/protected/repeatmaskerlibraries/RepBaseRepeatMaskerEdition-20181026.tar.gz -P ~/software/
+wget http://tandem.bu.edu/trf/downloads/trf409.linux64 -P ~/software/
+
+tar zxf ~/software/RepeatMasker-4.1.0.tar.gz -C /opt/biosoft/
 cd /opt/biosoft/RepeatMasker/
-tar zxf ~/software/RepBaseRepeatMaskerEdition-20170127.tar.gz
-# Configuration of RepeatMasker
-./configure 
-# Enter
-# Enter
-# Enter
-# /opt/biosoft/RepeatMasker             Enter
-# 2                                     Enter
-# /opt/biosoft/ncbi-blast-2.6.0+/bin/   Enter
-# Y                                     Enter
-# 4                                     Enter
-# /opt/biosoft/hmmer-3.1b2/bin/         Enter
-# N                                     Enter
-# 5                                     Enter
-chmod 644 *.pm configure RepeatMaskerConfig.tmpl
+chmod 644 *.pm configure
 echo 'PATH=$PATH:/opt/biosoft/RepeatMasker' >> ~/.bashrc
 source ~/.bashrc
 
+tar zxf ~/software/RepBaseRepeatMaskerEdition-20181026.tar.gz -C /opt/biosoft/RepeatMasker/
+cp ~/software/trf409.linux64 /opt/biosoft/RepeatMasker/trf
+chmod 755 /opt/biosoft/RepeatMasker/trf
+
+# Configuration of RepeatMasker
+cd /opt/biosoft/RepeatMasker/
+perl ./configure
+# /opt/biosoft/RepeatMasker/trf           Enter
+# 2                                       Enter
+# /opt/biosoft/ncbi-rmblast-2.10.0+/bin   Enter
+# Y                                       Enter
+# 5                                       Enter
+
 
 ## 5. Installing RepeatModeler
-wget http://www.repeatmasker.org/RepeatModeler/RepeatModeler-open-1.0.11.tar.gz -P ~/software
-wget http://www.repeatmasker.org/RepeatModeler/RECON-1.08.tar.gz -P ~/software
-wget http://repeatscout.bioprojects.org/RepeatScout-1.0.5.tar.gz -P ~/software
+wget http://www.repeatmasker.org/RepeatModeler/RepeatModeler-2.0.1.tar.gz -P ~/software/
+wget http://www.repeatmasker.org/RepeatModeler/RECON-1.08.tar.gz -P ~/software/
+wget http://www.repeatmasker.org/RepeatScout-1.0.6.tar.gz -P ~/software/
+wget http://genometools.org/pub/genometools-1.5.9.tar.gz -P ~/software/
+wget https://github.com/oushujun/LTR_retriever/archive/v2.9.0.tar.gz -O ~/software/LTR_retriever-2.9.0.tar.gz
+wget https://mafft.cbrc.jp/alignment/software/mafft-7.407-without-extensions-src.tgz -P ~/software
+wget https://github.com/weizhongli/cdhit/releases/download/V4.8.1/cd-hit-v4.8.1-2019-0228.tar.gz -P ~/software
+wget https://github.com/TravisWheelerLab/NINJA/archive/0.95-cluster_only.tar.gz -O ~/software/NINJA-0.95-cluster_only.tar.gz
 
 tar zxf ~/software/RECON-1.08.tar.gz -C /opt/biosoft/
 cd /opt/biosoft/RECON-1.08/src/
 make && make install
 
-tar zxf ~/software/RepeatScout-1.0.5.tar.gz -C /opt/biosoft/
-cd /opt/biosoft/RepeatScout-1/
+tar zxf ~/software/RepeatScout-1.0.6.tar.gz -C /opt/biosoft/
+cd /opt/biosoft/RepeatScout-1.0.6
 make
 
-cd /opt/biosoft/
-lftp -e "mirror /pub/seg/nseg/ ./; exit" ftp://ftp.ncbi.nih.gov
-cd /opt/biosoft/nseg/
-make
+cd && tar zxf ~/software/genometools-1.5.9.tar.gz
+cd genometools-1.5.9
+perl -p -i -e 's/-Werror/-Wno-error/g' Makefile
+make prefix=//opt/biosoft/genometools-1.5.9/ install -j 4
+cd ../ && rm -rf genometools-1.5.9
 
-tar zxf ~/software/RepeatModeler-open-1.0.11.tar.gz -C /opt/biosoft/
-cd /opt/biosoft/RepeatModeler-open-1.0.11/
-perl configure 
-# Enter
-# Enter
-# Enter
-# /opt/biosoft/RepeatMasker              Enter
-# /opt/biosoft/RECON-1.08/bin/           Enter
-# /opt/biosoft/RepeatScout-1/            Enter
-# /opt/biosoft/nseg/                     Enter
-# /opt/biosoft/RepeatMasker              Enter
-# 1                                      Enter
-# /opt/biosoft/ncbi-blast-2.6.0+/bin/    Enter
-# Enter
-# 3                                      Enter
+tar zxf ~/software/LTR_retriever-2.9.0.tar.gz -C /opt/biosoft/
+
+tar zxf ~/software/mafft-7.407-without-extensions-src.tgz
+cd mafft-7.407-without-extensions/core/
+perl -p -i -e 's#PREFIX =.*#PREFIX = /opt/biosoft/mafft#' Makefile
+perl -p -i -e 's#BINDIR =.*#BINDIR = /opt/biosoft/mafft/bin/#' Makefile
+make -j 4
+make install
+cd ../../ && rm -rf mafft-7.407-without-extensions
+echo 'PATH=$PATH:/opt/biosoft/mafft/bin/' >> ~/.bashrc
+source ~/.bashrc
+
+tar zxf ~/software/cd-hit-v4.8.1-2019-0228.tar.gz -C /opt/biosoft/
+cd /opt/biosoft/cd-hit-v4.8.1-2019-0228
+make -j 4
+
+tar zxf ~/software/NINJA-0.95-cluster_only.tar.gz -C /opt/biosoft/
+cd /opt/biosoft/NINJA-0.95-cluster_only/NINJA/
+make -j 4
+
+tar zxf ~/software/RepeatModeler-2.0.1.tar.gz -C /opt/biosoft/
+cd /opt/biosoft/RepeatModeler-2.0.1
+perl configure
+#                                             Enter
+# /usr/bin/perl                               Enter
+# /opt/biosoft/RepeatMasker                   Enter
+# /opt/biosoft/RECON-1.08/bin                 Enter
+# /opt/biosoft/RepeatScout-1.0.6              Enter
+# /opt/biosoft/RepeatMasker/trf               Enter
+# 1                                           Enter
+# /opt/biosoft/ncbi-rmblast-2.10.0+/bin       Enter
+# 3                                           Enter
+# y                                           Enter
+# /opt/biosoft/genometools-1.5.9/bin          Enter
+# /opt/biosoft/LTR_retriever-2.9.0            Enter
+# /opt/biosoft/mafft/bin                      Enter
+# /opt/biosoft/NINJA-0.95-cluster_only/NINJA  Enter
+# /opt/biosoft/cd-hit-v4.8.1-2019-0228        Enter
 chmod 644 *.pm configure RepModelConfig.pm.tmpl
-echo 'PATH=$PATH:/opt/biosoft/RepeatModeler-open-1.0.11' >> ~/.bashrc
+echo 'PATH=$PATH:/opt/biosoft/RepeatModeler-2.0.1' >> ~/.bashrc
 source ~/.bashrc
 
 
 ## 6. Installing Samtools
 cd /home/train/
-wget https://github.com/samtools/samtools/releases/download/1.8/samtools-1.8.tar.bz2 -P ~/software
-tar jxf ~/software/samtools-1.8.tar.bz2
-cd samtools-1.8
-./configure --prefix=/opt/biosoft/samtools-1.8
+wget https://github.com/samtools/samtools/releases/download/1.11/samtools-1.11.tar.bz2 -P ~/software
+tar jxf ~/software/samtools-1.11.tar.bz2 -C /opt/biosoft/
+cd /opt/biosoft/samtools-1.11
+./configure --prefix=/opt/biosoft/samtools-1.11
 make -j 8 && make install
-cd ../ && rm -rf samtools-1.8
-echo "PATH=$PATH:/opt/biosoft/samtools-1.8/bin/' >> ~/.bashrc
+echo 'PATH=/opt/biosoft/samtools-1.11/bin/:$PATH' >> ~/.bashrc
 source ~/.bashrc
 
 
@@ -173,31 +168,30 @@ source ~/.bashrc
 
 
 ## 9. Installing AUGUSTUS
-wget https://github.com/pezmaster31/bamtools/archive/master.zip -O ~/software/bamtools-2.4.0.zip
-wget http://bioinf.uni-greifswald.de/augustus/binaries/augustus-3.3.1.tar.gz -P ~/software
+wget https://github.com/pezmaster31/bamtools/archive/v2.5.1.tar.gz -O ~/software/bamtools-2.5.1.tar.gz
+wget http://bioinf.uni-greifswald.de/augustus/binaries/augustus-3.3.3.tar.gz -P ~/software
 
-unzip ~/software/bamtools-2.4.0.zip
-cd bamtools-master/
+tar zxf ~/software/bamtools-2.5.1.tar.gz
+cd bamtools-2.5.1/
 mkdir build
 cd build/
+#cmake ../ -DCMAKE_INSTALL_PREFIX=/opt/biosoft/bamtools-2.5.1
 cmake ../
 make -j 4
-# switch user to "root"
-make install
-cp /usr/local/include/bamtools/ /usr/include/ -rf
-cp ../lib/* /usr/local/lib/
-# switch user to "train"
+sudo make install
+sudo cp /usr/local/include/bamtools/ /usr/include/ -rf
 cd ../../
-rm bamtools-master/ -rf
+rm bamtools-2.5.1/ -rf
 
-tar zxf ~/software/augustus-3.3.1.tar.gz -C /opt/biosoft/
-cd /opt/biosoft/augustus-3.3.1/
+tar zxf ~/software/augustus-3.3.3.tar.gz -C /opt/biosoft/
+cd /opt/biosoft/augustus-3.3.3/
 make clean
+perl -p -i.bak -e 's#^SAMTOOLS=.*#SAMTOOLS=/opt/biosoft/samtools-1.11#; s#^HTSLIB=.*#HTSLIB=/opt/biosoft/samtools-1.11/htslib-1.11#;' auxprogs/bam2wig/Makefile
 make -j 4
-# if the compilation of bam2wig failed, please ignore it.
-echo 'PATH=$PATH:/opt/biosoft/augustus-3.3.1/bin/' >> ~/.bashrc
-echo 'PATH=$PATH:/opt/biosoft/augustus-3.3.1/scripts/' >> ~/.bashrc
-echo "export AUGUSTUS_CONFIG_PATH=/opt/biosoft/augustus-3.3.1/config/" >> ~/.bashrc
+chmod 777 /opt/biosoft/augustus-3.3.3/config/species
+echo 'PATH=$PATH:/opt/biosoft/augustus-3.3.3/bin/' >> ~/.bashrc
+echo 'PATH=$PATH:/opt/biosoft/augustus-3.3.3/scripts/' >> ~/.bashrc
+echo "export AUGUSTUS_CONFIG_PATH=/opt/biosoft/augustus-3.3.3/config/" >> ~/.bashrc
 source ~/.bashrc
 
 
@@ -205,15 +199,14 @@ source ~/.bashrc
 wget https://sourceforge.net/projects/parafly/files/parafly-r2013-01-21.tgz -P ~/software
 tar zxf ~/software/parafly-r2013-01-21.tgz
 cd parafly-r2013-01-21
-./configure --prefix=/opt/sysoft/parafly-r2013-01-21
-make -j 8 && make install
+./configure --prefix=/opt/sysoft/parafly-r2013-01-21 && make -j 8 && make install
 cd .. && rm -rf parafly-r2013-01-21
-echo 'PATH=$PATH:/opt/sysoft/parafly-r2013-01-21/bin/" >> ~/.bashrc
+echo 'PATH=/opt/sysoft/parafly-r2013-01-21/bin/:$PATH' >> ~/.bashrc
 source ~/.bashrc
 
 
 ## 11. Installing Java
-wget http://download.oracle.com/otn-pub/java/jdk/8u172-b11/a58eab1ec242421181065cdc37240b08/jre-8u172-linux-x64.tar.gz -P ~/software
-tar zxf ~/software/jre-8u172-linux-x64.tar.gz -C /opt/sysoft/
-echo 'PATH=/opt/sysoft/jre1.8.0_172/bin/:$PATH' >> ~/.bashrc
+wget https://javadl.oracle.com/webapps/download/AutoDL?BundleId=244058_89d678f2be164786b292527658ca1605 -O ~/software/jre-8u281-linux-x64.tar.gz
+tar zxf ~/software/jre-8u281-linux-x64.tar.gz -C /opt/sysoft/
+echo 'PATH=/opt/sysoft/jre1.8.0_281/bin:$PATH' >> ~/.bashrc
 source ~/.bashrc
