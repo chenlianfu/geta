@@ -318,7 +318,12 @@ sub cds2pep {
     my $pep;
     while ((length $seq) >= 3) {
         $seq =~ s/(\w{3})//;
-        $pep .= $cds2pep{$1};
+        if (exists $cds2pep{$1}) {
+            $pep .= $cds2pep{$1};
+        }
+        else {
+            $pep .= 'X';
+        }
     }
     return $pep;
 }

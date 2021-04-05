@@ -149,7 +149,7 @@ sub target {
     $input =~ s/\(\d+\)//;
     $input =~ s/^\s*//;
     $input =~ s/\s*$//;
-	$input =~ s/\s+/ /g;
+    $input =~ s/\s+/ /g;
     my $out = "$_[0] $input";
     return $out;
 }

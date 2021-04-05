@@ -6,18 +6,18 @@ my $usage = <<USAGE;
 Usage:
     perl $0 file.gff genome.fasta > out.masked.fasta
 
-	--mask_type <string>    default: hardmaskN
-	    设置重复序列屏蔽的类型，有三个值可以选择：softmask(将原本需要硬隐蔽的重复序列字符由大写字母换成小写字母)、hardmaskX(将原本需要硬隐蔽的复序列字符替换成X)和hardmaskN(将原本需要硬隐蔽的重复序列字符替换成N)。
-	--mask_all
-	    加入该参数后，则对GFF文件中的所有重复序列进行屏蔽。默认设置：不对Low_complexity、Simple_repeat、Satellite类型的重复序列进行屏蔽，因为这种类型的重复序列长度较短，出现在基因区域的可能性较高；对Unknown和Other类型的重复序列进行软屏蔽；对其它类型的转座子序列进行硬屏蔽。
+    --mask_type <string>    default: hardmaskN
+        设置重复序列屏蔽的类型，有三个值可以选择：softmask(将原本需要硬隐蔽的重复序列字符由大写字母换成小写字母)、hardmaskX(将原本需要硬隐蔽的复序列字符替换成X)和hardmaskN(将原本需要硬隐蔽的重复序列字符替换成N)。
+    --mask_all
+        加入该参数后，则对GFF文件中的所有重复序列进行屏蔽。默认设置：不对Low_complexity、Simple_repeat、Satellite类型的重复序列进行屏蔽，因为这种类型的重复序列长度较短，出现在基因区域的可能性较高；对Unknown和Other类型的重复序列进行软屏蔽；对其它类型的转座子序列进行硬屏蔽。
 
 USAGE
 if (@ARGV==0){die $usage}
 
 my ($mask_type, $mask_all);
 GetOptions(
-	"mask_type:s" => \$mask_type,
-	"mask_all" => \$mask_all,
+    "mask_type:s" => \$mask_type,
+    "mask_all" => \$mask_all,
 );
 $mask_type ||= "hardmaskN";
 
@@ -36,22 +36,25 @@ while (<FASTA>) {
 }
 
 while (<GFF>) {
-	unless ($mask_all) {
-		next if m/Name=Low_complexity/;
-		next if m/Name=Simple_repeat/;
-		#next if m/Name=.*RNA/;
-		next if m/Name=Satellite/;
-	}
+    unless ($mask_all) {
+        next if m/Name=Low_complexity/;
+        next if m/Name=Simple_repeat/;
+        #next if m/Name=.*RNA/;
+        next if m/Name=Satellite/;
+    }
     if (/(\S+)\t.+\t.+\t(\d+)\t(\d+)\t/) {
         my $id = $1;
         my $start = $2 - 1;
         my $length = $3 - $start;
-		if (m/Name=Unknown/) {
-			substr($fasta{$id},$start,$length) =~ tr/ATCGN/atcgn/;
-		}
-		elsif (m/Name=Other/) {
-			substr($fasta{$id},$start,$length) =~ tr/ATCGN/atcgn/;
-		}
+        if (m/Name=Unknown/) {
+            substr($fasta{$id},$start,$length) =~ tr/ATCGN/atcgn/;
+        }
+	elsif (m/Name=Unspecified/) {
+            substr($fasta{$id},$start,$length) =~ tr/ATCGN/atcgn/;
+        }
+        elsif (m/Name=Other/) {
+            substr($fasta{$id},$start,$length) =~ tr/ATCGN/atcgn/;
+        }
         elsif ($mask_type eq "softmask") {
             substr($fasta{$id},$start,$length) =~ tr/ATCGN/atcgn/;
         }

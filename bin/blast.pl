@@ -4,7 +4,7 @@ use strict;
 my $usage = <<USAGE;
 Usage:
     perl homolog_paraBlast blastProgramType blastDB fastaFile evalue threads outPrefix outfmt
-	7 parameters should be given, and the final result is outPrefix.xml or outPrefix.tab
+    7 parameters should be given, and the final result is outPrefix.xml or outPrefix.tab
 
 For example:
     perl homolog_paraBlast blastp nr proteins.fa 1e-3 24 nr 5
