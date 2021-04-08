@@ -110,9 +110,14 @@ foreach my $scaffold_id (sort keys %scaffold) {
             $exon_len .= "$exon_length,";
             if ($last_exon_end) {
                 my $intron_length = $_[0] - $last_exon_end - 1;
-                $intron_size += $intron_length;
-                $intron_num ++;
-                $intron_len .= "$intron_length,";
+                if ($intron_length > 0) {
+                    $intron_size += $intron_length;
+                    $intron_num ++;
+                    $intron_len .= "$intron_length,";
+                }
+                else {
+                    print STDERR "$gene_id: intron_length was calculated to a minus num\n";
+                }
             }
             $last_exon_end = $_[1];
 
