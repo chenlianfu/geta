@@ -436,7 +436,7 @@ unless (-e "2.hisat2.ok") {
     $pwd = `pwd`; print STDERR "PWD: $pwd";
 
     # 构建基因组hisat2索引数据库
-    $cmdString = "hisat2-build $config{'hisat2-build'} $genome genome &> hisat2-build.log\n";
+    $cmdString = "hisat2-build $config{'hisat2-build'} ../0.RepeatMasker/genome.masked.fasta genome &> hisat2-build.log\n";
     unless (-e "hisat2-build.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
