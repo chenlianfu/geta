@@ -351,7 +351,7 @@ unless (-e "0.RepeatMasker.ok") {
     $pwd = `pwd`; print STDERR "PWD: $pwd";
 
     # 合并RepeatMasker和RepeatModeler的结果
-    $cmdString = "$dirname/bin/merge_repeatMasker_out.pl repeatMasker/genome.fasta.out repeatModeler/genome.fasta.out > genome.repeat.stats";
+    $cmdString = "$dirname/bin/merge_repeatMasker_out.pl $genome repeatMasker/genome.fasta.out repeatModeler/genome.fasta.out > genome.repeat.stats";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
     $cmdString = "$dirname/bin/maskedByGff.pl genome.repeat.gff3 $genome > genome.masked.fasta";
