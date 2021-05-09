@@ -514,7 +514,7 @@ unless (-e "3.transcript.ok") {
     close IN;
 
     # 批量并行化进行transcripts计算
-    $cmdString = "ParaFly -c command.sam2transfrag.list -CPU 4 &> /dev/null";
+    $cmdString = "ParaFly -c command.sam2transfrag.list -CPU $cpu &> /dev/null";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
