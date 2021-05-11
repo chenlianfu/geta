@@ -52,7 +52,7 @@ my (%gff, %sort1, %sort2, %sort3, %sort4, %CDS);
 foreach (@ARGV) {
     open IN, $_ or die $!;
     my (%gff_info, $id, %gene_length);
-	my $keep = 0;
+    my $keep = 0;
     while (<IN>) {
         next if m/^#/;
         next if m/^\s*$/;
@@ -64,11 +64,11 @@ foreach (@ARGV) {
             $sort3{$id} = $_[4];
             $sort4{$id} = $_[6];
             $gene_length{$id} = $_[4] - $_[3] + 1;
-			$keep = 1;
+    		$keep = 1;
         }
-		elsif (! m/Parent=/) {
-			$keep = 0;
-		}
+    	elsif (! m/Parent=/) {
+    		$keep = 0;
+    	}
         $gff_info{$id} .= $_ if $keep == 1;
     }
     close IN;
@@ -76,10 +76,11 @@ foreach (@ARGV) {
     my %cds;
     foreach my $gene_id (keys %gff_info) {
         my $gff_info = $gff_info{$gene_id};
-		unless ($gff_info =~ m/\tCDS\t/) {
-			delete $gff_info{$gene_id};
-			next;
-		}
+    	# 去除不含 CDS 信息的基因模型
+    	unless ($gff_info =~ m/\tCDS\t/) {
+    		delete $gff_info{$gene_id};
+    		next;
+    	}
         foreach (split /\n/, $gff_info) {
             if (m/^(\S+?)\t.*\tCDS\t(\d+?)\t(\d+?)\t.*?\t(.*?)\t/) {
                 my $index1 = int($2 / 1000); 
@@ -103,7 +104,7 @@ foreach (@ARGV) {
                         @_ = split /\t/;
                         if ($_[1] >= $2 && $_[0] <= $3 && $gene_id ne $cds{$1}{$4}{$index}{$_}) {
                             $overlap{$gene_id}{$cds{$1}{$4}{$index}{$_}} = 1;
-							#print STDERR "$gene_id\t$2\t$3\t$cds{$1}{$4}{$index}{$_}\t$_[0]\t$_[1]\n";
+    						#print STDERR "$gene_id\t$2\t$3\t$cds{$1}{$4}{$index}{$_}\t$_[0]\t$_[1]\n";
                         }
                     }    
                 }
@@ -141,43 +142,43 @@ foreach (@ARGV) {
         shift @genes;
         foreach (@genes) {
             delete $gff_info{$_};
-			print STDERR "$cluster: delete $_\n";
+    		print STDERR "$cluster: delete $_\n";
         }
     }
 
-	my @gene_id = keys %gff_info;
-	foreach my $gene_id (@gene_id) {
-		my $gff_info = $gff_info{$gene_id};
-		foreach (split /\n/, $gff_info) {
-			if (m/^(\S+?)\t.*\tCDS\t(\d+?)\t(\d+?)\t.*?\t(.*?)\t/) {
-				my $index1 = int($2 / 1000); 
-				my $index2 = int($3 / 1000); 
-				foreach my $index ( $index1 .. $index2 ) {
-					foreach (keys %{$CDS{$1}{$4}{$index}}) {
-						@_ = split /\t/;
-						if ($_[1] >= $2 && $_[0] <= $3 && $gene_id ne $CDS{$1}{$4}{$index}{$_}) {
-							delete $gff_info{$gene_id};
-							print STDERR "$gene_id\t$CDS{$1}{$4}{$index}{$_}: delete: $gene_id\n";
-						}
-					}
-				}
-			}
-		}
-	}
+    my @gene_id = keys %gff_info;
+    foreach my $gene_id (@gene_id) {
+    	my $gff_info = $gff_info{$gene_id};
+    	foreach (split /\n/, $gff_info) {
+    		if (m/^(\S+?)\t.*\tCDS\t(\d+?)\t(\d+?)\t.*?\t(.*?)\t/) {
+    			my $index1 = int($2 / 1000); 
+    			my $index2 = int($3 / 1000); 
+    			foreach my $index ( $index1 .. $index2 ) {
+    				foreach (keys %{$CDS{$1}{$4}{$index}}) {
+    					@_ = split /\t/;
+    					if ($_[1] >= $2 && $_[0] <= $3 && $gene_id ne $CDS{$1}{$4}{$index}{$_}) {
+    						delete $gff_info{$gene_id};
+    						print STDERR "$gene_id\t$CDS{$1}{$4}{$index}{$_}: delete: $gene_id\n";
+    					}
+    				}
+    			}
+    		}
+    	}
+    }
 
-	foreach my $chr (keys %cds) {
-		foreach my $strand (keys %{$cds{$chr}}) {
-			foreach my $index (keys %{$cds{$chr}{$strand}}) {
-				foreach (keys %{$cds{$chr}{$strand}{$index}}) {
-					$CDS{$chr}{$strand}{$index}{$_} = $cds{$chr}{$strand}{$index}{$_};
-				}
-			}
-		}
-	}
+    foreach my $chr (keys %cds) {
+    	foreach my $strand (keys %{$cds{$chr}}) {
+    		foreach my $index (keys %{$cds{$chr}{$strand}}) {
+    			foreach (keys %{$cds{$chr}{$strand}{$index}}) {
+    				$CDS{$chr}{$strand}{$index}{$_} = $cds{$chr}{$strand}{$index}{$_};
+    			}
+    		}
+    	}
+    }
 
-	foreach (keys %gff_info) {
-		$gff{$_} = $gff_info{$_};
-	}
+    foreach (keys %gff_info) {
+    	$gff{$_} = $gff_info{$_};
+    }
 }
 
 # 对基因按位置进行排序
@@ -188,9 +189,9 @@ my $number;
 
 # 读取基因的exon和CDS信息，添加UTR信息。也适用于含有可变剪接的GFF3文件。
 foreach my $gene_id (@id) {
-	next unless $gene_id;
+    next unless $gene_id;
     my $gff_info = $gff{$gene_id};
-	next unless $gff_info =~ m/\tCDS\t/;
+    next unless $gff_info =~ m/\tCDS\t/;
     my $out;
     $number ++;
 
@@ -221,7 +222,7 @@ foreach my $gene_id (@id) {
     my $mRNA_number = 0;
     foreach (@mRNA_id) {
         my $gff_mRNA = $gff_mRNA{$_};
-		next unless $gff_mRNA =~ m/\tCDS\t/;
+    	next unless $gff_mRNA =~ m/\tCDS\t/;
         $mRNA_number ++;
 
         # 修改mRNA的ID和Parent信息。
@@ -231,8 +232,11 @@ foreach my $gene_id (@id) {
         $mRNA_line =~ s/Parent=[^;\s]+;?//;
         $mRNA_line =~ s/\t([^\t]*)$/\tID=$transcript_id;Parent=$id_out;$1/;
 
+    	# 由CDSs得到exons，和已有的exons进行整合：（1）一个exon和另外一个exon有重叠，则选择exon长的；（2）若一个exon和多个exons有重叠，则去掉该exon，对多个exon进行延长。
+    	$gff_mRNA = &modify_exon($gff_mRNA, $transcript_id);
+
         # 修改CDS和exon的ID和Parent信息。若没有exon信息，则根据CDS信息得到exon信息。
-        $gff_mRNA = &change_id($gff_mRNA, $transcript_id);
+    	#$gff_mRNA = &change_id($gff_mRNA, $transcript_id);
 
         # 进行基因完整性验证。
         my %info = &cdsIncludeStopCodon_and_integrity($gff_mRNA, $transcript_id);
@@ -285,6 +289,115 @@ sub sortgff {
         }
     }
     
+    return $out;
+}
+
+sub modify_exon {
+    my $info = $_[0];
+    my $gene_id = $_[1];
+
+    my @line = split /\n/, $info;
+    @_ = split /\t/, $line[0];
+    my ($f1, $f2, $strand) = ($_[0], $_[1], $_[6]);
+
+    my (%cds_exon, %exon, %cds_info);
+    foreach (@line) {
+    	s/\t[^\t]+$//;
+    	@_ = split /\t/;
+    	if (m/\tCDS\t/) {
+    		$cds_info{"$_[3]\t$_[4]"} = $_;
+    		$cds_exon{"$_[3]\t$_[4]"} = 1;
+    	}
+    	elsif (m/\texon\t/) {
+    		$exon{"$_[3]\t$_[4]"} = 1;
+    	}
+    }
+
+    my @exon = sort {$a <=> $b} keys %exon;
+    my @cds_exon = sort {$a <=> $b} keys %cds_exon;
+
+    # 首先，首尾CDS得到的exon可能被包含在含有UTR的exon中。这是第一种exons之间的重叠，选择有UTR的exon信息（选择更长的exon）。
+    # =========----=======---=======
+    # +++======----=======---==+++++
+    # 以上示例中，选择前者exon信息
+    my $cds_exon_start = shift @cds_exon;
+    my ($start, $end) = split /\t/, $cds_exon_start;
+    # 若CDS得到的exon能被已有的exons覆盖，则不需要其exon信息。
+    my $keep = 1;
+    foreach (@exon) {
+    	@_ = split /\t/, $_;
+    	if ($_[0] <= $start && $_[1] == $end) {
+    		$keep = 0;
+    		#print "OK1:\t$_\n";
+    		last;
+    	}
+    }
+    $exon{$cds_exon_start} = 1 if $keep == 1;
+    if (@cds_exon) {
+    	my $cds_exon_end = pop @cds_exon;
+    	($start, $end) = split /\t/, $cds_exon_end;
+    	$keep = 1;
+    	foreach (@exon) {
+    		@_ = split /\t/, $_;
+    		if ($_[0] == $start && $_[1] >= $end) {
+    			$keep = 0;
+    			#print "OK1:\t$_\n";
+    			last;
+    		}
+    	}
+    	$exon{$cds_exon_end} = 1 if $keep == 1;
+    }
+    if (@cds_exon) {
+    	$exon{$_} = 1;
+    }
+
+    # 此外，再对所有的exons进行分析，若有重叠，则将更长的exon进行打断，选择更短的exon。
+    # ==============================
+    #   ====----========---=====
+    # 以上示例中出现了4个exons，则选择较短的exons，并将和3个exons有重叠的第一个exon进行打断，得到的3个exons如下：
+    # ======----========---=========
+    @exon = sort {$a <=> $b} keys %exon;
+    my $first_exon = shift @exon;
+    my ($last_start, $last_end) = split /\t/, $first_exon;
+    my ($stop_end, @exon_out);
+    foreach (@exon) {
+    	my ($start, $end) = split /\t/, $_;
+    	if ($start > $last_end) {
+    		push @exon_out, "$last_start\t$last_end";
+    		#print "OK2:\t$last_start\t$last_end\n";
+    		($last_start, $last_end) = ($start, $end);
+    	}
+    	else {
+    		$stop_end = $last_end if $stop_end < $last_end;
+    		$last_end = $end;
+    	}
+    }
+    $last_end = $stop_end if $stop_end > $last_end;
+    push @exon_out, "$last_start\t$last_end";
+    #print "OK2:\t$last_start\t$last_end\n";
+
+    my @cds_out = keys %cds_info;
+    if ($strand eq "+") {
+    	@cds_out = sort {$a <=> $b} @cds_out;
+    	@exon_out = sort {$a <=> $b} @exon_out;
+    }
+    elsif ($strand eq "-") {
+    	@cds_out = sort {$b <=> $a} @cds_out;
+    	@exon_out = sort {$b <=> $a} @exon_out;
+    }
+
+    my $out;
+    my $cds_num = 0;
+    foreach (@cds_out) {
+    	$cds_num ++;
+    	$out .= "$cds_info{$_}\tID=$gene_id.CDS$cds_num;Parent=$gene_id;\n";
+    }
+    my $exon_num = 0;
+    foreach (@exon_out) {
+    	$exon_num ++;
+    	$out .= "$f1\t$f2\texon\t$_\t\.$strand\t\.\tID=$gene_id.exon$exon_num;Parent=$gene_id;\n";
+    }
+
     return $out;
 }
 
