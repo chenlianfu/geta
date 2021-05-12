@@ -230,6 +230,7 @@ if ($single_end) {
 }
 
 $out_prefix ||= "out";
+$cpu ||= 4;
 # 各个主要命令的参数设置
 my %config = (
     'RepeatMasker' => '-e ncbi -gff',
