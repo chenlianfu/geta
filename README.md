@@ -1,6 +1,6 @@
 GETA
 ============
-GETA is an automatic genome-wide annotation tool (GWAT) with improved accuracy and gene integrity for eukaryotes written by Lianfu Chen, Congcong Liu, Lei Deng and so on.
+GETA is an automatic genome-wide annotation tool (GWAT) with improved accuracy and gene integrity for eukaryotes written by Lianfu Chen, Hansheng Zhao, Congcong Liu and Lei Deng.
 
 Introduction
 ============
