@@ -6,7 +6,7 @@ my $usage = <<USAGE;
 Usage:
     perl $0 [options] file1.gff3 file2.gff3 ... > total.gff3
 
-    读取输入GFF3格式文件中的中CDS和exon信息，在输出文件中添加UTR信息。
+    读取输入GFF3格式文件中的中CDS和exon信息，在输出文件中添加UTR信息。若一个mRNA中的exons之间有重叠，程序能进行修正。
     有部分基因模型的尾部CDS不包含终止密码子，则对其要进行修正。
     添加gene或mRNA是否完整的信息。
     若GFF3文件含有可变剪接，也适用。
@@ -347,11 +347,11 @@ sub modify_exon {
     	}
     	$exon{$cds_exon_end} = 1 if $keep == 1;
     }
-    if (@cds_exon) {
+    foreach (@cds_exon) {
     	$exon{$_} = 1;
     }
 
-    # 此外，再对所有的exons进行分析，若有重叠，则将更长的exon进行打断，选择更短的exon。
+    # 此外，再对所有的exons之间的重叠进行分析，这是第二种exons之间的重叠，则将更长的exon进行打断，选择更短的exon。
     # ==============================
     #   ====----========---=====
     # 以上示例中出现了4个exons，则选择较短的exons，并将和3个exons有重叠的第一个exon进行打断，得到的3个exons如下：
