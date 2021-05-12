@@ -395,7 +395,7 @@ sub modify_exon {
     my $exon_num = 0;
     foreach (@exon_out) {
     	$exon_num ++;
-    	$out .= "$f1\t$f2\texon\t$_\t\.$strand\t\.\tID=$gene_id.exon$exon_num;Parent=$gene_id;\n";
+    	$out .= "$f1\t$f2\texon\t$_\t\.\t$strand\t\.\tID=$gene_id.exon$exon_num;Parent=$gene_id;\n";
     }
 
     return $out;
