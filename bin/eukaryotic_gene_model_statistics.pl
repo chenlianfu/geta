@@ -7,7 +7,7 @@ Usage:
 
     通过真核生物GTF文件对基因模型进行统计。
 
-    程序统计了基因水平的信息：基因长度、起始位点、结束位点、正负链方向、转录本的个数、和前一个基因的距离。并得到基因正义链上的序列。统计基因中拥有最长CDS转录本的信息：cDNA长度、exon个数、CDS长度、CDS个数、intron长度、intron个数、exon长度信息、cds长度信息、intron长度信息。并得到该转录本的cDNA序列、CDS序列和氨基酸序列。
+    程序统计了基因水平的信息：基因长度、起始位点、结束位点、正负链方向、转录本的个数、和前一个基因的距离。并得到基因正义链上的序列。统 计基因中拥有最长CDS转录本的信息：cDNA长度、exon个数、CDS长度、CDS个数、intron长度、intron个数、exon长度信息、cds长度信息、intron长度信 息。并得到该转录本的cDNA序列、CDS序列和氨基酸序列。
 
     得到几个文件：
     outPrefix.geneModels.statistics    对每个基因的统计信息，表格文件
@@ -80,7 +80,7 @@ foreach my $scaffold_id (sort keys %scaffold) {
         my $gene_length = $gene_end - $gene_start + 1;
         my $gene_seq = substr($seq{$scaffold_id}, $gene_start - 1, $gene_length);
         my $strand = $strand{$gene_id};
-        my @isoform = sort {$cds_length{$b} <=> $cds_length{$a} or $exon_length{$b} <=> $exon_length{$a}} keys %{$scaffold{$scaffold_id}{$gene_id}};
+        my @isoform = sort {$cds_length{$b} <=> $cds_length{$a} or $exon_length{$b} <=> $exon_length{$a} or $a cmp $b} keys %{$scaffold{$scaffold_id}{$gene_id}};
         my $isoform_number = @isoform;
         my $isoform = $isoform[0];
         my $intergenic_length = $gene_start - $last_gene_end - 1;
@@ -110,7 +110,7 @@ foreach my $scaffold_id (sort keys %scaffold) {
             $exon_len .= "$exon_length,";
             if ($last_exon_end) {
                 my $intron_length = $_[0] - $last_exon_end - 1;
-                if ($intron_length > 0) {
+                if ($intron_length >= 0) {
                     $intron_size += $intron_length;
                     $intron_num ++;
                     $intron_len .= "$intron_length,";
@@ -335,6 +335,7 @@ sub cds2pep {
         "GGG" => "G",
     );
     my $seq = shift @_;
+    $seq = uc($seq);
     my $fram = shift @_;
     my $gene = shift @_;
     $seq =~ s/\w{$fram}//;
