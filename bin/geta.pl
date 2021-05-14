@@ -326,7 +326,7 @@ unless (-e "0.RepeatMasker.ok") {
         else {
             print STDERR "CMD(Skipped): $cmdString\n";
         }
-        $cmdString = "RepeatModeler -engine ncbi -pa $cpu -database species &> RepeatModeler.log";
+        $cmdString = "RepeatModeler -pa $cpu -database species -LTRStruct &> RepeatModeler.log";
         unless (-e "RepeatModeler.ok") {
             print STDERR (localtime) . ": CMD: $cmdString\n";
             system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
