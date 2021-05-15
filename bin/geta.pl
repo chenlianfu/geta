@@ -70,7 +70,7 @@ This script was tested on CentOS 6.8 with such softwares can be run directly in 
 9. genewise (version: 2.4.1)
 10. augustus/etraining (version: 3.3.1)
 
-Version: 2.4.2
+Version: 2.4.7
 
 USAGE
 if (@ARGV==0){die $usage}
@@ -230,6 +230,7 @@ if ($single_end) {
 }
 
 $out_prefix ||= "out";
+$cpu ||= 4;
 # 各个主要命令的参数设置
 my %config = (
     'RepeatMasker' => '-e ncbi -gff',
@@ -325,7 +326,7 @@ unless (-e "0.RepeatMasker.ok") {
         else {
             print STDERR "CMD(Skipped): $cmdString\n";
         }
-        $cmdString = "RepeatModeler -engine ncbi -pa $cpu -database species &> RepeatModeler.log";
+        $cmdString = "RepeatModeler -pa $cpu -database species -LTRStruct &> RepeatModeler.log";
         unless (-e "RepeatModeler.ok") {
             print STDERR (localtime) . ": CMD: $cmdString\n";
             system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -351,7 +352,7 @@ unless (-e "0.RepeatMasker.ok") {
     $pwd = `pwd`; print STDERR "PWD: $pwd";
 
     # 合并RepeatMasker和RepeatModeler的结果
-    $cmdString = "$dirname/bin/merge_repeatMasker_out.pl repeatMasker/genome.fasta.out repeatModeler/genome.fasta.out > genome.repeat.stats";
+    $cmdString = "$dirname/bin/merge_repeatMasker_out.pl $genome repeatMasker/genome.fasta.out repeatModeler/genome.fasta.out > genome.repeat.stats";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
     $cmdString = "$dirname/bin/maskedByGff.pl genome.repeat.gff3 $genome > genome.masked.fasta";
@@ -436,7 +437,7 @@ unless (-e "2.hisat2.ok") {
     $pwd = `pwd`; print STDERR "PWD: $pwd";
 
     # 构建基因组hisat2索引数据库
-    $cmdString = "hisat2-build $config{'hisat2-build'} $genome genome &> hisat2-build.log\n";
+    $cmdString = "hisat2-build $config{'hisat2-build'} ../0.RepeatMasker/genome.masked.fasta genome &> hisat2-build.log\n";
     unless (-e "hisat2-build.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -514,7 +515,7 @@ unless (-e "3.transcript.ok") {
     close IN;
 
     # 批量并行化进行transcripts计算
-    $cmdString = "ParaFly -c command.sam2transfrag.list -CPU 4 &> /dev/null";
+    $cmdString = "ParaFly -c command.sam2transfrag.list -CPU $cpu &> /dev/null";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
