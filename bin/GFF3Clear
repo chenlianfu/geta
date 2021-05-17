@@ -6,48 +6,63 @@ my $usage = <<USAGE;
 Usage:
     perl $0 [options] file1.gff3 file2.gff3 ... > total.gff3
 
-    读取输入GFF3格式文件中的中CDS和exon信息，在输出文件中添加UTR信息。若一个mRNA中的exons之间有重叠，程序能进行修正。
-    有部分基因模型的尾部CDS不包含终止密码子，则对其要进行修正。
-    添加gene或mRNA是否完整的信息。
-    若GFF3文件含有可变剪接，也适用。
-    可以输入多个文件，对其进行去冗余整合：（1）对输入的GFF3的基因模型进行分析，若相邻且在同一条链上的基因在CDS区上有重叠，则保留基因长 度较大的那个基因模型；（2）若输入多个GFF3文件，保留先输入文件的基因；后输入文件的相同链上相邻的基因模型中，若有CDS区域和之前文件基因的CDS重叠，则过滤之。
+    程序用于读取一个或多个GFF3文件，对GFF3文件格式进行修正，仅保留编码蛋白基因，并去除CDS区有重叠的冗余基因模型。
 
-    --gene_prefix <string>    default: gene
-    设置gene ID前缀
+    1. 输入的GFF3文件格式要求：必须包含mRNA、CDS这两个Feature信息，且其第九列含有Parent信息; 也可以包含exon和UTR信息; 所有输入的额GFF3文件中的所有基因具有不同的ID编号。程序仅读取GFF3文件的mRNA、CDS、exon信息。
+    2. 程序对GFF3文件按如下顺序进行行修正：
+        2.1 若输入GFF3文件中不包含exon，则程序根据CDS信息生成exon信息和CDSs之间的intron信息；
+        2.2 若输入GFF3文件中包含exon，且exon比CDS范围要多时，则生成UTRs之间的intron信息；
+        2.3 若一个mRNA内有两CDSs之间的碱基距离 < 指定阈值，则程序在标准错误输出中给出警告信息，不进行处理；
+        2.4 若一个mRNA内有两个exons之间的碱基距离 < 0，则程序将较长的exon根据intron打断；
+        2.5 根据输入的基因组序列信息，程序检测基因模型尾部CDS是否包含终止密码子。若不包含，则程序在基因组序列中检测后续的3个碱基是否为终止密码子，从而修正CDS范围，使之包含终止密码子；
+        2.6 程序对每个gene的mRNA进行了CDS和exon的完善，检测基因的完整性信息，得到UTR和intron信息，并能将这些信息输出到GFF3结果文件中；
+        2.7 在一个GFF3文件中，若有两个或多个基因在同一条链上的CDS区域有重叠，则按基因CDS的长度（若存在可变剪接，则是所有isoform的所有CDSs去冗余后的长度），从短到长去除基因模型，保证两两基因模型的CDS区重叠覆盖率（相对较短基因CDS长度的比例）<= 指定阈值；
+        2.8 当输入多个GFF3文件时，检测到基因在同一条链上的CDS区重叠覆盖率（相对较短基因CDS长度的比例）> 指定阈值时，则去除后输入文件的基因模型;
+        2.9 程序最后对基因模型按输入的基因序列顺序及位置信息进行排序，然后根据需要对基因ID进行重命名，输出去冗余的标准GFF3格式的基因模型信息。
 
-    --gene_code_length <int>    default: none
-    设置基因数字编号的长度。若不添加改参数，则程序根据基因的数量自动计算出基因数字编号的长度。例如，基因总数量为10000~99999时，基因数字编号长度为5，于是第一个基因编号为00001；若基因总数量在1000~9999时，基因数字编号长度为4，第一个基因编号为0001。设置该参数用于强行指定基 因编号的长度，从而决定基因编号前0的数量。若某个基因的编号数值长度 >= 本参数设置的值，则该基因编号数值前不加0。
-
+    3. 参数信息：
     --genome <string>
     输入基因组fasta文件。该参数是必须的，用于修正尾部的CDS和基因完整性检测。
+
+    --min_intron <int>    default: 1
+    设置一个最短intron长度阈值。当检测到相邻两CDSs之间相距的碱基距离 < 该阈值时，程序会标准错误输出中给出警告信息。当使用默认参数 1 时，出现警告表示基因模型有错误。
+
+    --coverage <int>    default: 0.30
+    设置一个覆盖度阈值。当两个基因型模型CDS重叠区碱基数 / 较小基因模型CDS去冗余碱基数 > 该覆盖度阈值时， 则去除相应的基因模型。若该值设置为 1，则表示不会去除冗余的基因模型；设置为 0，则表示在CDS区重叠 >= 1 bp，也会去除冗余的基因模型。
+
+    --gene_prefix <string>    default: None
+    若设置该参数，则程序会对基因ID进行重命名，该参数用于设置gene ID前缀。若不设置该参数，则程序不会对基因进行重命名。
+
+    --gene_code_length <int>    default: none
+    设置基因数字编号的长度。若不添加改参数，则程序根据基因的数量自动计算出基因数字编号的长度。例如，基因总数量为10000~99999时，基因数字编号长度为5，于是第一个基因编号为00001；若基因总数量在1000~9999时，基因数字编号长度为4，第一个基因编号为0001。设置该参数用于强行指定基因编号的长度，从而决定基因编号前0的数量。若某个基因的编号数值长度 >= 本参数设置的值，则该基因编号数值前不加0。
 
     --no_attr_add <bool>     default: None
     添加该参数，则不在GFF3文件第9列添加Source和Integrity信息。
 
-    --no_rm_overlap_gene <bool>    default: None
-    添加该参数，则不会对同一条链上CDS区有重叠的基因进行去冗余。
-
 USAGE
 if(@ARGV==0){die $usage}
 
-my ($gene_prefix, $genome, $no_attr_add, $gene_code_length, $no_rm_overlap_gene);
+my ($genome, $min_intron, $coverage, $gene_prefix, $gene_code_length,  $no_attr_add);
 GetOptions(
-    "gene_prefix:s" => \$gene_prefix,
     "genome:s" => \$genome,
-    "no_attr_add!" => \$no_attr_add,
+    "min_intron:i" => \$min_intron,
+    "coverage:f" => \$coverage,
+    "gene_prefix:s" => \$gene_prefix,
     "gene_code_length:i" => \$gene_code_length,
-    "no_rm_overlap_gene!" => \$no_rm_overlap_gene,
+    "no_attr_add!" => \$no_attr_add,
 );
-$gene_prefix ||= "gene";
 die "--genome should be set\n" unless $genome;
+$min_intron ||= 1;
+$coverage ||= 0.3;
 
 # 读取基因组序列
 open IN, $genome or die $!;
-my (%seq, $seq_id);
+my (%seq, $seq_id, @seq_id);
 while (<IN>) {
     chomp;
     if (m/^>(\S+)/) {
         $seq_id = $1;
+        push @seq_id, $1 unless $seq{$1};
     }
     else {
         $seq{$seq_id} .= $_;
@@ -57,29 +72,90 @@ close IN;
 
 # 读取GFF3文件
 my (%gff, %sort1, %sort2, %sort3, %sort4, %CDS);
-foreach (@ARGV) {
-    open IN, $_ or die $!;
-    my (%gff_info, $id, %gene_length);
-    my $keep = 0;
-    while (<IN>) {
-        next if m/^#/;
-        next if m/^\s*$/;
-        if (m/\tgene\t.*ID=([^;\s]+)/) {
-            $id = $1;
-            @_ = split /\t/;
-            $sort1{$id} = $_[0];
-            $sort2{$id} = $_[3];
-            $sort3{$id} = $_[4];
-            $sort4{$id} = $_[6];
-            $gene_length{$id} = $_[4] - $_[3] + 1;
-            $keep = 1;
-        }
-        elsif (! m/Parent=/) {
-            $keep = 0;
-        }
-        $gff_info{$id} .= $_ if $keep == 1;
-    }
-    close IN;
+foreach my $input_file ( @ARGV ) {
+
+    # 每读取一个GFF3文件，则将其编码蛋白信息存储在 %gff3 中
+    # 读取GFF3文件的mRNA、CDS和exon信息。若有 gene 信息，则保存其 attribute 信息
+    open IN, $input_file or die "can not open file $input_file, $!";
+    my ( %lines, $gene_id, $mRNA_id, %gff3_attr, %mRNAID2geneID );
+	# 先读取gene和mRNA信息，存储GFF3第9列attribute信息，得到mRNA ID和gene ID之间的对应关系
+	while ( <IN> ) {
+		if ( m/\tmRNA\t/ ) {
+			@_ = split /\t/;
+			if ( $_[8] =~ /ID=([^;\s]+)/ ) {
+				$mRNA_id = $1;
+			}
+			else {
+				die "In the GFF3 File $input_file, mRNA Feature have no ID information: $_";
+			}
+
+			if ( $_[8] =~ /Parent=([^;\s]+)/ ) {
+				$gene_id = $1;
+			}
+			else {
+				die "In the GFF3 File $input_file, mRNA Feature have no Parent information: $_";
+			}
+			$mRNAID2geneID{$mRNA_id} = $gene_id;
+
+			$gff3_attr{$mRNA_id} = &get_attr($_[8]);
+		}
+		elsif ( m/\tgene\t/) {
+			@_ = split /\t/;
+			if ( $_[8] =~ /ID=([^;\s]+)/ ) {
+				$gene_id = $1;
+				$gff3_attr{$gene_id} r($_[8]);
+			}
+			else {
+				die "In the GFF3 File $input_file, gene Feature have no ID information: $_";
+			}
+		}
+	}
+
+	# 再读取CDS和exon信息，得到 gene -> mRNA -> CDS/exon 信息。
+	my %gff3;
+	while ( <IN> ) {
+		next if m/^#/;
+		next if m/^\s*$/;
+		next if exists $lines{$_};
+		$lines{$_} = 1;
+		@_ = split /\t/;
+
+		if ( $_[2] eq "CDS" or  $_[2] eq "exon" ) {
+			if ( $_[8] =~ /Parent=([^;\s]+)/ ) {
+				$gff3{$mRNAID2geneID{$1}}{$1} .= $_;
+			}
+			else {
+				die "In the GFF3 File $input_file, CDS/exon Feature have no Parent information: $_";
+			}
+		}
+	}
+
+    # 对mRNA的CDS和exon进行修正
+	my %gff3_m;
+	foreach my $gene_ID ( keys %gff3 ) {
+		foreach my $mRNA_ID ( keys %{$gff3{$gene_ID}} ) {
+			my $info = $gff3{$gene_ID}{$mRNA_ID};
+			$info =~ s/^\s*//;
+			$info =~ s/\s*$//;
+			my @info = split /\n/, $info;
+			@_ = split /\t/, $info[0];
+			my ( $chr, $source, $strand ) = ( $_[0], $_[1], $_[6] );
+
+			my ( @CDS, @exon, @CDS_exon, @exon_exon, @intron, @UTR );
+			foreach ( @info ) {
+				@_ = split /\t/;
+				push @CDS, "$_[3]\t$_[4]" if $_[2] eq "CDS";
+				push @CDS_exon, "$_[3]\t$_[4]" if $_[2] eq "CDS";
+				push @exon_exon, "$_[3]\t$_[4]" if $_[2] eq "exon";
+			}
+
+			@exon = &modify_exon(\@CDS_exon, \@exon_exon)
+			my %intron1 = &(@CDS);
+			my %intron2 = &get_intron(@exon);
+			foreach (keys %intron1) 
+
+		}
+	}
 
     my %cds;
     foreach my $gene_id (keys %gff_info) {
@@ -605,6 +681,30 @@ sub cdsIncludeStopCodon_and_integrity {
     $cds_seq =~ s/^\w{$frame}//;
     my $pep_seq = &cds2pep($cds_seq, $gene_id);
 
+    if ($pep_seq =~ s/(\*+)\*$/\*/) {
+        my $extra_stop_codon_length = length($1);
+        if ($strand eq "+") {
+            my ($start, $end, $frame) = split /\t/, $cds[-1];
+            $frame = ($end + 1 - $start - $frame) % 3;
+            $frame = 1 if $frame == 2;
+            $frame = 2 if $frame == 1;
+            if ($frame == 0) {
+                my $end3 = $end - (3 * $extra_stop_codon_length);
+                $info =~ s/^(\S+\t\S+\t\S+\t\d+)\t$end\t/$1\t$end3\t/mg;
+            }
+        }
+        elsif ($strand eq "-") {
+            my ($start, $end, $frame) = split /\t/, $cds[0];
+            $frame = ($end + 1 - $start - $frame) % 3;
+            $frame = 1 if $frame == 2;
+            $frame = 2 if $frame == 1;
+            if ($frame == 0 && $start > 3) {
+                my $start3 = $start + (3 * $extra_stop_codon_length);
+                $info =~ s/^(\S+\t\S+\t\S+)\t$start\t/$1\t$start3\t/mg;
+            }
+        }
+    }
+
     unless ($pep_seq =~ m/\*$/) {
         my $next_codon;
         if ($strand eq "+") {
@@ -742,4 +842,19 @@ sub cds2pep {
     #print STDERR "Warning: CDS length of $gene is not multiple of 3\n" if (length $seq) > 0;
     #print STDERR "Warning: Stop Codon appear in the middle of $gene\n" if $pep =~ m/\*\w/;
     return $pep;
+}
+
+sub get_attr {
+	my $attribute = $_[0];
+	my @attribute = split /;/, $attribute;
+	my @out;
+	foreach ( @attribute ) {
+		s/^\s*//;
+		s/\s*$//;
+		next if m/^ID/i;
+		next if m/^Parent/i;
+		push @out, $_;
+	}
+	my $out = join ";", @out;
+	return $out;
 }
