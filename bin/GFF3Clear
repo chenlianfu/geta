@@ -6,7 +6,7 @@ my $usage = <<USAGE;
 Usage:
     perl $0 [options] file1.gff3 file2.gff3 ... > total.gff3
 
-    程序用于读取一个或多个GFF3文件，对GFF3文件格式进行修正，仅保留编码蛋白基因，并去除CDS区有重叠的冗余基因模型。
+    程序用于读取一个或多个GFF3文件，对GFF3文件格式进行修正，仅保留编码蛋白(mRNA信息中包含CDS)基因，并去除CDS区有重叠的冗余基因模型。
 
     1. 输入的GFF3文件格式要求：必须包含mRNA、CDS这两个Feature信息，且其第九列含有Parent信息; 也可以包含exon和UTR信息; 所有输入的额GFF3文件中的所有基因具有不同的ID编号。程序仅读取GFF3文件的mRNA、CDS、exon信息。
 
@@ -151,6 +151,10 @@ foreach my $input_file ( @ARGV ) {
         my ( $chr, $source, $strand );
         foreach my $mRNA_ID ( keys %{$gff3{$gene_ID}} ) {
             my $info = $gff3{$gene_ID}{$mRNA_ID};
+
+            # 去除不包含CDS信息的mRNA
+            next unless $info =~ m/\tCDS\t/;
+
             #print "$gene_ID\t$mRNA_ID\n$info";
             $info =~ s/^\s*//;
             $info =~ s/\s*$//;
