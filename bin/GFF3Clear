@@ -385,7 +385,7 @@ foreach my $gene_ID (@gene_ID) {
         $mRNAID = "$geneID.t$mRNA_number" if $gene_prefix;
         my $attribute = "ID=$mRNAID;Parent=$geneID;$gff3_attr{$mRNA_ID}";
         if ($gene_prefix) {
-            $attribute .= "Source=mRNA_ID;" unless $no_attr_add;
+            $attribute .= "Source=$mRNA_ID;" unless $no_attr_add;
         }
         print "$chr\t$source\tmRNA\t$mRNA_border{$mRNA_ID}\t\.\t$strand\t\.\t$attribute\n";
 
