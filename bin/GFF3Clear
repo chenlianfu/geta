@@ -825,6 +825,7 @@ sub get_attr {
     my @attribute = split /;/, $attribute;
     my @out;
     foreach ( @attribute ) {
+        next if m/^\s*$/;
         s/^\s*//;
         s/\s*$//;
         next if m/^ID/i;

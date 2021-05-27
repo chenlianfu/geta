@@ -70,7 +70,7 @@ This script was tested on CentOS 6.8 with such softwares can be run directly in 
 9. genewise (version: 2.4.1)
 10. augustus/etraining (version: 3.3.1)
 
-Version: 2.4.9
+Version: 2.4.10
 
 USAGE
 if (@ARGV==0){die $usage}
@@ -1144,21 +1144,21 @@ unless (-e "6.combineGeneModels.ok") {
     # 注意，有部分AUGUSTUS预测的基因，其预测结果中不是以ATG作为起始密码子。
     open IN, "genome.gff3" or die $!;
     my $complete_keep;
+    $/ = "\n\n";
     while (<IN>) {
-        next if m/^\s*$/;
-        if (m/\tgene\t/) {
-            if (m/Integrity=complete/) {
-                $complete_keep = 1;
-            }
-            elsif (m/source=augustus/) {
-                $complete_keep = 1;
-            } else {
-                $complete_keep = 0;
-            }
+        #next if m/^\s*$/;
+        if (m/Integrity=complete/) {
+            $complete_keep = 1;
+        }
+        elsif (m/source=augustus/) {
+            $complete_keep = 1;
+        } else {
+            $complete_keep = 0;
         }
         print OUT1 if $complete_keep == 1;
         print OUT2 if $complete_keep == 0;
     }
+    $/ = "\n";
 
     $cmdString = "$dirname/bin/remove_genes_in_repeats $config{'remove_genes_in_repeats'} --filtered_gene_models genome.completed.genes_in_repeats.gff3 ../0.RepeatMasker/genome.repeat.gff3 genome.completed.gff3 > genome.completed.rm_genes_in_repeats.gff3 2> remove_genes_in_repeats.txt";
     unless (-e "remove_genes_in_repeats.ok") {
