@@ -70,7 +70,7 @@ This script was tested on CentOS 6.8 with such softwares can be run directly in 
 9. genewise (version: 2.4.1)
 10. augustus/etraining (version: 3.3.1)
 
-Version: 2.4.10
+Version: 2.4.12
 
 USAGE
 if (@ARGV==0){die $usage}
@@ -457,7 +457,7 @@ unless (-e "2.hisat2.ok") {
         $input .= " -U ../1.trimmomatic/reads.fastq"
     }
     if ($strand_specific) {
-        $input .= " --rna-strandness RF"
+        $input .= " --rna-strandness RF";
     }
     $cmdString = "hisat2 -x genome -p $cpu $input -S hisat2.sam $config{'hisat2'} 2> hisat2.log";
     unless (-e "hisat2.ok") {
