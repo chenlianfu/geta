@@ -456,6 +456,9 @@ unless (-e "2.hisat2.ok") {
     if ($single_end) {
         $input .= " -U ../1.trimmomatic/reads.fastq"
     }
+    if ($strand_specific) {
+        $input .= " --rna-strandness RF"
+    }
     $cmdString = "hisat2 -x genome -p $cpu $input -S hisat2.sam $config{'hisat2'} 2> hisat2.log";
     unless (-e "hisat2.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
