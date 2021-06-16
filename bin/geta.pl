@@ -302,7 +302,8 @@ unless (-e "0.RepeatMasker.ok") {
     
     # 进行RepeatMasker分析
     mkdir "repeatMasker" unless -e "repeatMasker";
-    $cmdString = "RepeatMasker $config{'RepeatMasker'} -pa $cpu -species $RM_species -dir repeatMasker/ $genome &> repeatmasker.log";
+    my $cpu_RepeatMasker = int($cpu / 4);
+    $cmdString = "RepeatMasker $config{'RepeatMasker'} -pa $cpu_RepeatMasker -species $RM_species -dir repeatMasker/ $genome &> repeatmasker.log";
     unless (-e "RepeatMasker.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -326,7 +327,8 @@ unless (-e "0.RepeatMasker.ok") {
         else {
             print STDERR "CMD(Skipped): $cmdString\n";
         }
-        $cmdString = "RepeatModeler -pa $cpu -database species -LTRStruct &> RepeatModeler.log";
+	my $cpu_RepeatModeler = int($cpu / 4);
+        $cmdString = "RepeatModeler -pa $cpu_RepeatModeler -database species -LTRStruct &> RepeatModeler.log";
         unless (-e "RepeatModeler.ok") {
             print STDERR (localtime) . ": CMD: $cmdString\n";
             system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
