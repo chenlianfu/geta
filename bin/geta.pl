@@ -327,7 +327,7 @@ unless (-e "0.RepeatMasker.ok") {
         else {
             print STDERR "CMD(Skipped): $cmdString\n";
         }
-	my $cpu_RepeatModeler = int($cpu / 4);
+    my $cpu_RepeatModeler = int($cpu / 4);
         $cmdString = "RepeatModeler -pa $cpu_RepeatModeler -database species -LTRStruct &> RepeatModeler.log";
         unless (-e "RepeatModeler.ok") {
             print STDERR (localtime) . ": CMD: $cmdString\n";
@@ -1114,7 +1114,7 @@ unless (-e "6.combineGeneModels.ok") {
     }
 
     if ($pfam_db) {
-        $cmdString = "rm -rf command.hmmscan.list hmmscan.tmp for_pfam_search.fasta";
+        #$cmdString = "rm -rf command.hmmscan.list* hmmscan.tmp for_pfam_search.fasta";
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
