@@ -434,7 +434,7 @@ print STDERR "\n============================================\n";
 print STDERR "Step 2: HISAT2 " . "(" . (localtime) . ")" . "\n";
 mkdir "2.hisat2" unless -e "2.hisat2";
 unless (($pe1 && $pe2) or $single_end) {
-	open OUT, ">", "2.hisat2.ok" or die $!; close OUT;
+    open OUT, ">", "2.hisat2.ok" or die $!; close OUT;
 }
 unless (-e "2.hisat2.ok") {
     chdir "2.hisat2";
@@ -494,10 +494,10 @@ print STDERR "\n============================================\n";
 print STDERR "Step 3: Transcript " . "(" . (localtime) . ")" . "\n";
 mkdir "3.transcript" unless -e "3.transcript";
 unless (($pe1 && $pe2) or $single_end) {
-	open OUT, ">", "3.transcript.ok" or die $!; close OUT;
-	chdir "3.transcript";
-	open OUT, ">", "transfrag.genome.gff3" or die $!; close OUT;
-	chdir "../";
+    open OUT, ">", "3.transcript.ok" or die $!; close OUT;
+    chdir "3.transcript";
+    open OUT, ">", "transfrag.genome.gff3" or die $!; close OUT;
+    chdir "../";
 }
 unless (-e "3.transcript.ok") {
     chdir "3.transcript";
