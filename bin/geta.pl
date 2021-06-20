@@ -797,6 +797,10 @@ unless (-e "5.augustus.ok") {
 
     # Augustus Hint Preparing
     $cmdString = "bam2hints --source=W --intronsonly --in=../2.hisat2/hisat2.sorted.bam --out=bam2intronHints.gff";
+    unless (($pe1 && $pe2) or $single_end) {
+        open OUT, ">", "bam2hints.ok" or die $!; close OUT;
+        open OUT, ">", "bam2intronHints.gff" or die $!; close OUT;
+    }
     unless (-e "bam2hints.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
