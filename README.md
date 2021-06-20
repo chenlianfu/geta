@@ -83,17 +83,17 @@ Usage of the main script geta.pl
 
     This script was tested on CentOS 6.8 with such softwares can be run directly in terminal:
     1. ParaFly
-    2. java (version: 1.8.0_172)
+    2. java (version: 1.8.0_281)
     3. hisat2 (version: 2.1.0)
-    4. samtools (version: 1.8)
-    5. hmmscan (version: 3.1b2)
+    4. samtools (version: 1.9)
+    5. hmmscan (version: 3.3.2)
     6. makeblastdb/tblastn/blastp (version: 2.6.0)
-    7. RepeatMasker (version: 4.0.7)
-    8. RepeatModeler (version: 1.0.11)
+    7. RepeatMasker (version: 4.1.0)
+    8. RepeatModeler (version: 2.0.1)
     9. genewise (version: 2.4.1)
-    10. augustus/etraining (version: 3.3.1)
+    10. augustus/etraining (version: 3.3.3)
 
-    Version: 2.4.2
+    Version: 2.4.12
 
 Test of GETA
 ============
