@@ -707,7 +707,7 @@ unless (-e "4.homolog.ok") {
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
-    $cmdString = "$dirname/bin/GFF3Clear --GFF3_source GETA --genome $genome --gene_prefix genewise --no_attr_add genewise.gff3 > out.gff3 2> /dev/null";
+    $cmdString = "$dirname/bin/GFF3Clear --genome $genome --gene_prefix genewise --no_attr_add genewise.gff3 > out.gff3 2> /dev/null";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
