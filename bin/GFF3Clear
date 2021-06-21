@@ -319,14 +319,15 @@ foreach my $input_file ( @ARGV ) {
     }
 }
 
-my (%sort1, %sort2, %sort3, %sort4, %gene_border, %mRNA_border, %chr, %strand, %source);
+my (%sort1, %sort2, %sort3, %sort4, %sort5, %gene_border, %mRNA_border, %chr, %strand, %source);
 foreach my $gene_ID (keys %gff) {
-    my ( %exon_pos, $chr, $strand, $source );
+    my ( %exon_pos, %CDS_pos, $chr, $strand, $source );
     foreach my $mRNA_ID (keys %{$gff{$gene_ID}}) {
         $chr = $gff{$gene_ID}{$mRNA_ID}{"chr"};
         $strand = $gff{$gene_ID}{$mRNA_ID}{"strand"};
         $source = $gff{$gene_ID}{$mRNA_ID}{"source"};
         my @exon = @{$gff{$gene_ID}{$mRNA_ID}{"exon"}};
+        my @CDS = @{$gff{$gene_ID}{$mRNA_ID}{"CDS"}};
 
         my %pos;
         foreach (@exon) {
@@ -339,6 +340,11 @@ foreach my $gene_ID (keys %gff) {
         my @pos = sort {$a <=> $b} keys %pos;
         $mRNA_border{$mRNA_ID} = "$pos[0]\t$pos[-1]";
 
+        foreach (@CDS) {
+            @_ = split /\t/;
+            $CDS_pos{$_[0]} = 1;
+            $CDS_pos{$_[1]} = 1;
+        }
     }
     my @exon_pos = sort {$a <=> $b} keys %exon_pos;
     $gene_border{$gene_ID} = "$exon_pos[0]\t$exon_pos[-1]";
@@ -350,9 +356,12 @@ foreach my $gene_ID (keys %gff) {
     $sort2{$gene_ID} = $exon_pos[0];
     $sort3{$gene_ID} = $exon_pos[-1];
     $sort4{$gene_ID} = $strand;
+
+    my @CDS_pos = sort {$a <=> $b} keys %CDS_pos;
+    $sort5{$gene_ID} = $CDS_pos[0];
 }
 
-my @gene_ID = sort { $sort1{$a} <=> $sort1{$b} or $sort2{$a} <=> $sort2{$b} or $sort3{$a} <=> $sort3{$b} or $sort4{$a} cmp $sort4{$b} } keys %gff;
+my @gene_ID = sort { $sort1{$a} <=> $sort1{$b} or $sort2{$a} <=> $sort2{$b} or $sort3{$a} <=> $sort3{$b} or $sort4{$a} cmp $sort4{$b} or $sort5{$a} <=> $sort5{$b} } keys %gff;
 my $gene_number = 0;
 my $total_gene_number = @gene_ID;
 
