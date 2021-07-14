@@ -38,14 +38,16 @@ foreach my $id (sort keys %cds) {
         $cds_seq .= substr($seq{$locus{$id}}, $_[0] - 1, $_[1] - $_[0] + 1);
     }
     if ($strand{$id} eq "+") {
-        my $frame = $1 if $cds[0] =~ m/(\d+)$/;
+        my $frame = 0;
+    $frame = $1 if $cds[0] =~ m/(\d+)$/;
         print STDERR "Warning: $id\tthe frame not equal 0\n" if $frame != 0;
         my $pep = &cds2pep($cds_seq, $frame);
         print ">$id\n$pep\n";
     }
     elsif ($strand{$id} eq "-") {
         $cds_seq = &rc($cds_seq);
-        my $frame = $1 if $cds[-1] =~ m/(\d+)$/;
+        my $frame = 0;
+        $frame = $1 if $cds[-1] =~ m/(\d+)$/;
         print STDERR "Warning: $id\tthe frame not equal 0\n" if $frame != 0;
         my $pep = &cds2pep($cds_seq, $frame);
         print ">$id\n$pep\n";
