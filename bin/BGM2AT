@@ -86,16 +86,16 @@ if ($onlytrain_GFF3) {
 # 去除错误的基因模型
 my $for_bad_genes_removing = `echo \$AUGUSTUS_CONFIG_PATH`;
 chomp($for_bad_genes_removing);
-$for_bad_genes_removing = "$for_bad_genes_removing/species/for_bad_genes_removing";
+$for_bad_genes_removing = "$for_bad_genes_removing/species/for_bad_genes_removing_$$";
 if (-e $for_bad_genes_removing) {
     $cmdString = "rm -rf $for_bad_genes_removing";
     print STDERR "CMD: $cmdString\n";
     (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 }
-$cmdString = "new_species.pl --species=for_bad_genes_removing &> new_species.1.log";
+$cmdString = "new_species.pl --species=for_bad_genes_removing_$$ &> new_species.1.log";
 print STDERR "CMD: $cmdString\n";
 (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
-$cmdString = "etraining --species=for_bad_genes_removing --stopCodonExcludedFromCDS=false genes.raw.gb 1>etraining.out0 2> etraining.err0";
+$cmdString = "etraining --species=for_bad_genes_removing_$$ --stopCodonExcludedFromCDS=false genes.raw.gb 1>etraining.out0 2> etraining.err0";
 print STDERR "CMD: $cmdString\n";
 (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 $cmdString = "rm -rf $for_bad_genes_removing";
