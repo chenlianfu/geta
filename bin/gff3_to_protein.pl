@@ -39,7 +39,7 @@ foreach my $id (sort keys %cds) {
     }
     if ($strand{$id} eq "+") {
         my $frame = 0;
-    $frame = $1 if $cds[0] =~ m/(\d+)$/;
+        $frame = $1 if $cds[0] =~ m/(\d+)$/;
         print STDERR "Warning: $id\tthe frame not equal 0\n" if $frame != 0;
         my $pep = &cds2pep($cds_seq, $frame);
         print ">$id\n$pep\n";
