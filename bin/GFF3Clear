@@ -178,12 +178,9 @@ foreach my $input_file ( @ARGV ) {
 
             # 根据 CDS 和 exon 信息，对exon进行修正
             @exon = &modify_exon(\@CDS_exon, \@exon_exon, $mRNA_ID);
-        print STDERR ( "CDS: " . (join "\n", @CDS_exon ) . "\n" ) if $gene_ID eq "Fh.12G0001450";
-        print STDERR ( "exon: " . (join "\n", @exon ) . "\n" ) if $gene_ID eq "Fh.12G0001450";
 
             # 得到 intron 信息
             @intron = &get_intron(\@exon, $mRNA_ID, 1);
-        print STDERR ( "intron: " . (join "\n", @intron) . "\n" ) if $gene_ID eq "Fh.12G0001450";
 
             # 得到 UTR 信息，相比上面的 CDS、intron和exon，多了five_prime_UTR和three_prime_UTR信息。
             @UTR = &get_UTR(\@CDS, \@exon, $strand);
@@ -245,6 +242,7 @@ foreach my $input_file ( @ARGV ) {
                         #print STDERR "$gene_ID\t$chr\t$strand\t$start\t$end\t$index\t$target_id\t$_\n";
                         #print STDERR "$gene_ID\t$target_id\n";
                         $overlap{$gene_ID}{$cds{$chr}{$strand}{$index}{$_}} = 1;
+                        $overlap{$cds{$chr}{$strand}{$index}{$_}}{$gene_ID} = 1;
                     }
                 }
             }
@@ -272,12 +270,13 @@ foreach my $input_file ( @ARGV ) {
             }
         }
 
-        my $cluster = join "\t", keys %cluster_one;
+        my $cluster = join "\t", sort keys %cluster_one;
+        #print STDERR "OK9: $cluster\n";
         $cluster{$cluster} = 1;
     }
 
-    # 根据CDS长度，从长到短，对同一个GFF3文件中的基因进行过滤。
-    foreach my $cluster (keys %cluster) {
+    # 根据CDS长度，从短到长，对同一个GFF3文件中有重叠的基因进行过滤。
+    foreach my $cluster (sort keys %cluster) {
         #print STDERR "OK1:$cluster\n";
         my @genes = split /\t/, $cluster;
         @genes = sort {$gene_CDS_length{$a} <=> $gene_CDS_length{$b} or $a cmp $b} @genes;
@@ -312,6 +311,7 @@ foreach my $input_file ( @ARGV ) {
                     delete $gene_CDS{$gene};
                     delete $gff3_m{$gene};
                     delete $genes{$gene};
+                    last;
                 }
             }
         }
@@ -749,7 +749,7 @@ sub get_intron {
         }
         else {
             my $value = $start - $last_end - 1;
-            print STDERR "Warning: a intron length (value is $value) of mRNA $mRNA_ID < $intron_len was detected: $_\n";
+            print STDERR "Warning: a intron length (value is $value) of mRNA $mRNA_ID < $intron_len was detected:\n\tThe former CDS/Exon: $last_start - $last_end\n\tThe latter CDS/Exon: $start - $end\n";
         }
         ($last_start, $last_end) = ($start, $end);
     }
