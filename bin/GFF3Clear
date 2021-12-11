@@ -177,10 +177,13 @@ foreach my $input_file ( @ARGV ) {
             &get_intron(\@CDS, $mRNA_ID, $min_intron);
 
             # 根据 CDS 和 exon 信息，对exon进行修正
-            @exon = &modify_exon(\@CDS_exon, \@exon_exon);
+            @exon = &modify_exon(\@CDS_exon, \@exon_exon, $mRNA_ID);
+        print STDERR ( "CDS: " . (join "\n", @CDS_exon ) . "\n" ) if $gene_ID eq "Fh.12G0001450";
+        print STDERR ( "exon: " . (join "\n", @exon ) . "\n" ) if $gene_ID eq "Fh.12G0001450";
 
             # 得到 intron 信息
             @intron = &get_intron(\@exon, $mRNA_ID, 1);
+        print STDERR ( "intron: " . (join "\n", @intron) . "\n" ) if $gene_ID eq "Fh.12G0001450";
 
             # 得到 UTR 信息，相比上面的 CDS、intron和exon，多了five_prime_UTR和three_prime_UTR信息。
             @UTR = &get_UTR(\@CDS, \@exon, $strand);
@@ -383,7 +386,7 @@ foreach my $gene_ID (@gene_ID) {
     print "$chr{$gene_ID}\t$source\tgene\t$gene_border{$gene_ID}\t\.\t$strand{$gene_ID}\t\.\t$attribute\n";
 
     my $mRNA_number = 0;
-    foreach my $mRNA_ID (keys %{$gff{$gene_ID}}) {
+    foreach my $mRNA_ID (sort keys %{$gff{$gene_ID}}) {
         my $chr = $gff{$gene_ID}{$mRNA_ID}{"chr"};
         my $source = $gff{$gene_ID}{$mRNA_ID}{"source"};
         my $strand = $gff{$gene_ID}{$mRNA_ID}{"strand"};
@@ -754,78 +757,85 @@ sub get_intron {
     return @intron;
 }
 
-
+# 以下子程序用于能根据一个基因模型的CDSs信息对exons信息进行修正。可以将没有exons的基因模型使用CDS信息补上；可以将错误的exons信息进行修正（比如，exons之间有重叠或exon和intron有重叠）。
+# 要求输入的CDS信息是正确的，即CDSs之间不能有重叠。
 sub modify_exon {
-    my @cds_exon = @{$_[0]};
+    # 得到CDS和exon的信息，分别放入@cds和@exon。
+    my @cds = @{$_[0]};
+    @cds = sort {$a <=> $b} @cds;
     my @exon = @{$_[1]};
-    #print ((join ";", @cds_exon) . "\n");
-    #print ((join ";", @exon) . "\n");
-    my %exon;
-    foreach ( @exon ) {
-        $exon{$_} = 1;
-    }
-
-    @cds_exon = sort {$a <=> $b} @cds_exon;
     @exon = sort {$a <=> $b} @exon;
+    my $mRNA_ID = $_[2];
 
-    # 首先，首尾CDS得到的exon可能被包含在含有UTR的exon中。这是第一种exons之间的重叠，选择有UTR的exon信息（选择更长的exon）。
-    # =========----=======---=======
-    # +++======----=======---==+++++
-    # 以上示例中，选择前者exon信息
-    my $cds_exon_start = shift @cds_exon;
-    my ($start, $end) = split /\t/, $cds_exon_start;
-    # 将CDS得到exon并入总的exon信息中时，首尾CDS对应的exon能被已有的exons覆盖，则不需要其exon信息。
-    my $keep = 1;
-    foreach ( @exon ) {
+    # 获得mRNA的边界。
+    my ($mRNA_start, $mRNA_end, @pos);
+    foreach (@cds) {
         @_ = split /\t/, $_;
-        if ($_[0] <= $start && $_[1] == $end) {
-            $keep = 0;
-            last;
-        }
+        push @pos, @_;
     }
-    $exon{$cds_exon_start} = 1 if $keep == 1;
-    if ( @cds_exon ) {
-        my $cds_exon_end = pop @cds_exon;
-        ($start, $end) = split /\t/, $cds_exon_end;
-        $keep = 1;
-        foreach (@exon) {
-            @_ = split /\t/, $_;
-            if ($_[0] == $start && $_[1] >= $end) {
-                $keep = 0;
-                last;
-            }
-        }
-        $exon{$cds_exon_end} = 1 if $keep == 1;
-    }
-    # 非首尾的CDS则直接并入总的exon信息中
-    foreach (@cds_exon) {
-        $exon{$_} = 1;
-    }
-
-    # 此外，再对所有的exons之间的重叠进行分析，这是第二种exons之间的重叠，则将更长的exon进行打断，选择更短的exon。
-    # ==============================
-    #   ====----========---=====
-    # 以上示例中出现了4个exons，则选择较短的exons，并将和3个exons有重叠的第一个exon进行打断，得到的3个exons如下：
-    # ======----========---=========
-    @exon = sort {$a <=> $b} keys %exon;
-    my $first_exon = shift @exon;
-    my ($last_start, $last_end) = split /\t/, $first_exon;
-    my ($stop_end, @exon_out);
     foreach (@exon) {
+        @_ = split /\t/, $_;
+        push @pos, @_;
+    }
+    @pos = sort {$a <=> $b} @pos;
+    ($mRNA_start, $mRNA_end) = ($pos[0], $pos[-1]);
+
+    # 根据CDSs信息鉴定introns。
+    my %intron;
+    my $first_CDS = shift @cds;
+    my ($last_start, $last_end) = split /\t/, $first_CDS;
+    foreach ( @cds ) {
         my ($start, $end) = split /\t/, $_;
         if ($start > $last_end) {
-            push @exon_out, "$last_start\t$last_end";
-            ($last_start, $last_end) = ($start, $end);
+            my $intron_start = $last_end + 1;
+            my $intron_stop = $start - 1;
+            $intron{"$intron_start\t$intron_stop"} = 1;
         }
-        else {
-            $stop_end = $last_end if $stop_end < $last_end;
-            $last_end = $end;
-        }
+        ($last_start, $last_end) = ($start, $end);
     }
-    $last_end = $stop_end if $stop_end > $last_end;
-    push @exon_out, "$last_start\t$last_end";
 
-    #print ((join ";", @exon_out) . "\n");
+    # 根据exons信息鉴定introns。若两exons之间找到的intron和CDS的intron有冲突，则仅选择CDS来源的intron。
+    my $first_exon = shift @exon;
+    ($last_start, $last_end) = split /\t/, $first_exon;
+    foreach my $exon ( @exon ) {
+        my ($start, $end) = split /\t/, $exon;
+        if ($start > $last_end) {
+            my $intron_start = $last_end + 1;
+            my $intron_stop = $start - 1;
+            my $keep_intron = 1;
+            foreach ( keys %intron ) {
+                my ($intron1, $intron2) = split /\t/, $_;
+                if ( $intron1 <= $intron_stop && $intron2 >= $intron_start ) {
+                    $keep_intron = 0;
+                }
+            }
+            $intron{"$intron_start\t$intron_stop"} = 1 if $keep_intron == 1;
+        }
+        ($last_start, $last_end) = ($start, $end);
+    }
+
+    # 根据mRNA边界和introns信息得到准确的exons信息
+    my @exon_out;
+    my @intron = sort {$a <=> $b} keys %intron;
+    if (@intron) {
+        my $first_intron = shift @intron;
+        ($last_start, $last_end) = split /\t/, $first_intron;
+        my $exon_end = $last_start - 1;
+        my $exon_start = $last_end + 1;
+        push @exon_out, "$mRNA_start\t$exon_end";
+        foreach (@intron) {
+            my ($start, $end) = split /\t/, $_;
+            $exon_end = $start - 1;
+            push @exon_out, "$exon_start\t$exon_end";
+            $exon_start = $end + 1;
+        }
+        push @exon_out, "$exon_start\t$mRNA_end";
+    }
+    else {
+        push @exon_out, "$mRNA_start\t$mRNA_end";
+    }
+
+    #print ( "$mRNA_ID: " . (join ";", @exon_out) . "\n");
     return @exon_out;
 }
 
