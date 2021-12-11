@@ -487,7 +487,7 @@ foreach my $gene_ID (@gene_ID) {
             }
             foreach (sort {$UTR_sort{$a} <=> $UTR_sort{$b}} @UTR3) {
                 $UTR3_num ++;
-                my $out = "$chr\t$source\t$_\t.\t$strand\t\.\tID=$mRNAID.utr5p$UTR3_num;Parent=$mRNAID;\n";
+                my $out = "$chr\t$source\t$_\t.\t$strand\t\.\tID=$mRNAID.utr3p$UTR3_num;Parent=$mRNAID;\n";
                 @_ = split /\t/;
                 $sort{$out} = $_[1];
                 $sort_UTR{$out} = 4;
