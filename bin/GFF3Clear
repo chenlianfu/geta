@@ -99,14 +99,14 @@ foreach my $input_file ( @ARGV ) {
                 $mRNA_id = $1;
             }
             else {
-                warn "In the GFF3 File $input_file, mRNA Feature have no ID information: $_";
+                warn "Warning: In the GFF3 File $input_file, mRNA Feature have no ID information: $_";
             }
 
             if ( $_[8] =~ /Parent=([^;\s]+)/ ) {
                 $gene_id = $1;
             }
             else {
-                warn "In the GFF3 File $input_file, mRNA Feature have no Parent information: $_";
+                warn "Warning: In the GFF3 File $input_file, mRNA Feature have no Parent information: $_";
             }
             $mRNAID2geneID{$mRNA_id} = $gene_id;
 
@@ -119,7 +119,7 @@ foreach my $input_file ( @ARGV ) {
                 $gff3_attr{$gene_id} = &get_attr($_[8]);
             }
             else {
-                warn "In the GFF3 File $input_file, gene Feature have no ID information: $_";
+                warn "Warning: In the GFF3 File $input_file, gene Feature have no ID information: $_";
             }
         }
     }
@@ -140,7 +140,7 @@ foreach my $input_file ( @ARGV ) {
                 $gff3{$mRNAID2geneID{$1}}{$1} .= $_ if exists $mRNAID2geneID{$1};
             }
             else {
-                warn "In the GFF3 File $input_file, CDS/exon Feature have no Parent information: $_";
+                warn "Warning: In the GFF3 File $input_file, CDS/exon Feature have no Parent information: $_";
             }
         }
     }
