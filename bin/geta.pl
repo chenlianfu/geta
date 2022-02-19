@@ -70,7 +70,7 @@ This script was tested on CentOS 6.8 with such softwares can be run directly in 
 9. genewise (version: 2.4.1)
 10. augustus/etraining (version: 3.3.1)
 
-Version: 2.4.7
+Version: 2.4.12
 
 USAGE
 if (@ARGV==0){die $usage}
@@ -182,8 +182,10 @@ my $pwd = `pwd`;
 chomp($pwd);
 die "No genome fasta input\n" unless $genome;
 $genome =~ s/^/$pwd\// unless $genome =~ m/^\//;
-die "No homolog fasta input\n" unless $protein;
 $protein  =~ s/^/$pwd\// unless $protein =~ m/^\//;
+unless (($pe1 && $pe2) or $single_end or $protein) {
+    die "No RNA-Seq short reads or homologous proteins as input\n";
+}
 die "No Augustus species provided\n" unless ($augustus_species or $use_existed_augustus_species);
 if ($use_existed_augustus_species) {
     my $species_config_dir = `echo \$AUGUSTUS_CONFIG_PATH`;
@@ -201,9 +203,6 @@ if ($RM_lib) {
 }
 if ($config) {
     $config =~ s/^/$pwd\// unless $config =~ m/^\//;
-}
-unless (($pe1 && $pe2) or $single_end) {
-    die "No RNA-Seq short reads as input\n";
 }
 my (%pe_reads, %se_reads);
 if ($pe1 && $pe2) {
@@ -302,7 +301,8 @@ unless (-e "0.RepeatMasker.ok") {
     
     # 进行RepeatMasker分析
     mkdir "repeatMasker" unless -e "repeatMasker";
-    $cmdString = "RepeatMasker $config{'RepeatMasker'} -pa $cpu -species $RM_species -dir repeatMasker/ $genome &> repeatmasker.log";
+    my $cpu_RepeatMasker = int($cpu / 4);
+    $cmdString = "RepeatMasker $config{'RepeatMasker'} -pa $cpu_RepeatMasker -species $RM_species -dir repeatMasker/ $genome &> repeatmasker.log";
     unless (-e "RepeatMasker.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -326,7 +326,8 @@ unless (-e "0.RepeatMasker.ok") {
         else {
             print STDERR "CMD(Skipped): $cmdString\n";
         }
-        $cmdString = "RepeatModeler -pa $cpu -database species -LTRStruct &> RepeatModeler.log";
+    my $cpu_RepeatModeler = int($cpu / 4);
+        $cmdString = "RepeatModeler -pa $cpu_RepeatModeler -database species -LTRStruct &> RepeatModeler.log";
         unless (-e "RepeatModeler.ok") {
             print STDERR (localtime) . ": CMD: $cmdString\n";
             system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -432,6 +433,9 @@ else {
 print STDERR "\n============================================\n";
 print STDERR "Step 2: HISAT2 " . "(" . (localtime) . ")" . "\n";
 mkdir "2.hisat2" unless -e "2.hisat2";
+unless (($pe1 && $pe2) or $single_end) {
+    open OUT, ">", "2.hisat2.ok" or die $!; close OUT;
+}
 unless (-e "2.hisat2.ok") {
     chdir "2.hisat2";
     $pwd = `pwd`; print STDERR "PWD: $pwd";
@@ -455,6 +459,9 @@ unless (-e "2.hisat2.ok") {
     }
     if ($single_end) {
         $input .= " -U ../1.trimmomatic/reads.fastq"
+    }
+    if ($strand_specific) {
+        $input .= " --rna-strandness RF";
     }
     $cmdString = "hisat2 -x genome -p $cpu $input -S hisat2.sam $config{'hisat2'} 2> hisat2.log";
     unless (-e "hisat2.ok") {
@@ -486,6 +493,12 @@ else {
 print STDERR "\n============================================\n";
 print STDERR "Step 3: Transcript " . "(" . (localtime) . ")" . "\n";
 mkdir "3.transcript" unless -e "3.transcript";
+unless (($pe1 && $pe2) or $single_end) {
+    open OUT, ">", "3.transcript.ok" or die $!; close OUT;
+    chdir "3.transcript";
+    open OUT, ">", "transfrag.genome.gff3" or die $!; close OUT;
+    chdir "../";
+}
 unless (-e "3.transcript.ok") {
     chdir "3.transcript";
     $pwd = `pwd`; print STDERR "PWD: $pwd";
@@ -590,11 +603,22 @@ unless (-e "3.transcript.ok") {
     }
 
     # 将transcripts的ORF预测结果映射到基因组序列上，得到transcripts的基因预测结果： transfrag.genome.gff3
-    $cmdString = "$dirname/bin/transdecoder2ORF --out_protein proteins.fasta transfrag.gtf transfrag.transdecoder.gff3 $genome > transfrag.genome.gff3";
+    $cmdString = "$dirname/bin/transdecoder2ORF --out_protein proteins.fasta transfrag.gtf transfrag.transdecoder.gff3 $genome > transdecoder2ORF.gff3";
     unless (-e "transdecoder2ORF.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
         open OUT, ">", "transdecoder2ORF.ok" or die $!; close OUT;
+    }
+    else {
+        print STDERR "CMD(Skipped): $cmdString\n";
+    }
+
+    # 对 transdecoder2ORF.gff3 进行 GFF3Clear，得到transcripts的基因预测结果： transfrag.genome.gff3
+    $cmdString = "$dirname/bin/GFF3Clear --GFF3_source GETA --genome $genome --gene_prefix transfrag --no_attr_add transdecoder2ORF.gff3 > transfrag.genome.gff3 2> /dev/null";
+    unless (-e "GFF3Clear.ok") {
+        print STDERR (localtime) . ": CMD: $cmdString\n";
+        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+        open OUT, ">", "GFF3Clear.ok" or die $!; close OUT;
     }
     else {
         print STDERR "CMD(Skipped): $cmdString\n";
@@ -680,6 +704,14 @@ unless (-e "4.homolog.ok") {
     }
 
     $cmdString = "$dirname/bin/homolog_genewiseGFF2GFF3 $config{'homolog_genewiseGFF2GFF3'} --input_genewise_start_info genewise.start_info.txt --output_start_and_stop_hints_of_augustus genewise.start_stop_hints.gff --genome $genome genewise.gff > genewise.gff3 2> genewise.gene_id_with_stop_codon.txt";
+    print STDERR (localtime) . ": CMD: $cmdString\n";
+    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+
+    $cmdString = "$dirname/bin/GFF3Clear --GFF3_source GETA --genome $genome --gene_prefix genewise --no_attr_add genewise.gff3 > out.gff3 2> /dev/null";
+    print STDERR (localtime) . ": CMD: $cmdString\n";
+    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+
+    $cmdString = "mv out.gff3 genewise.gff3";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
@@ -784,6 +816,10 @@ unless (-e "5.augustus.ok") {
 
     # Augustus Hint Preparing
     $cmdString = "bam2hints --source=W --intronsonly --in=../2.hisat2/hisat2.sorted.bam --out=bam2intronHints.gff";
+    unless (($pe1 && $pe2) or $single_end) {
+        open OUT, ">", "bam2hints.ok" or die $!; close OUT;
+        open OUT, ">", "bam2intronHints.gff" or die $!; close OUT;
+    }
     unless (-e "bam2hints.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -1109,7 +1145,7 @@ unless (-e "6.combineGeneModels.ok") {
     }
 
     if ($pfam_db) {
-        $cmdString = "rm -rf command.hmmscan.list* hmmscan.tmp for_pfam_search.fasta";
+        #$cmdString = "rm -rf command.hmmscan.list* hmmscan.tmp for_pfam_search.fasta";
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
@@ -1144,21 +1180,21 @@ unless (-e "6.combineGeneModels.ok") {
     # 注意，有部分AUGUSTUS预测的基因，其预测结果中不是以ATG作为起始密码子。
     open IN, "genome.gff3" or die $!;
     my $complete_keep;
+    $/ = "\n\n";
     while (<IN>) {
-        next if m/^\s*$/;
-        if (m/\tgene\t/) {
-            if (m/Integrity=complete/) {
-                $complete_keep = 1;
-            }
-            elsif (m/source=augustus/) {
-                $complete_keep = 1;
-            } else {
-                $complete_keep = 0;
-            }
+        #next if m/^\s*$/;
+        if (m/Integrity=complete/) {
+            $complete_keep = 1;
+        }
+        elsif (m/source=augustus/) {
+            $complete_keep = 1;
+        } else {
+            $complete_keep = 0;
         }
         print OUT1 if $complete_keep == 1;
         print OUT2 if $complete_keep == 0;
     }
+    $/ = "\n";
 
     $cmdString = "$dirname/bin/remove_genes_in_repeats $config{'remove_genes_in_repeats'} --filtered_gene_models genome.completed.genes_in_repeats.gff3 ../0.RepeatMasker/genome.repeat.gff3 genome.completed.gff3 > genome.completed.rm_genes_in_repeats.gff3 2> remove_genes_in_repeats.txt";
     unless (-e "remove_genes_in_repeats.ok") {
@@ -1259,32 +1295,173 @@ print STDERR "Step 7: OutPut " . "(" . (localtime) . ")" . "\n";
 chdir "../";
 $pwd = `pwd`; print STDERR "PWD: $pwd";
 
-$cmdString = "$dirname/bin/GFF3Clear --gene_prefix $gene_prefix --genome $genome --no_attr_add $out_prefix.tmp/6.combineGeneModels/genome.filter.gff3 > $out_prefix.gff3 2> GFF3Clear.1.log";
+$cmdString = "$dirname/bin/GFF3Clear --GFF3_source GETA --gene_prefix $gene_prefix --genome $genome --no_attr_add $out_prefix.tmp/6.combineGeneModels/genome.filter.gff3 > $out_prefix.GeneModels.gff3 2> /dev/null";
 #$cmdString = "cp $out_prefix.tmp/7.addAlternativeSplicing/genome.addAS.gff3 $out_prefix.gff3";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
-$cmdString = "$dirname/bin/GFF3Clear --gene_prefix ${gene_prefix}Broken --genome $genome --no_attr_add $out_prefix.tmp/6.combineGeneModels/genome.partial.gff3 > $out_prefix.incomplete_geneModels.gff3 2> GFF3Clear.2.log";
+$cmdString = "$dirname/bin/GFF3Clear --GFF3_source GETA --gene_prefix ${gene_prefix}Broken --genome $genome --no_attr_add $out_prefix.tmp/6.combineGeneModels/genome.partial.gff3 > $out_prefix.Incomplete_GeneModels.gff3 2> /dev/null";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
-$cmdString = "$dirname/bin/GFF3Clear --gene_prefix ${gene_prefix}InRepeatRegion --genome $genome --no_attr_add $out_prefix.tmp/6.combineGeneModels/genome.completed.genes_in_repeats.gff3 > $out_prefix.InRepeatRegion_geneModels.gff3 2> GFF3Clear.3.log";
+$cmdString = "$dirname/bin/GFF3Clear --GFF3_source GETA --gene_prefix ${gene_prefix}InRepeatRegion --genome $genome --no_attr_add $out_prefix.tmp/6.combineGeneModels/genome.completed.genes_in_repeats.gff3 > $out_prefix.InRepeatRegion_GeneModels.gff3 2> /dev/null";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
 if ($pfam_db) {
-    $cmdString = "$dirname/bin/GFF3Clear --gene_prefix ${gene_prefix}ShortGene --genome $genome --no_attr_add $out_prefix.tmp/6.combineGeneModels/remove_short_genes.filter_out.gff3 > $out_prefix.ShortCDS_geneModels.gff3 2> GFF3Clear.4.log";
+    $cmdString = "$dirname/bin/GFF3Clear --GFF3_source GETA --gene_prefix ${gene_prefix}ShortGene --genome $genome --no_attr_add $out_prefix.tmp/6.combineGeneModels/remove_short_genes.filter_out.gff3 > $out_prefix.ShortCDS_GeneModels.gff3 2> /dev/null";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 }
 
-$cmdString = "$dirname/bin/gff3ToGtf.pl $genome $out_prefix.gff3 > $out_prefix.gtf 2> gff3ToGtf.log";
+$cmdString = "$dirname/bin/gff3ToGtf.pl $genome $out_prefix.GeneModels.gff3 > $out_prefix.GeneModels.gtf 2> /dev/null";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
-$cmdString = "$dirname/bin/eukaryotic_gene_model_statistics.pl $out_prefix.gtf $genome $out_prefix &> eukaryotic_gene_model_statistics.stats";
+$cmdString = "$dirname/bin/eukaryotic_gene_model_statistics.pl $out_prefix.GeneModels.gtf $genome $out_prefix &> $out_prefix.GeneModels.stats";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+
+open IN, "$out_prefix.tmp/0.RepeatMasker/genome.repeat.stats" or die "Can not open file $out_prefix.tmp/0.RepeatMasker/genome.repeat.stats, $!";
+open OUT, ">", "$out_prefix.repeat.stats" or die "Can not create file $out_prefix.repeat.stats, $!";
+print OUT <IN>;
+close IN; close OUT;
+
+open IN, "$out_prefix.tmp/0.RepeatMasker/genome.repeat.gff3" or die "Can not open file $out_prefix.tmp/0.RepeatMasker/genome.repeat.gff3, $!";
+open OUT, ">", "$out_prefix.repeat.gff3" or die "Can not create file $out_prefix.repeat.gff3, $!";
+print OUT <IN>;
+close IN; close OUT;
+
+if (($pe1 && $pe2) or $single_end) {
+    open IN, "$out_prefix.tmp/3.transcript/transfrag.alignment.gff3" or die "Can not open file $out_prefix.tmp/3.transcript/transfrag.alignment.gff3, $!";
+    open OUT, ">", "$out_prefix.transfrag_alignment.gff3" or die "Can not create file $out_prefix.transfrag_alignment.gff3, $!";
+    print OUT <IN>;
+    close IN; close OUT;
+
+    open IN, "$out_prefix.tmp/3.transcript/transfrag.genome.gff3" or die "Can not open file $out_prefix.tmp/3.transcript/transfrag.genome.gff3, $!";
+    open OUT, ">", "$out_prefix.transfrag_prediction.gff3" or die "Can not create file $out_prefix.transfrag_prediction.gff3, $!";
+    print OUT <IN>;
+    close IN; close OUT;
+}
+
+if ($protein) {
+    open IN, "$out_prefix.tmp/4.homolog/genewise.gff3" or die "Can not open file $out_prefix.tmp/4.homolog/genewise.gff3, $!";
+    open OUT, ">", "$out_prefix.homolog_prediction.gff3" or die "Can not create file $out_prefix.homolog_prediction.gff3, $!";
+    print OUT <IN>;
+    close IN; close OUT;
+}
+
+open OUT, ">", "$out_prefix.gene_prediction.summary" or die "Can not create file $out_prefix.gene_prediction.summary, $!";
+open IN, "$out_prefix.tmp/0.RepeatMasker/genome.repeat.stats" or die "Can not open file $out_prefix.tmp/0.RepeatMasker/genome.repeat.stats, $!";
+while (<IN>) {
+    print OUT $_ if m/^Genome Size/;
+    print OUT "$_\n" if m/^Repeat Ratio/;
+}
+close IN;
+if ( -e "$out_prefix.tmp/2.hisat2/hisat2.log" ) {
+    open IN, "$out_prefix.tmp/2.hisat2/hisat2.log" or die $!;
+    while (<IN>) {
+        print OUT "The alignment rate of RNA-Seq reads is: $1\n\n" if m/^(\S+) overall alignment rate/;
+    }
+    close IN;
+    open IN, "$out_prefix.tmp/3.transcript/transfrag.genome.gff3" or die "Can not open file $out_prefix.tmp/3.transcript/transfrag.genome.gff3, $!";
+    my ($num1, $num2, $num3, $num4, $num5);
+    while (<IN>) {
+        if (m/\tgene\t/) {
+            $num1 ++;
+            if (m/Integrity=complete/) {
+                $num2 ++;
+            }
+            elsif (m/Integrity=5prime_partial/) {
+                $num3 ++;
+            }
+            elsif (m/Integrity=3prime_partial/) {
+                $num4 ++;
+            }
+            elsif (m/Integrity=internal/) {
+                $num5 ++;
+            }
+        }
+    }
+    print OUT "$num1 genes were predicted by Transfrag, including $num2 complete, $num3 5prime_partial, $num4 3prime_partial, $num5 internal genes.\n\n";
+}
+if ( $protein ) {
+    open IN, "$out_prefix.tmp/4.homolog/genewise.gff3" or die "Can not open file $out_prefix.tmp/4.homolog/genewise.gff3, $!";
+    my ($num1, $num2, $num3, $num4, $num5);
+    while (<IN>) {
+        if (m/\tgene\t/) {
+            $num1 ++;
+            if (m/Integrity=complete/) {
+                $num2 ++;
+            }
+            elsif (m/Integrity=5prime_partial/) {
+                $num3 ++;
+            }
+            elsif (m/Integrity=3prime_partial/) {
+                $num4 ++;
+            }
+            elsif (m/Integrity=internal/) {
+                $num5 ++;
+            }
+        }
+    }
+    print OUT "$num1 genes were predicted by Homolog, including $num2 complete, $num3 5prime_partial, $num4 3prime_partial, $num5 internal genes.\n\n";
+}
+if (-e "$out_prefix.tmp/5.augustus/augustus.2.gff3") {
+    open IN, "$out_prefix.tmp/5.augustus/training_again/secondtest.out" or die "Can not open file $out_prefix.tmp/5.augustus/training_again/secondtest.out, $!";
+}
+else {
+    open IN, "$out_prefix.tmp/5.augustus/training/secondtest.out" or die "Can not open file $out_prefix.tmp/5.augustus/training/secondtest.out, $!";
+}
+my ($accuary1, $accuary2, $accuary3, $accuary4, $accuary5, $accuary6, $out);
+while (<IN>) {
+    if (m/^nucleotide level/) {
+        @_ = m/([\d\.]+)/g;
+        $out .= "nucleotide_level\t$_[0]\t$_[1]\n";
+        ($accuary1, $accuary2) = ($_[-2], $_[-1]);
+    }
+    elsif (m/^exon level/) {
+        @_ = m/([\d\.]+)/g;
+        $out .= "exon_level\t$_[-2]\t$_[-1]\n";
+        ($accuary3, $accuary4) = ($_[-2], $_[-1]);
+    }
+    elsif (m/^gene level/) {
+        @_ = m/([\d\.]+)/g;
+        $out .= "gene_level\t$_[-2]\t$_[-1]\n";
+        ($accuary5, $accuary6) = ($_[-2], $_[-1]);
+    }
+}
+my $accuary = ($accuary1 * 3 + $accuary2 * 2 + $accuary3 * 4 + $accuary4 * 3 + $accuary5 * 2 + $accuary6 * 1) / 15;
+$accuary = int($accuary * 10000) / 100;
+$out = "The accuary of AUGUSTUS Training is $accuary\%.\nLevel\tSensitivity\tSpecificity\n$out\n";
+print OUT $out;
+my ($gene_num1, $gene_num2, $gene_num3, $gene_num4) = (0, 0, 0, 0);
+open IN, "$out_prefix.GeneModels.gff3" or die "Can not open file $out_prefix.GeneModels.gff3, $!";
+while (<IN>) {
+    $gene_num1 ++ if m/\tgene\t/;
+}
+close IN;
+open IN, "$out_prefix.Incomplete_GeneModels.gff3" or die "Can not open file $out_prefix.Incomplete_GeneModels.gff3, $!";
+while (<IN>) {
+    $gene_num2 ++ if m/\tgene\t/;
+}
+close IN;
+open IN, "$out_prefix.InRepeatRegion_GeneModels.gff3" or die "Can not open file $out_prefix.InRepeatRegion_GeneModels.gff3, $!";
+while (<IN>) {
+    $gene_num3 ++ if m/\tgene\t/;
+}
+close IN;
+open IN, "$out_prefix.ShortCDS_GeneModels.gff3" or die "Can not open file $out_prefix.ShortCDS_GeneModels.gff3, $!";
+while (<IN>) {
+    $gene_num4 ++ if m/\tgene\t/;
+}
+close IN;
+print OUT "The number of final complete gene models is: $gene_num1\n";
+print OUT "The number of Incomplete gene models is: $gene_num2\n";
+print OUT "The number of gene models whose CDS region overlap to Repeat Region > $1 is: $gene_num3\n" if $config{"remove_genes_in_repeats"} =~ m/([\d\.]+)/;
+print OUT "The number of gene models whose CDS length < $1 and cannot find ortholog in Pfam validation is: $gene_num4\n" if $config{"remove_short_genes"} =~ m/([\d\.]+)/;
+
+
 
 print STDERR "\n============================================\n";
 print STDERR "GETA complete successfully! " . "(" . (localtime) . ")" . "\n";

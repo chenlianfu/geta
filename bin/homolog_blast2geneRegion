@@ -36,7 +36,7 @@ open IN, $ARGV[1] or die $!;
 my (%protein_length, $protein_ID);
 while (<IN>) {
     chomp;
-    if (/>(\S+)/) { $protein_ID = $1; }
+    if (/^>(\S+)/) { $protein_ID = $1; }
     else { $protein_length{$protein_ID} += length $_; }
 }
 close IN;

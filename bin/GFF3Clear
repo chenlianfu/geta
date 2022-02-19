@@ -6,48 +6,69 @@ my $usage = <<USAGE;
 Usage:
     perl $0 [options] file1.gff3 file2.gff3 ... > total.gff3
 
-    读取输入GFF3格式文件中的中CDS和exon信息，在输出文件中添加UTR信息。若一个mRNA中的exons之间有重叠，程序能进行修正。
-    有部分基因模型的尾部CDS不包含终止密码子，则对其要进行修正。
-    添加gene或mRNA是否完整的信息。
-    若GFF3文件含有可变剪接，也适用。
-    可以输入多个文件，对其进行去冗余整合：（1）对输入的GFF3的基因模型进行分析，若相邻且在同一条链上的基因在CDS区上有重叠，则保留基因长 度较大的那个基因模型；（2）若输入多个GFF3文件，保留先输入文件的基因；后输入文件的相同链上相邻的基因模型中，若有CDS区域和之前文件基因的CDS重叠，则过滤之。
+    程序用于读取一个或多个GFF3文件，对GFF3文件格式进行修正，仅保留编码蛋白(mRNA信息中包含CDS)基因，并去除CDS区有重叠的冗余基因模型。
 
-    --gene_prefix <string>    default: gene
-    设置gene ID前缀
+    1. 输入的GFF3文件格式要求：必须包含mRNA、CDS这两个Feature信息，且其第九列含有Parent信息; 也可以包含exon和UTR信息; 所有输入的额GFF3文件中的所有基因具有不同的ID编号。程序仅读取GFF3文件的mRNA、CDS、exon信息。
 
-    --gene_code_length <int>    default: none
-    设置基因数字编号的长度。若不添加改参数，则程序根据基因的数量自动计算出基因数字编号的长度。例如，基因总数量为10000~99999时，基因数字编号长度为5，于是第一个基因编号为00001；若基因总数量在1000~9999时，基因数字编号长度为4，第一个基因编号为0001。设置该参数用于强行指定基 因编号的长度，从而决定基因编号前0的数量。若某个基因的编号数值长度 >= 本参数设置的值，则该基因编号数值前不加0。
+    2. 程序对GFF3文件按如下顺序进行行修正：
+    2.1 根据输入的基因组序列信息，程序检测基因模型尾部CDS是否包含终止密码子。若不包含，则程序在基因组序列中检测后续的3个碱基是否为终止密码子，从而修正CDS范围，使之包含终止密码子；
+    2.2 若输入GFF3文件中不包含exon，则程序根据CDS信息生成exon信息和CDSs之间的intron信息；
+    2.3 若输入GFF3文件中包含exon，且exon比CDS范围要多时，则生成UTRs之间的intron信息；
+    2.4 若一个mRNA内有两CDSs之间的碱基距离 < 指定阈值，则程序在标准错误输出中给出警告信息，不进行处理；
+    2.5 若一个mRNA内有两个exons之间的碱基距离 < 0，则程序将较长的exon根据intron打断；
+    2.6 程序对每个gene的mRNA进行了CDS和exon的完善，检测基因的完整性信息，得到UTR和intron信息，并能将这些信息输出到GFF3结果文件中；
+    2.7 在一个GFF3文件中，若有两个或多个基因在同一条链上的CDS区域有重叠，则按基因CDS的长度（若存在可变剪接，则是所有isoform的所有CDSs去冗余后的长度），从短到长去除基因模型，保证两两基因模型的CDS区重叠覆盖率（相对较短基因CDS长度的比例）<= 指定阈值；
+    2.8 当输入多个GFF3文件时，检测到基因在同一条链上的CDS区重叠覆盖率（相对较短基因CDS长度的比例）> 指定阈值时，则去除后输入文件的基因模型;
+    2.9 程序最后对基因模型按输入的基因序列顺序及位置信息进行排序，然后根据需要对基因ID进行重命名，输出去冗余的标准GFF3格式的基因模型信息，此外也输出文件中的原有的Attribute信息。
 
+    3. 参数信息：
     --genome <string>
     输入基因组fasta文件。该参数是必须的，用于修正尾部的CDS和基因完整性检测。
+
+    --min_intron <int>    default: 1
+    设置一个最短intron长度阈值。当检测到相邻两CDSs之间相距的碱基距离 < 该阈值时，程序会标准错误输出中给出警告信息。当使用默认参数 1 时，出现警告表示基因模型有错误。
+
+    --coverage <int>    default: 0.30
+    设置一个覆盖度阈值。当两个基因型模型CDS重叠区碱基数 / 较小基因模型CDS去冗余碱基数 > 该覆盖度阈值时， 则去除相应的基因模型。若该值设置为 1，则表示不会去除冗余的基因模型；设置为 0，则表示在CDS区重叠 >= 1 bp，也会去除冗余的基因模型。
+
+    --gene_prefix <string>    default: None
+    若设置该参数，则程序会对基因ID进行重命名，该参数用于设置gene ID前缀。若不设置该参数，则程序不会对基因进行重命名。
+
+    --gene_code_length <int>    default: none
+    设置基因数字编号的长度。若不添加改参数，则程序根据基因的数量自动计算出基因数字编号的长度。例如，基因总数量为10000~99999时，基因数字编号长度为5，于是第一个基因编号为00001；若基因总数量在1000~9999时，基因数字编号长度为4，第一个基因编号为0001。设置该参数用于强行指定基因编号的长度，从而决定基因编号前0的数量。若某个基因的编号数值长度 >= 本参数设置的值，则该基因编号数值前不加0。
 
     --no_attr_add <bool>     default: None
     添加该参数，则不在GFF3文件第9列添加Source和Integrity信息。
 
-    --no_rm_overlap_gene <bool>    default: None
-    添加该参数，则不会对同一条链上CDS区有重叠的基因进行去冗余。
+    --GFF3_source <string>    default: none
+    若添加该参数，则程序输出的GFF3文件第二列变为该参数设置的值。若不添加该参数，则使用输入文件中原有的信息。
 
 USAGE
 if(@ARGV==0){die $usage}
 
-my ($gene_prefix, $genome, $no_attr_add, $gene_code_length, $no_rm_overlap_gene);
+my ($genome, $min_intron, $coverage, $gene_prefix, $gene_code_length,  $no_attr_add, $GFF3_source);
 GetOptions(
-    "gene_prefix:s" => \$gene_prefix,
     "genome:s" => \$genome,
-    "no_attr_add!" => \$no_attr_add,
+    "min_intron:i" => \$min_intron,
+    "coverage:f" => \$coverage,
+    "gene_prefix:s" => \$gene_prefix,
     "gene_code_length:i" => \$gene_code_length,
-    "no_rm_overlap_gene!" => \$no_rm_overlap_gene,
+    "no_attr_add!" => \$no_attr_add,
+    "GFF3_source:s" => \$GFF3_source,
 );
-$gene_prefix ||= "gene";
 die "--genome should be set\n" unless $genome;
+$min_intron ||= 1;
+$coverage ||= 0.3;
 
 # 读取基因组序列
 open IN, $genome or die $!;
-my (%seq, $seq_id);
+my (%seq, $seq_id, %seq_sort, $seq_num);
 while (<IN>) {
     chomp;
     if (m/^>(\S+)/) {
         $seq_id = $1;
+        $seq_num ++;
+        $seq_sort{$seq_id} = $seq_num unless $seq{$1};
     }
     else {
         $seq{$seq_id} .= $_;
@@ -55,72 +76,180 @@ while (<IN>) {
 }
 close IN;
 
+my ( %gff, %gff3_attr, %cds, %gene_CDS, %gene_CDS_length, %chr, %strand, %source );
+# %gff 存放最终有效基因的 mRNA / CDS / exon / UTR /intron 信息。
+# %gff3_attr 存放 gene 或 mRNA 第 9 列 attribute 信息。
+# %cds 存放 CDS 的索引信息
+# %gene_CDS 存放基因所有 CDS 信息
+# %gene_CDS_length 存放基因的 CDS 总长度信息
+
 # 读取GFF3文件
-my (%gff, %sort1, %sort2, %sort3, %sort4, %CDS);
-foreach (@ARGV) {
-    open IN, $_ or die $!;
-    my (%gff_info, $id, %gene_length);
-    my $keep = 0;
-    while (<IN>) {
-        next if m/^#/;
-        next if m/^\s*$/;
-        if (m/\tgene\t.*ID=([^;\s]+)/) {
-            $id = $1;
+foreach my $input_file ( @ARGV ) {
+    #print STDERR "OK:\t$input_file\n";
+
+    # 每读取一个GFF3文件，则将其编码蛋白信息存储在 %gff3 中
+    # 读取GFF3文件的mRNA、CDS和exon信息。若有 gene 信息，则保存其 attribute 信息
+    open IN, $input_file or die "can not open file $input_file, $!";
+    my ( %lines, $gene_id, $mRNA_id, %mRNAID2geneID );
+    # 先读取gene和mRNA信息，存储GFF3第9列attribute信息，得到mRNA ID和gene ID之间的对应关系
+    while ( <IN> ) {
+        if ( m/\tmRNA\t/ ) {
             @_ = split /\t/;
-            $sort1{$id} = $_[0];
-            $sort2{$id} = $_[3];
-            $sort3{$id} = $_[4];
-            $sort4{$id} = $_[6];
-            $gene_length{$id} = $_[4] - $_[3] + 1;
-            $keep = 1;
+            if ( $_[8] =~ /ID=([^;\s]+)/ ) {
+                $mRNA_id = $1;
+            }
+            else {
+                warn "Warning: In the GFF3 File $input_file, mRNA Feature have no ID information: $_";
+            }
+
+            if ( $_[8] =~ /Parent=([^;\s]+)/ ) {
+                $gene_id = $1;
+            }
+            else {
+                warn "Warning: In the GFF3 File $input_file, mRNA Feature have no Parent information: $_";
+            }
+            $mRNAID2geneID{$mRNA_id} = $gene_id;
+
+            $gff3_attr{$mRNA_id} = &get_attr($_[8]);
         }
-        elsif (! m/Parent=/) {
-            $keep = 0;
+        elsif ( m/\tgene\t/) {
+            @_ = split /\t/;
+            if ( $_[8] =~ /ID=([^;\s]+)/ ) {
+                $gene_id = $1;
+                $gff3_attr{$gene_id} = &get_attr($_[8]);
+            }
+            else {
+                warn "Warning: In the GFF3 File $input_file, gene Feature have no ID information: $_";
+            }
         }
-        $gff_info{$id} .= $_ if $keep == 1;
     }
     close IN;
 
-    my %cds;
-    foreach my $gene_id (keys %gff_info) {
-        my $gff_info = $gff_info{$gene_id};
-        # 去除不含 CDS 信息的基因模型
-        unless ($gff_info =~ m/\tCDS\t/) {
-            delete $gff_info{$gene_id};
-            print STDERR "Delete gene without CDS information: $gene_id\n";
-            next;
-        }
-        foreach (split /\n/, $gff_info) {
-            if (m/^(\S+?)\t.*\tCDS\t(\d+?)\t(\d+?)\t.*?\t(.*?)\t/) {
-                my $index1 = int($2 / 1000);
-                my $index2 = int($3 / 1000);
-                foreach ($index1 .. $index2) {
-                    $cds{$1}{$4}{$_}{"$2\t$3"} = $gene_id;
-                }
+    # 再读取CDS和exon信息，得到 gene -> mRNA -> CDS/exon 信息。
+    my %gff3;
+    open IN, $input_file or die "can not open file $input_file, $!";
+    while ( <IN> ) {
+        next if m/^#/;
+        next if m/^\s*$/;
+        next if exists $lines{$_};
+        $lines{$_} = 1;
+        @_ = split /\t/;
+
+        if ( $_[2] eq "CDS" or  $_[2] eq "exon" ) {
+            if ( $_[8] =~ /Parent=([^;\s]+)/ ) {
+                $gff3{$mRNAID2geneID{$1}}{$1} .= $_ if exists $mRNAID2geneID{$1};
+            }
+            else {
+                warn "Warning: In the GFF3 File $input_file, CDS/exon Feature have no Parent information: $_";
             }
         }
     }
 
+    # 对mRNA的CDS和exon进行修正，并得到UTR和intron信息。
+    my %gff3_m;
+    foreach my $gene_ID ( keys %gff3 ) {
+        my ( $chr, $source, $strand );
+        foreach my $mRNA_ID ( keys %{$gff3{$gene_ID}} ) {
+            my $info = $gff3{$gene_ID}{$mRNA_ID};
+
+            # 去除不包含CDS信息的mRNA
+            next unless $info =~ m/\tCDS\t/;
+
+            #print "$gene_ID\t$mRNA_ID\n$info";
+            $info =~ s/^\s*//;
+            $info =~ s/\s*$//;
+            my @info = split /\n/, $info;
+            @_ = split /\t/, $info[0];
+            ( $chr, $source, $strand ) = ( $_[0], $_[1], $_[6] );
+
+            my ( @CDS, @exon, @CDS_exon, @exon_exon, @intron, @UTR );
+            foreach ( @info ) {
+                @_ = split /\t/;
+                push @CDS, "$_[3]\t$_[4]\t$_[5]\t$_[6]\t$_[7]" if $_[2] eq "CDS";
+                push @CDS_exon, "$_[3]\t$_[4]" if $_[2] eq "CDS";
+                push @exon_exon, "$_[3]\t$_[4]" if $_[2] eq "exon";
+            }
+
+            # 对尾部CDS进行终止密码子分析，并使尾部CDS包含终止密码子，同时添加基因完整性信息。
+            @CDS = &cdsIncludeStopCodon_and_integrity(\@CDS, $chr, $strand, $mRNA_ID);
+
+            # 检测CDS之间的intron长度
+            &get_intron(\@CDS, $mRNA_ID, $min_intron);
+
+            # 根据 CDS 和 exon 信息，对exon进行修正
+            @exon = &modify_exon(\@CDS_exon, \@exon_exon, $mRNA_ID);
+
+            # 得到 intron 信息
+            @intron = &get_intron(\@exon, $mRNA_ID, 1);
+
+            # 得到 UTR 信息，相比上面的 CDS、intron和exon，多了five_prime_UTR和three_prime_UTR信息。
+            @UTR = &get_UTR(\@CDS, \@exon, $strand);
+
+            #foreach ( @exon ) { print "$chr\t$source\texon\t$_\t\.\t$strand\t\.\n" }
+            #foreach ( @CDS ) { print "$chr\t$source\tCDS\t$_\n"; }
+            #foreach ( @UTR ) { print "$chr\t$source\t$_\t\.\t$strand\t\.\n" }
+            #foreach ( @intron ) { print "$chr\t$source\tintron\t$_\t\.\t$strand\t\.\n" }
+
+            $gff3_m{$gene_ID}{$mRNA_ID}{"CDS"} = \@CDS;
+            $gff3_m{$gene_ID}{$mRNA_ID}{"exon"} = \@exon;
+            $gff3_m{$gene_ID}{$mRNA_ID}{"intron"} = \@intron;
+            $gff3_m{$gene_ID}{$mRNA_ID}{"UTR"} = \@UTR;
+            $gff3_m{$gene_ID}{$mRNA_ID}{"chr"} = $chr;
+            $gff3_m{$gene_ID}{$mRNA_ID}{"source"} = $source;
+            $gff3_m{$gene_ID}{$mRNA_ID}{"strand"} = $strand;
+
+            foreach ( @CDS ) { $gene_CDS{$gene_ID}{$_} = 1; }
+        }
+        $chr{$gene_ID} = $chr;
+        $source{$gene_ID} = $source;
+        $strand{$gene_ID} = $strand;
+
+        my @gene_CDS = keys %{$gene_CDS{$gene_ID}};
+        $gene_CDS_length{$gene_ID} = &get_gene_CDS_length(\@gene_CDS);
+
+        foreach my $gene_CDS ( keys %{$gene_CDS{$gene_ID}} ) {
+            #print STDERR "$gene_ID\t$gene_CDS\n";
+            @_ = split /\t/, $gene_CDS;
+            my $index1 = int($_[0] / 1000);
+            my $index2 = int($_[1] / 1000);
+            foreach ($index1 .. $index2) {
+                $cds{$chr}{$strand}{$_}{$gene_CDS} = $gene_ID;
+            }
+        }
+    }
+
+    # 仅对本循环中待分析的GFF3文件中的基因模型进行过滤。过滤CDS区和其它基因重叠比率 > 指定阈值的基因。
+    # 先找本GFF3中基因模型和其它所有基因模型（包含之前的多个GFF文件）重叠的信息，然后聚类。对每类基因进行过滤。
+    # 对基因按CDS总长度进行从小到大排序，再进行过滤。计算两基因模型在CDS区的覆盖率，若高于阈值，则去除 %gff_m, %gene_CDS中的信息。
+    # 由于仅对本循环中的GFF3文件的基因模型做过滤，则相当于优先保留先输入的GFF3基因模型。
+    #
+    # 先找到两两有重叠的基因信息
     my %overlap;
-    foreach my $gene_id (keys %gff_info) {
-        my $gff_info = $gff_info{$gene_id};
-        foreach (split /\n/, $gff_info) {
-            if (m/^(\S+?)\t.*\tCDS\t(\d+?)\t(\d+?)\t.*?\t(.*?)\t/) {
-                my $index1 = int($2 / 1000);
-                my $index2 = int($3 / 1000);
-                foreach my $index ( $index1 .. $index2 ) {
-                    foreach (keys %{$cds{$1}{$4}{$index}}) {
-                        @_ = split /\t/;
-                        if ($_[1] >= $2 && $_[0] <= $3 && $gene_id ne $cds{$1}{$4}{$index}{$_}) {
-                            $overlap{$gene_id}{$cds{$1}{$4}{$index}{$_}} = 1;
-                            #print STDERR "$gene_id\t$2\t$3\t$cds{$1}{$4}{$index}{$_}\t$_[0]\t$_[1]\n";
-                        }
+    my @gene_CDS = keys %gene_CDS;
+    my $gene_CDS_num = @gene_CDS;
+    foreach my $gene_ID (keys %gene_CDS) {
+        my ($chr, $strand) = ($chr{$gene_ID}, $strand{$gene_ID});
+        foreach my $gene_CDS ( keys %{$gene_CDS{$gene_ID}} ) {
+            my ($start, $end) = split /\t/, $gene_CDS;
+            my $index1 = int($start / 1000);
+            my $index2 = int($end / 1000);
+            foreach my $index ( $index1 .. $index2 ) {
+                foreach (keys %{$cds{$chr}{$strand}{$index}}) {
+                    my $target_id = $cds{$chr}{$strand}{$index}{$_};
+                    next unless exists $gene_CDS{$target_id};
+                    @_ = split /\t/;
+                    if ( $_[1] >= $start && $_[0] <= $end && $gene_ID ne $target_id ) {
+                        #print STDERR "$gene_ID\t$chr\t$strand\t$start\t$end\t$index\t$target_id\t$_\n";
+                        #print STDERR "$gene_ID\t$target_id\n";
+                        $overlap{$gene_ID}{$cds{$chr}{$strand}{$index}{$_}} = 1;
+                        $overlap{$cds{$chr}{$strand}{$index}{$_}}{$gene_ID} = 1;
                     }
                 }
             }
         }
     }
 
+    # 将相互有重叠的基因聚成一类
     my %cluster;
     while (%overlap) {
         my %cluster_one;
@@ -141,378 +270,413 @@ foreach (@ARGV) {
             }
         }
 
-        my $cluster = join "\t", keys %cluster_one;
+        my $cluster = join "\t", sort keys %cluster_one;
+        #print STDERR "OK9: $cluster\n";
         $cluster{$cluster} = 1;
     }
 
-    foreach my $cluster (keys %cluster) {
+    # 根据CDS长度，从短到长，对同一个GFF3文件中有重叠的基因进行过滤。
+    foreach my $cluster (sort keys %cluster) {
+        #print STDERR "OK1:$cluster\n";
         my @genes = split /\t/, $cluster;
-        @genes = sort {$gene_length{$a} <=> $gene_length{$b}} @genes;
-        my %genes_for_delete;
-        foreach (@genes) { $genes_for_delete{$_} = 1; }
-        # 根据CDS长度从短到长删除和其它基因CDS有重叠的基因。
-        foreach my $gene_id (@genes) {
-            delete $genes_for_delete{$gene_id};
-            # 得到这些重叠基因类的所有的CDS信息。
-            my %gene_cds;
-            foreach my $gene_id_d (keys %genes_for_delete) {
-                my $gff_info_d = $gff_info{$gene_id_d};
-                foreach (split /\n/, $gff_info_d) {
-                    if (m/^(\S+?)\t.*\tCDS\t(\d+?)\t(\d+?)\t.*?\t(.*?)\t/) {
-                        my $index1 = int($2 / 1000);
-                        my $index2 = int($3 / 1000);
-                        foreach ($index1 .. $index2) {
-                            $gene_cds{$1}{$4}{$_}{"$2\t$3"} = $gene_id_d;
-                        }
+        @genes = sort {$gene_CDS_length{$a} <=> $gene_CDS_length{$b} or $a cmp $b} @genes;
+        my %genes;
+        foreach (@genes) {
+            $genes{$_} = 1;
+        }
 
-                    }
-                }
-            }
-            # 当前基因的CDS和其它基因CDS有重叠，则删除该基因信息。
-            my $gff_info = $gff_info{$gene_id};
-            F1: foreach (split /\n/, $gff_info) {
-                if (m/^(\S+?)\t.*\tCDS\t(\d+?)\t(\d+?)\t.*?\t(.*?)\t/) {
-                    my $index1 = int($2 / 1000);
-                    my $index2 = int($3 / 1000);
-                    foreach my $index ( $index1 .. $index2 ) {
-                        foreach (keys %{$gene_cds{$1}{$4}{$index}}) {
-                            @_ = split /\t/;
-                            if ($_[1] >= $2 && $_[0] <= $3 && $gene_id ne $gene_cds{$1}{$4}{$index}{$_}) {
-                                delete $gff_info{$gene_id} unless $no_rm_overlap_gene;
-                                print STDERR "$gene_id\t$gene_cds{$1}{$4}{$index}{$_}: delete: $gene_id\n" unless $no_rm_overlap_gene;
-                                last F1;
-                            }
-                        }
-                    }
+        # 根据CDS长度从短到长删除。
+        while (@genes) {
+            my $gene = shift @genes;
+            #print STDERR "OK2:\t$gene\n";
+            # 核心操作，仅对当前GFF3中的基因模型进行后续的过滤。
+            next unless exists $gff3_m{$gene};
+
+            my @gene_CDS = keys %{$gene_CDS{$gene}};
+            my $gene_CDS_length = $gene_CDS_length{$gene};
+
+            foreach my $target_gene (keys %genes) {
+                next if $gene eq $target_gene;
+                my @target_gene_CDS = keys %{$gene_CDS{$target_gene}};
+                my $target_gene_CDS_length = $gene_CDS_length{$target_gene};
+
+                my $match_CDS_length = &get_match_length(\@gene_CDS, \@target_gene_CDS);
+                my $ratio1 = $match_CDS_length / $gene_CDS_length;
+                my $ratio2 = $match_CDS_length / $target_gene_CDS_length;
+                #print STDERR "$gene\t$ratio1 | $target_gene\t$ratio2\n";
+                my $ratio = $ratio1;
+                $ratio = $ratio2 if $ratio2 > $ratio1;
+                if ( $ratio > $coverage ) {
+                    print STDERR "Delete gene $gene, for its CDS coverage ratio with gene $target_gene is: $ratio > $coverage\n";
+                    delete $gene_CDS{$gene};
+                    delete $gff3_m{$gene};
+                    delete $genes{$gene};
+                    last;
                 }
             }
         }
     }
 
-    my @gene_id = keys %gff_info;
-    foreach my $gene_id (@gene_id) {
-        my $gff_info = $gff_info{$gene_id};
-        foreach (split /\n/, $gff_info) {
-            if (m/^(\S+?)\t.*\tCDS\t(\d+?)\t(\d+?)\t.*?\t(.*?)\t/) {
-                my $index1 = int($2 / 1000);
-                my $index2 = int($3 / 1000);
-                foreach my $index ( $index1 .. $index2 ) {
-                    foreach (keys %{$CDS{$1}{$4}{$index}}) {
-                        @_ = split /\t/;
-                        if ($_[1] >= $2 && $_[0] <= $3 && $gene_id ne $CDS{$1}{$4}{$index}{$_}) {
-                            delete $gff_info{$gene_id} unless $no_rm_overlap_gene;
-                            print STDERR "$gene_id\t$CDS{$1}{$4}{$index}{$_}: delete: $gene_id\n" unless $no_rm_overlap_gene;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    foreach my $chr (keys %cds) {
-        foreach my $strand (keys %{$cds{$chr}}) {
-            foreach my $index (keys %{$cds{$chr}{$strand}}) {
-                foreach (keys %{$cds{$chr}{$strand}{$index}}) {
-                    $CDS{$chr}{$strand}{$index}{$_} = $cds{$chr}{$strand}{$index}{$_};
-                }
-            }
-        }
-    }
-
-    foreach (keys %gff_info) {
-        $gff{$_} = $gff_info{$_};
+    foreach (keys %gff3_m) {
+        $gff{$_} = $gff3_m{$_};
     }
 }
 
-# 对基因按位置进行排序
-my @id = sort {$sort1{$a} cmp $sort1{$b} or $sort2{$a} <=> $sort2{$b} or $sort3{$a} <=> $sort3{$b} or $sort4{$a} cmp $sort4{$b}} keys %gff;
-my $total_number = @id;
-$total_number = length $total_number;
-$total_number = $gene_code_length if $gene_code_length;
-my $number;
+my (%sort1, %sort2, %sort3, %sort4, %sort5, %gene_border, %mRNA_border, %chr, %strand, %source);
+foreach my $gene_ID (keys %gff) {
+    my ( %exon_pos, %CDS_pos, $chr, $strand, $source );
+    foreach my $mRNA_ID (keys %{$gff{$gene_ID}}) {
+        $chr = $gff{$gene_ID}{$mRNA_ID}{"chr"};
+        $strand = $gff{$gene_ID}{$mRNA_ID}{"strand"};
+        $source = $gff{$gene_ID}{$mRNA_ID}{"source"};
+        my @exon = @{$gff{$gene_ID}{$mRNA_ID}{"exon"}};
+        my @CDS = @{$gff{$gene_ID}{$mRNA_ID}{"CDS"}};
 
-# 读取基因的exon和CDS信息，添加UTR信息。也适用于含有可变剪接的GFF3文件。
-foreach my $gene_id (@id) {
-    next unless $gene_id;
-    my $gff_info = $gff{$gene_id};
-    next unless $gff_info =~ m/\tCDS\t/;
-    my $out;
-    $number ++;
-
-    # 对gene的ID进行修改
-    my $id_out = $gene_prefix . 0 x ($total_number - (length $number)) . $number;
-    $gff_info =~ s/(\tgene\t.*\tID=)$gene_id/$1$id_out/;
-    $gff_info =~ s/;?\n/;\n/;
-    $gff_info =~ s/(\tgene\t.*)/${1}Source=$gene_id;/ unless $no_attr_add;
-    my $gene_integrity = "incomplete";
-
-    # 将gene的所有信息分割成mRNA信息
-    my (%gff_mRNA, @mRNA_id, $mRNA_id, %mRNA_line, $gene_out);
-    foreach (split /\n/, $gff_info) {
-        if (m/\tgene\t/) {
-            $gene_out = $_;
-        }
-        elsif (m/\tmRNA\t.*ID=([^;\s]+)/) {
-            $mRNA_id = $1;
-            $mRNA_line{$mRNA_id} = $_;
-            push @mRNA_id, $mRNA_id;
-        }
-        elsif (m/\tCDS\t/ or m/\texon\t/) {
-            $gff_mRNA{$mRNA_id} .= "$_\n";
-        }
-    }
-
-    # 对mRNA信息进行分析：验证是否完整、修改ID、添加UTR
-    my $mRNA_number = 0;
-    foreach (@mRNA_id) {
-        my $gff_mRNA = $gff_mRNA{$_};
-        next unless $gff_mRNA =~ m/\tCDS\t/;
-        $mRNA_number ++;
-
-        # 修改mRNA的ID和Parent信息。
-        my $transcript_id = "$id_out.t$mRNA_number";
-        my $mRNA_line = $mRNA_line{$_};
-        $mRNA_line =~ s/ID=[^;\s]+;?//;
-        $mRNA_line =~ s/Parent=[^;\s]+;?//;
-        $mRNA_line =~ s/\t([^\t]*)$/\tID=$transcript_id;Parent=$id_out;$1/;
-
-        # 由CDSs得到exons，和已有的exons进行整合：（1）一个exon和另外一个exon有重叠，则选择exon长的；（2）若一个exon和多个exons有重叠，则去掉该exon，对多个exon进行延长。
-        $gff_mRNA = &modify_exon($gff_mRNA, $transcript_id);
-
-        # 修改CDS和exon的ID和Parent信息。若没有exon信息，则根据CDS信息得到exon信息。
-        #$gff_mRNA = &change_id($gff_mRNA, $transcript_id);
-
-        # 进行基因完整性验证。
-        my %info = &cdsIncludeStopCodon_and_integrity($gff_mRNA, $transcript_id);
-        $gff_mRNA = $info{"info"};
-        my $integrity = $info{"integrity"};
-        $gene_integrity = "complete" if $integrity eq "complete";
-
-        $mRNA_line =~ s/;?$/;Integrity=$integrity;/ unless $no_attr_add;
-        $out .= "$mRNA_line\n";
-
-        # 添加UTR信息。
-        $gff_mRNA = &addUTR($gff_mRNA, $transcript_id);
-
-        my $sortgff = &sortgff($gff_mRNA);
-        $out .= $sortgff;
-    }
-
-    $gene_out =~ s/;?$/;Integrity=$gene_integrity;/ unless $no_attr_add;
-    print "$gene_out\n$out\n";
-}
-
-sub sortgff {
-    my $out;
-    my $info = $_[0];
-    my @line = split /\n/, $info;
-    @_ = split /\t/, $line[0];
-    my $strand = $_[6];
-    my %sort;
-    foreach (@line) {
-        @_ = split /\t/;
-        if ($_[2] eq "gene") {
-            $out .= "$_\n";
-        }
-        elsif ($_[2] eq "mRNA") {
-            $out .= "$_\n";
-        }
-        elsif ($_[2] eq "CDS" or $_[2] eq "exon" or $_[2] eq "five_prime_UTR" or $_[2] eq "three_prime_UTR") {
-            $sort{$_} = $_[3];
-        }
-    }
-
-    if ($strand eq "+") {
-        foreach (sort {$sort{$a} <=> $sort{$b} or $b cmp $a } keys %sort) {
-            $out .= "$_\n";
-        }
-    }
-    elsif ($strand eq "-") {
-        foreach (sort {$sort{$b} <=> $sort{$a} or $b cmp $a } keys %sort) {
-            $out .= "$_\n";
-        }
-    }
-
-    return $out;
-}
-
-sub modify_exon {
-    my $info = $_[0];
-    my $gene_id = $_[1];
-
-    my @line = split /\n/, $info;
-    @_ = split /\t/, $line[0];
-    my ($f1, $f2, $strand) = ($_[0], $_[1], $_[6]);
-
-    my (%cds_exon, %exon, %cds_info);
-    foreach (@line) {
-        s/\t[^\t]+$//;
-        @_ = split /\t/;
-        if (m/\tCDS\t/) {
-            $cds_info{"$_[3]\t$_[4]"} = $_;
-            $cds_exon{"$_[3]\t$_[4]"} = 1;
-        }
-        elsif (m/\texon\t/) {
-            $exon{"$_[3]\t$_[4]"} = 1;
-        }
-    }
-
-    my @exon = sort {$a <=> $b} keys %exon;
-    my @cds_exon = sort {$a <=> $b} keys %cds_exon;
-
-    # 首先，首尾CDS得到的exon可能被包含在含有UTR的exon中。这是第一种exons之间的重叠，选择有UTR的exon信息（选择更长的exon）。
-    # =========----=======---=======
-    # +++======----=======---==+++++
-    # 以上示例中，选择前者exon信息
-    my $cds_exon_start = shift @cds_exon;
-    my ($start, $end) = split /\t/, $cds_exon_start;
-    # 若CDS得到的exon能被已有的exons覆盖，则不需要其exon信息。
-    my $keep = 1;
-    foreach (@exon) {
-        @_ = split /\t/, $_;
-        if ($_[0] <= $start && $_[1] == $end) {
-            $keep = 0;
-            #print "OK1:\t$_\n";
-            last;
-        }
-    }
-    $exon{$cds_exon_start} = 1 if $keep == 1;
-    if (@cds_exon) {
-        my $cds_exon_end = pop @cds_exon;
-        ($start, $end) = split /\t/, $cds_exon_end;
-        $keep = 1;
+        my %pos;
         foreach (@exon) {
-            @_ = split /\t/, $_;
-            if ($_[0] == $start && $_[1] >= $end) {
-                $keep = 0;
-                #print "OK1:\t$_\n";
-                last;
+            @_ = split /\t/;
+            $exon_pos{$_[0]} = 1;
+            $exon_pos{$_[1]} = 1;
+            $pos{$_[0]} = 1;
+            $pos{$_[1]} = 1;
+        }
+        my @pos = sort {$a <=> $b} keys %pos;
+        $mRNA_border{$mRNA_ID} = "$pos[0]\t$pos[-1]";
+
+        foreach (@CDS) {
+            @_ = split /\t/;
+            $CDS_pos{$_[0]} = 1;
+            $CDS_pos{$_[1]} = 1;
+        }
+    }
+    my @exon_pos = sort {$a <=> $b} keys %exon_pos;
+    $gene_border{$gene_ID} = "$exon_pos[0]\t$exon_pos[-1]";
+    $chr{$gene_ID} = $chr;
+    $strand{$gene_ID} = $strand;
+    $source{$gene_ID} = $source;
+
+    $sort1{$gene_ID} = $seq_sort{$chr};
+    $sort2{$gene_ID} = $exon_pos[0];
+    $sort3{$gene_ID} = $exon_pos[-1];
+    $sort4{$gene_ID} = $strand;
+
+    my @CDS_pos = sort {$a <=> $b} keys %CDS_pos;
+    $sort5{$gene_ID} = $CDS_pos[0];
+}
+
+my @gene_ID = sort { $sort1{$a} <=> $sort1{$b} or $sort2{$a} <=> $sort2{$b} or $sort3{$a} <=> $sort3{$b} or $sort4{$a} cmp $sort4{$b} or $sort5{$a} <=> $sort5{$b} } keys %gff;
+my $gene_number = 0;
+my $total_gene_number = @gene_ID;
+
+foreach my $gene_ID (@gene_ID) {
+    my $source = $source{$gene_ID};
+    $source = $GFF3_source if $GFF3_source;
+
+    $gene_number ++;
+    my $geneID = $gene_ID;
+    if ($gene_prefix) {
+        my $code_length = length($total_gene_number);
+        $code_length = $gene_code_length if $gene_code_length;
+        $geneID = $gene_prefix . '0' x ($code_length - length($gene_number)) . $gene_number;
+    }
+    my $attribute = "ID=$geneID;$gff3_attr{$gene_ID}";
+    if ($gene_prefix) {
+        $attribute .= "Source=$gene_ID;" unless $no_attr_add;
+    }
+    print "$chr{$gene_ID}\t$source\tgene\t$gene_border{$gene_ID}\t\.\t$strand{$gene_ID}\t\.\t$attribute\n";
+
+    my $mRNA_number = 0;
+    foreach my $mRNA_ID (sort keys %{$gff{$gene_ID}}) {
+        my $chr = $gff{$gene_ID}{$mRNA_ID}{"chr"};
+        my $source = $gff{$gene_ID}{$mRNA_ID}{"source"};
+        my $strand = $gff{$gene_ID}{$mRNA_ID}{"strand"};
+        my @CDS = @{$gff{$gene_ID}{$mRNA_ID}{"CDS"}};
+        my @exon = @{$gff{$gene_ID}{$mRNA_ID}{"exon"}};
+        my @intron = @{$gff{$gene_ID}{$mRNA_ID}{"intron"}};
+        my @UTR = @{$gff{$gene_ID}{$mRNA_ID}{"UTR"}};
+
+        $source = $GFF3_source if $GFF3_source;
+        $mRNA_number ++;
+        my $mRNAID = $mRNA_ID;
+        $mRNAID = "$geneID.t$mRNA_number" if $gene_prefix;
+        my $attribute = "ID=$mRNAID;Parent=$geneID;$gff3_attr{$mRNA_ID}";
+        if ($gene_prefix) {
+            $attribute .= "Source=$mRNA_ID;" unless $no_attr_add;
+        }
+        print "$chr\t$source\tmRNA\t$mRNA_border{$mRNA_ID}\t\.\t$strand\t\.\t$attribute\n";
+
+        my (%sort, %sort_UTR, $CDS_num, $exon_num, $intron_num, $UTR3_num, $UTR5_num);
+        if ($strand eq "+") {
+            foreach (sort {$a <=> $b} @CDS) {
+                $CDS_num ++;
+                my $out = "$chr\t$source\tCDS\t$_\tID=$mRNAID.CDS$CDS_num;Parent=$mRNAID;\n";
+                @_ = split /\t/;
+                $sort{$out} = $_[0];
+                $sort_UTR{$out} = 3
+            }
+            foreach (sort {$a <=> $b} @exon) {
+                $exon_num ++;
+                my $out = "$chr\t$source\texon\t$_\t.\t$strand\t\.\tID=$mRNAID.exon$exon_num;Parent=$mRNAID;\n";
+                @_ = split /\t/;
+                $sort{$out} = $_[0];
+                $sort_UTR{$out} = 2;
+            }
+            foreach (sort {$a <=> $b} @intron) {
+                $intron_num ++;
+                my $out = "$chr\t$source\tintron\t$_\t\.\t$strand\t\.\tID=$mRNAID.intron$intron_num;Parent=$mRNAID;\n";
+                @_ = split /\t/;
+                $sort{$out} = $_[0];
+            }
+            my (%UTR_sort, @UTR5, @UTR3);
+            foreach (@UTR) {
+                @_ = split /\t/;
+                $UTR_sort{$_} = $_[1];
+                push @UTR5, $_ if $_[0] eq "five_prime_UTR";
+                push @UTR3, $_ if $_[0] eq "three_prime_UTR";
+            }
+            foreach (sort {$UTR_sort{$a} <=> $UTR_sort{$b}} @UTR5) {
+                $UTR5_num ++;
+                my $out = "$chr\t$source\t$_\t.\t$strand\t\.\tID=$mRNAID.utr5p$UTR5_num;Parent=$mRNAID;\n";
+                @_ = split /\t/;
+                $sort{$out} = $_[1];
+                $sort_UTR{$out} = 1;
+            }
+            foreach (sort {$UTR_sort{$a} <=> $UTR_sort{$b}} @UTR3) {
+                $UTR3_num ++;
+                my $out = "$chr\t$source\t$_\t.\t$strand\t\.\tID=$mRNAID.utr3p$UTR3_num;Parent=$mRNAID;\n";
+                @_ = split /\t/;
+                $sort{$out} = $_[1];
+                $sort_UTR{$out} = 4;
+            }
+
+            foreach (sort {$sort{$a} <=> $sort{$b} or $sort_UTR{$a} <=> $sort_UTR{$b}} keys %sort) {
+                print;
             }
         }
-        $exon{$cds_exon_end} = 1 if $keep == 1;
+        elsif ($strand eq "-") {
+            foreach (sort {$b <=> $a} @CDS) {
+                $CDS_num ++;
+                my $out = "$chr\t$source\tCDS\t$_\tID=$mRNAID.CDS$CDS_num;Parent=$mRNAID;\n";
+                @_ = split /\t/;
+                $sort{$out} = $_[0];
+                $sort_UTR{$out} = 3;
+            }
+            foreach (sort {$b <=> $a} @exon) {
+                $exon_num ++;
+                my $out = "$chr\t$source\texon\t$_\t.\t$strand\t\.\tID=$mRNAID.exon$exon_num;Parent=$mRNAID;\n";
+                @_ = split /\t/;
+                $sort{$out} = $_[0];
+                $sort_UTR{$out} = 2;
+            }
+            foreach (sort {$b <=> $a} @intron) {
+                $intron_num ++;
+                my $out = "$chr\t$source\tintron\t$_\t\.\t$strand\t\.\tID=$mRNAID.intron$intron_num;Parent=$mRNAID;\n";
+                @_ = split /\t/;
+                $sort{$out} = $_[0];
+            }
+            my (%UTR_sort, @UTR5, @UTR3);
+            foreach (@UTR) {
+                @_ = split /\t/;
+                $UTR_sort{$_} = $_[1];
+                push @UTR5, $_ if $_[0] eq "five_prime_UTR";
+                push @UTR3, $_ if $_[0] eq "three_prime_UTR";
+            }
+            foreach (sort {$UTR_sort{$b} <=> $UTR_sort{$a}} @UTR5) {
+                $UTR5_num ++;
+                my $out = "$chr\t$source\t$_\t.\t$strand\t\.\tID=$mRNAID.utr5p$UTR5_num;Parent=$mRNAID;\n";
+                @_ = split /\t/;
+                $sort{$out} = $_[1];
+                $sort_UTR{$out} = 1;
+            }
+            foreach (sort {$UTR_sort{$a} <=> $UTR_sort{$b}} @UTR3) {
+                $UTR3_num ++;
+                my $out = "$chr\t$source\t$_\t.\t$strand\t\.\tID=$mRNAID.utr3p$UTR3_num;Parent=$mRNAID;\n";
+                @_ = split /\t/;
+                $sort{$out} = $_[1];
+                $sort_UTR{$out} = 4;
+            }
+
+            foreach (sort {$sort{$b} <=> $sort{$a} or $sort_UTR{$a} <=> $sort_UTR{$b}} keys %sort) {
+                print;
+            }
+        }
     }
-    foreach (@cds_exon) {
-        $exon{$_} = 1;
+    print "\n";
+}
+
+
+sub get_match_length {
+    my @region1 = @{$_[0]};
+    my @region2 = @{$_[1]};
+
+    my $out_length;
+    my @region_match;
+    foreach my $region1 (@region1) {
+        my ($start1, $end1) = split /\t/, $region1;
+        foreach my $region2 (@region2) {
+            my ($start2, $end2) = split /\t/, $region2;
+            if ($start1 < $end2 && $start2 < $end1) {
+                my ($start, $end) = ($start1, $end1);
+                $start = $start2 if $start2 > $start1;
+                $end = $end2 if $end2 < $end1;
+                push @region_match, "$start\t$end";
+            }
+        }
     }
 
-    # 此外，再对所有的exons之间的重叠进行分析，这是第二种exons之间的重叠，则将更长的exon进行打断，选择更短的exon。
-    # ==============================
-    #   ====----========---=====
-    # 以上示例中出现了4个exons，则选择较短的exons，并将和3个exons有重叠的第一个exon进行打断，得到的3个exons如下：
-    # ======----========---=========
-    @exon = sort {$a <=> $b} keys %exon;
-    my $first_exon = shift @exon;
-    my ($last_start, $last_end) = split /\t/, $first_exon;
-    my ($stop_end, @exon_out);
-    foreach (@exon) {
-        my ($start, $end) = split /\t/, $_;
-        if ($start > $last_end) {
-            push @exon_out, "$last_start\t$last_end";
-            #print "OK2:\t$last_start\t$last_end\n";
-            ($last_start, $last_end) = ($start, $end);
+    $out_length = &get_gene_CDS_length(\@region_match);
+    return $out_length;
+}
+
+sub get_gene_CDS_length {
+    my @region = @{$_[0]};
+    @region = sort { $a <=> $b } @region;
+    
+    my $out_length;
+    my $last_region = shift @region;
+    @_ = split /\t/, $last_region;
+    $out_length += ($_[1] - $_[0] + 1);
+    foreach ( @region ) {
+        my @last_region = split /\t/, $last_region;
+        my @region = split /\t/;
+
+        if ($region[0] > $last_region[1]) {
+            $out_length += ($region[1] - $region[0] + 1);
+            $last_region = $_;
+        }
+        elsif ($region[1] > $last_region[1]) {
+            $out_length += ($region[1] - $last_region[1]);
+            $last_region = $_;
         }
         else {
-            $stop_end = $last_end if $stop_end < $last_end;
-            $last_end = $end;
+            next;
         }
     }
-    $last_end = $stop_end if $stop_end > $last_end;
-    push @exon_out, "$last_start\t$last_end";
-    #print "OK2:\t$last_start\t$last_end\n";
 
-    my @cds_out = keys %cds_info;
-    if ($strand eq "+") {
-        @cds_out = sort {$a <=> $b} @cds_out;
-        @exon_out = sort {$a <=> $b} @exon_out;
-    }
-    elsif ($strand eq "-") {
-        @cds_out = sort {$b <=> $a} @cds_out;
-        @exon_out = sort {$b <=> $a} @exon_out;
-    }
-
-    my $out;
-    my $cds_num = 0;
-    foreach (@cds_out) {
-        $cds_num ++;
-        $out .= "$cds_info{$_}\tID=$gene_id.CDS$cds_num;Parent=$gene_id;\n";
-    }
-    my $exon_num = 0;
-    foreach (@exon_out) {
-        $exon_num ++;
-        $out .= "$f1\t$f2\texon\t$_\t\.\t$strand\t\.\tID=$gene_id.exon$exon_num;Parent=$gene_id;\n";
-    }
-
-    return $out;
+    return $out_length;
 }
 
-sub change_id {
-    my $info = $_[0];
-    my $gene_id = $_[1];
+sub cdsIncludeStopCodon_and_integrity {
+    my @cds = @{$_[0]};
+    my ($seqID, $strand, $mRNA_ID) = ($_[1], $_[2], $_[3]);
+    my @cds_out = @cds;
 
-    my @line = split /\n/, $info;
-    @_ = split /\t/, $line[0];
-    my $strand = $_[6];
+    @cds = sort { $a <=> $b } @cds;
+    @_ = split /\t/, $cds[0];
+    my $frame = $_[-1];
 
-    my (%cds, %exon);
-    foreach (@line) {
-        s/\t[^\t]+$//;
-        @_ = split /\t/;
-        if (m/\tCDS\t/) {
-            $cds{$_} = $_[3];
-        }
-        elsif (m/\texon\t/) {
-            $exon{$_} = $_[3];
-        }
-    }
-
-    my (@cds, @exon);
-    if ($strand eq "+") {
-        @cds = sort {$cds{$a} <=> $cds{$b}} keys %cds;
-        @exon = sort {$exon{$a} <=> $exon{$b}} keys %exon;
-    }
-    elsif ($strand eq "-") {
-        @cds = sort {$cds{$b} <=> $cds{$a}} keys %cds;
-        @exon = sort {$exon{$b} <=> $exon{$a}} keys %exon;
-    }
-
-    my $out;
-    my $cds_num = 0;
+    my $cds_seq;
     foreach (@cds) {
-        $cds_num ++;
-        $out .= "$_\tID=$gene_id.CDS$cds_num;Parent=$gene_id;\n";
-        unless (@exon) {
-            s/\tCDS\t/\texon\t/;
-            $out .= "$_\tID=$gene_id.exon$cds_num;Parent=$gene_id;\n";
-        }
-    }
-    my $exon_num = 0;
-    foreach (@exon) {
-        $exon_num ++;
-        $out .= "$_\tID=$gene_id.exon$exon_num;Parent=$gene_id;\n";
+        @_ = split /\t/;
+        my $start = $_[0] - 1;
+        my $len = $_[1] - $start;
+        $cds_seq .= substr($seq{$seqID}, $start, $len);
     }
 
-    return $out;
+    if ($strand eq "-") {
+        @_ = split /\t/, $cds[-1];
+        $frame = $_[-1];
+        $cds_seq = reverse $cds_seq;
+        $cds_seq =~ tr/ATCGatcg/TAGCTAGC/;
+    }
+
+    $cds_seq =~ s/^\w{$frame}// if $frame > 0;
+    my $pep_seq = &cds2pep($cds_seq, $mRNA_ID);
+
+    # 若CDS尾部存在多个终止密码子，则需要去除
+    if ($pep_seq =~ s/(\*+)\*$/\*/) {
+        my $extra_stop_codon_length = length($1);
+        if ($strand eq "+") {
+            my ($start, $end, $frame) = split /\t/, $cds[-1];
+            $frame = ($end + 1 - $start - $frame) % 3;
+            $frame = 1 if $frame == 2;
+            $frame = 2 if $frame == 1;
+            if ($frame == 0) {
+                my $end3 = $end - (3 * $extra_stop_codon_length);
+                my $info = pop @cds_out;
+                $info =~ s/\t$end\t/\t$end3\t/;
+                push @cds_out, $info;
+            }
+        }
+        elsif ($strand eq "-") {
+            my ($start, $end, $frame) = split /\t/, $cds[0];
+            $frame = ($end + 1 - $start - $frame) % 3;
+            $frame = 1 if $frame == 2;
+            $frame = 2 if $frame == 1;
+            if ($frame == 0 && $start > 3) {
+                my $start3 = $start + (3 * $extra_stop_codon_length);
+                my $info = shift @cds_out;
+                $info =~ s/\t$start\t/\t$start3\t/;
+                unshift @cds_out, $info;
+            }
+        }
+    }
+    
+    unless ($pep_seq =~ m/\*$/) {
+        my $next_codon;
+        if ($strand eq "+") {
+            my ($start, $end, $frame) = split /\t/, $cds[-1];
+            $frame = ($end + 1 - $start - $frame) % 3;
+            $frame = 1 if $frame == 2;
+            $frame = 2 if $frame == 1;
+            if ($frame == 0) {
+                my $codon = substr($seq{$seqID}, $end, 3);
+                #print "OK1:\t$gene_id\t$frame\t$seqID\t$start\t$end\t$codon\n";
+                if ($codon eq "TAA" or $codon eq "TGA" or $codon eq "TAG") {
+                    my $end3 = $end + 3;
+                    my $info = pop @cds_out;
+                    $info =~ s/\t$end\t/\t$end3\t/;
+                    push @cds_out, $info;
+                    $pep_seq .= '*';
+                }
+            }
+        }
+        elsif ($strand eq "-") {
+            my ($start, $end, $frame) = split /\t/, $cds[0];
+            $frame = ($end + 1 - $start - $frame) % 3;
+            $frame = 1 if $frame == 2;
+            $frame = 2 if $frame == 1;
+            if ($frame == 0 && $start > 3) {
+                my $codon = substr($seq{$seqID}, ($start - 4), 3);
+                $codon = reverse $codon;
+                $codon =~ tr/ATCGatcg/TAGCTAGC/;
+                #print "OK2:\t$gene_id\t$frame\t$seqID\t$start\t$end\t$codon\n";
+                if ($codon eq "TAA" or $codon eq "TGA" or $codon eq "TAG") {
+                    my $start3 = $start - 3;
+                    my $info = shift @cds_out;
+                    $info =~ s/\t$start\t/\t$start3\t/;
+                    unshift @cds_out, $info;
+                    $pep_seq .= '*';
+                }
+            }
+        }
+    }
+
+    my ($integrity, $start_ok, $end_ok);
+    if ($pep_seq =~ m/^M/) {$start_ok = 1}
+    if ($pep_seq =~ m/\*$/) {$end_ok = 1}
+    if ($start_ok == 1 && $end_ok == 1) { $integrity = "complete" }
+    elsif ($start_ok == 1 && $end_ok != 1) { $integrity = "3prime_partial" }
+    elsif ($start_ok != 1 && $end_ok == 1) { $integrity = "5prime_partial" }
+    elsif ($start_ok != 1 && $end_ok != 1) { $integrity = "internal" }
+    $gff3_attr{$mRNA_ID} .= "Integrity=$integrity;" unless $no_attr_add;
+
+    return @cds_out;
 }
 
-sub addUTR {
-    my $info = $_[0];
-    my $gene_id = $_[1];
 
-    my @line = split /\n/, $info;
-    @_ = split /\t/, $line[0];
-    my ($seqID, $strand) = ($_[0], $_[6]);
 
-    my (@cds, @exon, @utr, %cds_pos);
-    foreach (@line) {
+
+sub get_UTR {
+    my @cds = @{$_[0]};
+    my @exon = @{$_[1]};
+    my $strand = $_[2];
+
+    my (@utr, %cds_pos);
+    foreach (@cds) {
         @_ = split /\t/;
-        if ($_[2] eq 'CDS') {
-            push @cds, "$_[3]\t$_[4]";
-            $cds_pos{$_[3]} = 1;
-            $cds_pos{$_[4]} = 1;
-        }
-        elsif ($_[2] eq 'exon') {
-            push @exon, "$_[3]\t$_[4]";
-        }
+        $cds_pos{$_[0]} = 1;
+        $cds_pos{$_[1]} = 1;
     }
 
     foreach (@exon) {
@@ -537,19 +701,17 @@ sub addUTR {
         push @utr, $_ if $utr_keep == 1;
     }
 
+    my @out;
     my @cds_pos = sort {$a <=> $b} keys %cds_pos;
-    my ($utr5num, $utr3num);
     if ($strand eq "+") {
         @utr = sort {$a <=> $b} @utr;
         foreach (@utr) {
             @_ = split /\t/;
             if ($_[1] <= $cds_pos[0]) {
-                $utr5num ++;
-                $info .= "$seqID\t\.\tfive_prime_UTR\t$_\t\.\t$strand\t\.\tID=$gene_id.5UTR$utr5num;Parent=$gene_id;\n";
+                push @out, "five_prime_UTR\t$_";
             }
             elsif ($_[0] >= $cds_pos[1]) {
-                $utr3num ++;
-                $info .= "$seqID\t\.\tthree_prime_UTR\t$_\t\.\t$strand\t\.\tID=$gene_id.3UTR$utr3num;Parent=$gene_id;\n";
+                push @out, "three_prime_UTR\t$_";
             }
         }
     }
@@ -558,105 +720,140 @@ sub addUTR {
         foreach (@utr) {
             @_ = split /\t/;
             if ($_[0] >= $cds_pos[1]) {
-                $utr5num ++;
-                $info .= "$seqID\t\.\tfive_prime_UTR\t$_\t\.\t$strand\t\.\tID=$gene_id.5UTR$utr5num;Parent=$gene_id;\n";
+                push @out, "five_prime_UTR\t$_";
             }
             elsif ($_[1] <= $cds_pos[0]) {
-                $utr3num ++;
-                $info .= "$seqID\t\.\tthree_prime_UTR\t$_\t\.\t$strand\t\.\tID=$gene_id.3UTR$utr3num;Parent=$gene_id;\n";
+                push @out, "three_prime_UTR\t$_";
             }
         }
     }
 
-    return $info;
+    return @out;
 }
-sub cdsIncludeStopCodon_and_integrity {
-    # 输入一个genemodel的GFF3信息
-    my $info = $_[0];
-    my $gene_id = $_[1];
-    my @line = split /\n/, $info;
-    @_ = split /\t/, $line[0];
-    my ($seqID, $strand) = ($_[0], $_[6]);
 
-    my @cds;
-    foreach (@line) {
-        @_ = split /\t/;
-        push @cds, "$_[3]\t$_[4]\t$_[7]" if $_[2] eq 'CDS';
+sub get_intron {
+    my @exon = @{$_[0]};
+    my $mRNA_ID = $_[1];
+    my $intron_len = $_[2];
+    @exon = sort {$a <=> $b} @exon;
+
+    my @intron;
+    my $first_exon = shift @exon;
+    my ($last_start, $last_end) = split /\t/, $first_exon;
+    foreach ( @exon ) {
+        my ($start, $end) = split /\t/, $_;
+        if ($start > $last_end + $intron_len) {
+            my $intron_start = $last_end + 1;
+            my $intron_stop = $start - 1;
+            push @intron, "$intron_start\t$intron_stop";
+        }
+        else {
+            my $value = $start - $last_end - 1;
+            print STDERR "Warning: a intron length (value is $value) of mRNA $mRNA_ID < $intron_len was detected:\n\tThe former CDS/Exon: $last_start - $last_end\n\tThe latter CDS/Exon: $start - $end\n";
+        }
+        ($last_start, $last_end) = ($start, $end);
     }
-    @cds = sort { $a <=> $b } @cds;
-    @_ = split /\t/, $cds[0];
-    my $frame = $_[2];
 
-    my $cds_seq;
+    return @intron;
+}
+
+# 以下子程序用于能根据一个基因模型的CDSs信息对exons信息进行修正。可以将没有exons的基因模型使用CDS信息补上；可以将错误的exons信息进行修正（比如，exons之间有重叠或exon和intron有重叠）。
+# 要求输入的CDS信息是正确的，即CDSs之间不能有重叠。
+sub modify_exon {
+    # 得到CDS和exon的信息，分别放入@cds和@exon。
+    my @cds = @{$_[0]};
+    @cds = sort {$a <=> $b} @cds;
+    my @exon = @{$_[1]};
+    @exon = sort {$a <=> $b} @exon;
+    my $mRNA_ID = $_[2];
+
+    # 获得mRNA的边界。
+    my ($mRNA_start, $mRNA_end, @pos);
     foreach (@cds) {
-        @_ = split /\t/;
-        my $start = $_[0] - 1;
-        my $len = $_[1] - $start;
-        $cds_seq .= substr($seq{$seqID}, $start, $len);
+        @_ = split /\t/, $_;
+        push @pos, @_;
+    }
+    foreach (@exon) {
+        @_ = split /\t/, $_;
+        push @pos, @_;
+    }
+    @pos = sort {$a <=> $b} @pos;
+    ($mRNA_start, $mRNA_end) = ($pos[0], $pos[-1]);
+
+    # 根据CDSs信息鉴定introns。
+    my %intron;
+    my $first_CDS = shift @cds;
+    my ($last_start, $last_end) = split /\t/, $first_CDS;
+    foreach ( @cds ) {
+        my ($start, $end) = split /\t/, $_;
+        if ($start > $last_end) {
+            my $intron_start = $last_end + 1;
+            my $intron_stop = $start - 1;
+            $intron{"$intron_start\t$intron_stop"} = 1;
+        }
+        ($last_start, $last_end) = ($start, $end);
     }
 
-    if ($strand eq "-") {
-        @_ = split /\t/, $cds[-1];
-        $frame = $_[2];
-        $cds_seq = reverse $cds_seq;
-        $cds_seq =~ tr/ATCGatcg/TAGCTAGC/;
-    }
-
-    $cds_seq =~ s/^\w{$frame}//;
-    my $pep_seq = &cds2pep($cds_seq, $gene_id);
-
-    unless ($pep_seq =~ m/\*$/) {
-        my $next_codon;
-        if ($strand eq "+") {
-            my ($start, $end, $frame) = split /\t/, $cds[-1];
-            $frame = ($end + 1 - $start - $frame) % 3;
-            $frame = 1 if $frame == 2;
-            $frame = 2 if $frame == 1;
-            if ($frame == 0) {
-                my $codon = substr($seq{$seqID}, $end, 3);
-                #print "OK1:\t$gene_id\t$frame\t$seqID\t$start\t$end\t$codon\n";
-                if ($codon eq "TAA" or $codon eq "TGA" or $codon eq "TAG") {
-                    my $end3 = $end + 3;
-                    #print "$info\n";
-                    $info =~ s/^(\S+\t\S+\t\S+\t\d+)\t$end\t/$1\t$end3\t/mg;
-                    #print "$info\n";
-                    $pep_seq .= '*';
+    # 根据exons信息鉴定introns。若两exons之间找到的intron和CDS的intron有冲突，则仅选择CDS来源的intron。
+    my $first_exon = shift @exon;
+    ($last_start, $last_end) = split /\t/, $first_exon;
+    foreach my $exon ( @exon ) {
+        my ($start, $end) = split /\t/, $exon;
+        if ($start > $last_end) {
+            my $intron_start = $last_end + 1;
+            my $intron_stop = $start - 1;
+            my $keep_intron = 1;
+            foreach ( keys %intron ) {
+                my ($intron1, $intron2) = split /\t/, $_;
+                if ( $intron1 <= $intron_stop && $intron2 >= $intron_start ) {
+                    $keep_intron = 0;
                 }
             }
+            $intron{"$intron_start\t$intron_stop"} = 1 if $keep_intron == 1;
         }
-        elsif ($strand eq "-") {
-            my ($start, $end, $frame) = split /\t/, $cds[0];
-            $frame = ($end + 1 - $start - $frame) % 3;
-            $frame = 1 if $frame == 2;
-            $frame = 2 if $frame == 1;
-            if ($frame == 0 && $start > 3) {
-                my $codon = substr($seq{$seqID}, ($start - 4), 3);
-                $codon = reverse $codon;
-                $codon =~ tr/ATCGatcg/TAGCTAGC/;
-                #print "OK2:\t$gene_id\t$frame\t$seqID\t$start\t$end\t$codon\n";
-                if ($codon eq "TAA" or $codon eq "TGA" or $codon eq "TAG") {
-                    my $start3 = $start - 3;
-                    #print "$info\n";
-                    $info =~ s/^(\S+\t\S+\t\S+)\t$start\t/$1\t$start3\t/mg;
-                    #print "$info\n";
-                    $pep_seq .= '*';
-                }
-            }
-        }
+        ($last_start, $last_end) = ($start, $end);
     }
 
-    my ($integrity, $start_ok, $end_ok);
-    if ($pep_seq =~ m/^M/) {$start_ok = 1}
-    if ($pep_seq =~ m/\*$/) {$end_ok = 1}
-    if ($start_ok == 1 && $end_ok == 1) { $integrity = "complete" }
-    elsif ($start_ok == 1 && $end_ok != 1) { $integrity = "3prime_partial" }
-    elsif ($start_ok != 1 && $end_ok == 1) { $integrity = "5prime_partial" }
-    elsif ($start_ok != 1 && $end_ok != 1) { $integrity = "internal" }
+    # 根据mRNA边界和introns信息得到准确的exons信息
+    my @exon_out;
+    my @intron = sort {$a <=> $b} keys %intron;
+    if (@intron) {
+        my $first_intron = shift @intron;
+        ($last_start, $last_end) = split /\t/, $first_intron;
+        my $exon_end = $last_start - 1;
+        my $exon_start = $last_end + 1;
+        push @exon_out, "$mRNA_start\t$exon_end";
+        foreach (@intron) {
+            my ($start, $end) = split /\t/, $_;
+            $exon_end = $start - 1;
+            push @exon_out, "$exon_start\t$exon_end";
+            $exon_start = $end + 1;
+        }
+        push @exon_out, "$exon_start\t$mRNA_end";
+    }
+    else {
+        push @exon_out, "$mRNA_start\t$mRNA_end";
+    }
 
-    my %out;
-    $out{"info"} = $info;
-    $out{"integrity"} = $integrity;
-    return %out;
+    #print ( "$mRNA_ID: " . (join ";", @exon_out) . "\n");
+    return @exon_out;
+}
+
+sub get_attr {
+    my $attribute = $_[0];
+    my @attribute = split /;/, $attribute;
+    my @out;
+    foreach ( @attribute ) {
+        next if m/^\s*$/;
+        s/^\s*//;
+        s/\s*$//;
+        next if m/^ID/i;
+        next if m/^Parent/i;
+        push @out, $_;
+    }
+    my $out = join ";", @out;
+    $out .= ';';
+    return $out;
 }
 
 sub cds2pep {

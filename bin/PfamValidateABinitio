@@ -66,18 +66,18 @@ close IN;
 
 my (%gene_CDS_length, %gene_CDS_number, %gene_CDS_info);
 foreach my $gene_id (@id) {
-	my $mRNA_id;
-	foreach (split /\n/, $gff{$gene_id}) {
-		if (m/\tmRNA\t.*ID=([^;\s]+)/) {
-			$mRNA_id = $1;
-		}
-		elsif (m/\tCDS\t/) {
-			@_ = split /\t/;
-			$gene_CDS_length{$gene_id}{$mRNA_id} += ($_[4] - $_[3] + 1);
-			$gene_CDS_number{$gene_id}{$mRNA_id} ++;
-			$gene_CDS_info{$gene_id}{$mRNA_id} .= "$_[3]\t$_[4]\t$_[0]\t$_[6]\t$_[7]\n";
-		}
-	}
+    my $mRNA_id;
+    foreach (split /\n/, $gff{$gene_id}) {
+        if (m/\tmRNA\t.*ID=([^;\s]+)/) {
+            $mRNA_id = $1;
+        }
+        elsif (m/\tCDS\t/) {
+            @_ = split /\t/;
+            $gene_CDS_length{$gene_id}{$mRNA_id} += ($_[4] - $_[3] + 1);
+            $gene_CDS_number{$gene_id}{$mRNA_id} ++;
+            $gene_CDS_info{$gene_id}{$mRNA_id} .= "$_[3]\t$_[4]\t$_[0]\t$_[6]\t$_[7]\n";
+        }
+    }
 }
 
 open IN, $ARGV[1] or die $!;
@@ -91,10 +91,10 @@ close IN;
 
 my %gene_long;
 foreach my $gene_id (@id) {
-	my @mRNA_id = sort {$gene_CDS_length{$gene_id}{$b} <=> $gene_CDS_length{$gene_id}{$a}} keys %{$gene_CDS_length{$gene_id}};
-	my $gene_CDS_length = $gene_CDS_length{$gene_id}{$mRNA_id[0]};
-	@mRNA_id = sort {$gene_CDS_number{$gene_id}{$b} <=> $gene_CDS_number{$gene_id}{$a}} keys %{$gene_CDS_number{$gene_id}};
-	my $gene_CDS_number = $gene_CDS_number{$gene_id}{$mRNA_id[0]};
+    my @mRNA_id = sort {$gene_CDS_length{$gene_id}{$b} <=> $gene_CDS_length{$gene_id}{$a}} keys %{$gene_CDS_length{$gene_id}};
+    my $gene_CDS_length = $gene_CDS_length{$gene_id}{$mRNA_id[0]};
+    @mRNA_id = sort {$gene_CDS_number{$gene_id}{$b} <=> $gene_CDS_number{$gene_id}{$a}} keys %{$gene_CDS_number{$gene_id}};
+    my $gene_CDS_number = $gene_CDS_number{$gene_id}{$mRNA_id[0]};
     #print STDERR "$gene_id\t$gene_CDS_length\t$gene_CDS_number\n";
     if ($gene_CDS_number >= $CDS_num && $gene_CDS_length >= $CDS_length) {
         $gene_long{$gene_id} = 1;
@@ -106,10 +106,10 @@ open CMD, ">", "command.hmmscan.list" or die $!;
 mkdir "hmmscan.tmp" unless -e "hmmscan.tmp";
 my %gene_length_0;
 foreach my $gene_id (@id) {
-	my @mRNA_id = sort {$gene_CDS_length{$gene_id}{$b} <=> $gene_CDS_length{$gene_id}{$a}} keys %{$gene_CDS_length{$gene_id}};
-	my $gene_CDS_info = $gene_CDS_info{$gene_id}{$mRNA_id[0]};
-	chomp($gene_CDS_info); chomp($gene_CDS_info);
-	my @cds = split /\n/, $gene_CDS_info;
+    my @mRNA_id = sort {$gene_CDS_length{$gene_id}{$b} <=> $gene_CDS_length{$gene_id}{$a}} keys %{$gene_CDS_length{$gene_id}};
+    my $gene_CDS_info = $gene_CDS_info{$gene_id}{$mRNA_id[0]};
+    chomp($gene_CDS_info); chomp($gene_CDS_info);
+    my @cds = split /\n/, $gene_CDS_info;
 
     @_ = split /\t/, $cds[0];
     my ($seqID, $strand, $frame) = ($_[2], $_[3], $_[4]);
@@ -134,16 +134,16 @@ foreach my $gene_id (@id) {
     print FASTA ">$gene_id\n$pep_seq\n";
 
     $pep_seq =~ s/\*$//;
-	if (length($pep_seq) > 0) {
-		open OUT, ">", "hmmscan.tmp/$gene_id.fasta" or die $!;
-		print OUT ">$gene_id\n$pep_seq\n";
-		close OUT;
-		print CMD "hmmscan -o hmmscan.tmp/$gene_id.txt --cpu 1 -E 1e-3 --domE 1e-3 --tblout hmmscan.tmp/$gene_id.tbl --domtblout hmmscan.tmp/$gene_id.domtbl $pfam_db hmmscan.tmp/$gene_id.fasta\n" unless exists $gene_long{$gene_id};
-		#print CMD "hmmscan -o hmmscan.tmp/$gene_id.txt --cpu 1 -E 1e-3 --domE 1e-3 --tblout hmmscan.tmp/$gene_id.tbl --domtblout hmmscan.tmp/$gene_id.domtbl $pfam_db hmmscan.tmp/$gene_id.fasta\n";
-	}
-	else {
-		$gene_length_0{$gene_id} = 1;
-	}
+    if (length($pep_seq) > 0) {
+        open OUT, ">", "hmmscan.tmp/$gene_id.fasta" or die $!;
+        print OUT ">$gene_id\n$pep_seq\n";
+        close OUT;
+        print CMD "hmmscan -o hmmscan.tmp/$gene_id.txt --cpu 1 -E 1e-3 --domE 1e-3 --tblout hmmscan.tmp/$gene_id.tbl --domtblout hmmscan.tmp/$gene_id.domtbl $pfam_db hmmscan.tmp/$gene_id.fasta\n" unless exists $gene_long{$gene_id};
+        #print CMD "hmmscan -o hmmscan.tmp/$gene_id.txt --cpu 1 -E 1e-3 --domE 1e-3 --tblout hmmscan.tmp/$gene_id.tbl --domtblout hmmscan.tmp/$gene_id.domtbl $pfam_db hmmscan.tmp/$gene_id.fasta\n";
+    }
+    else {
+        $gene_length_0{$gene_id} = 1;
+    }
 }
 close FASTA;
 close CMD;
@@ -153,44 +153,44 @@ system ($cmdString) == 0 or die "Failed to execute: $cmdString\n$!";
 
 my %gene_ok;
 foreach my $gene_id (@id) {
-	next if exists $gene_long{$gene_id};
-	next if exists $gene_length_0{$gene_id};
+    next if exists $gene_long{$gene_id};
+    next if exists $gene_length_0{$gene_id};
     open IN, "hmmscan.tmp/$gene_id.domtbl" or die $!;
-	my (%hmmscan_info, %hmm_length, $query_length);
+    my (%hmmscan_info, %hmm_length, $query_length);
     while (<IN>) {
         next if m/^#/; next if m/^\s*$/;
         @_ = split /\s+/;
-		$query_length = $_[5];
-		$hmm_length{$_[0]} = $_[2] unless exists $hmm_length{$_[0]};
+        $query_length = $_[5];
+        $hmm_length{$_[0]} = $_[2] unless exists $hmm_length{$_[0]};
 
-		if ($_[12] <= $evalue) {
-			$hmmscan_info{$_[3]}{$_[0]}{"hmm_coord"}{"$_[15]\t$_[16]"} = 1;
-			$hmmscan_info{$_[3]}{$_[0]}{"query_coord"}{"$_[17]\t$_[18]"} = 1;
-		}
-	}
-	close IN;
+        if ($_[12] <= $evalue) {
+            $hmmscan_info{$_[3]}{$_[0]}{"hmm_coord"}{"$_[15]\t$_[16]"} = 1;
+            $hmmscan_info{$_[3]}{$_[0]}{"query_coord"}{"$_[17]\t$_[18]"} = 1;
+        }
+    }
+    close IN;
 
-	foreach my $query_id (sort keys %hmmscan_info) {
-		my @query_coord_all;
-		foreach my $hmm_id (sort keys %{$hmmscan_info{$query_id}}) {
-			my $hmm_length = $hmm_length{$hmm_id};
-			my @hmm_coord = sort {$a <=> $b} keys %{$hmmscan_info{$query_id}{$hmm_id}{"hmm_coord"}};
-			my @query_coord = sort {$a <=> $b} keys %{$hmmscan_info{$query_id}{$hmm_id}{"query_coord"}};
-			push @query_coord_all, @query_coord; 
-			my $aligned_length_hmm = &match_length(@hmm_coord);
-			my $aligned_ratio_hmm = $aligned_length_hmm / $hmm_length;
-			if ($aligned_ratio_hmm >= $coverage) {
-				$gene_ok{$gene_id} = 1;
-				print STDERR "$query_id\t$hmm_id\t$aligned_ratio_hmm\n";
-			}
-			$gene_ok{$gene_id} = 1 if $aligned_ratio_hmm >= $coverage;
-		}
-		my $aligned_length_query = &match_length(@query_coord_all);
-		my $aligned_ratio_query = $aligned_length_query / $query_length;
-		if ($aligned_ratio_query >= $coverage) {
-			$gene_ok{$gene_id} = 1;
-			print STDERR "$query_id\t$aligned_ratio_query\n";
-		}
+    foreach my $query_id (sort keys %hmmscan_info) {
+        my @query_coord_all;
+        foreach my $hmm_id (sort keys %{$hmmscan_info{$query_id}}) {
+            my $hmm_length = $hmm_length{$hmm_id};
+            my @hmm_coord = sort {$a <=> $b} keys %{$hmmscan_info{$query_id}{$hmm_id}{"hmm_coord"}};
+            my @query_coord = sort {$a <=> $b} keys %{$hmmscan_info{$query_id}{$hmm_id}{"query_coord"}};
+            push @query_coord_all, @query_coord; 
+            my $aligned_length_hmm = &match_length(@hmm_coord);
+            my $aligned_ratio_hmm = $aligned_length_hmm / $hmm_length;
+            if ($aligned_ratio_hmm >= $coverage) {
+                $gene_ok{$gene_id} = 1;
+                print STDERR "$query_id\t$hmm_id\t$aligned_ratio_hmm\n";
+            }
+            $gene_ok{$gene_id} = 1 if $aligned_ratio_hmm >= $coverage;
+        }
+        my $aligned_length_query = &match_length(@query_coord_all);
+        my $aligned_ratio_query = $aligned_length_query / $query_length;
+        if ($aligned_ratio_query >= $coverage) {
+            $gene_ok{$gene_id} = 1;
+            print STDERR "$query_id\t$aligned_ratio_query\n";
+        }
     }
     close IN;
 }

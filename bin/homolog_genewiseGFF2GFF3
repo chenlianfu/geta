@@ -132,18 +132,20 @@ foreach my $gene_id (sort keys %gff) {
     }
     @cds = sort { $a <=> $b } @cds;
 
+    my ($start_complete, $end_complete);
     if ($strand eq "+") {
-        if ($output_start_and_stop_hints_of_augustus) {
-            open OUT, ">>", $output_start_and_stop_hints_of_augustus;
-            my ($tss1, $tss2) = split /\t/, $cds[0];
-            if ( (exists $tss{"$seqID\t$tss1"}) && (($tss2 - $tss1) >= 2) ) {
-                my $codon = substr($seq{$seqID}, $tss1 - 1, 3);
-                if ($codon eq "ATG") {
+        my ($tss1, $tss2) = split /\t/, $cds[0];
+        if ( (exists $tss{"$seqID\t$tss1"}) && (($tss2 - $tss1) >= 2) ) {
+            my $codon = substr($seq{$seqID}, $tss1 - 1, 3);
+            if ($codon eq "ATG") {
+                $start_complete = 1;
+                if ($output_start_and_stop_hints_of_augustus) {
+                    open OUT, ">>", $output_start_and_stop_hints_of_augustus;
                     my $tss3 = $tss1 + 2;
                     print OUT "$seqID\t\.\tstart\t$tss1\t$tss3\t\.\t$strand\t0\tgrp=$gene_id;pri=4;src=P\n";
+                    close OUT;
                 }
             }
-            close OUT;
         }
 
         my ($start, $end, $frame) = split /\t/, $cds[-1];
@@ -153,6 +155,7 @@ foreach my $gene_id (sort keys %gff) {
         if ($frame == 0) {
             my $codon = substr($seq{$seqID}, $end, 3);
             if ($codon eq "TAA" or $codon eq "TGA" or $codon eq "TAG") {
+                $end_complete = 1;
                 my $end3 = $end + 3;
                 $info =~ s/^(\S+\t\S+\t\S+\t\d+)\t$end\t/$1\t$end3\t/mg;
                 print STDERR "Gene end with stop codon:$gene_id\t$strand\n";
@@ -165,19 +168,20 @@ foreach my $gene_id (sort keys %gff) {
         }
     }
     elsif ($strand eq "-") {
-        if ($output_start_and_stop_hints_of_augustus) {
-            open OUT, ">>", $output_start_and_stop_hints_of_augustus;
-            my ($tss1, $tss2) = split /\t/, $cds[-1];
-            if ( (exists $tss{"$seqID\t$tss2"}) && (($tss2 - $tss1) >= 2) ) {
-                my $codon = substr($seq{$seqID}, $tss2 - 3, 3);
-                $codon = reverse $codon;
-                $codon =~ tr/ATCGatcgn/TAGCTAGCN/;
-                if ($codon eq "ATG") {
+        my ($tss1, $tss2) = split /\t/, $cds[-1];
+        if ( (exists $tss{"$seqID\t$tss2"}) && (($tss2 - $tss1) >= 2) ) {
+            my $codon = substr($seq{$seqID}, $tss2 - 3, 3);
+            $codon = reverse $codon;
+            $codon =~ tr/ATCGatcgn/TAGCTAGCN/;
+            if ($codon eq "ATG") {
+                $start_complete = 1;
+                if ($output_start_and_stop_hints_of_augustus) {
+                    open OUT, ">>", $output_start_and_stop_hints_of_augustus;
                     my $tss3 = $tss2 - 2;
                     print OUT "$seqID\t\.\tstart\t$tss3\t$tss2\t\.\t$strand\t0\tgrp=$gene_id;pri=4;src=P\n";
+                    close OUT;
                 }
             }
-            close OUT;
         }
 
         my ($start, $end, $frame) = split /\t/, $cds[0];
@@ -189,6 +193,7 @@ foreach my $gene_id (sort keys %gff) {
             $codon = reverse $codon;
             $codon =~ tr/ATCGatcgn/TAGCTAGCN/;
             if ($codon eq "TAA" or $codon eq "TGA" or $codon eq "TAG") {
+                $end_complete = 1;
                 my $start3 = $start - 3;
                 $info =~ s/^(\S+\t\S+\t\S+)\t$start\t/$1\t$start3\t/mg;
                 print STDERR "Gene end with stop codon:$gene_id\t$strand\n";
@@ -239,6 +244,21 @@ foreach my $gene_id (sort keys %gff) {
                 s/CDS/exon/g;
                 print "$_\n";
             }
+        }
+        elsif (m/\tgene\t/) {
+            if ( $start_complete && $end_complete ) {
+                s/$/Integrity=complete;/;
+            }
+            elsif ( $start_complete ) {
+                s/$/Integrity=3prime_partial;/;
+            }
+            elsif ( $end_complete ) {
+                s/$/Integrity=5prime_partial;/;
+            }
+            else {
+                s/$/Integrity=internal;/;
+            }
+            print "$_\n";
         }
         else {
             print "$_\n";
