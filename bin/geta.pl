@@ -58,7 +58,7 @@ Parameters:
     the prefix of gene id shown in output file.
 
     --enable_augustus_training_iteration    default: False
-	开启augustus_training_iteration，运行在第一次Augustus training后，根据基因预测的结果，选择有证据支持的基因模型，再一次进行Augustus training（迭代）。此举会消耗较多计算时间，且可能对基因预测没有改进，或产生不好的影响。
+    开启augustus_training_iteration，运行在第一次Augustus training后，根据基因预测的结果，选择有证据支持的基因模型，再一次进行Augustus training（迭代）。此举会消耗较多计算时间，且可能对基因预测没有改进，或产生不好的影响。
 
 
 This script was tested on CentOS 6.8 with such softwares can be run directly in terminal:
@@ -180,8 +180,8 @@ else {
     die "hmmer:\tFailed\n\n";
 }
 print STDERR "============================================\n\n";
-my $pwd = `pwd`;
-print STDERR "PWD: $pwd";
+my $pwd = `pwd`; chomp($pwd);
+print STDERR "PWD: $pwd\n";
 print STDERR (localtime) . ": CMD: $0 $command_line_geta\n\n"; 
 
 # 参数设置
@@ -284,11 +284,11 @@ unless (-e "genome.fasta") {
     open OUT, ">", "genome.fasta" or die "Can not create file genome.fasta, $!\n";
     open IN, $genome or die "Can not open file $genome, $!\n";
     $_ = <IN>;
-	s/\s.*//;
+    s/\s.*\s?$/\n/;
     print OUT;
     while (<IN>) {
         if (m/^>/) {
-			s/\s.*//;
+            s/\s.*\s?$/\n/;
             print OUT "\n$_";
         }
         else {
@@ -304,23 +304,23 @@ $genome = "$pwd/genome.fasta";
 
 # 准备直系同源基因蛋白序列：读取FASTA序列以>开始的头部时，去除第一个空及之后的字符，将所有怪异字符变为下划线字符；去除序列中尾部的换行符。
 unless (-e "homolog.fasta") {
-	open OUT, ">", "homolog.fasta" or die "Can not create file homolog.fasta, $!\n";
-	open IN, $protein or die "Can not open file $protein, $!\n";
-	$_ = <IN>;
-	s/\s.*//; s/[^\w\n]/_/g;
-	print OUT;
-	while (<IN>) {
-		if (m/^>/) {
-			s/\s.*//; s/[^\w\n]/_/g;
-			print OUT "\n$_";
-		}
-		else {
-			s/\s+?$//g;
-			print OUT;
-		}
-	}
-	close IN;
-	close OUT;
+    open OUT, ">", "homolog.fasta" or die "Can not create file homolog.fasta, $!\n";
+    open IN, $protein or die "Can not open file $protein, $!\n";
+    $_ = <IN>;
+    s/\s.*\s?$/\n/; s/[^\w\n>]/_/g;
+    print OUT;
+    while (<IN>) {
+        if (m/^>/) {
+            s/\s.*\s?$/\n/; s/[^\w\n>]/_/g;
+            print OUT "\n$_";
+        }
+        else {
+            s/\s+?$//g;
+            print OUT;
+        }
+    }
+    close IN;
+    close OUT;
 }
 $pwd = `pwd`; chomp($pwd);
 $protein = "$pwd/homolog.fasta";
@@ -802,17 +802,17 @@ unless (-e "5.augustus.ok") {
             print STDERR (localtime) . ": CMD: $cmdString\n";
             system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
-	        # 若用于Augustus training的基因数量少于1000个，则重新运行geneModels2AugusutsTrainingInput，降低阈值来增加基因数量。
-			open IN, "geneModels2AugusutsTrainingInput.log" or die "Can not open file geneModels2AugusutsTrainingInput.log, $!";
-			my $training_genes_number = 0;
-			while (<IN>) {
-				$training_genes_number = $1 if m/Best gene Models number:\s+(\d+)/;
-			}
-			if ( $training_genes_number < 1000 ) {
-				$cmdString = "$dirname/bin/geneModels2AugusutsTrainingInput --min_evalue 1e-9 --min_identity 0.9 --min_coverage_ratio 0.9 --min_cds_num 1 --min_cds_length 450 --min_cds_exon_ratio 0.40 --keep_ratio_for_excluding_too_long_gene 0.99 --out_prefix ati --cpu $cpu geneModels.gff3 $genome &> geneModels2AugusutsTrainingInput.log.Loose_thresholds";
-				print STDERR (localtime) . ": CMD: $cmdString\n";
-				system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-			}
+            # 若用于Augustus training的基因数量少于1000个，则重新运行geneModels2AugusutsTrainingInput，降低阈值来增加基因数量。
+            open IN, "geneModels2AugusutsTrainingInput.log" or die "Can not open file geneModels2AugusutsTrainingInput.log, $!";
+            my $training_genes_number = 0;
+            while (<IN>) {
+                $training_genes_number = $1 if m/Best gene Models number:\s+(\d+)/;
+            }
+            if ( $training_genes_number < 1000 ) {
+                $cmdString = "$dirname/bin/geneModels2AugusutsTrainingInput --min_evalue 1e-9 --min_identity 0.9 --min_coverage_ratio 0.9 --min_cds_num 1 --min_cds_length 450 --min_cds_exon_ratio 0.40 --keep_ratio_for_excluding_too_long_gene 0.99 --out_prefix ati --cpu $cpu geneModels.gff3 $genome &> geneModels2AugusutsTrainingInput.log.Loose_thresholds";
+                print STDERR (localtime) . ": CMD: $cmdString\n";
+                system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+            }
 
             open OUT, ">", "geneModels2AugusutsTrainingInput.ok" or die $!; close OUT;
         }
@@ -916,7 +916,7 @@ unless (-e "5.augustus.ok") {
     }
 
     # augustus_training_iteration
-	if ($enable_augustus_training_iteration && (! $use_existed_augustus_species)) {
+    if ($enable_augustus_training_iteration && (! $use_existed_augustus_species)) {
         unless (-e "training_again") {
             mkdir "training_again";
             my $species_config_dir = `echo \$AUGUSTUS_CONFIG_PATH`;
@@ -983,17 +983,17 @@ unless (-e "5.augustus.ok") {
                 print STDERR (localtime) . ": CMD: $cmdString\n";
                 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
-				# 若用于Augustus training的基因数量少于1000个，则重新运行geneModels2AugusutsTrainingInput，降低阈值来增加基因数量。
-				open IN, "geneModels2AugusutsTrainingInput.log" or die "Can not open file geneModels2AugusutsTrainingInput.log, $!";
-				my $training_genes_number = 0;
-				while (<IN>) {
-					$training_genes_number = $1 if m/Best gene Models number:\s+(\d+)/;
-				}
-				if ( $training_genes_number < 1000 ) {
-					$cmdString = "$dirname/bin/geneModels2AugusutsTrainingInput --min_evalue 1e-9 --min_identity 0.9 --min_coverage_ratio 0.9 --min_cds_num 1 --min_cds_length 450 --min_cds_exon_ratio 0.40 --keep_ratio_for_excluding_too_long_gene 0.99 --out_prefix ati --cpu $cpu geneModels.gff3 $genome &> geneModels2AugusutsTrainingInput.log.Loose_thresholds";
-					print STDERR (localtime) . ": CMD: $cmdString\n";
-					system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-				}
+                # 若用于Augustus training的基因数量少于1000个，则重新运行geneModels2AugusutsTrainingInput，降低阈值来增加基因数量。
+                open IN, "geneModels2AugusutsTrainingInput.log" or die "Can not open file geneModels2AugusutsTrainingInput.log, $!";
+                my $training_genes_number = 0;
+                while (<IN>) {
+                    $training_genes_number = $1 if m/Best gene Models number:\s+(\d+)/;
+                }
+                if ( $training_genes_number < 1000 ) {
+                    $cmdString = "$dirname/bin/geneModels2AugusutsTrainingInput --min_evalue 1e-9 --min_identity 0.9 --min_coverage_ratio 0.9 --min_cds_num 1 --min_cds_length 450 --min_cds_exon_ratio 0.40 --keep_ratio_for_excluding_too_long_gene 0.99 --out_prefix ati --cpu $cpu geneModels.gff3 $genome &> geneModels2AugusutsTrainingInput.log.Loose_thresholds";
+                    print STDERR (localtime) . ": CMD: $cmdString\n";
+                    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+                }
 
                 open OUT, ">", "geneModels2AugusutsTrainingInput.ok" or die $!; close OUT;
             }
