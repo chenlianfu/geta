@@ -100,7 +100,7 @@ close OUT;
 
 mkdir $tmp_dir unless -e $tmp_dir;
 my %out_id;
-open COM, ">", "command.augustus.list" or die $!;
+open COM, ">", "$tmp_dir/command.augustus.list" or die $!;
 foreach my $seq_id (sort keys %seq) {
     my $seq = $seq{$seq_id};
     my $seq_length = length $seq;
@@ -177,7 +177,7 @@ foreach my $seq_id (sort keys %seq) {
 }
 close COM;
 
-my $cmdString = "ParaFly -c command.augustus.list -CPU $cpu &> command.augustus.log";
+my $cmdString = "ParaFly -c $tmp_dir/command.augustus.list -CPU $cpu &> $tmp_dir/command.augustus.log";
 system ($cmdString) == 0 or die "Failed to execute: $cmdString\n$!\n";
 
 my (%out, $info, %hints_supporting_ratio, %intron_supporting_info);

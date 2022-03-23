@@ -21,23 +21,27 @@ For example:
 USAGE
 if (@ARGV == 0){die $usage}
 
-open IN, $ARGV[0] or die $!;
-my (%stats);
-while (<IN>) {
-    chomp;
-    @_ = split /\t/;
-    $stats{$_[0]}{$_[1]}{"$_[8]\t$_[9]"}{"region"} = "$_[6]\t$_[7]";
-    $stats{$_[0]}{$_[1]}{"$_[8]\t$_[9]"}{"evalue"} = "$_[10]";
-    $stats{$_[0]}{$_[1]}{"$_[8]\t$_[9]"}{"score"} = "$_[11]";
-}
-close IN;
-
 open IN, $ARGV[1] or die $!;
 my (%protein_length, $protein_ID);
 while (<IN>) {
     chomp;
     if (/^>(\S+)/) { $protein_ID = $1; }
     else { $protein_length{$protein_ID} += length $_; }
+}
+close IN;
+
+open IN, $ARGV[0] or die $!;
+my (%stats);
+while (<IN>) {
+    chomp;
+    @_ = split /\t/;
+    if ( ! exists $protein_length{$_[0]} ) {
+        warn "Warning: $ARGV[0]文件第一列出现了 $ARGV[1] 中不存在的序列名 $_[0] 。\n";
+        next;
+    }
+    $stats{$_[0]}{$_[1]}{"$_[8]\t$_[9]"}{"region"} = "$_[6]\t$_[7]";
+    $stats{$_[0]}{$_[1]}{"$_[8]\t$_[9]"}{"evalue"} = "$_[10]";
+    $stats{$_[0]}{$_[1]}{"$_[8]\t$_[9]"}{"score"} = "$_[11]";
 }
 close IN;
 
