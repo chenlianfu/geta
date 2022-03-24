@@ -1354,6 +1354,7 @@ print STDERR "Step 7: OutPut " . "(" . (localtime) . ")" . "\n";
 chdir "../";
 $pwd = `pwd`; print STDERR "PWD: $pwd";
 
+# 7.1 输出GFF3格式文件基因结构注释信息
 $cmdString = "$dirname/bin/GFF3Clear --GFF3_source GETA --gene_prefix $gene_prefix --genome $genome --no_attr_add $out_prefix.tmp/6.combineGeneModels/genome.filter.gff3 > $out_prefix.GeneModels.gff3 2> /dev/null";
 #$cmdString = "cp $out_prefix.tmp/7.addAlternativeSplicing/genome.addAS.gff3 $out_prefix.gff3";
 print STDERR (localtime) . ": CMD: $cmdString\n";
@@ -1373,6 +1374,7 @@ if ($pfam_db) {
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 }
 
+# 7.2 输出GTF文件和基因的序列信息
 $cmdString = "$dirname/bin/gff3ToGtf.pl $genome $out_prefix.GeneModels.gff3 > $out_prefix.GeneModels.gtf 2> /dev/null";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -1381,6 +1383,7 @@ $cmdString = "$dirname/bin/eukaryotic_gene_model_statistics.pl $out_prefix.GeneM
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
+# 7.3 输出重复序列信息及其统计结果、RepeatModeler软件构建的重复序列数据库
 open IN, "$out_prefix.tmp/0.RepeatMasker/genome.repeat.stats" or die "Can not open file $out_prefix.tmp/0.RepeatMasker/genome.repeat.stats, $!";
 open OUT, ">", "$out_prefix.repeat.stats" or die "Can not create file $out_prefix.repeat.stats, $!";
 print OUT <IN>;
@@ -1391,6 +1394,12 @@ open OUT, ">", "$out_prefix.repeat.gff3" or die "Can not create file $out_prefix
 print OUT <IN>;
 close IN; close OUT;
 
+open IN, "$out_prefix.tmp/0.RepeatMasker/repeatModeler/species-families.fa" or die "Can not open file $out_prefix.tmp/0.RepeatMasker/repeatModeler/species-families.fa, $!";
+open OUT, ">", "$out_prefix.repeat.lib, $!" or die "Can not create file $out_prefix.repeat.lib, $!";
+print OUT <IN>;
+close IN; close OUT;
+
+# 7.4 输出转录本和同源蛋白的基因预测结果
 if (($pe1 && $pe2) or $single_end) {
     open IN, "$out_prefix.tmp/3.transcript/transfrag.alignment.gff3" or die "Can not open file $out_prefix.tmp/3.transcript/transfrag.alignment.gff3, $!";
     open OUT, ">", "$out_prefix.transfrag_alignment.gff3" or die "Can not create file $out_prefix.transfrag_alignment.gff3, $!";
@@ -1410,6 +1419,7 @@ if ($protein) {
     close IN; close OUT;
 }
 
+# 7.5 输出GETA流程信息，用于追踪基因预测结果的可靠性
 open OUT, ">", "$out_prefix.gene_prediction.summary" or die "Can not create file $out_prefix.gene_prediction.summary, $!";
 open IN, "$out_prefix.tmp/0.RepeatMasker/genome.repeat.stats" or die "Can not open file $out_prefix.tmp/0.RepeatMasker/genome.repeat.stats, $!";
 while (<IN>) {
@@ -1523,4 +1533,4 @@ print OUT "The number of gene models whose CDS length < $1 and cannot find ortho
 
 
 print STDERR "\n============================================\n";
-print STDERR "GETA complete successfully! " . "(" . (localtime) . ")" . "\n";
+print STDERR "GETA complete successfully! " . "(" . (localtime) . ")" . "\n\n";
