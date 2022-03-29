@@ -3,6 +3,8 @@ use strict;
 use Getopt::Long;
 use File::Basename;
 
+my $command_line_geta = join " ", @ARGV;
+
 my $usage = <<USAGE;
 Usage:
     perl $0 [options]
@@ -55,7 +57,8 @@ Parameters:
     --gene_prefix <string>    default: gene
     the prefix of gene id shown in output file.
 
-    --no_augustus_training_iteration    default: False
+    --enable_augustus_training_iteration    default: False
+    开启augustus_training_iteration，运行在第一次Augustus training后，根据基因预测的结果，选择有证据支持的基因模型，再一次进行Augustus training（迭代）。此举会消耗较多计算时间，且可能对基因预测没有改进，或产生不好的影响。
 
 
 This script was tested on CentOS 6.8 with such softwares can be run directly in terminal:
@@ -75,7 +78,9 @@ Version: 2.4.12
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($RM_species, $RM_lib, $genome, $out_prefix, $pe1, $pe2, $single_end, $protein, $cpu, $trimmomatic, $strand_specific, $sam2transfrag, $ORF2bestGeneModels, $augustus_species, $pfam_db, $gene_prefix, $cmdString, $no_augustus_training_iteration, $config, $use_existed_augustus_species);
+
+
+my ($RM_species, $RM_lib, $genome, $out_prefix, $pe1, $pe2, $single_end, $protein, $cpu, $trimmomatic, $strand_specific, $sam2transfrag, $ORF2bestGeneModels, $augustus_species, $pfam_db, $gene_prefix, $cmdString, $enable_augustus_training_iteration, $config, $use_existed_augustus_species);
 GetOptions(
     "RM_species:s" => \$RM_species,
     "RM_lib:s" => \$RM_lib,
@@ -91,7 +96,7 @@ GetOptions(
     "use_existed_augustus_species:s" => \$use_existed_augustus_species,
     "pfam_db:s" => \$pfam_db,
     "gene_prefix:s" => \$gene_prefix,
-    "no_augustus_training_iteration!" => \$no_augustus_training_iteration,
+    "enable_augustus_training_iteration!" => \$enable_augustus_training_iteration,
     "config:s" => \$config,
 );
 
@@ -174,12 +179,14 @@ if ($software_info =~ m/HMMER 3.(\d+)/) {
 else {
     die "hmmer:\tFailed\n\n";
 }
+print STDERR "============================================\n\n";
+my $pwd = `pwd`; chomp($pwd);
+print STDERR "PWD: $pwd\n";
+print STDERR (localtime) . ": CMD: $0 $command_line_geta\n\n"; 
 
 # 参数设置
 # 检查输入文件
 die "--RM_species shoud be set!" unless $RM_species;
-my $pwd = `pwd`;
-chomp($pwd);
 die "No genome fasta input\n" unless $genome;
 $genome =~ s/^/$pwd\// unless $genome =~ m/^\//;
 $protein  =~ s/^/$pwd\// unless $protein =~ m/^\//;
@@ -241,10 +248,10 @@ my %config = (
     'TransDecoder.Predict' => '--retain_long_orfs_mode dynamic',
     'homolog_genewise' => '--coverage_ratio 0.4 --evalue 1e-9',
     'homolog_genewiseGFF2GFF3' => '--min_score 15 --gene_prefix genewise --filterMiddleStopCodon',
-    'geneModels2AugusutsTrainingInput' => '--min_evalue 1e-9 --min_identity 0.8 --min_coverage_ratio 0.6 --min_cds_num 2 --min_cds_length 600 --min_cds_exon_ratio 0.60',
+    'geneModels2AugusutsTrainingInput' => '--min_evalue 1e-9 --min_identity 0.8 --min_coverage_ratio 0.8 --min_cds_num 2 --min_cds_length 450 --min_cds_exon_ratio 0.60',
     'BGM2AT' => '--min_gene_number_for_augustus_training 500 --gene_number_for_accuracy_detection 200 --min_gene_number_of_optimize_augustus_chunk 50 --max_gene_number_of_optimize_augustus_chunk 200',
     'prepareAugusutusHints' => '--margin 20',
-    'paraAugusutusWithHints' => '--gene_prefix augustus --min_intron_len 30 --alternatives_from_evidence',
+    'paraAugusutusWithHints' => '--gene_prefix augustus --min_intron_len 20 --alternatives_from_evidence',
     'paraCombineGeneModels' => '--overlap 30 --min_augustus_transcriptSupport_percentage 10.0 --min_augustus_intronSupport_number 1 --min_augustus_intronSupport_ratio 0.01',
     'PfamValidateABinitio' => '--CDS_length 750 --CDS_num 2 --evalue 1e-5 --coverage 0.25',
     'remove_genes_in_repeats' => '--ratio 0.8',
@@ -271,13 +278,17 @@ $dirname =~ s/bin$//;
 mkdir "$out_prefix.tmp" unless -e "$out_prefix.tmp";
 chdir "$out_prefix.tmp";
 $pwd = `pwd`; print STDERR "PWD: $pwd";
+
+# 准备基因组序列：读取FASTA序列以>开始的头部时，去除第一个空及之后的字符；去除基因组序列中尾部的换行符。
 unless (-e "genome.fasta") {
     open OUT, ">", "genome.fasta" or die "Can not create file genome.fasta, $!\n";
     open IN, $genome or die "Can not open file $genome, $!\n";
     $_ = <IN>;
+    s/\s.*\s?$/\n/;
     print OUT;
     while (<IN>) {
         if (m/^>/) {
+            s/\s.*\s?$/\n/;
             print OUT "\n$_";
         }
         else {
@@ -291,8 +302,30 @@ unless (-e "genome.fasta") {
 $pwd = `pwd`; chomp($pwd);
 $genome = "$pwd/genome.fasta";
 
+# 准备直系同源基因蛋白序列：读取FASTA序列以>开始的头部时，去除第一个空及之后的字符，将所有怪异字符变为下划线字符；去除序列中尾部的换行符。
+unless (-e "homolog.fasta") {
+    open OUT, ">", "homolog.fasta" or die "Can not create file homolog.fasta, $!\n";
+    open IN, $protein or die "Can not open file $protein, $!\n";
+    $_ = <IN>;
+    s/\s.*\s?$/\n/; s/[^\w\n>]/_/g;
+    print OUT;
+    while (<IN>) {
+        if (m/^>/) {
+            s/\s.*\s?$/\n/; s/[^\w\n>]/_/g;
+            print OUT "\n$_";
+        }
+        else {
+            s/\s+?$//g;
+            print OUT;
+        }
+    }
+    close IN;
+    close OUT;
+}
+$pwd = `pwd`; chomp($pwd);
+$protein = "$pwd/homolog.fasta";
+
 # Step 0: RepeatMasker and RepeatModeler
-print STDERR "\n============================================\n";
 print STDERR "Step 0: RepeatMasker and RepeatModeler " . "(" . (localtime) . ")" . "\n";
 mkdir "0.RepeatMasker" unless -e "0.RepeatMasker";
 unless (-e "0.RepeatMasker.ok") {
@@ -768,6 +801,19 @@ unless (-e "5.augustus.ok") {
         unless (-e "geneModels2AugusutsTrainingInput.ok") {
             print STDERR (localtime) . ": CMD: $cmdString\n";
             system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+
+            # 若用于Augustus training的基因数量少于1000个，则重新运行geneModels2AugusutsTrainingInput，降低阈值来增加基因数量。
+            open IN, "geneModels2AugusutsTrainingInput.log" or die "Can not open file geneModels2AugusutsTrainingInput.log, $!";
+            my $training_genes_number = 0;
+            while (<IN>) {
+                $training_genes_number = $1 if m/Best gene Models number:\s+(\d+)/;
+            }
+            if ( $training_genes_number < 1000 ) {
+                $cmdString = "$dirname/bin/geneModels2AugusutsTrainingInput --min_evalue 1e-9 --min_identity 0.9 --min_coverage_ratio 0.9 --min_cds_num 1 --min_cds_length 450 --min_cds_exon_ratio 0.40 --keep_ratio_for_excluding_too_long_gene 0.99 --out_prefix ati --cpu $cpu geneModels.gff3 $genome &> geneModels2AugusutsTrainingInput.log.Loose_thresholds";
+                print STDERR (localtime) . ": CMD: $cmdString\n";
+                system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+            }
+
             open OUT, ">", "geneModels2AugusutsTrainingInput.ok" or die $!; close OUT;
         }
         else {
@@ -870,7 +916,7 @@ unless (-e "5.augustus.ok") {
     }
 
     # augustus_training_iteration
-    unless ($no_augustus_training_iteration or $use_existed_augustus_species) {
+    if ($enable_augustus_training_iteration && (! $use_existed_augustus_species)) {
         unless (-e "training_again") {
             mkdir "training_again";
             my $species_config_dir = `echo \$AUGUSTUS_CONFIG_PATH`;
@@ -936,6 +982,19 @@ unless (-e "5.augustus.ok") {
             unless (-e "geneModels2AugusutsTrainingInput.ok") {
                 print STDERR (localtime) . ": CMD: $cmdString\n";
                 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+
+                # 若用于Augustus training的基因数量少于1000个，则重新运行geneModels2AugusutsTrainingInput，降低阈值来增加基因数量。
+                open IN, "geneModels2AugusutsTrainingInput.log" or die "Can not open file geneModels2AugusutsTrainingInput.log, $!";
+                my $training_genes_number = 0;
+                while (<IN>) {
+                    $training_genes_number = $1 if m/Best gene Models number:\s+(\d+)/;
+                }
+                if ( $training_genes_number < 1000 ) {
+                    $cmdString = "$dirname/bin/geneModels2AugusutsTrainingInput --min_evalue 1e-9 --min_identity 0.9 --min_coverage_ratio 0.9 --min_cds_num 1 --min_cds_length 450 --min_cds_exon_ratio 0.40 --keep_ratio_for_excluding_too_long_gene 0.99 --out_prefix ati --cpu $cpu geneModels.gff3 $genome &> geneModels2AugusutsTrainingInput.log.Loose_thresholds";
+                    print STDERR (localtime) . ": CMD: $cmdString\n";
+                    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+                }
+
                 open OUT, ">", "geneModels2AugusutsTrainingInput.ok" or die $!; close OUT;
             }
             else {
@@ -1295,6 +1354,7 @@ print STDERR "Step 7: OutPut " . "(" . (localtime) . ")" . "\n";
 chdir "../";
 $pwd = `pwd`; print STDERR "PWD: $pwd";
 
+# 7.1 输出GFF3格式文件基因结构注释信息
 $cmdString = "$dirname/bin/GFF3Clear --GFF3_source GETA --gene_prefix $gene_prefix --genome $genome --no_attr_add $out_prefix.tmp/6.combineGeneModels/genome.filter.gff3 > $out_prefix.GeneModels.gff3 2> /dev/null";
 #$cmdString = "cp $out_prefix.tmp/7.addAlternativeSplicing/genome.addAS.gff3 $out_prefix.gff3";
 print STDERR (localtime) . ": CMD: $cmdString\n";
@@ -1314,6 +1374,7 @@ if ($pfam_db) {
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 }
 
+# 7.2 输出GTF文件和基因的序列信息
 $cmdString = "$dirname/bin/gff3ToGtf.pl $genome $out_prefix.GeneModels.gff3 > $out_prefix.GeneModels.gtf 2> /dev/null";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -1322,6 +1383,7 @@ $cmdString = "$dirname/bin/eukaryotic_gene_model_statistics.pl $out_prefix.GeneM
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
+# 7.3 输出重复序列信息及其统计结果、RepeatModeler软件构建的重复序列数据库
 open IN, "$out_prefix.tmp/0.RepeatMasker/genome.repeat.stats" or die "Can not open file $out_prefix.tmp/0.RepeatMasker/genome.repeat.stats, $!";
 open OUT, ">", "$out_prefix.repeat.stats" or die "Can not create file $out_prefix.repeat.stats, $!";
 print OUT <IN>;
@@ -1332,6 +1394,12 @@ open OUT, ">", "$out_prefix.repeat.gff3" or die "Can not create file $out_prefix
 print OUT <IN>;
 close IN; close OUT;
 
+open IN, "$out_prefix.tmp/0.RepeatMasker/repeatModeler/species-families.fa" or die "Can not open file $out_prefix.tmp/0.RepeatMasker/repeatModeler/species-families.fa, $!";
+open OUT, ">", "$out_prefix.repeat.lib, $!" or die "Can not create file $out_prefix.repeat.lib, $!";
+print OUT <IN>;
+close IN; close OUT;
+
+# 7.4 输出转录本和同源蛋白的基因预测结果
 if (($pe1 && $pe2) or $single_end) {
     open IN, "$out_prefix.tmp/3.transcript/transfrag.alignment.gff3" or die "Can not open file $out_prefix.tmp/3.transcript/transfrag.alignment.gff3, $!";
     open OUT, ">", "$out_prefix.transfrag_alignment.gff3" or die "Can not create file $out_prefix.transfrag_alignment.gff3, $!";
@@ -1351,6 +1419,7 @@ if ($protein) {
     close IN; close OUT;
 }
 
+# 7.5 输出GETA流程信息，用于追踪基因预测结果的可靠性
 open OUT, ">", "$out_prefix.gene_prediction.summary" or die "Can not create file $out_prefix.gene_prediction.summary, $!";
 open IN, "$out_prefix.tmp/0.RepeatMasker/genome.repeat.stats" or die "Can not open file $out_prefix.tmp/0.RepeatMasker/genome.repeat.stats, $!";
 while (<IN>) {
@@ -1464,4 +1533,4 @@ print OUT "The number of gene models whose CDS length < $1 and cannot find ortho
 
 
 print STDERR "\n============================================\n";
-print STDERR "GETA complete successfully! " . "(" . (localtime) . ")" . "\n";
+print STDERR "GETA complete successfully! " . "(" . (localtime) . ")" . "\n\n";

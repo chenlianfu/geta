@@ -42,7 +42,7 @@ TruSeq3-PE-2.fa:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:50 TOPHRE
 # During the step of homolog_genewiseGFF2GFF3: --input_genewise_start_info was fixed to "genewise.start_info.txt"; --output_start_and_stop_hints_of_augustus was fixed to "genewise.start_stop_hints.gff".
 
 [geneModels2AugusutsTrainingInput]
---min_evalue 1e-9 --min_identity 0.8 --min_coverage_ratio 0.6 --min_cds_num 2 --min_cds_length 600 --min_cds_exon_ratio 0.60
+--min_evalue 1e-9 --min_identity 0.8 --min_coverage_ratio 0.8 --min_cds_num 2 --min_cds_length 450 --min_cds_exon_ratio 0.60
 # During the step of geneModels2AugusutsTrainingInput: --cpu was passed by --CPU; --out_prefix was set to ati.
 # if gene models number of ati.filter2.gff3 was few, recommed to decrease --min_cds_exon_ratio and increase --min_coverage_ratio.
 
@@ -55,7 +55,7 @@ TruSeq3-PE-2.fa:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:50 TOPHRE
 # note: to obtain the exonpart or cdspart hints, the margin 20bp will be removed.
 
 [paraAugusutusWithHints]
---gene_prefix augustus --min_intron_len 30 --alternatives_from_evidence
+--gene_prefix augustus --min_intron_len 20 --alternatives_from_evidence
 # During the step of paraAugusutusWithHints: --species was passed by --augustus_species; --cpu was passed by --CPU; --segmentSize and --overlapSize were automatically calculated.
 
 [paraCombineGeneModels]
