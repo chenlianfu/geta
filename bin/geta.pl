@@ -73,7 +73,7 @@ This script was tested on CentOS 6.8 with such softwares can be run directly in 
 9. genewise (version: 2.4.1)
 10. augustus/etraining (version: 3.3.1)
 
-Version: 2.4.12
+Version: 2.4.14
 
 USAGE
 if (@ARGV==0){die $usage}

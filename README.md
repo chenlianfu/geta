@@ -93,7 +93,7 @@ Usage of the main script geta.pl
     9. genewise (version: 2.4.1)
     10. augustus/etraining (version: 3.3.3)
 
-    Version: 2.4.12
+    Version: 2.4.14
 
 Test of GETA
 ============
