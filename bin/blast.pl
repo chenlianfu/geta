@@ -32,13 +32,16 @@ Usage:
     --max-target-seqs <int>    default: 20
     设置BLAST命令的-max_target_seqs参数值。该参数设置BLAST最多能匹配数据库中的序列数量。
 
+    --completed_ratio <float>    default: 1
+    设置程序要求的最低完成度。程序进行了数据分割，得到多个命令，要求对这些命令完成的比例要不小于该值，否则程序会运行失败。默认设置下要求所有的序列都完成比对。当本程序被集成到其它流程中时，可能个别命令执行失败对总体影响不大，考虑到整体的问题运行，考虑将该参数设置小于1，以让整个流程能顺利运行。
+
     --clean
     若添加该参数，则在运行程序成功后，会删除临时文件或文件夹。
 
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($tmpPrefix, $chunk, $blastProgram, $CPU, $blastThreads, $evalue, $outfmt, $maxTargetSeqs, $clean);
+my ($tmpPrefix, $chunk, $blastProgram, $CPU, $blastThreads, $evalue, $outfmt, $maxTargetSeqs, $completed_ratio, $clean);
 GetOptions(
     "tmp-prefix:s" => \$tmpPrefix,
     "chunk:i" => \$chunk,
@@ -48,6 +51,7 @@ GetOptions(
     "evalue:f" => \$evalue,
     "outfmt:i" => \$outfmt,
     "max-target-seqs:i" => \$maxTargetSeqs,
+    "completed_ratio:f" => \$completed_ratio,
     "clean!" => \$clean,
 );
 $tmpPrefix ||= "blast";
@@ -58,6 +62,7 @@ $blastThreads ||= 1;
 $evalue ||= 1e-3;
 $outfmt ||= 5;
 $maxTargetSeqs ||= 20;
+$completed_ratio ||= 1;
 
 my %blastProgram = ("blastn", 1, "blastp", 1, "blastx", 1, "tblastn", 1, "tblastx", 1);
 if (! exists $blastProgram{$blastProgram}) {
@@ -112,7 +117,21 @@ close CMD;
 
 my $cmdString = "ParaFly -c command.$tmpPrefix.list -CPU $CPU &> /dev/null";
 print STDERR "CMD: $cmdString\n";
-(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+(system $cmdString) == 0 or warn "Warning: Failed to execute: $cmdString\n";
+
+my ($cmd_num, $completed_num);
+open IN, "command.$tmpPrefix.list" or die "Can not open file command.$tmpPrefix.list, $!";
+while (<IN>) {
+    $cmd_num ++ if m/\S+/;
+}
+close IN;
+open IN, "command.$tmpPrefix.list.completed" or die "Can not open file command.$tmpPrefix.list.completed, $!";
+while (<IN>) {
+    $completed_num ++ if m/\S+/;
+}
+if ( $completed_num / $cmd_num < $completed_ratio ) {
+    die "程序将$blastProgram任务分割成 $cmd_num 份，目前仅完成了 $completed_num 份，未能最低的完成比例需求 $completed_ratio。\n";
+}
 
 foreach (@chunk) {
     if ($outfmt == 5) {
