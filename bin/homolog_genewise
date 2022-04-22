@@ -9,7 +9,7 @@ Usage:
 
     程序分4步运行：
     1. 将genome_seq.fasta文件使用makeblastdb构建数据库。成功运行后生成文件makeblastdb.ok。
-    2. 运行程序同目录下的blast.pl程序并行化调用tblastn将homolog_proteins.fasta比对到数据库（阈值为evalue<=1e-9且覆盖率>=0.4）。成功运行后生成文件blast.ok和结果文件out.tab。
+    2. 运行程序同目录下的para_blast程序并行化调用tblastn将homolog_proteins.fasta比对到数据库（阈值为evalue<=1e-9且覆盖率>=0.4）。成功运行后生成文件blast.ok和结果文件out.tab。
     3. 运行程序同目录下的homolog_blast2geneRegion对out.tab文件进行分析，找到gene region及其最优homolog。成功运行后生成文件blast2geneRegion.ok和结果文件homolog_gene_region.tab。
     4. 运行程序同目录下的homolog_geneRegion2genewise提取基因组的gene region序列，并行化调用genewise进行基因模型分析，生成最终结果文件genewise.gff。
 
@@ -123,7 +123,7 @@ else {
 my $blast_thread = 8;
 my $blastpl_CPU = int($cpu / $blast_thread + 0.5);
 $blastpl_CPU = 1 if $blastpl_CPU < 1;
-$cmdString = "$path/blast.pl --chunk 100 --blast-threads $blast_thread --CPU $blastpl_CPU --blast-program tblastn --evalue 1e-5 --outfmt 6 genome $homologProteinFastaFile 1e-5 > out.tab";
+$cmdString = "$path/para_blast --completed_ratio 0.9 --chunk 100 --blast-threads $blast_thread --CPU $blastpl_CPU --blast-program tblastn --evalue 1e-5 --outfmt 6 genome $homologProteinFastaFile 1e-5 > out.tab";
 print "CMD 2/4: $cmdString\n";
 unless (-e "blast.ok") {
     unlink "FailedCommands" if -e "FailedCommands";
