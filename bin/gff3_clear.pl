@@ -53,9 +53,9 @@ foreach ( @geneSym ) {
     $geneSymSort2{$_} = $_[3];
     $geneSymSort3{$_} = $_[4];
     $geneSymSort4{$_} = $_[6];
-    $geneSymSort4{$_} = $_[5];
+    $geneSymSort5{$_} = $_[5];
 }
-@geneSym = sort { $geneSymSort1{$a} cmp $geneSymSort1{$b} or $geneSymSort2{$a} <=> $geneSymSort2{$b} or $geneSymSort3{$a} <=> $geneSymSort3{$b} or $geneSymSort4{$a} cmp $geneSymSort4{$b} or $geneSymSort5{$a} <=> $geneSymSort5{$b} } @geneSym;
+@geneSym = sort { $geneSymSort1{$a} cmp $geneSymSort1{$b} or $geneSymSort2{$a} <=> $geneSymSort2{$b} or $geneSymSort3{$a} <=> $geneSymSort3{$b} or $geneSymSort4{$a} cmp $geneSymSort4{$b} or $geneSymSort5{$b} <=> $geneSymSort5{$a} } @geneSym;
 my @geneSym_new;
 foreach (@geneSym) {
     my @mRNA_id = keys %{$gff3_parent1{$_}};

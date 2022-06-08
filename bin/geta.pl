@@ -1394,10 +1394,17 @@ open OUT, ">", "$out_prefix.repeat.gff3" or die "Can not create file $out_prefix
 print OUT <IN>;
 close IN; close OUT;
 
-open IN, "$out_prefix.tmp/0.RepeatMasker/repeatModeler/species-families.fa" or die "Can not open file $out_prefix.tmp/0.RepeatMasker/repeatModeler/species-families.fa, $!";
-open OUT, ">", "$out_prefix.repeat.lib, $!" or die "Can not create file $out_prefix.repeat.lib, $!";
-print OUT <IN>;
-close IN; close OUT;
+unless ( $RM_lib ) {
+	open IN, "$out_prefix.tmp/0.RepeatMasker/repeatModeler/species-families.fa" or die "Can not open file $out_prefix.tmp/0.RepeatMasker/repeatModeler/species-families.fa, $!";
+	open OUT, ">", "$out_prefix.repeat.lib, $!" or die "Can not create file $out_prefix.repeat.lib, $!";
+	print OUT <IN>;
+	close IN; close OUT;
+}
+else {
+	$cmdString = "ln -sf $RM_lib $out_prefix.repeat.lib";
+	print STDERR (localtime) . ": CMD: $cmdString\n";
+	system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+}
 
 # 7.4 输出转录本和同源蛋白的基因预测结果
 if (($pe1 && $pe2) or $single_end) {
