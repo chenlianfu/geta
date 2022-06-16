@@ -55,7 +55,7 @@ TruSeq3-PE-2.fa:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:50 TOPHRE
 # note: to obtain the exonpart or cdspart hints, the margin 20bp will be removed.
 
 [paraAugusutusWithHints]
---gene_prefix augustus --min_intron_len 20 --alternatives_from_evidence
+--gene_prefix augustus --min_intron_len 20
 # During the step of paraAugusutusWithHints: --species was passed by --augustus_species; --cpu was passed by --CPU; --segmentSize and --overlapSize were automatically calculated.
 
 [paraCombineGeneModels]

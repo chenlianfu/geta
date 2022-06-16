@@ -2,6 +2,8 @@
 use strict;
 use Getopt::Long;
 use File::Basename;
+use Cwd qw/abs_path getcwd cwd/;
+use File::Basename;
 
 my $command_line_geta = join " ", @ARGV;
 
@@ -10,29 +12,29 @@ Usage:
     perl $0 [options]
 
 For example:
-    perl $0 --RM_species Embryophyta --genome genome.fasta -1 liba.1.fq.gz,libb.1.fq.gz -2 liba.2.fq.gz,libb.2.fq.gz --protein homolog.fasta --augustus_species oryza_sativa_20171120 --out_prefix out --config conf.txt --cpu 80 --gene_prefix OS01Gene --pfam_db /opt/biosoft/hmmer-3.1b2/Pfam-AB.hmm
+    perl $0 --RM_species Embryophyta --genome genome.fasta -1 liba.1.fq.gz,libb.1.fq.gz -2 liba.2.fq.gz,libb.2.fq.gz --protein homolog.fasta --augustus_species oryza_sativa_20220608 --out_prefix out --config conf.txt --cpu 80 --gene_prefix OS01Gene --HMM_db /opt/biosoft/hmmer-3.3.1/EggNOG_Eukaryota.hmm
 
 Parameters:
-[required]
-    --RM_species <string>
+[General]
+    --RM_species <string>    Required
     species identifier for RepeatMasker.
 
-    --genome <string>
+    --genome <string>     Required
     genome file in fasta format.
 
-    -1 <string> -2 <string>
+    -1 <string> -2 <string>    Not Required but Recommened
     fastq format files contain of paired-end RNA-seq data. if you have data come from multi librarys, input multi fastq files separated by comma. the compress file format .gz also can be accepted.
 
-    -S <string>
+    -S <string>    Not Required, a option when -1 and -2 were not provided
     fastq format file contains of single-end RNA-seq data. if you have data come from multi librarys, input multi fastq files separated by comma. the compress file format .gz also can be accepted.
 
-    --protein <string>
+    --protein <string>    Required
     homologous protein sequences (derived from multiple species would be recommended) file in fasta format.
 
-    --augustus_species <string>
+    --augustus_species <string>    Required when --use_existed_augustus_species were not provided
     species identifier for Augustus. the relative hmm files of augustus training will be created with this prefix. if the relative hmm files of augustus training exists, the program will delete the hmm files directory firstly, and then start the augustus training steps.
 
-    --use_existed_augustus_species <string>
+    --use_existed_augustus_species <string>    Required when --augustus_species were not provided
     species identifier for Augustus. This parameter is conflict with --augustus_species. When this parameter set, the --augustus_species parameter will be invalid, and the relative hmm files of augustus training should exists, and the augustus training step will be skipped (this will save lots of runing time).
 
 [other]
@@ -51,8 +53,8 @@ Parameters:
     --strand_specific    default: False
     enable the ability of analysing the strand-specific information provided by the tag "XS" from SAM format alignments. If this parameter was set, the paramter "--rna-strandness" of hisat2 should be set to "RF" usually.
 
-    --pfam_db <string>    default: None
-    the absolute path of Pfam database which was used for filtering of false positive gene models.
+    --HMM_db <string>    default: None
+    the absolute path of protein family HMM database which was used for filtering of false positive gene models.
 
     --gene_prefix <string>    default: gene
     the prefix of gene id shown in output file.
@@ -63,24 +65,22 @@ Parameters:
 
 This script was tested on CentOS 6.8 with such softwares can be run directly in terminal:
 1. ParaFly
-2. java (version: 1.8.0_172)
+2. java (version: 1.8.0_282)
 3. hisat2 (version: 2.1.0)
-4. samtools (version: 1.8)
-5. hmmscan (version: 3.1b2)
+4. samtools (version: 1.10)
+5. hmmscan (version: 3.3.1)
 6. makeblastdb/tblastn/blastp (version: 2.6.0)
-7. RepeatMasker (version: 4.0.7)
-8. RepeatModeler (version: 1.0.11)
+7. RepeatMasker (version: 4.1.2-p1)
+8. RepeatModeler (version: 2.0.3)
 9. genewise (version: 2.4.1)
-10. augustus/etraining (version: 3.3.1)
+10. augustus/etraining (version: 3.4.0)
 
-Version: 2.4.14
+Version: 2.5.1
 
 USAGE
 if (@ARGV==0){die $usage}
 
-
-
-my ($RM_species, $RM_lib, $genome, $out_prefix, $pe1, $pe2, $single_end, $protein, $cpu, $trimmomatic, $strand_specific, $sam2transfrag, $ORF2bestGeneModels, $augustus_species, $pfam_db, $gene_prefix, $cmdString, $enable_augustus_training_iteration, $config, $use_existed_augustus_species);
+my ($RM_species, $RM_lib, $genome, $out_prefix, $pe1, $pe2, $single_end, $protein, $cpu, $trimmomatic, $strand_specific, $sam2transfrag, $ORF2bestGeneModels, $augustus_species, $HMM_db, $gene_prefix, $cmdString, $enable_augustus_training_iteration, $config, $use_existed_augustus_species);
 GetOptions(
     "RM_species:s" => \$RM_species,
     "RM_lib:s" => \$RM_lib,
@@ -94,7 +94,7 @@ GetOptions(
     "strand_specific!" => \$strand_specific,
     "augustus_species:s" => \$augustus_species,
     "use_existed_augustus_species:s" => \$use_existed_augustus_species,
-    "pfam_db:s" => \$pfam_db,
+    "HMM_db:s" => \$HMM_db,
     "gene_prefix:s" => \$gene_prefix,
     "enable_augustus_training_iteration!" => \$enable_augustus_training_iteration,
     "config:s" => \$config,
@@ -173,7 +173,7 @@ if ($software_info =~ m/HMMER 3.(\d+)/) {
         print STDERR "hmmer:\tOK\n";
     }
     else {
-        print STDERR "hmmer:\tthis hmmer version 3.$1 may not work properly, version 3.1b2 is desired\n";
+        print STDERR "hmmer:\tthis hmmer version 3.$1 may not work properly, version 3.3.1 is desired\n";
     }
 }
 else {
@@ -251,7 +251,7 @@ my %config = (
     'geneModels2AugusutsTrainingInput' => '--min_evalue 1e-9 --min_identity 0.8 --min_coverage_ratio 0.8 --min_cds_num 2 --min_cds_length 450 --min_cds_exon_ratio 0.60',
     'BGM2AT' => '--min_gene_number_for_augustus_training 500 --gene_number_for_accuracy_detection 200 --min_gene_number_of_optimize_augustus_chunk 50 --max_gene_number_of_optimize_augustus_chunk 200',
     'prepareAugusutusHints' => '--margin 20',
-    'paraAugusutusWithHints' => '--gene_prefix augustus --min_intron_len 20 --alternatives_from_evidence',
+    'paraAugusutusWithHints' => '--gene_prefix augustus --min_intron_len 20',
     'paraCombineGeneModels' => '--overlap 30 --min_augustus_transcriptSupport_percentage 10.0 --min_augustus_intronSupport_number 1 --min_augustus_intronSupport_ratio 0.01',
     'PfamValidateABinitio' => '--CDS_length 750 --CDS_num 2 --evalue 1e-5 --coverage 0.25',
     'remove_genes_in_repeats' => '--ratio 0.8',
@@ -406,6 +406,9 @@ else {
 print STDERR "\n============================================\n";
 print STDERR "Step 1: Trimmomatic " . "(" . (localtime) . ")" . "\n";
 mkdir "1.trimmomatic" unless -e "1.trimmomatic";
+unless (($pe1 && $pe2) or $single_end) {
+    open OUT, ">", "1.trimmomatic.ok" or die $!; close OUT;
+}
 unless (-e "1.trimmomatic.ok") {
     chdir "1.trimmomatic";
     $pwd = `pwd`; print STDERR "PWD: $pwd";
@@ -417,7 +420,7 @@ unless (-e "1.trimmomatic.ok") {
             $number ++;
             my $code = "0" x ( length($pe_reads_num) - length($number) ) . $number;
             @_ = split /\t/;
-            $cmdString = "java -jar $dirname/Trimmomatic-0.38/trimmomatic-0.38.jar PE -threads $cpu $_[0] $_[1] reads$code.1.fastq reads$code.1.unpaired.fastq reads$code.2.fastq reads$code.2.unpaired.fastq ILLUMINACLIP:$dirname/Trimmomatic-0.38/adapters/$config{'trimmomatic'} &> trimmomatic.pe.log";
+            $cmdString = "java -jar $dirname/Trimmomatic-0.38/trimmomatic-0.38.jar PE -threads $cpu $_[0] $_[1] reads$code.1.fastq reads$code.1.unpaired.fastq reads$code.2.fastq reads$code.2.unpaired.fastq ILLUMINACLIP:$dirname/Trimmomatic-0.38/adapters/$config{'trimmomatic'} &> reads$code.trimmomatic.log";
             print STDERR (localtime) . ": CMD: $cmdString\n";
             system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
         }
@@ -440,7 +443,7 @@ unless (-e "1.trimmomatic.ok") {
             $number ++;
             my $code = "0" x ( length($se_reads_num) - length($number) ) . $number;
             @_ = split /\t/;
-            $cmdString = "java -jar $dirname/Trimmomatic-0.38/trimmomatic-0.38.jar SE -threads $cpu $single_end reads$code.fastq ILLUMINACLIP:$dirname/Trimmomatic-0.38/adapters/$config{'trimmomatic'} &> trimmomatic.single.log";
+            $cmdString = "java -jar $dirname/Trimmomatic-0.38/trimmomatic-0.38.jar SE -threads $cpu $single_end reads$code.fastq ILLUMINACLIP:$dirname/Trimmomatic-0.38/adapters/$config{'trimmomatic'} &> reads$code.trimmomatic.log";
             print STDERR (localtime) . ": CMD: $cmdString\n";
             system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
         }
@@ -767,6 +770,24 @@ unless (-e "5.augustus.ok") {
         mkdir "training";
         open OUT, ">", "training.ok" or die $!;
         print STDERR "Skip Augustus training for --use_existed_augustus_species paramter set\n";
+
+		chdir "training";
+		$pwd = `pwd`; print STDERR "PWD: $pwd";
+
+        # 准备Augustus training的输入文件
+        open OUT, ">", "blank.augustus.gff3" or die "Can not create file blank.augustus.gff3, $!\n";
+        close OUT;
+        open OUT, ">", "blank.intron.gff" or die "Can not create file blank.intron.gff, $!\n";
+        close OUT;
+        $cmdString = "$dirname/bin/paraCombineGeneModels --cpu $cpu $config{'paraCombineGeneModels'} blank.augustus.gff3 ../../3.transcript/transfrag.genome.gff3 ../../4.homolog/genewise.gff3 blank.intron.gff";
+        print STDERR (localtime) . ": CMD: $cmdString\n";
+        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+
+        $cmdString = "$dirname/bin/GFF3Clear --genome $genome combine.1.gff3 > geneModels.gff3 2> GFF3Clear.log";
+        print STDERR (localtime) . ": CMD: $cmdString\n";
+        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+
+		chdir "../";
     }
 
     # 第一次 Augustus HMM Training
@@ -1203,12 +1224,12 @@ unless (-e "6.combineGeneModels.ok") {
         print STDERR "CMD(Skipped): $cmdString\n";
     }
 
-    if ($pfam_db) {
+    if ($HMM_db) {
         #$cmdString = "rm -rf command.hmmscan.list* hmmscan.tmp for_pfam_search.fasta";
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
-        $cmdString = "$dirname/bin/PfamValidateABinitio --out_prefix combine2 --cpu $cpu --pfam_db $pfam_db $config{'PfamValidateABinitio'} combine.2.gff3 $genome 2> PfamValidateABinitio.1.log";
+        $cmdString = "$dirname/bin/PfamValidateABinitio --out_prefix combine2 --cpu $cpu --HMM_db $HMM_db $config{'PfamValidateABinitio'} combine.2.gff3 $genome 2> PfamValidateABinitio.1.log";
         unless (-e "PfamValidateABinitio.1.ok") {
             print STDERR (localtime) . ": CMD: $cmdString\n";
             system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -1223,6 +1244,7 @@ unless (-e "6.combineGeneModels.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
     }
+
 
     $cmdString = "$dirname/bin/GFF3Clear --gene_prefix $gene_prefix --genome $genome combine.1.gff3 combine2.filter_pass.gff3 > genome.gff3 2> GFF3Clear.1.log";
     unless (-e "GFF3Clear.1.ok") {
@@ -1265,7 +1287,7 @@ unless (-e "6.combineGeneModels.ok") {
         print STDERR "CMD(Skipped): $cmdString\n";
     }
 
-    if ($pfam_db) {
+    if ($HMM_db) {
         $cmdString = "rm -rf command.hmmscan.list* hmmscan.tmp for_pfam_search.fasta";
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -1280,7 +1302,7 @@ unless (-e "6.combineGeneModels.ok") {
             print STDERR "CMD(Skipped): $cmdString\n";
         }
 
-        $cmdString = "$dirname/bin/PfamValidateABinitio --out_prefix remove_short_genes --cpu $cpu --pfam_db $pfam_db $config{'PfamValidateABinitio'} genome.completed.rm_genes_in_repeats.short_genes.gff3 $genome 2> PfamValidateABinitio.2.log";
+        $cmdString = "$dirname/bin/PfamValidateABinitio --out_prefix remove_short_genes --cpu $cpu --HMM_db $HMM_db $config{'PfamValidateABinitio'} genome.completed.rm_genes_in_repeats.short_genes.gff3 $genome 2> PfamValidateABinitio.2.log";
         unless (-e "PfamValidateABinitio.2.ok") {
             print STDERR (localtime) . ": CMD: $cmdString\n";
             system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -1368,7 +1390,7 @@ $cmdString = "$dirname/bin/GFF3Clear --GFF3_source GETA --gene_prefix ${gene_pre
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
-if ($pfam_db) {
+if ($HMM_db) {
     $cmdString = "$dirname/bin/GFF3Clear --GFF3_source GETA --gene_prefix ${gene_prefix}ShortGene --genome $genome --no_attr_add $out_prefix.tmp/6.combineGeneModels/remove_short_genes.filter_out.gff3 > $out_prefix.ShortCDS_GeneModels.gff3 2> /dev/null";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";

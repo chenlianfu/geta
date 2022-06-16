@@ -15,7 +15,7 @@ Usage:
     2.2 若输入GFF3文件中不包含exon，则程序根据CDS信息生成exon信息和CDSs之间的intron信息；
     2.3 若输入GFF3文件中包含exon，且exon比CDS范围要多时，则生成UTRs之间的intron信息；
     2.4 若一个mRNA内有两CDSs之间的碱基距离 < 指定阈值，则程序在标准错误输出中给出警告信息，不进行处理；
-    2.5 若一个mRNA内有两个exons之间的碱基距离 < 0，则程序将较长的exon根据intron打断；
+    2.5 若一个mRNA内有两个exons之间的碱基距离 <= 0，则程序对Exon信息进行修正：先根据CDSs和exons计算出introns，再根据introns和mRNA边界得到准确的exons信息；
     2.6 程序对每个gene的mRNA进行了CDS和exon的完善，检测基因的完整性信息，得到UTR和intron信息，并能将这些信息输出到GFF3结果文件中；
     2.7 在一个GFF3文件中，若有两个或多个基因在同一条链上的CDS区域有重叠，则按基因CDS的长度（若存在可变剪接，则是所有isoform的所有CDSs去冗余后的长度），从短到长去除基因模型，保证两两基因模型的CDS区重叠覆盖率（相对较短基因CDS长度的比例）<= 指定阈值；
     2.8 当输入多个GFF3文件时，检测到基因在同一条链上的CDS区重叠覆盖率（相对较短基因CDS长度的比例）> 指定阈值时，则去除后输入文件的基因模型;
@@ -789,7 +789,7 @@ sub modify_exon {
         if ($start > $last_end) {
             my $intron_start = $last_end + 1;
             my $intron_stop = $start - 1;
-            $intron{"$intron_start\t$intron_stop"} = 1;
+            $intron{"$intron_start\t$intron_stop"} = 1 if $intron_stop >= $intron_start;
         }
         ($last_start, $last_end) = ($start, $end);
     }
@@ -809,7 +809,7 @@ sub modify_exon {
                     $keep_intron = 0;
                 }
             }
-            $intron{"$intron_start\t$intron_stop"} = 1 if $keep_intron == 1;
+            $intron{"$intron_start\t$intron_stop"} = 1 if ($keep_intron == 1 && $intron_stop >= $intron_start);
         }
         ($last_start, $last_end) = ($start, $end);
     }

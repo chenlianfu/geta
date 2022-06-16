@@ -1,0 +1,316 @@
+#!/usr/bin/env perl
+
+use strict;
+use Getopt::Long;
+use Cwd qw/abs_path getcwd cwd/;
+use File::Basename;
+
+my $usage = <<USAGE;
+Usage:
+    $0 ref.geneModels.gff3 evidence.geneModels.gff3 > out.geneModels.gff3 2> out.stats
+
+    程序用于挑选出更优的有证据支持的基因模型。
+
+    程序将 evidence.geneModels.gff3 文件中的基因模型和 ref.geneModels.gff3 进行比较。(1) 若evidence基因模型不和ref基因模型重叠，则挑选出来；(2) 否则，当 CDS重叠区碱基数 / evidence基因模型CDS总碱基数 < 阈值[0.2]，则挑选出来；(3) 当 CDS重叠区碱基数 / evidence基因模型CDS总碱基数 >= 阈值[0.2] 或 当 CDS重叠区碱基数 / ref基因模型CDS总碱基数 >= 阈值[0.2]时，认为基因有重叠：继而当evidence基因模型的CDS范围（首尾CDS坐标差）> ref基因模型 * 系数阈值[2]，则挑选出来，当evidence基因模型的CDS范围（首尾CDS坐标差）> ref基因模型的CDS范围 * 系数阈值[1] 或 evidence基因模型的CDS长度 > ref基因模型的CDS长度时 * 系数阈值[1]，且evidence基因模型是完整的，则挑选出来。
+    以上操作方式，是为了解决GETA软件对大型动物基因组的基因预测结果中，往往由于intron较长导致一个gene被预测成多个genes的问题。此外，evidence.geneModels.gff3中的完整基因模型可能和Augustus预测的基因模型有较小差异，后者可能更准确，前者的CDS总长度偏低，不需要对这些重叠区域较大且有evidence支持的基因进行保留。
+
+    --overlap_ratio <float>    default: 0.2
+    设置阈值，CDS重叠区碱基数 / 目标基因模型CDS总碱基数。当重叠小于该阈值，即认为来自evidence的基因模型在参考基因模型中不存在，则将其挑选出来。
+
+    --ratio1 <float>    default: 2
+    系数阈值，当evidence基因模型和ref基因模型重叠，且evidence基因模型的CDS范围（首尾CDS坐标差）> ref基因模型 * 系数阈值，则挑选出来。
+
+    --ratio2 <float>    default: 1
+    系数阈值，当evidence基因模型和ref基因模型重叠，evidence基因模型的CDS范围（首尾CDS坐标差）> ref基因模型的CDS范围 * 系数阈值 或 evidence基因模型的CDS长度 > ref基因模型的CDS长度时 * 系数阈值，且evidence基因模型是完整的，则挑选出来。
+
+    --help    default: None
+    display this help and exit.
+
+USAGE
+if (@ARGV==0){die $usage}
+
+my ($help_flag, $overlap_ratio, $Ratio1, $Ratio2);
+GetOptions(
+    "help" => \$help_flag,
+    "overlap_ratio:f" => \$overlap_ratio,
+    "ratio1:f" => \$Ratio1,
+    "ratio2:f" => \$Ratio2,
+);
+$overlap_ratio ||= 0.2;
+$Ratio1 ||= 2;
+$Ratio2 ||= 1;
+if ( $help_flag ) { die $usage }
+
+# 读取ref.geneModels.gff3
+open IN, $ARGV[0] or die "Can not open file $ARGV[0], $!";
+my @lines = <IN>;
+my %refGeneModels = &get_geneModels_from_GFF3(\@lines);
+close IN;
+
+# 对GFF3中的基因进行索引
+my %refGeneModels_index = &index_CDS_of_gene(\%refGeneModels);
+
+# 读取 evidence.geneModels.gff3 
+open IN, $ARGV[1] or die "Can not open file $ARGV[1], $!";
+@lines = <IN>;
+my %evidenceGeneModels = &get_geneModels_from_GFF3(\@lines);
+close IN;
+
+my %picked_genes;
+my ($pick_num1, $pick_num2, $pick_num3, $pick_num4) = (0, 0, 0, 0);
+foreach my $gene_ID ( keys %evidenceGeneModels ) {
+    # 检测基因的CDS区间，得到重叠的ref基因信息
+    my @gene_header = split /\t/, $evidenceGeneModels{$gene_ID}{"header"};
+    my (%CDS_position, $gene_info);
+    my $header_of_gene_and_mRNA = $evidenceGeneModels{$gene_ID}{"header"};
+    foreach my $mRNA_ID ( @{$evidenceGeneModels{$gene_ID}{"mRNA_ID"}} ) {
+        $header_of_gene_and_mRNA .= $evidenceGeneModels{$gene_ID}{"mRNA_header"}{$mRNA_ID};
+        $gene_info .= $evidenceGeneModels{$gene_ID}{"mRNA_info"}{$mRNA_ID};
+        foreach ( split /\n/, $evidenceGeneModels{$gene_ID}{"mRNA_info"}{$mRNA_ID} ) {
+            if ( m/\tCDS\t/ ) {
+                @_ = split /\t/;
+                $CDS_position{$_[3]} = 1;
+                $CDS_position{$_[4]} = 1;
+            }
+        }
+    }
+    my @CDS_position = sort {$a <=> $b} keys %CDS_position;
+    my $index1 = int($CDS_position[0] / 1000);
+    my $index2 = int($CDS_position[-1] / 1000);
+    my %ref_gene;
+    foreach ( $index1 .. $index2 ) {
+        foreach ( keys %{$refGeneModels_index{$gene_header[0]}{$gene_header[6]}{$_}} ) {
+            $ref_gene{$_} = 1;
+        }
+    }
+
+    # 若evidence gene的索引区域内有ref基因
+    if ( %ref_gene ) {
+        #print "$gene_ID\t" . join (",", sort keys %ref_gene) . "\n";
+        # 检测和ref基因的CDS最大重叠比例
+        my $ratio = 0;
+        foreach my $ref_gene_ID ( keys %ref_gene ) {
+            my $ref_gene_info;
+            foreach my $ref_mRNA_ID ( @{$refGeneModels{$ref_gene_ID}{"mRNA_ID"}} ) {
+                $ref_gene_info .= $refGeneModels{$ref_gene_ID}{"mRNA_info"}{$ref_mRNA_ID};
+            }
+            my @CDS_region = &get_sorted_CDSs($gene_info);
+            my @ref_CDS_region = &get_sorted_CDSs($ref_gene_info);
+            my $match_length = &get_match_length(\@CDS_region, \@ref_CDS_region);
+            my $CDS_length = &get_gene_CDS_length(\@CDS_region);
+            my $ref_CDS_length = &get_gene_CDS_length(\@ref_CDS_region);
+            my $ratio1 = $match_length / $CDS_length;
+            my $ratio2 = $match_length / $ref_CDS_length;
+            my $CDS_region_span = &get_CDS_region_span(\@CDS_region);
+            my $ref_CDS_region_span = &get_CDS_region_span(\@ref_CDS_region);
+
+            if ( $ratio1 > $overlap_ratio or $ratio2 > $overlap_ratio ) {
+                if ( $CDS_region_span > $ref_CDS_region_span * $Ratio1 ) {
+                    $picked_genes{$gene_ID} = 1;
+                    $pick_num3 ++;
+                    #print STDERR "TEST03: $gene_ID\t$ref_gene_ID\t$ratio1\t$ratio2\t$CDS_length\t$ref_CDS_length\n";
+                }
+                elsif ( $CDS_region_span > $ref_CDS_region_span * $Ratio2 or $CDS_length > $ref_CDS_length * $Ratio2 ) {
+                    if ( $header_of_gene_and_mRNA =~ m/Integrity=complete/ ) {
+                        $picked_genes{$gene_ID} = 1;
+                        $pick_num4 ++;
+                        #print STDERR "TEST04: $gene_ID\t$ref_gene_ID\t$ratio1\t$ratio2\t$CDS_length\t$ref_CDS_length\n";
+                    }
+                    $picked_genes{$gene_ID} = 1;
+
+                }
+            }
+
+            $ratio = $ratio1 if $ratio1 > $ratio;
+        }
+        if ( $ratio < $overlap_ratio ) {
+            $picked_genes{$gene_ID} = 1;
+            if ( $ratio > 0 ) {
+                $pick_num2 ++;
+            }
+            else {
+                $pick_num1 ++;
+            }
+            #print STDERR "TEST02: $gene_ID\t$ratio\n";
+        }
+    }
+    else {
+        $picked_genes{$gene_ID} = 1;
+        $pick_num1 ++;
+        #print STDERR "TEST01: $gene_ID\n";
+    }
+
+}
+
+foreach my $gene_ID (keys %picked_genes) {
+    print $evidenceGeneModels{$gene_ID}{"header"};
+    foreach my $mRNA_ID ( @{$evidenceGeneModels{$gene_ID}{"mRNA_ID"}} ) {
+        print $evidenceGeneModels{$gene_ID}{"mRNA_header"}{$mRNA_ID};
+        print $evidenceGeneModels{$gene_ID}{"mRNA_info"}{$mRNA_ID};
+    }
+    print "\n";
+}
+
+my $pick_num_total = $pick_num1 + $pick_num2 + $pick_num3 + $pick_num4;
+$overlap_ratio = $overlap_ratio * 100;
+print STDERR "有 $pick_num1 个evidence基因模型和ref基因没有任何重叠；
+有 $pick_num2 个evidence基因模型，其CDS区域低于 $overlap_ratio% 和ref基因重叠；
+有 $pick_num3 个evidence基因模型，其CDS范围 > ref基因模型CDS范围 * $Ratio1; 
+有 $pick_num4 个完整的evidence基因模型，其CDS范围 > ref基因模型CDS范围 * $Ratio2 或 CDS总长度 > 重叠的ref基因模型CDS总长度 * $Ratio2；
+共计 $pick_num_total 个evidence基因模型被挑选出来。\n";
+
+
+############################ 子程序 ########################
+# 1. index_CDS_of_gene               对GFF3的Gene信息根据CDS位置进行索引。
+# 2. get_geneModels_from_GFF3        返回基因的GFF3哈希信息。
+# 3. get_match_length                返回两组CDS数据之间重叠的碱基数，利用了下一个子程序。
+# 4. get_gene_CDS_length             返回一组CDS数据的总长度。
+# 5. get_sorted_CDSs                 根据GFF3内容得到排序后的CDS位置信息。
+# 6. get_CDS_region_span             计算CDS坐标的最大值-最小值。
+
+
+# 子程序，对GFF3的Gene信息根据CDS位置进行索引。索引窗口大小为1000bp，返回索引哈希信息：
+# chr_ID => strand => position(kb) => gene_ID => 1
+sub index_CDS_of_gene {
+    my %gene_info = %{$_[0]};
+    my %index;
+
+    foreach my $gene_ID ( keys %gene_info ) {
+        my @gene_header = split /\t/, $gene_info{$gene_ID}{"header"};
+        my %CDS_position;
+        foreach my $mRNA_ID ( @{$gene_info{$gene_ID}{"mRNA_ID"}} ) {
+            foreach ( split /\n/, $gene_info{$gene_ID}{"mRNA_info"}{$mRNA_ID} ) {
+                if ( m/\tCDS\t/ ) {
+                    @_ = split /\t/;
+                    $CDS_position{$_[3]} = 1;
+                    $CDS_position{$_[4]} = 1;
+                }
+            }
+        }
+        my @CDS_position = sort {$a <=> $b} keys %CDS_position;
+        my $index1 = int($CDS_position[0] / 1000);
+        my $index2 = int($CDS_position[-1] / 1000);
+
+        foreach ($index1 .. $index2) {
+            $index{$gene_header[0]}{$gene_header[6]}{$_}{$gene_ID} = 1;
+        }
+    }
+    return %index;
+}
+
+# 子程序，返回基因的GFF3哈希信息：
+# gene_ID => "header" => gene_header
+# gene_ID => "mRNA_ID" => 数组
+# gene_ID => "mRNA_header" => mRNA_ID => mRNA_header
+# gene_ID => "mRNA_info" => mRNA_ID => mRNA_Info
+sub get_geneModels_from_GFF3 {
+    my @lines = @{$_[0]};
+    my %gene_info;
+    # 第一轮，找gene信息
+    foreach (@lines) {
+        if ( m/\tgene\t.*ID=([^;\s]+)/ ) {
+            $gene_info{$1}{"header"} = $_;
+        }
+    }
+    # 第二轮，找Parent值是geneID的信息，包含但不限于 mRNA 信息
+    my %mRNA_ID2gene_ID;
+    foreach (@lines) {
+        if ( m/Parent=([^;]+)/ ) {
+            my $parent = $1;
+            if ( exists $gene_info{$parent} ) {
+                if ( m/ID=([^;]+)/ ) {
+                    push @{$gene_info{$parent}{"mRNA_ID"}}, $1;
+                    $gene_info{$parent}{"mRNA_header"}{$1} = $_;
+                    $mRNA_ID2gene_ID{$1} = $parent;
+                }
+            }
+        }
+    }
+    # 第三轮，找Parent值不是geneID的信息
+    foreach (@lines) {
+        if ( m/Parent=([^;]+)/ && exists $mRNA_ID2gene_ID{$1} ) {
+            my $parent = $1;
+            $gene_info{$mRNA_ID2gene_ID{$1}}{"mRNA_info"}{$parent} .= $_;
+        }
+    }
+
+    return %gene_info;
+}
+
+sub get_match_length {
+    my @region1 = @{$_[0]};
+    my @region2 = @{$_[1]};
+
+    my $out_length;
+    my @region_match;
+    foreach my $region1 (@region1) {
+        my ($start1, $end1) = split /\t/, $region1;
+        foreach my $region2 (@region2) {
+            my ($start2, $end2) = split /\t/, $region2;
+            if ($start1 < $end2 && $start2 < $end1) {
+                my ($start, $end) = ($start1, $end1);
+                $start = $start2 if $start2 > $start1;
+                $end = $end2 if $end2 < $end1;
+                push @region_match, "$start\t$end";
+            }
+        }
+    }
+
+    $out_length = &get_gene_CDS_length(\@region_match);
+    return $out_length;
+}
+
+sub get_gene_CDS_length {
+    my @region = @{$_[0]};
+    @region = sort { $a <=> $b } @region;
+
+    my $out_length = 0;
+    my $last_region = shift @region;
+    @_ = split /\t/, $last_region;
+    $out_length += ($_[1] - $_[0] + 1) if @_;
+    foreach ( @region ) {
+        my @last_region = split /\t/, $last_region;
+        my @region = split /\t/;
+
+        if ($region[0] > $last_region[1]) {
+            $out_length += ($region[1] - $region[0] + 1);
+            $last_region = $_;
+        }
+        elsif ($region[1] > $last_region[1]) {
+            $out_length += ($region[1] - $last_region[1]);
+            $last_region = $_;
+        }
+        else {
+            next;
+        }
+    }
+
+    return $out_length;
+}
+
+sub get_sorted_CDSs {
+    my $info = $_[0];
+    my (%sort1, %sort2);
+    foreach ( split /\n/, $info ) {
+        next unless m/\tCDS\t/;
+        @_ = split /\t/, $_;
+        $sort1{"$_[3]\t$_[4]"} = $_[3];
+        $sort2{"$_[3]\t$_[4]"} = $_[4];
+    }
+    my @CDS_region = sort { $sort1{$a} <=> $sort1{$b} or $sort2{$a} <=> $sort2{$b} } keys %sort1;
+
+    return @CDS_region;
+}
+
+sub get_CDS_region_span {
+    my @CDS = @{$_[0]};
+    my %position;
+    foreach (@CDS) {
+        @_ = split /\t/, $_;
+        $position{$_[0]} = 1;
+        $position{$_[1]} = 1;
+    }
+    my @position = sort {$a <=> $b} keys %position;
+    my $out = $position[-1] - $position[0];
+    return $out;
+}

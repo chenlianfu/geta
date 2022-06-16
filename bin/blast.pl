@@ -1,6 +1,8 @@
 #!/usr/bin/perl
 use strict;
 use Getopt::Long;
+use Cwd qw/abs_path getcwd cwd/;
+use File::Basename;
 
 my $usage = <<USAGE;
 Usage:
@@ -55,6 +57,7 @@ GetOptions(
     "clean!" => \$clean,
 );
 $tmpPrefix ||= "blast";
+$tmpPrefix = abs_path($tmpPrefix);
 $chunk ||= 10;
 $blastProgram ||= "blastp";
 $CPU ||= 1;
