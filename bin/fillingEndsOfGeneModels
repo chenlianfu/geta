@@ -1,0 +1,707 @@
+#!/usr/bin/env perl
+
+use strict;
+use Getopt::Long;
+use Cwd qw/abs_path getcwd cwd/;
+use File::Basename;
+
+my $usage = <<USAGE;
+Usage:
+    $0 [options] genome.fasta GeneModelsInput.gff3 > GeneModelsOutput.gff3
+
+    本程序用于填补基因模型的首尾，使之完整。在GETA基因预测过程中，有一些基因模型未能被Augustus预测出来，此时仅根据transcripts或homolog预测的结果，往往首尾缺失。此时，使用本程序将首尾缺失的基因模型进行补齐。
+    本程序补齐基因模型首尾的原理：（1）对基因模型尾部直接进行延长，直至遇到终止密码子或到基因组序列最尾部；（2）对基因模型首部直接进行延长，直至遇到终止密码子，再吐出密码子碱基直至遇到起始密码子。
+    程序最终输出包含所有基因模型的GFF3文件，并给出统计信息：所有的基因模型数量、完整基因模型数量、不完整的基因模型数量、填补成完整的基因模型数量、不能填补成完整基因模型的数量。
+
+    --start_codon <string>    default: ATG
+    设置起始密码子。
+
+    --stop_codon <string>    default: TAG,TGA,TAA
+    设置终止密码子。若有多个终止密码子，则使用逗号分割。
+
+    --help    default: None
+    display this help and exit.
+
+USAGE
+if (@ARGV==0){die $usage}
+
+my ($help_flag, $start_codon, $stop_codon);
+GetOptions(
+    "help" => \$help_flag,
+    "start_codon:s" => \$start_codon,
+    "stop_codon:s" => \$stop_codon,
+);
+
+if ( $help_flag ) { die $usage }
+$start_codon ||= "ATG";
+$stop_codon ||= "TAG,TGA,TAA";
+
+my (%start_codon, %stop_codon);
+foreach (split /,/, $start_codon) { $start_codon{$_} = 1; }
+foreach (split /,/, $stop_codon) { $stop_codon{$_} = 1; }
+
+# 读取基因组序列
+my %seq = &read_genome($ARGV[0]);
+#foreach (keys %seq) { print ">$_\n$seq{$_}\n"; } 
+
+# 读取GFF3文件
+my %gene_info = &get_geneModels_from_GFF3($ARGV[1]);
+
+# 对每个基因模型进行分析
+my ($num_total, $num_complete, $num_partial, $num_filled, $num_not_filled) = (0, 0, 0, 0, 0);
+foreach my $gene_ID ( sort keys %gene_info ) {
+    $num_total ++;
+    my @gene_header = split /\t/, $gene_info{$gene_ID}{"header"};
+    my ($gene_fill_need, $gene_fill_ok) = (0, 0);
+    my ($gene_start, $gene_end) = ($gene_header[3], $gene_header[4]);
+	my $mRNA_out;
+
+    # 分别对每个mRNA进行修正
+    foreach my $mRNA_ID ( @{$gene_info{$gene_ID}{"mRNA_ID"}} ) {
+		my @mRNA_header = split /\t/, $gene_info{$gene_ID}{"mRNA_header"}{$mRNA_ID};
+        my $mRNA_info = $gene_info{$gene_ID}{"mRNA_info"}{$mRNA_ID};
+        my $genome_seq = $seq{$gene_header[0]};
+        my $strand = $gene_header[6];
+		my ($fill_need, $fill_ok, $mRNA_CDSs, $mRNA_exons) = &fillingEnd($mRNA_info, $genome_seq, $strand, $mRNA_ID);
+        $gene_fill_need = 1 if $fill_need == 1;
+        $gene_fill_ok = 1 if $fill_ok == 1;
+
+		my ($mRNA_start, $mRNA_end, $mRNA_content) = &get_mRNA_info($mRNA_CDSs, $mRNA_exons, $mRNA_ID, $mRNA_header[0], $strand);
+		$mRNA_header[3] = $mRNA_start;
+		$mRNA_header[4] = $mRNA_end;
+		$mRNA_out .= (join "\t", @mRNA_header);
+		$mRNA_out .= $mRNA_content;
+
+		$gene_start = $mRNA_start if $gene_start > $mRNA_start;
+		$gene_end = $mRNA_end if $mRNA_end > $gene_end;
+
+		#print "$mRNA_ID\tCDS\n$mRNA_CDSs\n$mRNA_ID\texon\n$mRNA_exons\n";
+    }
+
+	#输入GFF3
+	$gene_header[3] = $gene_start;
+	$gene_header[4] = $gene_end;
+	print (join "\t", @gene_header);
+	print "$mRNA_out\n";
+
+    # 统计
+    if ($gene_fill_need == 0) {
+        $num_complete ++;
+    }
+    else {
+        $num_partial ++;
+        if ($gene_fill_ok == 0) {
+            $num_not_filled ++;
+			#print STDERR "TEST: $gene_ID\n";
+        }
+        else {
+            $num_filled ++;
+        }
+    }
+}
+print STDERR "共有 $num_total 个基因模型进行了分析；其中有 $num_complete 个完整的基因模型；有 $num_partial 个不完整的基因模型；
+对其中 $num_filled 个基因模型成功进行了首尾填补；有 $num_not_filled 个基因模型未能进行完整填补。\n";
+
+
+# 子程序，根据输入的CDSs和exons信息，返回mRNA起始结束位置和详细内容
+sub get_mRNA_info {
+	my ($mRNA_CDSs, $mRNA_exons, $mRNA_ID, $chr, $strand) = @_;
+	
+	# 根据CDS边界对exon边界进行修正；得到mRNA边界；得到intron信息；得到UTR信息。
+	my (@CDS, @exon);
+	foreach ( split /\n/, $mRNA_CDSs ) { push @CDS, $_; }
+	foreach ( split /\n/, $mRNA_exons ) { push @exon, $_; }
+	@CDS = sort {$a <=> $b} @CDS;
+	@exon = sort {$a <=> $b} @exon;
+	my ($mRNA_start, $mRNA_end, $mRNA_introns, $mRNA_UTR);
+   	($mRNA_start, $mRNA_end, $mRNA_exons, $mRNA_introns) = &modify_exon(\@CDS, \@exon);
+	$mRNA_UTR = &get_UTR(\@CDS, \@exon, $strand);
+
+	# 对mRNA内容进行排序
+	my $mRNA_content = &sort_mRNA_info($chr, $strand, $mRNA_ID, $mRNA_start, $mRNA_end, $mRNA_CDSs, $mRNA_exons,$mRNA_introns, $mRNA_UTR);
+	
+	#print "TEST: $mRNA_ID\t$mRNA_start\t$mRNA_end\n";
+	return ($mRNA_start, $mRNA_end, $mRNA_content);
+}
+
+sub sort_mRNA_info {
+	my ($chr, $strand, $mRNA_ID, $mRNA_start, $mRNA_end, $mRNA_CDSs, $mRNA_exons, $mRNA_introns, $mRNA_UTR) = @_;
+	my ($mRNA_content, %sort1, %sort2);
+	# sort1：按照位置排序； sort2：按照five_prime_UTR、exon、CDS、intron、three_prime_UTR顺序进行排序。
+
+	if ( $strand eq "+" ) {
+		my $num = 0;
+		foreach ( split /\n/, $mRNA_exons ) {
+			$num ++; @_ = split /\t/, $_;
+			$sort1{"$chr\t\.\texon\t$_[0]\t$_[1]\t\.\t$strand\t.\tID=$mRNA_ID.exon$num;Parent=$mRNA_ID\n"} = $_[0];
+			$sort2{"$chr\t\.\texon\t$_[0]\t$_[1]\t\.\t$strand\t.\tID=$mRNA_ID.exon$num;Parent=$mRNA_ID\n"} = 2;
+		}
+		my $num = 0;
+		foreach ( split /\n/, $mRNA_CDSs ) {
+			$num ++; @_ = split /\t/, $_;
+			$sort1{"$chr\t\.\tCDS\t$_[0]\t$_[1]\t\.\t$strand\t$_[2]\tID=$mRNA_ID.CDS$num;Parent=$mRNA_ID\n"} = $_[0];
+			$sort2{"$chr\t\.\tCDS\t$_[0]\t$_[1]\t\.\t$strand\t$_[2]\tID=$mRNA_ID.CDS$num;Parent=$mRNA_ID\n"} = 3;
+		}
+		my $num = 0;
+		foreach ( split /\n/, $mRNA_introns ) {
+			$num ++; @_ = split /\t/, $_;
+			$sort1{"$chr\t\.\tintron\t$_[0]\t$_[1]\t\.\t$strand\t.\tID=$mRNA_ID.intron$num;Parent=$mRNA_ID\n"} = $_[0];
+			$sort2{"$chr\t\.\tintron\t$_[0]\t$_[1]\t\.\t$strand\t.\tID=$mRNA_ID.intron$num;Parent=$mRNA_ID\n"} = 4;
+		}
+		my ($num5, $num3, $num, $sort_num)= (0, 0, 0, 0);
+		foreach ( split /\n/, $mRNA_UTR ) {
+			@_ = split /\t/, $_;
+			my $UTR_type;
+			if ( $_[0] eq "five_prime_UTR" ) {
+				$UTR_type = "utr5p";
+				$num5 ++; $num = $num5; $sort_num = 1;
+			}
+			elsif ( $_[0] eq "three_prime_UTR" ) {
+				$UTR_type = "utr3p";
+				$num3 ++; $num = $num3; $sort_num = 5;
+			}
+			$sort1{"$chr\t\.\t$_[0]\t$_[1]\t$_[2]\t\.\t$strand\t.\tID=$mRNA_ID.$UTR_type$num;Parent=$mRNA_ID\n"} = $_[1];
+			$sort2{"$chr\t\.\t$_[0]\t$_[1]\t$_[2]\t\.\t$strand\t.\tID=$mRNA_ID.$UTR_type$num;Parent=$mRNA_ID\n"} = $sort_num;
+		}
+
+		foreach ( sort { $sort1{$a} <=> $sort1{$b} or $sort2{$a} cmp $sort2{$b} } keys %sort1 ) {
+			$mRNA_content .= $_;
+		}
+	}
+	elsif ( $strand eq "-" ) {
+		my $num = 0;
+		foreach ( reverse split /\n/, $mRNA_exons ) {
+			$num ++; @_ = split /\t/, $_;
+			$sort1{"$chr\t\.\texon\t$_[0]\t$_[1]\t\.\t$strand\t.\tID=$mRNA_ID.exon$num;Parent=$mRNA_ID\n"} = $_[0];
+			$sort2{"$chr\t\.\texon\t$_[0]\t$_[1]\t\.\t$strand\t.\tID=$mRNA_ID.exon$num;Parent=$mRNA_ID\n"} = 2;
+		}
+		my $num = 0;
+		foreach ( reverse split /\n/, $mRNA_CDSs ) {
+			$num ++; @_ = split /\t/, $_;
+			$sort1{"$chr\t\.\tCDS\t$_[0]\t$_[1]\t\.\t$strand\t$_[2]\tID=$mRNA_ID.CDS$num;Parent=$mRNA_ID\n"} = $_[0];
+			$sort2{"$chr\t\.\tCDS\t$_[0]\t$_[1]\t\.\t$strand\t$_[2]\tID=$mRNA_ID.CDS$num;Parent=$mRNA_ID\n"} = 3;
+		}
+		my $num = 0;
+		foreach ( reverse split /\n/, $mRNA_introns ) {
+			$num ++; @_ = split /\t/, $_;
+			$sort1{"$chr\t\.\tintron\t$_[0]\t$_[1]\t\.\t$strand\t.\tID=$mRNA_ID.intron$num;Parent=$mRNA_ID\n"} = $_[0];
+			$sort2{"$chr\t\.\tintron\t$_[0]\t$_[1]\t\.\t$strand\t.\tID=$mRNA_ID.intron$num;Parent=$mRNA_ID\n"} = 4;
+		}
+		my ($num5, $num3, $num, $sort_num)= (0, 0, 0, 0);
+		foreach ( reverse split /\n/, $mRNA_UTR ) {
+			@_ = split /\t/, $_;
+			my $UTR_type;
+			if ( $_[0] eq "five_prime_UTR" ) {
+				$UTR_type = "utr5p";
+				$num5 ++; $num = $num5; $sort_num = 1;
+			}
+			elsif ( $_[0] eq "three_prime_UTR" ) {
+				$UTR_type = "utr3p";
+				$num3 ++; $num = $num3; $sort_num = 5;
+			}
+			$sort1{"$chr\t\.\t$_[0]\t$_[1]\t$_[2]\t\.\t$strand\t.\tID=$mRNA_ID.$UTR_type$num;Parent=$mRNA_ID\n"} = $_[1];
+			$sort2{"$chr\t\.\t$_[0]\t$_[1]\t$_[2]\t\.\t$strand\t.\tID=$mRNA_ID.$UTR_type$num;Parent=$mRNA_ID\n"} = $sort_num;
+		}
+		foreach ( sort { $sort1{$b} <=> $sort1{$a} or $sort2{$a} <=> $sort2{$b} } keys %sort1 ) {
+			$mRNA_content .= $_;
+		}
+	}
+
+	return $mRNA_content;
+}
+
+# 子程序，根据CDS和exon信息得到UTR
+sub get_UTR {
+    my @cds = @{$_[0]};
+    my @exon = @{$_[1]};
+    my $strand = $_[2];
+
+    my (@utr, %cds_pos);
+    foreach (@cds) {
+        @_ = split /\t/;
+        $cds_pos{$_[0]} = 1;
+        $cds_pos{$_[1]} = 1;
+    }
+
+    foreach (@exon) {
+        my ($start, $end) = split /\t/;
+        my $utr_keep = 1;
+        foreach (@cds) {
+            @_ = split /\t/;
+            if ($_[0] <= $end && $_[1] >= $start) {
+                $utr_keep = 0;
+                if ($start < $_[0] && $end == $_[1]) {
+                    my $utr_start = $start;
+                    my $utr_end = $_[0] - 1;
+                    push @utr, "$utr_start\t$utr_end";
+                }
+                elsif ($start == $_[0] && $end > $_[1]) {
+                    my $utr_start = $_[1] + 1;
+                    my $utr_end = $end;
+                    push @utr, "$utr_start\t$utr_end";
+                }
+            }
+        }
+        push @utr, $_ if $utr_keep == 1;
+    }
+
+    my @out;
+    my @cds_pos = sort {$a <=> $b} keys %cds_pos;
+    if ($strand eq "+") {
+        @utr = sort {$a <=> $b} @utr;
+        foreach (@utr) {
+            @_ = split /\t/;
+            if ($_[1] <= $cds_pos[0]) {
+                push @out, "five_prime_UTR\t$_";
+            }
+            elsif ($_[0] >= $cds_pos[1]) {
+                push @out, "three_prime_UTR\t$_";
+            }
+        }
+    }
+    elsif ($strand eq "-") {
+        @utr = sort {$b <=> $a} @utr;
+        foreach (@utr) {
+            @_ = split /\t/;
+            if ($_[0] >= $cds_pos[1]) {
+                push @out, "five_prime_UTR\t$_";
+            }
+            elsif ($_[1] <= $cds_pos[0]) {
+                push @out, "three_prime_UTR\t$_";
+            }
+        }
+    }
+
+	my $out = join "\n", @out;
+    return $out;
+}
+
+
+# 子程序，用于能根据一个基因模型的CDSs信息对exons信息进行修正。可以将没有exons的基因模型使用CDS信息补上；可以将错误的exons信息进行修正（比如，exons之间有重叠或exon和intron有重叠）。
+# 要求输入的CDS信息是正确的，即CDSs之间不能有重叠。
+sub modify_exon {
+    # 得到CDS和exon的信息，分别放入@cds和@exon。
+    my @cds = @{$_[0]};
+    @cds = sort {$a <=> $b} @cds;
+    my @exon = @{$_[1]};
+    @exon = sort {$a <=> $b} @exon;
+    my $mRNA_ID = $_[2];
+
+    # 获得mRNA的边界。
+    my ($mRNA_start, $mRNA_end, @pos);
+    foreach (@cds) {
+        @_ = split /\t/, $_;
+        push @pos, ($_[0], $_[1]);
+    }
+    foreach (@exon) {
+        @_ = split /\t/, $_;
+        push @pos, @_;
+    }
+    @pos = sort {$a <=> $b} @pos;
+    ($mRNA_start, $mRNA_end) = ($pos[0], $pos[-1]);
+
+    # 根据CDSs信息鉴定introns。
+    my %intron;
+    my $first_CDS = shift @cds;
+    my ($last_start, $last_end) = split /\t/, $first_CDS;
+    foreach ( @cds ) {
+        my ($start, $end) = split /\t/, $_;
+        if ($start > $last_end) {
+            my $intron_start = $last_end + 1;
+            my $intron_stop = $start - 1;
+            $intron{"$intron_start\t$intron_stop"} = 1 if $intron_stop >= $intron_start;
+        }
+        ($last_start, $last_end) = ($start, $end);
+    }
+
+    # 根据exons信息鉴定introns。若两exons之间找到的intron和CDS的intron有冲突，则仅选择CDS来源的intron。
+    my $first_exon = shift @exon;
+    ($last_start, $last_end) = split /\t/, $first_exon;
+    foreach my $exon ( @exon ) {
+        my ($start, $end) = split /\t/, $exon;
+        if ($start > $last_end) {
+            my $intron_start = $last_end + 1;
+            my $intron_stop = $start - 1;
+            my $keep_intron = 1;
+            foreach ( keys %intron ) {
+                my ($intron1, $intron2) = split /\t/, $_;
+                if ( $intron1 <= $intron_stop && $intron2 >= $intron_start ) {
+                    $keep_intron = 0;
+                }
+            }
+            $intron{"$intron_start\t$intron_stop"} = 1 if ($keep_intron == 1 && $intron_stop >= $intron_start);
+        }
+        ($last_start, $last_end) = ($start, $end);
+    }
+
+    # 根据mRNA边界和introns信息得到准确的exons信息
+    my @exon_out;
+    my @intron = sort {$a <=> $b} keys %intron;
+    if (@intron) {
+        my $first_intron = shift @intron;
+        ($last_start, $last_end) = split /\t/, $first_intron;
+        my $exon_end = $last_start - 1;
+        my $exon_start = $last_end + 1;
+        push @exon_out, "$mRNA_start\t$exon_end";
+        foreach (@intron) {
+            my ($start, $end) = split /\t/, $_;
+            $exon_end = $start - 1;
+            push @exon_out, "$exon_start\t$exon_end";
+            $exon_start = $end + 1;
+        }
+        push @exon_out, "$exon_start\t$mRNA_end";
+    }
+    else {
+        push @exon_out, "$mRNA_start\t$mRNA_end";
+    }
+
+    #print ( "$mRNA_ID: " . (join ";", @exon_out) . "\n");
+	my $exon_out = join "\n", @exon_out;
+	my $intron_out = join "\n", @intron;
+    return ($mRNA_start, $mRNA_end, $exon_out, $intron_out);
+}
+
+
+# 子程序，对mRNA进行首尾填补，主要返回填补后的CDSs信息。
+sub fillingEnd {
+    my ($mRNA_info, $genome_seq, $strand, $mRNA_ID) = @_;
+    my ($fill_need, $fill_ok) = (1, 1);
+
+    # 获取 CDS 和 exon 信息
+    my (@CDS, @exon);
+    foreach ( split /\n/, $mRNA_info ) {
+        @_ = split /\t/, $_;
+        if ( m/\tCDS\t/ ) {
+            push @CDS, "$_[3]\t$_[4]\t$_[7]";
+        }
+        elsif ( m/\texon\t/ ) {
+            push @exon, "$_[3]\t$_[4]";
+        }
+    }
+    @CDS = sort {$a <=> $b} @CDS;
+    @exon = sort {$a <=> $b} @exon;
+
+    # 根据CDS获取mRNA的起始密码子和结束密码子
+    my ($mRNA_start_codon, $mRNA_end_codon) = &get_start_and_stop_codon(\@CDS, $genome_seq, $strand);
+    $fill_need = 0 if ( exists $stop_codon{$mRNA_end_codon}  && exists $start_codon{$mRNA_start_codon} );
+    #print "$mRNA_start_codon\t$mRNA_end_codon\n";
+    if ( ! exists $stop_codon{$mRNA_end_codon} ) {
+        # 修复终止密码
+        @CDS = &modify_stop(\@CDS, $genome_seq, $strand, $mRNA_ID);
+        $fill_ok = 0 if $CDS[0] == 0; shift @CDS;
+    }
+    if ( ! exists $start_codon{$mRNA_start_codon} ) {
+        # 修复起始密码
+        @CDS = &modify_start(\@CDS, $genome_seq, $strand, $mRNA_ID);
+        $fill_ok = 0 if $CDS[0] == 0; shift @CDS;
+    }
+	#foreach (@CDS) { print "$_\t$strand\n"; }
+	
+	my $CDS_out = join "\n", @CDS;
+	my $exon_out = join "\n", @exon;
+	return ($fill_need, $fill_ok, $CDS_out, $exon_out);
+}
+
+# 子程序，返回修复了终止密码子的CDS信息
+sub modify_stop {
+    # 获取CDS、基因组序列和strand信息
+    $_ = shift @_;
+    my @CDS = @{$_};
+    my ($genome_seq, $strand, $mRNA_ID) = @_;
+    @CDS = sort {$a <=> $b} @CDS;
+    my $fill_ok = 0;
+    my $genome_seq_length = length($genome_seq);
+
+    if ( $strand eq "+" ) {
+        my $CDS_terminal = pop @CDS;
+        my ($start, $end, $frame) = split /\t/, $CDS_terminal;
+        #my $end_old = $end;
+        # 根据Frame信息定位准确的CDS结束位点。
+        $end = $end - (($end - ($start + $frame) + 1) % 3);
+        #print "ERROR1: $mRNA_ID" if $end_old != $end;
+        # 得到最后一个CDS的结束位点，往后推导出终止密码子位置，或到序列结束。
+        if ( $genome_seq_length - $end >= 3 ) {
+            my $codon = substr($genome_seq, $end, 3);
+            $end += 3;
+            while ( ( ! exists $stop_codon{$codon} ) && $genome_seq_length - $end >= 3 ) {
+                $codon = substr($genome_seq, $end, 3);
+                $end += 3;
+            }
+            $fill_ok = 1 if exists $stop_codon{$codon};
+        }
+        push @CDS, "$start\t$end\t$frame";
+    }
+    elsif ( $strand eq "-" ) {
+        my $CDS_terminal = shift @CDS;
+        my ($start, $end, $frame) = split /\t/, $CDS_terminal;
+        #my $start_old = $start;
+        # 根据Frame信息定位准确的CDS结束位点。
+        $start = ($end - $frame - $start + 1) % 3 + $start;
+        #print "ERROR2: $mRNA_ID" if $start != $start_old;
+        # 得到最后一个CDS的结束位点，往后推导出终止密码子位置，或到序列起始。
+        if ( $start >= 4 ) {
+            my $codon = substr($genome_seq, $start - 4, 3);
+			$codon = reverse($codon); $codon =~ tr/ATCGatcg/TAGCTAGC/;
+            $start -= 3;
+            while ( ( ! exists $stop_codon{$codon} ) && $start >= 4 ) {
+                $codon = substr($genome_seq, $start - 4, 3);
+				$codon = reverse($codon); $codon =~ tr/ATCGatcg/TAGCTAGC/;
+                $start -= 3;
+            }
+            $fill_ok = 1 if exists $stop_codon{$codon};
+        }
+        unshift @CDS, "$start\t$end\t$frame";
+    }
+	print STDERR "Warning: 位于 $strand 链上的 $mRNA_ID 在下游未能找到终止密码子。\n" if $fill_ok == 0;
+
+    unshift @CDS, $fill_ok;
+    return @CDS;
+}
+
+# 子程序，返回修复了起始密码子的CDS信息。
+sub modify_start {
+    # 获取CDS、基因组序列和strand信息
+    $_ = shift @_;
+    my @CDS = @{$_};
+    my ($genome_seq, $strand, $mRNA_ID) = @_;
+    @CDS = sort {$a <=> $b} @CDS;
+	my @CDS_orig = @CDS;
+    my $fill_ok = 0;
+    my $genome_seq_length = length($genome_seq);
+
+    if ( $strand eq "+" ) {
+        my $CDS_first = shift @CDS;
+        my ($start, $end, $frame) = split /\t/, $CDS_first;
+        $start = $start + $frame;
+        # 得到第一个CDS起始，往前推导出终止密码子位置，或到序列起始。
+        if ( $start >= 4 ) {
+            my $codon = substr($genome_seq, $start - 4, 3);
+            $start -= 3;
+            while ( ( ! exists $stop_codon{$codon} ) && $start >= 4 ) {
+                $codon = substr($genome_seq, $start - 4, 3);
+                $start -= 3;
+            }
+            unshift @CDS, "$start\t$end\t0";
+            # 若往前找到终止密码子，则往后找起始密码子
+            if ( exists $stop_codon{$codon} ) {
+                @CDS = &locating_start_codon(\@CDS, $genome_seq, $strand, $mRNA_ID);
+				if ( $CDS[0] == 1 ) {
+					$fill_ok = 1;
+					shift @CDS;
+				}
+				else {
+					@CDS = @CDS_orig;
+				}
+            }
+            else {
+				print STDERR "Warning: 在位于 $strand 链上的 $mRNA_ID 在上游未能找到终止密码子。\n";
+            }
+        }
+        else {
+            unshift @CDS, "$start\t$end\t0";
+			print STDERR "Warning: 在位于 $strand 链上的 $mRNA_ID 上游未能找到终止密码子。\n";
+        }
+    }
+    elsif ( $strand eq "-" ) {
+        my $CDS_first = pop @CDS;
+        my ($start, $end, $frame) = split /\t/, $CDS_first;
+        $end = $end - $frame;
+        # 得到第一个CDS起始，往前推导出终止密码子位置，或到序列结束。
+        if ( $genome_seq_length - $end >= 3 ) {
+            my $codon = substr($genome_seq, $end, 3);
+			$codon = reverse($codon); $codon =~ tr/ATCGatcg/TAGCTAGC/;
+            $end += 3;
+            while ( ( ! exists $stop_codon{$codon} ) && $genome_seq_length - $end >= 3 ) {
+                $codon = substr($genome_seq, $end, 3);
+				$codon = reverse($codon); $codon =~ tr/ATCGatcg/TAGCTAGC/;
+                $end += 3;
+            }
+            push @CDS, "$start\t$end\t0";
+            # 若往前找到终止密码子，则往后找起始密码子
+            if ( exists $stop_codon{$codon} ) {
+                @CDS = &locating_start_codon(\@CDS, $genome_seq, $strand, $mRNA_ID);
+				if ( $CDS[0] == 1 ) {
+					$fill_ok = 1;
+					shift @CDS;
+				}
+				else {
+					@CDS = @CDS_orig;
+				}
+            }
+            else {
+                print STDERR "Warning: 位于 $strand 链上的 $mRNA_ID 的前端未能找到终止密码子。\n";
+            }
+        }
+        else {
+            push @CDS, "$start\t$end\t0";
+			print STDERR "Warning: 位于 $strand 链上的 $mRNA_ID 的前端未能找到终止密码子。\n";
+        }
+    }
+
+    unshift @CDS, $fill_ok;
+    return @CDS;
+}
+
+# 子程序，定位起始密码子，返回mRNA的CDS信息
+sub locating_start_codon {
+	# 获取CDS、基因组序列和strand信息
+	$_ = shift @_;
+	my @CDS = @{$_};
+	my ($genome_seq, $strand, $mRNA_ID) = @_;
+	@CDS = sort {$a <=> $b} @CDS;
+	my $fill_ok = 0;
+	my $genome_seq_length = length($genome_seq);
+
+	# 根据CDS位置信息获取序列
+	my $seq_CDS;
+	foreach ( @CDS ) {
+		@_ = split /\t/, $_;
+		$seq_CDS .= substr($genome_seq, $_[0] - 1, $_[1] - $_[0] + 1);
+	}
+	if ( $strand eq "-" ) {
+		$seq_CDS = reverse $seq_CDS;
+		$seq_CDS =~ tr/ATCGatcg/TAGCTAGC/;
+	}
+	#print STDERR "TEST(子程序locating_start_codon)：位于 $strand 链上的$mRNA_ID包含上游终止密码子的序列 $seq_CDS\n";
+
+	# 定位到第一个起始密码子
+	my $codon_num = 0;
+	while ( $seq_CDS =~ s/^(\w\w\w)// && ( ! exists $start_codon{$1} ) ) {
+		$codon_num ++;
+	}
+	if ( $seq_CDS ) {
+		$fill_ok = 1;
+		#print STDERR "TEST(子程序locating_start_codon)：位于 $strand 链上的$mRNA_ID在上游终止密码子后第 $codon_num 个密码子处找到了起始密码子。\n";
+
+	}
+	else {
+		print STDERR "Warning：位于 $strand 链上的 $mRNA_ID 在上游终止密码子后未能找到起始密码子。\n";
+	}
+
+	# 去除前 $codon_num 个密码子后，下一个密码子即是起始密码子
+	my $removed_base_num = $codon_num * 3;
+	if ( $strand eq "+" ) {
+		while ( $removed_base_num ) {
+			my $CDS = shift @CDS;
+			@_ = split /\t/, $CDS;
+			my $CDS_length = $_[1] - $_[0] + 1;
+			if ($CDS_length > $removed_base_num) {
+				$_[0] = $_[0] + $removed_base_num;
+				unshift @CDS, "$_[0]\t$_[1]\t0";
+				$removed_base_num = 0;
+			}
+			else {
+				$removed_base_num = $removed_base_num - $CDS_length;
+			}
+		}
+	}
+	elsif ( $strand eq "-" ) {
+		while ( $removed_base_num ) {
+			my $CDS = pop @CDS;
+			@_ = split /\t/, $CDS;
+			my $CDS_length = $_[1] - $_[0] + 1;
+			if ($CDS_length > $removed_base_num) {
+				$_[1] = $_[1] - $removed_base_num;
+				push @CDS, "$_[0]\t$_[1]\t0";
+				$removed_base_num = 0;
+			}
+			else {
+				$removed_base_num = $removed_base_num - $CDS_length;
+			}
+		}
+	}
+
+	unshift @CDS, $fill_ok;
+	return @CDS;
+}
+
+# 子程序，返回mRNA的起始和终止密码子
+sub get_start_and_stop_codon {
+    # 获取CDS、基因组序列和strand信息
+    $_ = shift @_;
+    my @CDS = @{$_};
+    my ($genome_seq, $strand) = @_;
+    @CDS = sort {$a <=> $b} @CDS;
+
+    my ($out_codon_start, $out_cond_end);
+    if ( $strand eq "+" ) {
+        @_ = split /\t/, $CDS[0];
+        $out_codon_start = substr($genome_seq, $_[0] - 1, 3);
+        @_ = split /\t/, $CDS[-1];
+        $out_cond_end = substr($genome_seq, $_[1] - 3, 3);
+    }
+    elsif ( $strand eq "-" ) {
+        @_ = split /\t/, $CDS[-1];
+        $out_codon_start = substr($genome_seq, $_[1] - 3, 3);
+        $out_codon_start = reverse($out_codon_start);
+        $out_codon_start =~ tr/ATCGatcg/TAGCTAGC/;
+        @_ = split /\t/, $CDS[0];
+        $out_cond_end = substr($genome_seq, $_[0] - 1, 3);
+        $out_cond_end = reverse($out_cond_end);
+        $out_cond_end =~ tr/ATCGatcg/TAGCTAGC/;
+    }
+
+    return ($out_codon_start, $out_cond_end);
+}
+
+# 子程序，返回基因的GFF3哈希信息：
+# gene_ID => "header" => gene_header
+# gene_ID => "mRNA_ID" => 数组
+# gene_ID => "mRNA_header" => mRNA_ID => mRNA_header
+# gene_ID => "mRNA_info" => mRNA_ID => mRNA_Info
+sub get_geneModels_from_GFF3 {
+    my %gene_info;
+    # 第一轮，找gene信息
+    open IN, $_[0] or die "Can not open file $_[0], $!";
+    while (<IN>) {
+        if ( m/\tgene\t.*ID=([^;\s]+)/ ) {
+            $gene_info{$1}{"header"} = $_;
+        }
+    }
+    close IN;
+    # 第二轮，找Parent值是geneID的信息，包含但不限于 mRNA 信息
+    my %mRNA_ID2gene_ID;
+    open IN, $_[0] or die "Can not open file $_[0], $!";
+    while (<IN>) {
+        if ( m/Parent=([^;]+)/ ) {
+            my $parent = $1;
+            if ( exists $gene_info{$parent} ) {
+                if ( m/ID=([^;]+)/ ) {
+                    push @{$gene_info{$parent}{"mRNA_ID"}}, $1;
+                    $gene_info{$parent}{"mRNA_header"}{$1} = $_;
+                    $mRNA_ID2gene_ID{$1} = $parent;
+                }
+            }
+        }
+    }
+    close IN;
+    # 第三轮，找Parent值不是geneID的信息
+    open IN, $_[0] or die "Can not open file $_[0], $!";
+    while (<IN>) {
+        if ( m/Parent=([^;]+)/ && exists $mRNA_ID2gene_ID{$1} ) {
+            my $parent = $1;
+            $gene_info{$mRNA_ID2gene_ID{$1}}{"mRNA_info"}{$parent} .= $_;
+        }
+    }
+    close IN;
+
+    return %gene_info;
+}
+
+
+sub read_genome {
+    open IN, $_[0] or die "Can not open file $_[0], $!";
+    my ($seq_id, %seq);
+    while (<IN>) {
+        if (m/^>(\S+)/) {
+            $seq_id = $1;
+        }
+        else {
+            chomp;
+            s/[^ATCGatcg]/N/g;
+            tr/atcgn/ATCGN/;
+            $seq{$seq_id} .= $_;
+        }
+    }
+    return %seq;
+}
