@@ -62,9 +62,13 @@ TruSeq3-PE-2.fa:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:50 TOPHRE
 --overlap 30 --min_augustus_transcriptSupport_percentage 10.0 --min_augustus_intronSupport_number 1 --min_augustus_intronSupport_ratio 0.01
 # During the step of paraAugusutusWithHints: --cpu was passed by --CPU.
 
+[pickout_better_geneModels_from_evidence]
+--overlap_ratio 0.2 --ratio1 2 --ratio2 1.5 --ratio3 0.85 --ratio4 0.85
+# 本步骤用于挑选完全来自evidence的基因模型。当evidence基因模型的CDS重叠比例低于--overlap_ratio参数值，则挑选之；当evidence基因模型的CDS范围超过与之重叠的参考基因模型CDS范围的2倍，则挑选之；当完整evidence基因模型的CDS范围超过参考基因模型CDS范围的1倍，或完整evidence基因模型的CDS长度超过参考基因模型CDS长度的1倍，则挑选之。
+
 [PfamValidateABinitio]
 --CDS_length 750 --CDS_num 2 --evalue 1e-5 --coverage 0.25
-# During the step of PfamValidateABinitio: --pfam_db was passed by --pfam_db; --cpu was passed by --CPU; --out_prefix was fixed to "combine2".
+# During the step of PfamValidateABinitio: --pfam_db was passed by --pfam_db; --cpu was passed by --CPU; --out_prefix was fixed to "combine2"
 
 [remove_genes_in_repeats]
 --ratio 0.8

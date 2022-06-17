@@ -54,35 +54,35 @@ foreach my $gene_ID ( sort keys %gene_info ) {
     my @gene_header = split /\t/, $gene_info{$gene_ID}{"header"};
     my ($gene_fill_need, $gene_fill_ok) = (0, 0);
     my ($gene_start, $gene_end) = ($gene_header[3], $gene_header[4]);
-	my $mRNA_out;
+    my $mRNA_out;
 
     # 分别对每个mRNA进行修正
     foreach my $mRNA_ID ( @{$gene_info{$gene_ID}{"mRNA_ID"}} ) {
-		my @mRNA_header = split /\t/, $gene_info{$gene_ID}{"mRNA_header"}{$mRNA_ID};
+        my @mRNA_header = split /\t/, $gene_info{$gene_ID}{"mRNA_header"}{$mRNA_ID};
         my $mRNA_info = $gene_info{$gene_ID}{"mRNA_info"}{$mRNA_ID};
         my $genome_seq = $seq{$gene_header[0]};
         my $strand = $gene_header[6];
-		my ($fill_need, $fill_ok, $mRNA_CDSs, $mRNA_exons) = &fillingEnd($mRNA_info, $genome_seq, $strand, $mRNA_ID);
+        my ($fill_need, $fill_ok, $mRNA_CDSs, $mRNA_exons) = &fillingEnd($mRNA_info, $genome_seq, $strand, $mRNA_ID);
         $gene_fill_need = 1 if $fill_need == 1;
         $gene_fill_ok = 1 if $fill_ok == 1;
 
-		my ($mRNA_start, $mRNA_end, $mRNA_content) = &get_mRNA_info($mRNA_CDSs, $mRNA_exons, $mRNA_ID, $mRNA_header[0], $strand);
-		$mRNA_header[3] = $mRNA_start;
-		$mRNA_header[4] = $mRNA_end;
-		$mRNA_out .= (join "\t", @mRNA_header);
-		$mRNA_out .= $mRNA_content;
+        my ($mRNA_start, $mRNA_end, $mRNA_content) = &get_mRNA_info($mRNA_CDSs, $mRNA_exons, $mRNA_ID, $mRNA_header[0], $strand);
+        $mRNA_header[3] = $mRNA_start;
+        $mRNA_header[4] = $mRNA_end;
+        $mRNA_out .= (join "\t", @mRNA_header);
+        $mRNA_out .= $mRNA_content;
 
-		$gene_start = $mRNA_start if $gene_start > $mRNA_start;
-		$gene_end = $mRNA_end if $mRNA_end > $gene_end;
+        $gene_start = $mRNA_start if $gene_start > $mRNA_start;
+        $gene_end = $mRNA_end if $mRNA_end > $gene_end;
 
-		#print "$mRNA_ID\tCDS\n$mRNA_CDSs\n$mRNA_ID\texon\n$mRNA_exons\n";
+        #print "$mRNA_ID\tCDS\n$mRNA_CDSs\n$mRNA_ID\texon\n$mRNA_exons\n";
     }
 
-	#输入GFF3
-	$gene_header[3] = $gene_start;
-	$gene_header[4] = $gene_end;
-	print (join "\t", @gene_header);
-	print "$mRNA_out\n";
+    #输入GFF3
+    $gene_header[3] = $gene_start;
+    $gene_header[4] = $gene_end;
+    print (join "\t", @gene_header);
+    print "$mRNA_out\n";
 
     # 统计
     if ($gene_fill_need == 0) {
@@ -92,7 +92,7 @@ foreach my $gene_ID ( sort keys %gene_info ) {
         $num_partial ++;
         if ($gene_fill_ok == 0) {
             $num_not_filled ++;
-			#print STDERR "TEST: $gene_ID\n";
+            #print STDERR "TEST: $gene_ID\n";
         }
         else {
             $num_filled ++;
@@ -105,109 +105,109 @@ print STDERR "共有 $num_total 个基因模型进行了分析；其中有 $num_
 
 # 子程序，根据输入的CDSs和exons信息，返回mRNA起始结束位置和详细内容
 sub get_mRNA_info {
-	my ($mRNA_CDSs, $mRNA_exons, $mRNA_ID, $chr, $strand) = @_;
-	
-	# 根据CDS边界对exon边界进行修正；得到mRNA边界；得到intron信息；得到UTR信息。
-	my (@CDS, @exon);
-	foreach ( split /\n/, $mRNA_CDSs ) { push @CDS, $_; }
-	foreach ( split /\n/, $mRNA_exons ) { push @exon, $_; }
-	@CDS = sort {$a <=> $b} @CDS;
-	@exon = sort {$a <=> $b} @exon;
-	my ($mRNA_start, $mRNA_end, $mRNA_introns, $mRNA_UTR);
-   	($mRNA_start, $mRNA_end, $mRNA_exons, $mRNA_introns) = &modify_exon(\@CDS, \@exon);
-	$mRNA_UTR = &get_UTR(\@CDS, \@exon, $strand);
+    my ($mRNA_CDSs, $mRNA_exons, $mRNA_ID, $chr, $strand) = @_;
+    
+    # 根据CDS边界对exon边界进行修正；得到mRNA边界；得到intron信息；得到UTR信息。
+    my (@CDS, @exon);
+    foreach ( split /\n/, $mRNA_CDSs ) { push @CDS, $_; }
+    foreach ( split /\n/, $mRNA_exons ) { push @exon, $_; }
+    @CDS = sort {$a <=> $b} @CDS;
+    @exon = sort {$a <=> $b} @exon;
+    my ($mRNA_start, $mRNA_end, $mRNA_introns, $mRNA_UTR);
+       ($mRNA_start, $mRNA_end, $mRNA_exons, $mRNA_introns) = &modify_exon(\@CDS, \@exon);
+    $mRNA_UTR = &get_UTR(\@CDS, \@exon, $strand);
 
-	# 对mRNA内容进行排序
-	my $mRNA_content = &sort_mRNA_info($chr, $strand, $mRNA_ID, $mRNA_start, $mRNA_end, $mRNA_CDSs, $mRNA_exons,$mRNA_introns, $mRNA_UTR);
-	
-	#print "TEST: $mRNA_ID\t$mRNA_start\t$mRNA_end\n";
-	return ($mRNA_start, $mRNA_end, $mRNA_content);
+    # 对mRNA内容进行排序
+    my $mRNA_content = &sort_mRNA_info($chr, $strand, $mRNA_ID, $mRNA_start, $mRNA_end, $mRNA_CDSs, $mRNA_exons,$mRNA_introns, $mRNA_UTR);
+    
+    #print "TEST: $mRNA_ID\t$mRNA_start\t$mRNA_end\n";
+    return ($mRNA_start, $mRNA_end, $mRNA_content);
 }
 
 sub sort_mRNA_info {
-	my ($chr, $strand, $mRNA_ID, $mRNA_start, $mRNA_end, $mRNA_CDSs, $mRNA_exons, $mRNA_introns, $mRNA_UTR) = @_;
-	my ($mRNA_content, %sort1, %sort2);
-	# sort1：按照位置排序； sort2：按照five_prime_UTR、exon、CDS、intron、three_prime_UTR顺序进行排序。
+    my ($chr, $strand, $mRNA_ID, $mRNA_start, $mRNA_end, $mRNA_CDSs, $mRNA_exons, $mRNA_introns, $mRNA_UTR) = @_;
+    my ($mRNA_content, %sort1, %sort2);
+    # sort1：按照位置排序； sort2：按照five_prime_UTR、exon、CDS、intron、three_prime_UTR顺序进行排序。
 
-	if ( $strand eq "+" ) {
-		my $num = 0;
-		foreach ( split /\n/, $mRNA_exons ) {
-			$num ++; @_ = split /\t/, $_;
-			$sort1{"$chr\t\.\texon\t$_[0]\t$_[1]\t\.\t$strand\t.\tID=$mRNA_ID.exon$num;Parent=$mRNA_ID\n"} = $_[0];
-			$sort2{"$chr\t\.\texon\t$_[0]\t$_[1]\t\.\t$strand\t.\tID=$mRNA_ID.exon$num;Parent=$mRNA_ID\n"} = 2;
-		}
-		my $num = 0;
-		foreach ( split /\n/, $mRNA_CDSs ) {
-			$num ++; @_ = split /\t/, $_;
-			$sort1{"$chr\t\.\tCDS\t$_[0]\t$_[1]\t\.\t$strand\t$_[2]\tID=$mRNA_ID.CDS$num;Parent=$mRNA_ID\n"} = $_[0];
-			$sort2{"$chr\t\.\tCDS\t$_[0]\t$_[1]\t\.\t$strand\t$_[2]\tID=$mRNA_ID.CDS$num;Parent=$mRNA_ID\n"} = 3;
-		}
-		my $num = 0;
-		foreach ( split /\n/, $mRNA_introns ) {
-			$num ++; @_ = split /\t/, $_;
-			$sort1{"$chr\t\.\tintron\t$_[0]\t$_[1]\t\.\t$strand\t.\tID=$mRNA_ID.intron$num;Parent=$mRNA_ID\n"} = $_[0];
-			$sort2{"$chr\t\.\tintron\t$_[0]\t$_[1]\t\.\t$strand\t.\tID=$mRNA_ID.intron$num;Parent=$mRNA_ID\n"} = 4;
-		}
-		my ($num5, $num3, $num, $sort_num)= (0, 0, 0, 0);
-		foreach ( split /\n/, $mRNA_UTR ) {
-			@_ = split /\t/, $_;
-			my $UTR_type;
-			if ( $_[0] eq "five_prime_UTR" ) {
-				$UTR_type = "utr5p";
-				$num5 ++; $num = $num5; $sort_num = 1;
-			}
-			elsif ( $_[0] eq "three_prime_UTR" ) {
-				$UTR_type = "utr3p";
-				$num3 ++; $num = $num3; $sort_num = 5;
-			}
-			$sort1{"$chr\t\.\t$_[0]\t$_[1]\t$_[2]\t\.\t$strand\t.\tID=$mRNA_ID.$UTR_type$num;Parent=$mRNA_ID\n"} = $_[1];
-			$sort2{"$chr\t\.\t$_[0]\t$_[1]\t$_[2]\t\.\t$strand\t.\tID=$mRNA_ID.$UTR_type$num;Parent=$mRNA_ID\n"} = $sort_num;
-		}
+    if ( $strand eq "+" ) {
+        my $num = 0;
+        foreach ( split /\n/, $mRNA_exons ) {
+            $num ++; @_ = split /\t/, $_;
+            $sort1{"$chr\t\.\texon\t$_[0]\t$_[1]\t\.\t$strand\t.\tID=$mRNA_ID.exon$num;Parent=$mRNA_ID\n"} = $_[0];
+            $sort2{"$chr\t\.\texon\t$_[0]\t$_[1]\t\.\t$strand\t.\tID=$mRNA_ID.exon$num;Parent=$mRNA_ID\n"} = 2;
+        }
+        my $num = 0;
+        foreach ( split /\n/, $mRNA_CDSs ) {
+            $num ++; @_ = split /\t/, $_;
+            $sort1{"$chr\t\.\tCDS\t$_[0]\t$_[1]\t\.\t$strand\t$_[2]\tID=$mRNA_ID.CDS$num;Parent=$mRNA_ID\n"} = $_[0];
+            $sort2{"$chr\t\.\tCDS\t$_[0]\t$_[1]\t\.\t$strand\t$_[2]\tID=$mRNA_ID.CDS$num;Parent=$mRNA_ID\n"} = 3;
+        }
+        my $num = 0;
+        foreach ( split /\n/, $mRNA_introns ) {
+            $num ++; @_ = split /\t/, $_;
+            $sort1{"$chr\t\.\tintron\t$_[0]\t$_[1]\t\.\t$strand\t.\tID=$mRNA_ID.intron$num;Parent=$mRNA_ID\n"} = $_[0];
+            $sort2{"$chr\t\.\tintron\t$_[0]\t$_[1]\t\.\t$strand\t.\tID=$mRNA_ID.intron$num;Parent=$mRNA_ID\n"} = 4;
+        }
+        my ($num5, $num3, $num, $sort_num)= (0, 0, 0, 0);
+        foreach ( split /\n/, $mRNA_UTR ) {
+            @_ = split /\t/, $_;
+            my $UTR_type;
+            if ( $_[0] eq "five_prime_UTR" ) {
+                $UTR_type = "utr5p";
+                $num5 ++; $num = $num5; $sort_num = 1;
+            }
+            elsif ( $_[0] eq "three_prime_UTR" ) {
+                $UTR_type = "utr3p";
+                $num3 ++; $num = $num3; $sort_num = 5;
+            }
+            $sort1{"$chr\t\.\t$_[0]\t$_[1]\t$_[2]\t\.\t$strand\t.\tID=$mRNA_ID.$UTR_type$num;Parent=$mRNA_ID\n"} = $_[1];
+            $sort2{"$chr\t\.\t$_[0]\t$_[1]\t$_[2]\t\.\t$strand\t.\tID=$mRNA_ID.$UTR_type$num;Parent=$mRNA_ID\n"} = $sort_num;
+        }
 
-		foreach ( sort { $sort1{$a} <=> $sort1{$b} or $sort2{$a} cmp $sort2{$b} } keys %sort1 ) {
-			$mRNA_content .= $_;
-		}
-	}
-	elsif ( $strand eq "-" ) {
-		my $num = 0;
-		foreach ( reverse split /\n/, $mRNA_exons ) {
-			$num ++; @_ = split /\t/, $_;
-			$sort1{"$chr\t\.\texon\t$_[0]\t$_[1]\t\.\t$strand\t.\tID=$mRNA_ID.exon$num;Parent=$mRNA_ID\n"} = $_[0];
-			$sort2{"$chr\t\.\texon\t$_[0]\t$_[1]\t\.\t$strand\t.\tID=$mRNA_ID.exon$num;Parent=$mRNA_ID\n"} = 2;
-		}
-		my $num = 0;
-		foreach ( reverse split /\n/, $mRNA_CDSs ) {
-			$num ++; @_ = split /\t/, $_;
-			$sort1{"$chr\t\.\tCDS\t$_[0]\t$_[1]\t\.\t$strand\t$_[2]\tID=$mRNA_ID.CDS$num;Parent=$mRNA_ID\n"} = $_[0];
-			$sort2{"$chr\t\.\tCDS\t$_[0]\t$_[1]\t\.\t$strand\t$_[2]\tID=$mRNA_ID.CDS$num;Parent=$mRNA_ID\n"} = 3;
-		}
-		my $num = 0;
-		foreach ( reverse split /\n/, $mRNA_introns ) {
-			$num ++; @_ = split /\t/, $_;
-			$sort1{"$chr\t\.\tintron\t$_[0]\t$_[1]\t\.\t$strand\t.\tID=$mRNA_ID.intron$num;Parent=$mRNA_ID\n"} = $_[0];
-			$sort2{"$chr\t\.\tintron\t$_[0]\t$_[1]\t\.\t$strand\t.\tID=$mRNA_ID.intron$num;Parent=$mRNA_ID\n"} = 4;
-		}
-		my ($num5, $num3, $num, $sort_num)= (0, 0, 0, 0);
-		foreach ( reverse split /\n/, $mRNA_UTR ) {
-			@_ = split /\t/, $_;
-			my $UTR_type;
-			if ( $_[0] eq "five_prime_UTR" ) {
-				$UTR_type = "utr5p";
-				$num5 ++; $num = $num5; $sort_num = 1;
-			}
-			elsif ( $_[0] eq "three_prime_UTR" ) {
-				$UTR_type = "utr3p";
-				$num3 ++; $num = $num3; $sort_num = 5;
-			}
-			$sort1{"$chr\t\.\t$_[0]\t$_[1]\t$_[2]\t\.\t$strand\t.\tID=$mRNA_ID.$UTR_type$num;Parent=$mRNA_ID\n"} = $_[1];
-			$sort2{"$chr\t\.\t$_[0]\t$_[1]\t$_[2]\t\.\t$strand\t.\tID=$mRNA_ID.$UTR_type$num;Parent=$mRNA_ID\n"} = $sort_num;
-		}
-		foreach ( sort { $sort1{$b} <=> $sort1{$a} or $sort2{$a} <=> $sort2{$b} } keys %sort1 ) {
-			$mRNA_content .= $_;
-		}
-	}
+        foreach ( sort { $sort1{$a} <=> $sort1{$b} or $sort2{$a} cmp $sort2{$b} } keys %sort1 ) {
+            $mRNA_content .= $_;
+        }
+    }
+    elsif ( $strand eq "-" ) {
+        my $num = 0;
+        foreach ( reverse split /\n/, $mRNA_exons ) {
+            $num ++; @_ = split /\t/, $_;
+            $sort1{"$chr\t\.\texon\t$_[0]\t$_[1]\t\.\t$strand\t.\tID=$mRNA_ID.exon$num;Parent=$mRNA_ID\n"} = $_[0];
+            $sort2{"$chr\t\.\texon\t$_[0]\t$_[1]\t\.\t$strand\t.\tID=$mRNA_ID.exon$num;Parent=$mRNA_ID\n"} = 2;
+        }
+        my $num = 0;
+        foreach ( reverse split /\n/, $mRNA_CDSs ) {
+            $num ++; @_ = split /\t/, $_;
+            $sort1{"$chr\t\.\tCDS\t$_[0]\t$_[1]\t\.\t$strand\t$_[2]\tID=$mRNA_ID.CDS$num;Parent=$mRNA_ID\n"} = $_[0];
+            $sort2{"$chr\t\.\tCDS\t$_[0]\t$_[1]\t\.\t$strand\t$_[2]\tID=$mRNA_ID.CDS$num;Parent=$mRNA_ID\n"} = 3;
+        }
+        my $num = 0;
+        foreach ( reverse split /\n/, $mRNA_introns ) {
+            $num ++; @_ = split /\t/, $_;
+            $sort1{"$chr\t\.\tintron\t$_[0]\t$_[1]\t\.\t$strand\t.\tID=$mRNA_ID.intron$num;Parent=$mRNA_ID\n"} = $_[0];
+            $sort2{"$chr\t\.\tintron\t$_[0]\t$_[1]\t\.\t$strand\t.\tID=$mRNA_ID.intron$num;Parent=$mRNA_ID\n"} = 4;
+        }
+        my ($num5, $num3, $num, $sort_num)= (0, 0, 0, 0);
+        foreach ( reverse split /\n/, $mRNA_UTR ) {
+            @_ = split /\t/, $_;
+            my $UTR_type;
+            if ( $_[0] eq "five_prime_UTR" ) {
+                $UTR_type = "utr5p";
+                $num5 ++; $num = $num5; $sort_num = 1;
+            }
+            elsif ( $_[0] eq "three_prime_UTR" ) {
+                $UTR_type = "utr3p";
+                $num3 ++; $num = $num3; $sort_num = 5;
+            }
+            $sort1{"$chr\t\.\t$_[0]\t$_[1]\t$_[2]\t\.\t$strand\t.\tID=$mRNA_ID.$UTR_type$num;Parent=$mRNA_ID\n"} = $_[1];
+            $sort2{"$chr\t\.\t$_[0]\t$_[1]\t$_[2]\t\.\t$strand\t.\tID=$mRNA_ID.$UTR_type$num;Parent=$mRNA_ID\n"} = $sort_num;
+        }
+        foreach ( sort { $sort1{$b} <=> $sort1{$a} or $sort2{$a} <=> $sort2{$b} } keys %sort1 ) {
+            $mRNA_content .= $_;
+        }
+    }
 
-	return $mRNA_content;
+    return $mRNA_content;
 }
 
 # 子程序，根据CDS和exon信息得到UTR
@@ -272,7 +272,7 @@ sub get_UTR {
         }
     }
 
-	my $out = join "\n", @out;
+    my $out = join "\n", @out;
     return $out;
 }
 
@@ -356,8 +356,8 @@ sub modify_exon {
     }
 
     #print ( "$mRNA_ID: " . (join ";", @exon_out) . "\n");
-	my $exon_out = join "\n", @exon_out;
-	my $intron_out = join "\n", @intron;
+    my $exon_out = join "\n", @exon_out;
+    my $intron_out = join "\n", @intron;
     return ($mRNA_start, $mRNA_end, $exon_out, $intron_out);
 }
 
@@ -395,11 +395,11 @@ sub fillingEnd {
         @CDS = &modify_start(\@CDS, $genome_seq, $strand, $mRNA_ID);
         $fill_ok = 0 if $CDS[0] == 0; shift @CDS;
     }
-	#foreach (@CDS) { print "$_\t$strand\n"; }
-	
-	my $CDS_out = join "\n", @CDS;
-	my $exon_out = join "\n", @exon;
-	return ($fill_need, $fill_ok, $CDS_out, $exon_out);
+    #foreach (@CDS) { print "$_\t$strand\n"; }
+    
+    my $CDS_out = join "\n", @CDS;
+    my $exon_out = join "\n", @exon;
+    return ($fill_need, $fill_ok, $CDS_out, $exon_out);
 }
 
 # 子程序，返回修复了终止密码子的CDS信息
@@ -441,18 +441,18 @@ sub modify_stop {
         # 得到最后一个CDS的结束位点，往后推导出终止密码子位置，或到序列起始。
         if ( $start >= 4 ) {
             my $codon = substr($genome_seq, $start - 4, 3);
-			$codon = reverse($codon); $codon =~ tr/ATCGatcg/TAGCTAGC/;
+            $codon = reverse($codon); $codon =~ tr/ATCGatcg/TAGCTAGC/;
             $start -= 3;
             while ( ( ! exists $stop_codon{$codon} ) && $start >= 4 ) {
                 $codon = substr($genome_seq, $start - 4, 3);
-				$codon = reverse($codon); $codon =~ tr/ATCGatcg/TAGCTAGC/;
+                $codon = reverse($codon); $codon =~ tr/ATCGatcg/TAGCTAGC/;
                 $start -= 3;
             }
             $fill_ok = 1 if exists $stop_codon{$codon};
         }
         unshift @CDS, "$start\t$end\t$frame";
     }
-	print STDERR "Warning: 位于 $strand 链上的 $mRNA_ID 在下游未能找到终止密码子。\n" if $fill_ok == 0;
+    print STDERR "Warning: 位于 $strand 链上的 $mRNA_ID 在下游未能找到终止密码子。\n" if $fill_ok == 0;
 
     unshift @CDS, $fill_ok;
     return @CDS;
@@ -465,7 +465,7 @@ sub modify_start {
     my @CDS = @{$_};
     my ($genome_seq, $strand, $mRNA_ID) = @_;
     @CDS = sort {$a <=> $b} @CDS;
-	my @CDS_orig = @CDS;
+    my @CDS_orig = @CDS;
     my $fill_ok = 0;
     my $genome_seq_length = length($genome_seq);
 
@@ -485,21 +485,21 @@ sub modify_start {
             # 若往前找到终止密码子，则往后找起始密码子
             if ( exists $stop_codon{$codon} ) {
                 @CDS = &locating_start_codon(\@CDS, $genome_seq, $strand, $mRNA_ID);
-				if ( $CDS[0] == 1 ) {
-					$fill_ok = 1;
-					shift @CDS;
-				}
-				else {
-					@CDS = @CDS_orig;
-				}
+                if ( $CDS[0] == 1 ) {
+                    $fill_ok = 1;
+                    shift @CDS;
+                }
+                else {
+                    @CDS = @CDS_orig;
+                }
             }
             else {
-				print STDERR "Warning: 在位于 $strand 链上的 $mRNA_ID 在上游未能找到终止密码子。\n";
+                print STDERR "Warning: 在位于 $strand 链上的 $mRNA_ID 在上游未能找到终止密码子。\n";
             }
         }
         else {
             unshift @CDS, "$start\t$end\t0";
-			print STDERR "Warning: 在位于 $strand 链上的 $mRNA_ID 上游未能找到终止密码子。\n";
+            print STDERR "Warning: 在位于 $strand 链上的 $mRNA_ID 上游未能找到终止密码子。\n";
         }
     }
     elsif ( $strand eq "-" ) {
@@ -509,24 +509,24 @@ sub modify_start {
         # 得到第一个CDS起始，往前推导出终止密码子位置，或到序列结束。
         if ( $genome_seq_length - $end >= 3 ) {
             my $codon = substr($genome_seq, $end, 3);
-			$codon = reverse($codon); $codon =~ tr/ATCGatcg/TAGCTAGC/;
+            $codon = reverse($codon); $codon =~ tr/ATCGatcg/TAGCTAGC/;
             $end += 3;
             while ( ( ! exists $stop_codon{$codon} ) && $genome_seq_length - $end >= 3 ) {
                 $codon = substr($genome_seq, $end, 3);
-				$codon = reverse($codon); $codon =~ tr/ATCGatcg/TAGCTAGC/;
+                $codon = reverse($codon); $codon =~ tr/ATCGatcg/TAGCTAGC/;
                 $end += 3;
             }
             push @CDS, "$start\t$end\t0";
             # 若往前找到终止密码子，则往后找起始密码子
             if ( exists $stop_codon{$codon} ) {
                 @CDS = &locating_start_codon(\@CDS, $genome_seq, $strand, $mRNA_ID);
-				if ( $CDS[0] == 1 ) {
-					$fill_ok = 1;
-					shift @CDS;
-				}
-				else {
-					@CDS = @CDS_orig;
-				}
+                if ( $CDS[0] == 1 ) {
+                    $fill_ok = 1;
+                    shift @CDS;
+                }
+                else {
+                    @CDS = @CDS_orig;
+                }
             }
             else {
                 print STDERR "Warning: 位于 $strand 链上的 $mRNA_ID 的前端未能找到终止密码子。\n";
@@ -534,7 +534,7 @@ sub modify_start {
         }
         else {
             push @CDS, "$start\t$end\t0";
-			print STDERR "Warning: 位于 $strand 链上的 $mRNA_ID 的前端未能找到终止密码子。\n";
+            print STDERR "Warning: 位于 $strand 链上的 $mRNA_ID 的前端未能找到终止密码子。\n";
         }
     }
 
@@ -544,75 +544,75 @@ sub modify_start {
 
 # 子程序，定位起始密码子，返回mRNA的CDS信息
 sub locating_start_codon {
-	# 获取CDS、基因组序列和strand信息
-	$_ = shift @_;
-	my @CDS = @{$_};
-	my ($genome_seq, $strand, $mRNA_ID) = @_;
-	@CDS = sort {$a <=> $b} @CDS;
-	my $fill_ok = 0;
-	my $genome_seq_length = length($genome_seq);
+    # 获取CDS、基因组序列和strand信息
+    $_ = shift @_;
+    my @CDS = @{$_};
+    my ($genome_seq, $strand, $mRNA_ID) = @_;
+    @CDS = sort {$a <=> $b} @CDS;
+    my $fill_ok = 0;
+    my $genome_seq_length = length($genome_seq);
 
-	# 根据CDS位置信息获取序列
-	my $seq_CDS;
-	foreach ( @CDS ) {
-		@_ = split /\t/, $_;
-		$seq_CDS .= substr($genome_seq, $_[0] - 1, $_[1] - $_[0] + 1);
-	}
-	if ( $strand eq "-" ) {
-		$seq_CDS = reverse $seq_CDS;
-		$seq_CDS =~ tr/ATCGatcg/TAGCTAGC/;
-	}
-	#print STDERR "TEST(子程序locating_start_codon)：位于 $strand 链上的$mRNA_ID包含上游终止密码子的序列 $seq_CDS\n";
+    # 根据CDS位置信息获取序列
+    my $seq_CDS;
+    foreach ( @CDS ) {
+        @_ = split /\t/, $_;
+        $seq_CDS .= substr($genome_seq, $_[0] - 1, $_[1] - $_[0] + 1);
+    }
+    if ( $strand eq "-" ) {
+        $seq_CDS = reverse $seq_CDS;
+        $seq_CDS =~ tr/ATCGatcg/TAGCTAGC/;
+    }
+    #print STDERR "TEST(子程序locating_start_codon)：位于 $strand 链上的$mRNA_ID包含上游终止密码子的序列 $seq_CDS\n";
 
-	# 定位到第一个起始密码子
-	my $codon_num = 0;
-	while ( $seq_CDS =~ s/^(\w\w\w)// && ( ! exists $start_codon{$1} ) ) {
-		$codon_num ++;
-	}
-	if ( $seq_CDS ) {
-		$fill_ok = 1;
-		#print STDERR "TEST(子程序locating_start_codon)：位于 $strand 链上的$mRNA_ID在上游终止密码子后第 $codon_num 个密码子处找到了起始密码子。\n";
+    # 定位到第一个起始密码子
+    my $codon_num = 0;
+    while ( $seq_CDS =~ s/^(\w\w\w)// && ( ! exists $start_codon{$1} ) ) {
+        $codon_num ++;
+    }
+    if ( $seq_CDS ) {
+        $fill_ok = 1;
+        #print STDERR "TEST(子程序locating_start_codon)：位于 $strand 链上的$mRNA_ID在上游终止密码子后第 $codon_num 个密码子处找到了起始密码子。\n";
 
-	}
-	else {
-		print STDERR "Warning：位于 $strand 链上的 $mRNA_ID 在上游终止密码子后未能找到起始密码子。\n";
-	}
+    }
+    else {
+        print STDERR "Warning：位于 $strand 链上的 $mRNA_ID 在上游终止密码子后未能找到起始密码子。\n";
+    }
 
-	# 去除前 $codon_num 个密码子后，下一个密码子即是起始密码子
-	my $removed_base_num = $codon_num * 3;
-	if ( $strand eq "+" ) {
-		while ( $removed_base_num ) {
-			my $CDS = shift @CDS;
-			@_ = split /\t/, $CDS;
-			my $CDS_length = $_[1] - $_[0] + 1;
-			if ($CDS_length > $removed_base_num) {
-				$_[0] = $_[0] + $removed_base_num;
-				unshift @CDS, "$_[0]\t$_[1]\t0";
-				$removed_base_num = 0;
-			}
-			else {
-				$removed_base_num = $removed_base_num - $CDS_length;
-			}
-		}
-	}
-	elsif ( $strand eq "-" ) {
-		while ( $removed_base_num ) {
-			my $CDS = pop @CDS;
-			@_ = split /\t/, $CDS;
-			my $CDS_length = $_[1] - $_[0] + 1;
-			if ($CDS_length > $removed_base_num) {
-				$_[1] = $_[1] - $removed_base_num;
-				push @CDS, "$_[0]\t$_[1]\t0";
-				$removed_base_num = 0;
-			}
-			else {
-				$removed_base_num = $removed_base_num - $CDS_length;
-			}
-		}
-	}
+    # 去除前 $codon_num 个密码子后，下一个密码子即是起始密码子
+    my $removed_base_num = $codon_num * 3;
+    if ( $strand eq "+" ) {
+        while ( $removed_base_num ) {
+            my $CDS = shift @CDS;
+            @_ = split /\t/, $CDS;
+            my $CDS_length = $_[1] - $_[0] + 1;
+            if ($CDS_length > $removed_base_num) {
+                $_[0] = $_[0] + $removed_base_num;
+                unshift @CDS, "$_[0]\t$_[1]\t0";
+                $removed_base_num = 0;
+            }
+            else {
+                $removed_base_num = $removed_base_num - $CDS_length;
+            }
+        }
+    }
+    elsif ( $strand eq "-" ) {
+        while ( $removed_base_num ) {
+            my $CDS = pop @CDS;
+            @_ = split /\t/, $CDS;
+            my $CDS_length = $_[1] - $_[0] + 1;
+            if ($CDS_length > $removed_base_num) {
+                $_[1] = $_[1] - $removed_base_num;
+                push @CDS, "$_[0]\t$_[1]\t0";
+                $removed_base_num = 0;
+            }
+            else {
+                $removed_base_num = $removed_base_num - $CDS_length;
+            }
+        }
+    }
 
-	unshift @CDS, $fill_ok;
-	return @CDS;
+    unshift @CDS, $fill_ok;
+    return @CDS;
 }
 
 # 子程序，返回mRNA的起始和终止密码子

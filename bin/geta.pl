@@ -253,8 +253,10 @@ my %config = (
     'prepareAugusutusHints' => '--margin 20',
     'paraAugusutusWithHints' => '--gene_prefix augustus --min_intron_len 20',
     'paraCombineGeneModels' => '--overlap 30 --min_augustus_transcriptSupport_percentage 10.0 --min_augustus_intronSupport_number 1 --min_augustus_intronSupport_ratio 0.01',
+	'pickout_better_geneModels_from_evidence' => '--overlap_ratio 0.2 --ratio1 2 --ratio2 1.5 --ratio3 0.85 --ratio4 0.85',
     'PfamValidateABinitio' => '--CDS_length 750 --CDS_num 2 --evalue 1e-5 --coverage 0.25',
-    'remove_genes_in_repeats' => '--ratio 0.8',
+    'remove_genes_in_repeats1' => '--ratio 0.3 --ignore_Simple_repeat --ignore_Unknown',
+    'remove_genes_in_repeats2' => '--ratio 0.8',
     'remove_short_genes' => '--cds_length 150',
 );
 if ($config) {
@@ -1214,26 +1216,30 @@ unless (-e "6.combineGeneModels.ok") {
     chdir "6.combineGeneModels";
     $pwd = `pwd`; print STDERR "PWD: $pwd";
 
+	# 6.1 以AUGUSTUS结果为主，进行三种基因预测结果的整合
+	# 对三种基因预测结果进行第一轮整合，以Augustus结果为准。得到 combine.1.gff3 为有Evidence支持的结果，combine.2.gff3为支持不足的结果。
     $cmdString = "$dirname/bin/paraCombineGeneModels $config{'paraCombineGeneModels'} --cpu $cpu ../5.augustus/augustus.gff3 ../3.transcript/transfrag.genome.gff3 ../4.homolog/genewise.gff3 ../5.augustus/hints.gff &> /dev/null";
-    unless (-e "paraCombineGeneModels.ok") {
+    unless (-e "01.paraCombineGeneModels.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-        open OUT, ">", "paraCombineGeneModels.ok" or die $!; close OUT;
+        open OUT, ">", "01.paraCombineGeneModels.ok" or die $!; close OUT;
     }
     else {
         print STDERR "CMD(Skipped): $cmdString\n";
     }
 
+	# 6.2 对缺少evidence支持的，AUGUSTUS重头预测的基因模型使用HMM算法进行检验和过滤
+	# 对 evidence 支持不足的基因模型 combine.2.gff3 进行HMM检验，挑选有HMM匹配结果的基因模型 combine2.filter_pass.gff3
     if ($HMM_db) {
         #$cmdString = "rm -rf command.hmmscan.list* hmmscan.tmp for_pfam_search.fasta";
-        print STDERR (localtime) . ": CMD: $cmdString\n";
-        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+		#print STDERR (localtime) . ": CMD: $cmdString\n";
+		#system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
         $cmdString = "$dirname/bin/PfamValidateABinitio --out_prefix combine2 --cpu $cpu --HMM_db $HMM_db $config{'PfamValidateABinitio'} combine.2.gff3 $genome 2> PfamValidateABinitio.1.log";
-        unless (-e "PfamValidateABinitio.1.ok") {
+        unless (-e "02.PfamValidateABinitio.ok") {
             print STDERR (localtime) . ": CMD: $cmdString\n";
             system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-            open OUT, ">", "PfamValidateABinitio.1.ok" or die $!; close OUT;
+            open OUT, ">", "02.PfamValidateABinitio.ok" or die $!; close OUT;
         }
         else {
             print STDERR "CMD(Skipped): $cmdString\n";
@@ -1241,20 +1247,52 @@ unless (-e "6.combineGeneModels.ok") {
     }
     else {
         $cmdString = "cp combine.2.gff3 combine2.filter_pass.gff3";
-        print STDERR (localtime) . ": CMD: $cmdString\n";
-        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+		unless (-e "02.PfamValidateABinitio.ok") {
+			print STDERR (localtime) . ": CMD: $cmdString\n";
+			system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+			open OUT, ">", "02.PfamValidateABinitio.ok" or die $!; close OUT;
+		}
+		else {
+			print STDERR "CMD(Skipped): $cmdString\n";
+		}
     }
 
+	# 对三种基因预测结果进行第二轮整合：（1）以主要来自Augustus预测的 combine.1.gff3 基因模型为参考，从完全由Evidence获得基因模型中挑出更好的结果；（2）再合并结果，优先选择Evidence基因模型；（3）对基因模型进行首尾填补。
+	# 6.3 从完全由Evidence得到的基因模型中挑选准确的基因模型
+	$cmdString = "$dirname/bin/pickout_better_geneModels_from_evidence $config{'pickout_better_geneModels_from_evidence'} combine.1.gff3 ../5.augustus/training/geneModels.gff3 > picked_evidence_geneModels.gff3 2> picked_evidence_geneModels.log";
+	unless (-e "03.pickout_better_geneModels_from_evidence.ok") {
+		print STDERR (localtime) . ": CMD: $cmdString\n";
+		system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+		$cmdString = "perl -p -i -e 's/Integrity=.*;//' picked_evidence_geneModels.gff3";
+		print STDERR (localtime) . ": CMD: $cmdString\n";
+		system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+		open OUT, ">", "03.pickout_better_geneModels_from_evidence.ok" or die $!; close OUT;
+	}
+	else {
+		print STDERR "CMD(Skipped): $cmdString\n";
+	}
 
-    $cmdString = "$dirname/bin/GFF3Clear --gene_prefix $gene_prefix --genome $genome combine.1.gff3 combine2.filter_pass.gff3 > genome.gff3 2> GFF3Clear.1.log";
-    unless (-e "GFF3Clear.1.ok") {
+	# 6.4 合并并优先选择完全由Evidence支持的基因模型
+    $cmdString = "$dirname/bin/GFF3Clear --genome $genome --no_attr_add picked_evidence_geneModels.gff3 combine.1.gff3 combine2.filter_pass.gff3 > genome.all.gff3 2> GFF3Clear.1.log";
+    unless (-e "04.GFF3Clear.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-        open OUT, ">", "GFF3Clear.1.ok" or die $!; close OUT;
+        open OUT, ">", "04.GFF3Clear.ok" or die $!; close OUT;
     }
     else {
         print STDERR "CMD(Skipped): $cmdString\n";
     }
+
+	# 6.5 对所有基因模型进行首尾强制填补
+	$cmdString = "$dirname/bin/fillingEndsOfGeneModels $genome genome.all.gff3 > genome.all.filledEnds.gff3 2> fillingEndsOfGeneModels.log";
+	unless (-e "05.fillingEndsOfGeneModels.ok") {
+		print STDERR (localtime) . ": CMD: $cmdString\n";
+		system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+		open OUT, ">", "05.fillingEndsOfGeneModels.ok" or die $!; close OUT;
+	}
+	else {
+		print STDERR "CMD(Skipped): $cmdString\n";
+	}
 
     open OUT1, ">", "genome.completed.gff3" or die $!;
     open OUT2, ">", "genome.partial.gff3" or die $!;
@@ -1277,53 +1315,69 @@ unless (-e "6.combineGeneModels.ok") {
     }
     $/ = "\n";
 
-    $cmdString = "$dirname/bin/remove_genes_in_repeats $config{'remove_genes_in_repeats'} --filtered_gene_models genome.completed.genes_in_repeats.gff3 ../0.RepeatMasker/genome.repeat.gff3 genome.completed.gff3 > genome.completed.rm_genes_in_repeats.gff3 2> remove_genes_in_repeats.txt";
-    unless (-e "remove_genes_in_repeats.ok") {
+	# 6.6 去除CDS区域和转座子序列重叠过多(默认重叠比例>= 0.3)的基因模型
+    $cmdString = "$dirname/bin/remove_genes_in_repeats $config{'remove_genes_in_repeats1'} --filtered_gene_models genome.all.filledEnds.genes_in_repeats1.gff3 ../0.RepeatMasker/genome.repeat.gff3 genome.all.filledEnds.gff3 > genome.all.filledEnds.rm_genes_in_repeats1.gff3 2> remove_genes_in_repeats1.txt";
+    unless (-e "06.remove_genes_in_repeats.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-        open OUT, ">", "remove_genes_in_repeats.ok" or die $!; close OUT;
+        open OUT, ">", "06.remove_genes_in_repeats.ok" or die $!; close OUT;
     }
     else {
         print STDERR "CMD(Skipped): $cmdString\n";
     }
 
+	# 6.7 去除CDS区域和任意类型重复序列重叠过多(默认重叠比例>= 0.8)的基因模型
+    $cmdString = "$dirname/bin/remove_genes_in_repeats $config{'remove_genes_in_repeats2'} --filtered_gene_models genome.all.filledEnds.genes_in_repeats2.gff3 ../0.RepeatMasker/genome.repeat.gff3 genome.all.filledEnds.rm_genes_in_repeats1.gff3 > genome.all.filledEnds.rm_genes_in_repeats.gff3 2> remove_genes_in_repeats2.txt";
+    unless (-e "07.remove_genes_in_repeats.ok") {
+        print STDERR (localtime) . ": CMD: $cmdString\n";
+        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+        open OUT, ">", "07.remove_genes_in_repeats.ok" or die $!; close OUT;
+    }
+    else {
+        print STDERR "CMD(Skipped): $cmdString\n";
+    }
+
+	# 去除CDS长度较短的基因模型，要求HMM数据库支持
     if ($HMM_db) {
         $cmdString = "rm -rf command.hmmscan.list* hmmscan.tmp for_pfam_search.fasta";
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
-        $cmdString = "$dirname/bin/remove_short_genes $config{'remove_short_genes'} genome.completed.rm_genes_in_repeats.gff3 > genome.completed.rm_genes_in_repeats.remove_short_genes.gff3 2> genome.completed.rm_genes_in_repeats.short_genes.gff3";
-        unless (-e "remove_short_genes.ok") {
+		# 6.8 分类CDS长度较短的基因模型
+        $cmdString = "$dirname/bin/remove_short_genes $config{'remove_short_genes'} genome.all.filledEnds.rm_genes_in_repeats.gff3 > genome.all.filledEnds.rm_genes_in_repeats.remove_short_genes.gff3 2> genome.all.filledEnds.rm_genes_in_repeats.short_genes.gff3";
+        unless (-e "08.remove_short_genes.ok") {
             print STDERR (localtime) . ": CMD: $cmdString\n";
             system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-            open OUT, ">", "remove_short_genes.ok" or die $!; close OUT;
+            open OUT, ">", "08.remove_short_genes.ok" or die $!; close OUT;
         }
         else {
             print STDERR "CMD(Skipped): $cmdString\n";
         }
 
-        $cmdString = "$dirname/bin/PfamValidateABinitio --out_prefix remove_short_genes --cpu $cpu --HMM_db $HMM_db $config{'PfamValidateABinitio'} genome.completed.rm_genes_in_repeats.short_genes.gff3 $genome 2> PfamValidateABinitio.2.log";
-        unless (-e "PfamValidateABinitio.2.ok") {
+		# 6.9 对CDS较短的基因模型进行HMM检测和过滤
+        $cmdString = "$dirname/bin/PfamValidateABinitio --out_prefix remove_short_genes --cpu $cpu --HMM_db $HMM_db $config{'PfamValidateABinitio'} genome.all.filledEnds.rm_genes_in_repeats.short_genes.gff3 $genome 2> PfamValidateABinitio.2.log";
+        unless (-e "09.PfamValidateABinitio.2.ok") {
             print STDERR (localtime) . ": CMD: $cmdString\n";
             system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-            open OUT, ">", "PfamValidateABinitio.2.ok" or die $!; close OUT;
+            open OUT, ">", "09.PfamValidateABinitio.2.ok" or die $!; close OUT;
         }
         else {
             print STDERR "CMD(Skipped): $cmdString\n";
         }
 
-        $cmdString = "$dirname/bin/GFF3Clear --gene_prefix $gene_prefix --genome $genome --no_attr_add genome.completed.rm_genes_in_repeats.remove_short_genes.gff3 remove_short_genes.filter_pass.gff3 > genome.filter.gff3 2> GFF3Clear.2.log";
-        unless (-e "GFF3Clear.2.ok") {
+		# 6.10 合并经过HMM检测且CDS较短的基因模型
+        $cmdString = "$dirname/bin/GFF3Clear --genome $genome --no_attr_add genome.all.filledEnds.rm_genes_in_repeats.remove_short_genes.gff3 remove_short_genes.filter_pass.gff3 > genome.filter.gff3 2> GFF3Clear.2.log";
+        unless (-e "10.GFF3Clear.ok") {
             print STDERR (localtime) . ": CMD: $cmdString\n";
             system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-            open OUT, ">", "GFF3Clear.2.ok" or die $!; close OUT;
+            open OUT, ">", "10.GFF3Clear.ok" or die $!; close OUT;
         }
         else {
             print STDERR "CMD(Skipped): $cmdString\n";
         }
     }
     else {
-        $cmdString = "cp genome.completed.rm_genes_in_repeats.gff3 genome.filter.gff3";
+        $cmdString = "cp genome.all.filledEnds.rm_genes_in_repeats.gff3 genome.filter.gff3";
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
     }

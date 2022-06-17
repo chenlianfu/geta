@@ -11,17 +11,30 @@ Usage:
 
     程序用于挑选出更优的有证据支持的基因模型。
 
-    程序将 evidence.geneModels.gff3 文件中的基因模型和 ref.geneModels.gff3 进行比较。(1) 若evidence基因模型不和ref基因模型重叠，则挑选出来；(2) 否则，当 CDS重叠区碱基数 / evidence基因模型CDS总碱基数 < 阈值[0.2]，则挑选出来；(3) 当 CDS重叠区碱基数 / evidence基因模型CDS总碱基数 >= 阈值[0.2] 或 当 CDS重叠区碱基数 / ref基因模型CDS总碱基数 >= 阈值[0.2]时，认为基因有重叠：继而当evidence基因模型的CDS范围（首尾CDS坐标差）> ref基因模型 * 系数阈值[2]，则挑选出来，当evidence基因模型的CDS范围（首尾CDS坐标差）> ref基因模型的CDS范围 * 系数阈值[1] 或 evidence基因模型的CDS长度 > ref基因模型的CDS长度时 * 系数阈值[1]，且evidence基因模型是完整的，则挑选出来。
-    以上操作方式，是为了解决GETA软件对大型动物基因组的基因预测结果中，往往由于intron较长导致一个gene被预测成多个genes的问题。此外，evidence.geneModels.gff3中的完整基因模型可能和Augustus预测的基因模型有较小差异，后者可能更准确，前者的CDS总长度偏低，不需要对这些重叠区域较大且有evidence支持的基因进行保留。
+    程序将 evidence.geneModels.gff3 文件中的基因模型和 ref.geneModels.gff3 进行比较，挑选出没有重叠或有重叠而更准确的基因模型。挑选方法如下：
+    (1) 若evidence基因模型完全没有和ref基因模型重叠，则挑选出来。
+    (2) 当 CDS重叠区碱基数 / evidence基因模型CDS总碱基数 < 阈值[0.2]，认为重叠较少，则挑选出来。
+    (3) 当 CDS重叠区碱基数 / evidence基因模型CDS总碱基数 >= 阈值[0.2]，认为基因有重叠，进一步挑选：当evidence基因模型的CDS范围（首尾CDS坐标差）> ref基因模型的CDS范围 * 系数阈值[2]，则挑选出来；当evidence基因模型的CDS长度 > ref基因模型 * 系数阈值[1.5]，则挑选出来；当完整evidence基因模型(根据GFF3文件中的Integrity=complete信息)的CDS范围（首尾CDS坐标差）> ref基因模型的CDS范围 * 系数阈值[0.85]，则挑选出来；当完整evidence基因模型的CDS长度 > ref基因模型的CDS长度 * 系数阈值[0.85]，则挑选出来。
+
+    本程序用于使用evidence来优化基因模型。解决了旧版本GETA软件对大型动物基因组的基因预测结果中，往往由于intron较长导致一个gene被预测成多个genes的问题。
 
     --overlap_ratio <float>    default: 0.2
     设置阈值，CDS重叠区碱基数 / 目标基因模型CDS总碱基数。当重叠小于该阈值，即认为来自evidence的基因模型在参考基因模型中不存在，则将其挑选出来。
 
     --ratio1 <float>    default: 2
-    系数阈值，当evidence基因模型和ref基因模型重叠，且evidence基因模型的CDS范围（首尾CDS坐标差）> ref基因模型 * 系数阈值，则挑选出来。
+    系数阈值，当evidence基因模型和ref基因模型重叠，且evidence基因模型的CDS范围（首尾CDS坐标差）> ref基因模型 * 系数阈值，则挑选出来。若是intron长度较长的大型基因组物种，可以考虑增加该值大小。
 
-    --ratio2 <float>    default: 1
-    系数阈值，当evidence基因模型和ref基因模型重叠，evidence基因模型的CDS范围（首尾CDS坐标差）> ref基因模型的CDS范围 * 系数阈值 或 evidence基因模型的CDS长度 > ref基因模型的CDS长度时 * 系数阈值，且evidence基因模型是完整的，则挑选出来。
+    --ratio2 <float>    default: 1.5
+    系数阈值，当evidence基因模型和ref基因模型重叠，且evidence基因模型的CDS长度 > ref基因模型 * 系数阈值，则挑选出来。
+
+    --ratio3 <float>    default: 0.85
+    系数阈值，当完整evidence基因模型和ref基因模型重叠，且完整evidence基因模型的CDS范围（首尾CDS坐标差）> ref基因模型的CDS范围 * 系数阈值，则挑选出来。本参数推荐设置范围为 0.8 - 1 。
+
+    --ratio4 <float>    default: 0.85
+    系数阈值，当完整evidence基因模型和ref基因模型重叠，且完整evidence基因模型的CDS长度 > ref基因模型的CDS长度时 * 系数阈值，则挑选出来。本参数推荐设置范围为 0.8 - 1 。
+
+    注意，有很多5p端缺失的evidence基因模型，在AUGUSTUS预测结果中是完整的。原因是从AUGUSUTS预测的起始密码子开始，往上游仍然可以连续翻译成氨基酸，且未能找到终止密码子。此时，会出现evidence基因模型是5p端缺失，其CDS范围和长度却比ref基因要大。此种情形不应该以evidence基因模型为准，程序通过要求是完整的evidence基因来进行正确操作。
+    当然，也有很多完整的evidence基因模型，其CDS和AUGUSTUS结果一致，或起始密码子在更上游的位置。当--ratio3或--ratio4参数值低于1时，则本程序也会挑选出来。
 
     --help    default: None
     display this help and exit.
@@ -29,16 +42,20 @@ Usage:
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($help_flag, $overlap_ratio, $Ratio1, $Ratio2);
+my ($help_flag, $overlap_ratio, $Ratio1, $Ratio2, $Ratio3, $Ratio4);
 GetOptions(
     "help" => \$help_flag,
     "overlap_ratio:f" => \$overlap_ratio,
     "ratio1:f" => \$Ratio1,
     "ratio2:f" => \$Ratio2,
+    "ratio3:f" => \$Ratio3,
+    "ratio4:f" => \$Ratio4,
 );
 $overlap_ratio ||= 0.2;
 $Ratio1 ||= 2;
-$Ratio2 ||= 1;
+$Ratio2 ||= 1.5;
+$Ratio3 ||= 0.85;
+$Ratio4 ||= 0.85;
 if ( $help_flag ) { die $usage }
 
 # 读取ref.geneModels.gff3
@@ -57,8 +74,9 @@ my %evidenceGeneModels = &get_geneModels_from_GFF3(\@lines);
 close IN;
 
 my %picked_genes;
-my ($pick_num1, $pick_num2, $pick_num3, $pick_num4) = (0, 0, 0, 0);
+my ($total_evidence_gene_num, %pick_num1, %pick_num2, %pick_num3, %pick_num4, %pick_num5);
 foreach my $gene_ID ( keys %evidenceGeneModels ) {
+    $total_evidence_gene_num ++;
     # 检测基因的CDS区间，得到重叠的ref基因信息
     my @gene_header = split /\t/, $evidenceGeneModels{$gene_ID}{"header"};
     my (%CDS_position, $gene_info);
@@ -100,24 +118,26 @@ foreach my $gene_ID ( keys %evidenceGeneModels ) {
             my $CDS_length = &get_gene_CDS_length(\@CDS_region);
             my $ref_CDS_length = &get_gene_CDS_length(\@ref_CDS_region);
             my $ratio1 = $match_length / $CDS_length;
-            my $ratio2 = $match_length / $ref_CDS_length;
+            my $ratio4 = $match_length / $ref_CDS_length;
             my $CDS_region_span = &get_CDS_region_span(\@CDS_region);
             my $ref_CDS_region_span = &get_CDS_region_span(\@ref_CDS_region);
 
-            if ( $ratio1 > $overlap_ratio or $ratio2 > $overlap_ratio ) {
-                if ( $CDS_region_span > $ref_CDS_region_span * $Ratio1 ) {
+            #if ( $ratio1 > $overlap_ratio or $ratio4 > $overlap_ratio ) {
+            if ( $ratio1 >= $overlap_ratio ) {
+                if ( $CDS_region_span > $ref_CDS_region_span * $Ratio1 or $CDS_length > $ref_CDS_length * $Ratio2 ) {
                     $picked_genes{$gene_ID} = 1;
-                    $pick_num3 ++;
-                    #print STDERR "TEST03: $gene_ID\t$ref_gene_ID\t$ratio1\t$ratio2\t$CDS_length\t$ref_CDS_length\n";
+                    $pick_num3{$gene_ID} ++;
+                    #print STDERR "TEST03: $gene_ID\t$ref_gene_ID\t$ratio1\t$ratio4\t$CDS_region_span\t$ref_CDS_region_span\t$CDS_length\t$ref_CDS_length\n";
                 }
-                elsif ( $CDS_region_span > $ref_CDS_region_span * $Ratio2 or $CDS_length > $ref_CDS_length * $Ratio2 ) {
+                elsif ( $CDS_region_span > $ref_CDS_region_span * $Ratio3 or $CDS_length > $ref_CDS_length * $Ratio4 ) {
+                    my $CDS_region = join "\n", @CDS_region;
+                    my $ref_CDS_region = join "\n", @ref_CDS_region;
                     if ( $header_of_gene_and_mRNA =~ m/Integrity=complete/ ) {
                         $picked_genes{$gene_ID} = 1;
-                        $pick_num4 ++;
-                        #print STDERR "TEST04: $gene_ID\t$ref_gene_ID\t$ratio1\t$ratio2\t$CDS_length\t$ref_CDS_length\n";
+                        $pick_num4{$gene_ID} ++;
+                        $pick_num5{$gene_ID} ++ if $CDS_region eq $ref_CDS_region;
+                        #print STDERR "TEST04: $gene_ID\t$ref_gene_ID\t$ratio1\t$ratio4\t$CDS_length\t$ref_CDS_length\n";
                     }
-                    $picked_genes{$gene_ID} = 1;
-
                 }
             }
 
@@ -126,17 +146,17 @@ foreach my $gene_ID ( keys %evidenceGeneModels ) {
         if ( $ratio < $overlap_ratio ) {
             $picked_genes{$gene_ID} = 1;
             if ( $ratio > 0 ) {
-                $pick_num2 ++;
+                $pick_num2{$gene_ID} ++;
             }
             else {
-                $pick_num1 ++;
+                $pick_num1{$gene_ID} ++;
             }
             #print STDERR "TEST02: $gene_ID\t$ratio\n";
         }
     }
     else {
         $picked_genes{$gene_ID} = 1;
-        $pick_num1 ++;
+        $pick_num1{$gene_ID} ++;
         #print STDERR "TEST01: $gene_ID\n";
     }
 
@@ -151,13 +171,20 @@ foreach my $gene_ID (keys %picked_genes) {
     print "\n";
 }
 
-my $pick_num_total = $pick_num1 + $pick_num2 + $pick_num3 + $pick_num4;
+my ($pick_num1, $pick_num2, $pick_num3, $pick_num4, $pick_num5) = (0, 0, 0, 0);
+$pick_num1 = keys %pick_num1;
+$pick_num2 = keys %pick_num2;
+$pick_num3 = keys %pick_num3;
+$pick_num4 = keys %pick_num4;
+$pick_num5 = keys %pick_num5;
+my $pick_num_total = keys %picked_genes;;
 $overlap_ratio = $overlap_ratio * 100;
-print STDERR "有 $pick_num1 个evidence基因模型和ref基因没有任何重叠；
+print STDERR "对 $total_evidence_gene_num 个evidence基因模型进行分析，结果如下：
+有 $pick_num1 个evidence基因模型和ref基因没有任何重叠；
 有 $pick_num2 个evidence基因模型，其CDS区域低于 $overlap_ratio% 和ref基因重叠；
-有 $pick_num3 个evidence基因模型，其CDS范围 > ref基因模型CDS范围 * $Ratio1; 
-有 $pick_num4 个完整的evidence基因模型，其CDS范围 > ref基因模型CDS范围 * $Ratio2 或 CDS总长度 > 重叠的ref基因模型CDS总长度 * $Ratio2；
-共计 $pick_num_total 个evidence基因模型被挑选出来。\n";
+有 $pick_num3 个evidence基因模型，其CDS区域不低于 $overlap_ratio% 和ref基因重叠，且其CDS范围(首尾CDS坐标差) > ref基因模型CDS范围 * $Ratio1 或 CDS总长度 > 重叠的ref基因模型CDS总长度 * $Ratio2; 
+有 $pick_num4 个完整的evidence基因模型(其中 $pick_num5 个evidnece基因模型的CDS信息和ref基因模型完全一致)，其CDS区域不低于 $overlap_ratio% 和ref基因重叠，且其CDS范围(首尾CDS坐标差) > ref基因模型CDS范围 * $Ratio3 或 CDS总长度 > 重叠的ref基因模型CDS总长度 * $Ratio4；
+共计 $pick_num_total 个evidence基因模型被挑选出来。由于本程序能分析可变剪接的信息，前四个值之和可能大于最后的总数。\n";
 
 
 ############################ 子程序 ########################

@@ -4,7 +4,7 @@ use Getopt::Long;
 
 my $usage = <<USAGE;
 Usage:
-    perl $0 [options] combine.2.gff3 genome.fasta 2> PfamValidateABinitio.log
+    perl $0 [options] combine.2.gff3 genome.fasta 2> HMMValidateABinitio.log
 
     程序对combine.2.gff3文件中的基因模型进行过滤。首先，若基因模型的CDS总长度>=750且CDS个数>=2个，则保留该基因模型；再对剩下的基因模型使用PFAM数据库进行比对，若能比对上，则进行保留。若combine.2.gff3文件包含可变剪接，则使用其ORF最长的转录本进行分析。
 
@@ -16,21 +16,21 @@ Usage:
     CDS总长度不小于750，且CDS个数不小于2个，则保留该基因模型。
 
     --cpu <int>    default: 1
-    设置进行pfam分析时的并行数
+    设置进行HMM分析时的并行数
 
     --evalue <float>    default: 1e-5
-    设置Pfam的evalue阈值
+    设置HMM的evalue阈值
 
     --coverage <float>    default: 0.25
-    设置Pfam的覆盖度阈值
+    设置HMM的覆盖度阈值
 
-    --pfam_db <string>    default: /opt/biosoft/hmmer-3.1b2/Pfam-AB.hmm
-    设置Pfam数据库路径
+    --HMM_db <string>    default: /opt/biosoft/hmmer/HMM-AB.hmm
+    设置HMM数据库路径
 
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($out_prefix, $CDS_length, $CDS_num, $cpu, $evalue, $coverage, $pfam_db);
+my ($out_prefix, $CDS_length, $CDS_num, $cpu, $evalue, $coverage, $HMM_db);
 GetOptions(
     "out_prefix:s" => \$out_prefix,
     "CDS_length:i" => \$CDS_length,
@@ -38,7 +38,7 @@ GetOptions(
     "cpu:i" => \$cpu,
     "evalue:f" => \$evalue,
     "coverage:f" => \$coverage,
-    "pfam_db:s" => \$pfam_db,
+    "HMM_db:s" => \$HMM_db,
 );
 
 $out_prefix ||= "out";
@@ -47,7 +47,7 @@ $CDS_num ||= 2;
 $cpu ||= 1;
 $evalue ||= 1e-5;
 $coverage ||= 0.25;
-$pfam_db ||= "/opt/biosoft/hmmer-3.1b2/Pfam-AB.hmm";
+$HMM_db ||= "/opt/biosoft/hmmer/HMM-AB.hmm";
 
 open IN, $ARGV[0] or die $!;
 my (%gff, $id, @id, %id);
@@ -101,7 +101,7 @@ foreach my $gene_id (@id) {
     }
 }
 
-open FASTA, ">", "for_pfam_search.fasta" or die $!;
+open FASTA, ">", "for_HMM_search.fasta" or die $!;
 open CMD, ">", "command.hmmscan.list" or die $!;
 mkdir "hmmscan.tmp" unless -e "hmmscan.tmp";
 my %gene_length_0;
@@ -138,8 +138,8 @@ foreach my $gene_id (@id) {
         open OUT, ">", "hmmscan.tmp/$gene_id.fasta" or die $!;
         print OUT ">$gene_id\n$pep_seq\n";
         close OUT;
-        print CMD "hmmscan -o hmmscan.tmp/$gene_id.txt --cpu 1 -E 1e-3 --domE 1e-3 --tblout hmmscan.tmp/$gene_id.tbl --domtblout hmmscan.tmp/$gene_id.domtbl $pfam_db hmmscan.tmp/$gene_id.fasta\n" unless exists $gene_long{$gene_id};
-        #print CMD "hmmscan -o hmmscan.tmp/$gene_id.txt --cpu 1 -E 1e-3 --domE 1e-3 --tblout hmmscan.tmp/$gene_id.tbl --domtblout hmmscan.tmp/$gene_id.domtbl $pfam_db hmmscan.tmp/$gene_id.fasta\n";
+        print CMD "hmmscan -o hmmscan.tmp/$gene_id.txt --cpu 1 -E 1e-3 --domE 1e-3 --tblout hmmscan.tmp/$gene_id.tbl --domtblout hmmscan.tmp/$gene_id.domtbl $HMM_db hmmscan.tmp/$gene_id.fasta\n" unless exists $gene_long{$gene_id};
+        #print CMD "hmmscan -o hmmscan.tmp/$gene_id.txt --cpu 1 -E 1e-3 --domE 1e-3 --tblout hmmscan.tmp/$gene_id.tbl --domtblout hmmscan.tmp/$gene_id.domtbl $HMM_db hmmscan.tmp/$gene_id.fasta\n";
     }
     else {
         $gene_length_0{$gene_id} = 1;
@@ -231,8 +231,8 @@ $short_ratio = int(($short_ok_num / $short_num) * 100) / 100 if $short_num;
 print STDERR "
               \tTotal gene\tLong gene\tShort gene
 Gene number   \t$total_num\t$long_num\t$short_num
-Pfam validated\t$ok_num\t$long_ok_num\t$short_ok_num
-Pfam ratio    \t$ratio\t$long_ratio\t$short_ratio\n
+HMM validated\t$ok_num\t$long_ok_num\t$short_ok_num
+HMM ratio    \t$ratio\t$long_ratio\t$short_ratio\n
 note: Long Gene means (CDS number >= $CDS_num && CDS length >= $CDS_length)\n";
 
 sub match_length {

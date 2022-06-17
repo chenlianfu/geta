@@ -852,7 +852,7 @@ sub get_attr {
         push @out, $_;
     }
     my $out = join ";", @out;
-    $out .= ';';
+    $out .= ';' if $out;
     return $out;
 }
 
