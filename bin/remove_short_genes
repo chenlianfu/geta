@@ -6,51 +6,51 @@ my $usage = <<USAGE;
 Usage:
     $0 genome.gff3 > genome.filter.gff3 2> genome.short_genes.gff3
 
-	--cds_length <int>    default: 300
-	the longest CDS length of a transcript of a gene < this value, the gene models will be output to STDERR.
+    --cds_length <int>    default: 300
+    the longest CDS length of a transcript of a gene < this value, the gene models will be output to STDERR.
 
 USAGE
 if (@ARGV==0) {die $usage}
 
 my $cds_length;
 GetOptions (
-	"cds_length:i" => \$cds_length,
+    "cds_length:i" => \$cds_length,
 );
 $cds_length ||= 300;
 
 open IN, $ARGV[0] or die "Can not open file $ARGV[0], $!\n";
 my (%gene, %mRNA_length, %GFF3, $gene_id, @gene_id);
 while (<IN>) {
-	if (m/\tgene\t/) {
-		$gene_id = $1 if m/ID=([^;\s]+)/;
-		push @gene_id, $gene_id;
-	}
-	elsif (m/\tmRNA\t/) {
-		@_ = split /\t/;
-		my %i = $_[8] =~ m/([^;\s]+)=([^;\s]+)/g;
-		$gene{$i{'Parent'}}{$i{'ID'}} = 1;
-	}
-	elsif (m/\tCDS\t/) {
-		@_ = split /\t/;
-		if ($_[8] =~ m/Parent=([^;\s]+)/) {
-			my $mRNA_id = $1;
-			$mRNA_length{$mRNA_id} += ($_[4] - $_[3] + 1);
-		}
-	}
+    if (m/\tgene\t/) {
+        $gene_id = $1 if m/ID=([^;\s]+)/;
+        push @gene_id, $gene_id;
+    }
+    elsif (m/\tmRNA\t/) {
+        @_ = split /\t/;
+        my %i = $_[8] =~ m/([^;\s]+)=([^;\s]+)/g;
+        $gene{$i{'Parent'}}{$i{'ID'}} = 1;
+    }
+    elsif (m/\tCDS\t/) {
+        @_ = split /\t/;
+        if ($_[8] =~ m/Parent=([^;\s]+)/) {
+            my $mRNA_id = $1;
+            $mRNA_length{$mRNA_id} += ($_[4] - $_[3] + 1);
+        }
+    }
 
-	$GFF3{$gene_id} .= $_;
+    $GFF3{$gene_id} .= $_;
 }
 close IN;
 
 foreach my $gene (@gene_id) {
-	my @mRNA = sort {$mRNA_length{$b} <=> $mRNA_length{$a}} keys %{$gene{$gene}};
-	my $length = $mRNA_length{$mRNA[0]};
-	
-	if ($length >= $cds_length) {
-		print $GFF3{$gene};
-	}
-	else {
-		#print STDERR "$gene\t$length\n";
-		print STDERR $GFF3{$gene};
-	}
+    my @mRNA = sort {$mRNA_length{$b} <=> $mRNA_length{$a}} keys %{$gene{$gene}};
+    my $length = $mRNA_length{$mRNA[0]};
+    
+    if ($length >= $cds_length) {
+        print $GFF3{$gene};
+    }
+    else {
+        #print STDERR "$gene\t$length\n";
+        print STDERR $GFF3{$gene};
+    }
 }
