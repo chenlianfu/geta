@@ -1,0 +1,730 @@
+#!/usr/bin/env perl
+
+use strict;
+use Getopt::Long;
+use Cwd qw/abs_path getcwd cwd/;
+use File::Basename;
+
+my $usage = <<USAGE;
+Usage:
+    $0 [options] geneModels.gff3 intron.txt base_depth.txt > out.gff3 2> alternative_splicing.stats
+
+    程序根据intron信息进行，在GFF3文件中添加可变剪接转录本信息，并对可变剪接进行统计。
+
+    【输入文件要求】：
+    GFF3文件必须有exon信息，支持输入带可变剪接的GFF3文件，但推荐使用不带可变剪接的GFF3文件。
+    intron.txt文件使用制表符分割，有7列：转录本ID(本程序不利用该列信息)、基因组序列ID、正负链、intron起始、intron结束、intron测序深度、intron区域的碱基测序深度中位数。
+    base_depth.txt文件使用制表符分割，有4列：基因组序列ID、正负链、碱基的坐标位置、碱基测序深度。
+
+    【程序运行原理】：
+    程序对一个个基因模型独立进行分析；先得到单个基因模型中所有mRNA的所有intron，得到基因的ref intron信息；从intron.txt和base_depth.txt文件得到evidence intron和测序深度信息；将intron.txt中的evidence intron信息进行比较，找到所有可信的introns；对有重叠的introns进行进而可变剪接分析；最后得到包含可变剪接的GFF3文件。
+    程序的核心算法是根据有重叠的introns进行可变剪接分析：（1）先将所有的可信introns根据重叠进行聚类；（2）对一类有重叠的introns进行可变剪接分析时，将introns分成多套没有重叠的introns并根据introns测序深度来决定多套之间的比例，再分别对单套introns进行IR类型可变剪接分析，根据intron测序深度得到每种剪接模式的比例；（3）对没有重叠intron进行IR类型可变剪接分析。
+
+    【程序运行步骤】：
+    （1）先根据GFF3文件中基因模型的所有mRNA的所有intron信息，得到ref introns信息。
+    （2）再根据intron.txt文件，得到evidence introns。
+    （3）读取base_depth.txt文件，从而有利于计算基因区域排除了所有intron位点后的测序深度。
+    （4）比较ref introns和evidence introns，找特有intron和共有intron。
+    （5）对于ref introns中特有的intron，计算 碱基测序深度 / 基因测序深度 比值。若超过阈值0.3，则属于IR事件，将该intron进行标记。
+    （6）对于evidence introns中特有的intron，计算 intron测序深度 / 基因测序深度 比值。若超过阈值0.2，则表示intron是可信的，将该intron进行标记；否则忽略之。
+    （7）对于ref introns和evidence introns中共有的intron，计算 碱基测序深度 / 基因测序深度 比值。若超过阈值0.2，则属于IR事件，将intron进行标记。
+    （8）对所有的可信introns根据重叠进行聚类。
+    （9）对聚类的introns进行可变剪接分析，是核心算法。
+        对有重叠的introns类进行可变剪接分析，计算各种intron剪接类型及其比例：（1）将有重叠的introns分成多套没有重叠的introns，根据各
+套introns的平均测序深度来分配其比例；（2）每套没有重叠的introns可能存在IR剪接类型，根据intron测序深度和内部碱基测序深度分配比例；（3）再进一步
+算出所有，并得到各个intron_splicing的比例。
+        没有重叠的single intron若被标记了，则进行IR分析，计算两种剪接方式的比例。
+        没有重叠的single intron若未被标记，则不进行IR分析。
+    （10）输出比例不小于指定阈值的可变剪接转录本GFF3文件，包含原有的所有可变剪接转录本，并在mRNA信息中添加其比例信息。
+
+    --min_intron_depth <int>    default: 1
+    设置最小intron测序深度。若intron.txt文件最后一列测序深度值小于该参数值，则忽略相应行的数据。
+
+    --min_base_depth_ratio_for_ref_specific_intron <float>    default: 0.3
+    比较evidence introns和ref introns，对于ref introns中特有的intron，计算 碱基测序深度 / 基因测序深度 比值，若超过该参数阈值，则存在IR事件。碱基测序深度计算：计算intron区域所有碱基测序深度的中位数；基因测序深度计算：基因非inron区域的碱基测序深度的中位数。
+
+    --min_intron_depth_ratio_for_evidence_specific_intron <float>    default: 0.2
+    比较evidence introns和ref introns，对于evidence introns中特有的intron，计算 intron测序深度 / 基因测序深度 比值，若超过该参数阈值，则表示intron是可信的。基因测序深度计算：基因非inron区域的碱基测序深度的中位数。
+
+    --min_base_depth_ratio_for_common_intron <float>    default: 0.2
+    比较evidence introns和ref introns，对于ref introns和evidence introns中共有的intron，计算 碱基测序深度 / 基因测序深度 比值，若超过该参数阈值，则存在IR事件。基碱基测序深度计算：计算intron区域所有碱基测序深度的中位数；因测序深度计算：基因非inron区域的碱基测序深度的中位数。
+
+    --min_gene_depth <int>    default: 10
+    在以上三个阈值中计算基因测序深度时，若基因测序深度值小于该参数值，则使基因测序深度值值等于该参数值。
+
+    --min_transcript_confidence_for_output <float>    default: 0.05
+    增加的可变剪接转录本所占比例需不低于该参数阈值，否则，不予输出到GFF3文件中。
+
+    --transcript_num_for_output_when_all_low_confidence <int>    default: 8
+    当所有可变剪接转录本的比例都低于--min_transcript_confidence_for_output参数值时（例如，单个基因组出现了5个剪接位点且各个剪接转录本比例一致），则强制性输出比例靠前的可变剪接转录本信息，直至mRNA数量达到本参数设置的值。
+
+    --added_mRNA_ID_prefix <string>    default: t
+    输出GFF3文件中，要给增加的可变剪接转录本按表达量比例从高到低赋予ID，其ID格式为 <geneID>.<prefix><num>。<geneID>是基因的ID；<prefix>是本参数设置的值；<num>是数字编号，由两位数字组成，从1开始编号，若是个位数，则前面加零。若输入GFF3文件已经存在对应编号的转录本ID，则使用顺延的数字编号给增加的可变剪接转录本赋予ID。
+
+    --help    default: None
+    display this help and exit.
+
+USAGE
+if (@ARGV==0){die $usage}
+
+my ($help_flag, $min_intron_depth, $min_base_depth_ratio_for_ref_specific_intron, $min_intron_depth_ratio_for_evidence_specific_intron, $min_base_depth_ratio_for_common_intron, $min_transcript_confidence_for_output, $transcript_num_for_output_when_all_low_confidence, $min_gene_depth, $added_mRNA_ID_prefix);
+GetOptions(
+    "help" => \$help_flag,
+    "min_intron_depth:i" => \$min_intron_depth,
+    "min_base_depth_ratio_for_ref_specific_intron:f" => \$min_base_depth_ratio_for_ref_specific_intron,
+    "min_intron_depth_ratio_for_evidence_specific_intron:f" => \$min_intron_depth_ratio_for_evidence_specific_intron,
+    "min_base_depth_ratio_for_common_intron:f" => \$min_base_depth_ratio_for_common_intron,
+    "min_transcript_confidence_for_output:f" => \$min_transcript_confidence_for_output,
+    "transcript_num_for_output_when_all_low_confidence:i" => \$transcript_num_for_output_when_all_low_confidence,
+    "min_gene_depth:i" => \$min_gene_depth,
+    "added_mRNA_ID_prefix:s" => \$added_mRNA_ID_prefix,
+);
+$min_intron_depth ||= 1;
+$min_base_depth_ratio_for_ref_specific_intron ||= 0.3;
+$min_intron_depth_ratio_for_evidence_specific_intron ||= 0.2;
+$min_base_depth_ratio_for_common_intron ||= 0.2;
+$min_gene_depth ||= 10;
+$min_transcript_confidence_for_output ||= 0.05;
+$transcript_num_for_output_when_all_low_confidence ||= 8;
+$added_mRNA_ID_prefix ||= "t";
+if ( $help_flag ) { die $usage }
+
+# (1) 读取GFF3文件
+my %gene_info = &get_geneModels_from_GFF3($ARGV[0]);
+my %gene_info_index = &index_geneModels(\%gene_info);
+print STDERR "Read over $ARGV[0]\n";
+
+# (2) 读取intron.txt文件
+open IN, $ARGV[1] or die "Can not open file $ARGV[1], $!";
+my %intron_index;
+while (<IN>) {
+    chomp;
+    @_ = split /\t/;
+    next unless $_[5] >= $min_intron_depth;
+    my $index1 = int($_[3] / 1000);
+    my $index2 = int($_[4] / 1000);
+    foreach ($index1 .. $index2) {
+        $intron_index{$_[1]}{$_[2]}{$_}{"$_[3]\t$_[4]\t$_[5]\t$_[6]"} = 1;
+    }
+}
+close IN;
+print STDERR "Read over $ARGV[1]\n";
+
+# (3) 读取base_depth.txt文件
+my %depth;
+open IN, $ARGV[2] or die "Can not open file $ARGV[2], $!";
+while (<IN>) {
+    chomp;
+    @_ = split /\t/;
+    $depth{$_[0]}{$_[1]}{$_[2]} = $_[3];
+}
+close IN;
+print STDERR "Read over $ARGV[2]\n";
+
+# 分别对各个基因进行可变剪接分析
+foreach my $gene_ID (sort keys %gene_info) {
+    # 得到gene的起始和结束位置
+    my @gene_header = split /\t/, $gene_info{$gene_ID}{"header"};
+    my ($chr, $source, $gene_start, $gene_end, $strand) = ($gene_header[0], $gene_header[1],  $gene_header[3], $gene_header[4], $gene_header[6]);
+
+    # 得到intron.txt中位于基因区域的intron信息。
+    my $index1 = int($gene_start / 1000);
+    my $index2 = int($gene_end  / 1000);
+    my (@intron_evidence, %intron_evidence);
+    foreach ($index1 .. $index2) {
+        foreach my $intron_region ( keys %{$intron_index{$chr}{$strand}{$_}} ) {
+            @_ = split /\t/, $intron_region;
+            $intron_evidence{$intron_region} = 1 if ($_[0] > $gene_start && $_[1] < $gene_end);
+        }
+    }
+    @intron_evidence = sort {$a <=> $b} keys %intron_evidence;
+
+    # 得到各个mRNA的intron信息，合并所有的intron，得到基因的ref intron信息
+    my (%ref_transcript_intron, %intron_ref, %exon_ref, %ref_mRNA_ID);
+    my @mRNA_ID = @{$gene_info{$gene_ID}{"mRNA_ID"}};
+    foreach my $ref_mRNA_ID ( @mRNA_ID ) {
+        my $ref_mRNA_info = $gene_info{$gene_ID}{"mRNA_info"}{$ref_mRNA_ID};
+        my @ref_mRNA_exon;
+        foreach ( split /\n/, $ref_mRNA_info ) {
+            if ( m/\texon\t/ ) {
+                @_ = split /\t/;
+                push @ref_mRNA_exon, "$_[3]\t$_[4]";
+                $exon_ref{"$_[3]\t$_[4]"} = 1;
+            }
+        }
+        @ref_mRNA_exon = sort {$a <=> $b} @ref_mRNA_exon;
+        my @ref_mRNA_intron = &get_intron_from_exons(\@ref_mRNA_exon, $ref_mRNA_ID);
+
+        my @ref_mRNA_intron_out;
+        foreach ( sort {$a <=> $b} @ref_mRNA_intron ) {
+            @_ = split /\t/, $_;
+            push @ref_mRNA_intron_out, "$_[0]\t$_[1]";
+            $intron_ref{"$_[0]\t$_[1]"} = $_[1];
+        }
+        my $ref_mRNA_intron_out = join "\n", @ref_mRNA_intron_out;
+		$ref_mRNA_intron_out = "No_intron" unless $ref_mRNA_intron_out;
+		unless ( exists $ref_transcript_intron{$ref_mRNA_intron_out} ) {
+			$ref_transcript_intron{$ref_mRNA_intron_out} = $ref_mRNA_ID;
+			$ref_mRNA_ID{$ref_mRNA_ID} = $ref_mRNA_intron_out;
+		}
+    }
+
+    # 计算ref intron的碱基测序深度中位数
+    my @intron_ref;
+    foreach ( sort { $a <=> $b or $intron_ref{$a} <=> $intron_ref{$b} } keys %intron_ref ) {
+        my @site_depth;
+        @_ = split /\t/, $_;
+        foreach ( $_[0] .. $_[1] ) {
+            my $depth = 0;
+            $depth = $depth{$chr}{$strand}{$_} if $depth{$chr}{$strand}{$_};
+            push @site_depth, $depth;
+        }
+        @site_depth = sort {$b <=> $a} @site_depth;
+        push @intron_ref, "$_[0]\t$_[1]\t0\t$site_depth[@site_depth*0.5]";
+    }
+
+    # 计算ref exon区域的碱基测序深度中位数，即基因的测序深度。
+    my (%intron_pos, @depth_exon_base);
+    foreach (@intron_evidence) { @_ = split /\t/, $_; foreach ( $_[0] .. $_[1] ) { $intron_pos{$_} = 1; } }
+    foreach (@intron_ref) { @_ = split /\t/, $_; foreach ( $_[0] .. $_[1] ) { $intron_pos{$_} = 1; } }
+    foreach ( sort {$a <=> $b} keys %exon_ref ) {
+        @_ = split /\t/, $_;
+        foreach ($_[0] .. $_[1]) {
+            next if exists $intron_pos{$_};
+            my $depth_value = 0;
+            $depth_value = $depth{$chr}{$strand}{$_} if $depth{$chr}{$strand}{$_};
+            push @depth_exon_base, $depth_value;
+        }
+    }
+    @depth_exon_base = sort {$b <=> $a} @depth_exon_base;
+    my $exon_base_depth_median = $depth_exon_base[@depth_exon_base*0.5];
+	my $GFF3_gene_depth = $exon_base_depth_median;
+    $exon_base_depth_median = $min_gene_depth if $exon_base_depth_median < $min_gene_depth;
+
+    # (4) 比较ref intron和evidence intron，得到特有和共有的introns
+    my @intron_ref_specific = &intron_specific(\@intron_evidence, \@intron_ref);
+    my @intron_evidence_specific = &intron_specific(\@intron_ref, \@intron_evidence);
+    my @intron_common = &intron_common(\@intron_ref, \@intron_evidence);
+    # 检测出ref intron和evidence intron比较后，特有和共有的introns
+	#print "\n$gene_ID\nexon_base_depth_median:$exon_base_depth_median\nintron_ref_specific:\n" . join("\n", @intron_ref_specific) . "\n\nintron_common\n" . join("\n", @intron_common) . "\n\nintron_evidence_specific\n" . join("\n", @intron_evidence_specific) . "\n";
+
+    # (5) 对于ref introns中特有的intron，计算 碱基测序深度 / 基因测序深度 比值。若超过阈值0.3，则属于IR事件，将该intron进行标记。
+    my %intron_group; # 标记出与可变剪接相关的intron
+    my %valid_intron; # 有效的intron
+    foreach (@intron_ref_specific) {
+        $valid_intron{$_} = 1;
+        @_ = split /\t/, $_;
+        if ($_[3] >= $exon_base_depth_median * $min_base_depth_ratio_for_ref_specific_intron) {
+            $intron_group{$_} = 1;
+        }
+    }
+
+    # (6) 对于evidence introns中特有的intron，计算 intron测序深度 / 基因测序深度 比值。若超过阈值0.2，则表示intron是可信的，将该intron进行标记；否则忽略之。
+    foreach (@intron_evidence_specific) {
+        @_ = split /\t/, $_;
+        if ($_[2] >= $exon_base_depth_median * $min_intron_depth_ratio_for_evidence_specific_intron) {
+            $intron_group{$_} = 1; $valid_intron{$_} = 1;
+        }
+    }
+
+    # (7) 对于ref introns和evidence introns中共有的intron，计算 碱基测序深度 / 基因测序深度 比值。若超过阈值0.2，则属于IR事件，将intron进行标记。
+    foreach (@intron_common) {
+        $valid_intron{$_} = 1;
+        @_ = split /\t/, $_;
+        if ($_[3] >= $exon_base_depth_median * $min_base_depth_ratio_for_common_intron) {
+            $intron_group{$_} = 1;
+        }
+    }
+    my @valid_intron = sort {$a <=> $b} keys %valid_intron;
+    my @intron_group = sort {$a <=> $b} keys %intron_group;
+    
+    # 检测出基因所有的可信introns和被标记出有可变剪接事件的introns
+	#print STDERR "\n$gene_ID\nexon_base_depth_median:$exon_base_depth_median\nvalid_intron:\n" . join("\n", @valid_intron) . "\n\nintron_group\n" . join("\n", @intron_group) . "\n";
+    
+    # (8) 对所有的可信introns根据重叠进行聚类。
+    my %cluster_intron = &cluster_intron(\@valid_intron);
+
+    # 进行转录本分析
+    my @cluster_intron = sort {$a <=> $b} keys %cluster_intron;
+    my %transcript_intron;
+    foreach my $cluster_intron ( @cluster_intron ) {
+		#print "$gene_ID Intron_Cluster: $cluster_intron\n";
+
+        # (9) 对聚类的introns进行可变剪接分析
+        my %intron_splicing;
+        my @introns = split /;/, $cluster_intron;
+
+        # 对有重叠的introns类进行可变剪接分析，计算各种intron剪接类型及其比例：（1）将有重叠的introns分成多套没有重叠的introns，根据各套introns的平均测序深度来分配其比例；（2）每套没有重叠的introns可能存在IR剪接类型，根据intron测序深度和内部碱基测序深度分配比例；（3）再进一步算出所有，并得到各个intron_splicing的比例。
+        if (@introns >= 2) {
+            %intron_splicing = &intron_splcing(\@introns);
+            #foreach ( keys %intron_splicing ) { print "TEST3: $intron_splicing{$_}\t$_\n"; }
+            #my $AS_type = &AS_type(\%intron_splcing, $strand);
+        }
+        # 没有重叠的single intron若被标记了，则进行IR分析，计算两种剪接方式的比例。
+        elsif ( exists $intron_group{$introns[0]} ) {
+            @_ = split /\t/, $introns[0];
+            my ($ratio_intron, $ratio_IR) = (1, 0);
+            if ( $_[2] + $_[3] > 0 ) { $ratio_intron = $_[2] / ($_[2] + $_[3]); $ratio_IR = $_[3] / ($_[2] + $_[3]); }
+			$intron_splicing{$introns[0]} = $ratio_intron;
+			$intron_splicing{"Intron_Retention"} = $ratio_IR;
+        }
+        # 没有重叠的single intron若未被标记，则不进行IR分析。
+        else {
+            $intron_splicing{$introns[0]} = 1;
+        }
+
+        # 计算转录本及其比例
+        if (%transcript_intron) {
+            foreach my $transcript_intron ( keys %transcript_intron ) {
+                my $ratio_transcript_intron = $transcript_intron{$transcript_intron};
+                foreach my $intron_info ( keys %intron_splicing ) {
+                    $transcript_intron{"$transcript_intron;$intron_info"} = $ratio_transcript_intron * $intron_splicing{$intron_info};
+                }
+                delete $transcript_intron{$transcript_intron};
+            }
+        }
+        else {
+            foreach my $intron_info ( keys %intron_splicing ) {
+                $transcript_intron{$intron_info} = $intron_splicing{$intron_info};
+            }
+        }
+    }
+	# 若是单外显子，则给一个转录本
+	$transcript_intron{"No_intron"} = 1 unless @cluster_intron;
+
+    # （10）输出比例不小于指定阈值的可变剪接转录本GFF3文件，包含原有的所有可变剪接转录本，并在mRNA信息中添加其比例信息。
+	# 收集转录本的Intron信息、ID和比例
+	my (%out_transcript_intron, @out_transcript_ID);
+	my $added_mRNA_num = 0;
+    foreach my $transcript_intron ( sort {$transcript_intron{$b} <=> $transcript_intron{$a}} keys %transcript_intron ) {
+		# 准备新加入的转录本ID
+		$added_mRNA_num ++;
+		my $added_mRNA_code = '0' x ( 2 - length($added_mRNA_num) ) . $added_mRNA_num;
+		my $added_mRNA_ID = "$gene_ID." . $added_mRNA_ID_prefix . $added_mRNA_code;
+		while ( exists $ref_mRNA_ID{$added_mRNA_ID} ) {
+			$added_mRNA_num ++;
+			$added_mRNA_code = '0' x ( 2 - length($added_mRNA_num) ) . $added_mRNA_num;
+			$added_mRNA_ID = "$gene_ID." . $added_mRNA_ID_prefix . $added_mRNA_code;
+		}
+
+		# 得到转录本intron信息
+		my (@out_transcript_intron, @out_transcript_intron_without_depth);
+		foreach ( split /;/, $transcript_intron ) {
+			@_ = split /\t/, $_;
+			push @out_transcript_intron, $_ if @_ >= 2;
+			push @out_transcript_intron_without_depth, "$_[0]\t$_[1]" if @_ >= 2;
+
+		}
+		my $out_transcript_intron = join "\n", @out_transcript_intron;
+		my $out_transcript_intron_without_depth = join "\n", @out_transcript_intron_without_depth;
+		# 若转录本没有intron
+		$out_transcript_intron_without_depth = "No_intron" unless $out_transcript_intron;
+		$out_transcript_intron = "No_intron" unless $out_transcript_intron;
+
+		# 若转录本和参考GFF3文件中的转录本一致
+		if ( exists $ref_transcript_intron{$out_transcript_intron_without_depth} ) {
+			$added_mRNA_num --;
+			$added_mRNA_ID = $ref_transcript_intron{$out_transcript_intron_without_depth};
+		}
+
+		# 记录转录本信息，及其ID和比例
+		push @out_transcript_ID, $added_mRNA_ID unless exists $ref_mRNA_ID{$added_mRNA_ID};
+		$out_transcript_intron{$added_mRNA_ID}{"introns"} = $out_transcript_intron;
+		$out_transcript_intron{$added_mRNA_ID}{"ratio"} = $transcript_intron{$transcript_intron};
+
+		#print "TEST5: $added_mRNA_ID\t$transcript_intron{$transcript_intron}\t$transcript_intron\n";
+    }
+
+	# 再加入所有参考转录本
+	foreach ( sort keys %ref_mRNA_ID ) {
+		if ( ! exists $out_transcript_intron{$_} ) {
+			$out_transcript_intron{$_}{"introns"} = $ref_mRNA_ID{$_};
+			$out_transcript_intron{$_}{"ratio"} = 0;
+		}
+	}
+
+	# 输出GFF3文件gene信息
+	my $gene_header_out = $gene_info{$gene_ID}{"header"};
+	$gene_header_out =~ s/;?$/;RNASeq_exon_base_depth_median=$GFF3_gene_depth;/;
+	print $gene_header_out;
+
+	# 输出各个转录本GFF3
+	# 先输出参考的转录本
+	my ($out_transcript_number, $out_transcript_valid_ratio_num) = (0, 0);
+	foreach my $mRNA_ID ( sort keys %ref_mRNA_ID ) {
+		$out_transcript_number ++;
+		my $out_mRNA_intron = $out_transcript_intron{$mRNA_ID}{"introns"};
+		my $ratio = $out_transcript_intron{$mRNA_ID}{"ratio"};
+		my $mRNA_header = $gene_info{$gene_ID}{"mRNA_header"}{$mRNA_ID};
+		my $mRNA_info = $gene_info{$gene_ID}{"mRNA_info"}{$mRNA_ID};
+
+		$out_transcript_valid_ratio_num ++ if $ratio >= $min_transcript_confidence_for_output;
+		my $out = &get_mRNA_GFF3_info($out_mRNA_intron, $ratio, $chr, $source, $gene_start, $gene_end, $strand, $gene_ID, $mRNA_ID, $mRNA_header, $mRNA_info);
+		print "$out";
+	}
+
+	# 再输出增加的转录本
+	foreach my $mRNA_ID ( @out_transcript_ID ) {
+		my $out_mRNA_intron = $out_transcript_intron{$mRNA_ID}{"introns"};
+		my $ratio = $out_transcript_intron{$mRNA_ID}{"ratio"};
+		my ($mRNA_header, $mRNA_info);
+		my $out = &get_mRNA_GFF3_info($out_mRNA_intron, $ratio, $chr, $source, $gene_start, $gene_end, $strand, $gene_ID, $mRNA_ID, $mRNA_header, $mRNA_info);
+		if ($ratio >= $min_transcript_confidence_for_output) {
+			print "$out";
+			$out_transcript_valid_ratio_num ++;
+		}
+	}
+
+	# 当所有可变剪接转录本的比例都低于--min_transcript_confidence_for_output参数值时，强制最多输出8个转录本
+	if ($out_transcript_valid_ratio_num == 0) {
+		while ($out_transcript_number < $transcript_num_for_output_when_all_low_confidence && @out_transcript_ID >= $transcript_num_for_output_when_all_low_confidence - $out_transcript_number) {
+			my $mRNA_ID = shift @out_transcript_ID;
+			my $out_mRNA_intron = $out_transcript_intron{$mRNA_ID}{"introns"};
+			my $ratio = $out_transcript_intron{$mRNA_ID}{"ratio"};
+			my ($mRNA_header, $mRNA_info);
+			my $out = &get_mRNA_GFF3_info($out_mRNA_intron, $ratio, $chr, $source, $gene_start, $gene_end, $strand, $gene_ID, $mRNA_ID, $mRNA_header, $mRNA_info);
+			print $out;
+			$out_transcript_number ++;
+		}
+	}
+
+    print "\n";
+}
+
+# 子程序，输出mRNA的GFF3信息
+sub get_mRNA_GFF3_info {
+	my ($out_mRNA_intron, $ratio, $chr, $source, $gene_start, $gene_end, $strand, $gene_ID, $mRNA_ID, $mRNA_header, $mRNA_info) = @_;
+
+	# 若输入了参考转录本信息，则直接输出其信息
+	if ($mRNA_header) {
+		$mRNA_header =~ s/;*$/;Transcript_Ratio=$ratio;/;
+		return "$mRNA_header$mRNA_info";
+	}
+
+	# 若没有intron信息
+	if ($out_mRNA_intron eq "No_intron") {
+		my $out = "$chr\t$source\tmRNA\t$gene_start\t$gene_end\t\.\t$strand\t\.\tID=$mRNA_ID;Parent=$gene_ID;Transcript_Ratio=$ratio;\n";
+		$out .= "$chr\t$source\texon\t$gene_start\t$gene_end\t\.\t$strand\t\.\tID=$mRNA_ID.exon1;Parent=$mRNA_ID\n";
+		return $out;
+	}
+	else {
+		# 由 intron 得到 exon 信息
+		my @intron = sort {$a <=> $b} split "\n", $out_mRNA_intron;
+		my @exon;
+
+		my $first_intron = shift @intron;
+		my ($exon_start, $exon_end);
+		@_ = split /\t/, $first_intron;
+		if ( $_[0] > $gene_start ) {
+			$exon_end = $_[0] - 1;
+			push @exon, "$gene_start\t$exon_end";
+			$exon_start = $_[1] + 1;
+		}
+		else {
+			warn "Warning: $mRNA_ID 的起始 intron 位置 > 基因起始位置。\n";
+		}
+
+		foreach (@intron) {
+			@_ = split /\t/, $_;
+			$exon_end = $_[0] - 1;
+			push @exon, "$exon_start\t$exon_end";
+			$exon_start = $_[1] + 1;
+		}
+		push @exon, "$exon_start\t$gene_end";
+		unshift @intron, $first_intron;
+
+		# 输出 mRNA header
+		my $out = "$chr\t$source\tmRNA\t$gene_start\t$gene_end\t\.\t$strand\t\.\tID=$mRNA_ID;Parent=$gene_ID;Transcript_Ratio=$ratio;\n";
+		my %out;
+
+		if ( $strand eq "-" ) {
+			@intron = sort { $b <=> $a } @intron;
+			@exon = sort { $b <=> $a } @exon;
+		}
+		# 输出exon
+		my $num = 0;
+		foreach ( @exon ) {
+			$num ++;
+			@_ = split /\t/, $_;
+			$out{"$chr\t$source\texon\t$_[0]\t$_[1]\t.\t$strand\t\.\tID=$mRNA_ID.exon$num;Parent=$mRNA_ID;\n"} = $_[0];
+		}
+		# 输出intron
+		my $num = 0;
+		foreach ( @intron ) {
+			$num ++;
+			@_ = split /\t/, $_;
+			my $score = '.';
+			my $attr;
+			if ( $_[2] ) {
+				$score = $_[2];
+				$attr .= "intron_depth=$score;base_depth_median=$_[3];";
+			}
+			elsif ( $_[3] ) {
+				$attr .= "base_depth_median=$_[3];"
+			}
+			$out{"$chr\t$source\tintron\t$_[0]\t$_[1]\t$score\t$strand\t\.\tID=$mRNA_ID.intron$num;Parent=$mRNA_ID;$attr\n"} = $_[0];
+		}
+		
+		my @out = sort {$out{$a} <=> $out{$b}} keys %out;
+		$out .= join "", @out;
+
+		return $out;
+	}
+
+}
+
+# 子程序，计算各种intron剪接类型及其比例：（1）将有重叠的introns分成多套没有重叠的introns，根据各套introns的平均测序深度来分配其比例；（2）每套没有重叠的introns可能存在IR剪接类型，根据intron测序深度和内部碱基测序深度分配比例；（3）再进一步算出所有，并得到各个intron_splicing的比例。
+sub intron_splcing {
+    my @intron = @{$_[0]};
+
+    # (0) 根据intron的起始和结束位点进行排序
+    my %sort_intron;
+    foreach (@intron) { @_ = split /\t/, $_; $sort_intron{$_} = $_[1]; }
+    @intron = sort { $a <=> $b or $sort_intron{$a} <=> $sort_intron{$b} } @intron;
+
+    # (1) 将有重叠的introns分成多套没有重叠的introns
+    # 根据intron尾部坐标得到多套introns
+    my %group_intron_end;
+    foreach my $intron (@intron) {
+        @_ = split /\t/, $intron;
+
+        my $group_add_ok = 0;
+        foreach ( keys %group_intron_end ) {
+            if ($_[0] > $group_intron_end{$_}) {
+                $group_intron_end{"$_;$intron"} = $_[1];
+                delete $group_intron_end{$_};
+                $group_add_ok = 1;
+            }
+        }
+
+        if ($group_add_ok == 0) {
+            $group_intron_end{$intron} = $_[1];
+        }
+    }
+
+    # 计算每套introns的测序深度和分配比例：对单个intron计算其 intron测序深度 + intron内碱基测序深度 值；再算单套所有introns的平均值；再算各套introns的分配比例。
+    my (%group_intron_depth, %group_intron_ratio);
+    my $sum_depth = 0;
+    foreach my $group_intron ( keys %group_intron_end ) {
+        my ($total, $num, $average) = (0, 0, 0);
+        foreach ( split /;/, $group_intron ) {
+            @_ = split /\t/, $_;
+            $total += ($_[2] + $_[3]);
+            $num ++;
+        }
+        $average = $total / $num if $num;
+        $group_intron_depth{$group_intron} = $average;
+        $sum_depth += $average;
+    }
+    foreach my $group_intron ( keys %group_intron_end ) {
+        my $ratio = 0;
+        $ratio = $group_intron_depth{$group_intron} / $sum_depth if $sum_depth;
+        $group_intron_ratio{$group_intron} = $ratio;
+    }
+
+    # 检测多套introns的分配比例
+    #foreach ( sort { $a <=> $b } keys %group_intron_ratio ) { print "TEST1: $group_intron_ratio{$_}\t$_\n"; }
+
+    my %intron_splicing;
+    foreach my $group_intron ( keys %group_intron_ratio ) {
+    # (2) 对每套没有重叠的introns再进一步检测IR可变剪接
+        my (%intron_splicing_end, %intron_splicing_ratio);
+        my $group_intron_ratio = $group_intron_ratio{$group_intron};
+
+        my @IR_intron = split /;/, $group_intron;
+        foreach my $IR_intron ( @IR_intron ) {
+            @_ = split /\t/, $IR_intron;
+            # 当intron的测序深度与其碱基测序深度之和为0时，则认为不存在IR可变剪接事件。
+            my ($ratio_intron, $ratio_base_depth) = (1, 0);
+            if ( $_[2] + $_[3] > 0 ) { $ratio_intron = $_[2] / ($_[2] + $_[3]); $ratio_base_depth = $_[3] / ($_[2] + $_[3]); }
+
+            my $IR_intron_add_ok = 0;
+            foreach ( keys %intron_splicing_end ) {
+                if ( $_[0] > $intron_splicing_end{$_} ) {
+                    $intron_splicing_ratio{"$_;$IR_intron"} = $intron_splicing_ratio{$_} * $ratio_intron;
+                    $intron_splicing_ratio{"$_;Intron_Retention"} = $intron_splicing_ratio{$_} * $ratio_base_depth;
+                    $intron_splicing_end{"$_;$IR_intron"} = $_[1];
+                    $intron_splicing_end{"$_;Intron_Retention"} = $_[1];
+                    delete $intron_splicing_ratio{$_};
+                    delete $intron_splicing_end{$_};
+                    $IR_intron_add_ok = 1;
+                }
+            }
+
+            if ($IR_intron_add_ok == 0) {
+                $intron_splicing_ratio{"$IR_intron"} = $group_intron_ratio * $ratio_intron;
+                $intron_splicing_ratio{"Intron_Retention"} = $group_intron_ratio * $ratio_base_depth;
+                $intron_splicing_end{"$IR_intron"} = $_[1];
+                $intron_splicing_end{"Intron_Retention"} = $_[1];
+            }
+        }
+
+    # (3) 合并各套introns的分配比例。
+        foreach ( keys %intron_splicing_ratio ) {
+            my $value = $intron_splicing_ratio{$_};
+            # 当所有 IR 全部都是 Intron_Retention 时，其结果得合并。即 Intron_Retention、Intron_Retention;Intron_Retention、Intron_Retention;Intron_Retention;Intron_Retention 都是同一个意思。
+            $_ = "Intron_Retention" if ( m/Intron_Retention/ && (! m/\d/) );
+            $intron_splicing{$_} += $value;
+        }
+    }
+
+    # 检测所有intron splicing的分配比例
+    #foreach ( sort { $a <=> $b } keys %intron_splicing ) { print "TEST2: $intron_splicing{$_}\t$_\n"; }
+
+    # 返回intron splicing结果及其比例
+    return %intron_splicing;
+}
+
+# 子程序，将intron根据重叠聚类
+sub cluster_intron {
+    my @intron = @{$_[0]};
+    @intron = sort {$a <=> $b} @intron;
+
+    my %out;
+    my $intron = shift @intron;
+    my ($last_start, $last_end) = split /\t/, $intron;
+    foreach (@intron) {
+        my ($start, $end) = split /\t/, $_;
+        if ($start > $last_end) {
+            $out{$intron} = "$last_start\t$last_end";
+            $intron = $_;
+            ($last_start, $last_end) = ($start, $end);
+        }
+        else {
+            $last_end = $end if $end > $last_end;
+            $intron .= ";$_";
+        }
+    }
+    $out{$intron} = "$last_start\t$last_end" if $intron;
+
+    return %out;
+}
+
+# 子程序，在后一个数组中找和前一个数组共有的intron数据
+sub intron_common {
+    my @intron_ref = @{$_[0]};
+    my @intron_evidence = @{$_[1]};
+
+    my %intron_ref;
+    foreach (@intron_ref) {
+        @_ = split /\t/;
+        $intron_ref{"$_[0]\t$_[1]"} = 1;
+    }
+
+    my @out;
+    foreach (@intron_evidence) {
+        @_ = split /\t/;
+        push @out, $_ if exists $intron_ref{"$_[0]\t$_[1]"};
+    }
+
+    return @out;
+}
+
+# 子程序，找到后一个输入数组中特有的intron数据
+sub intron_specific {
+    my @intron_ref = @{$_[0]};
+    my @intron_evidence = @{$_[1]};
+
+    my %intron_ref;
+    foreach (@intron_ref) {
+        @_ = split /\t/;
+        $intron_ref{"$_[0]\t$_[1]"} = 1;
+    }
+
+    my @out;
+    foreach (@intron_evidence) {
+        @_ = split /\t/;
+        push @out, $_ unless exists $intron_ref{"$_[0]\t$_[1]"};
+    }
+
+    return @out;
+}
+
+# 子程序，根据exon信息得到intron
+sub get_intron_from_exons {
+    my @exon = @{$_[0]};
+    my $mRNA_ID = $_[1];
+    @exon = sort {$a <=> $b} @exon;
+
+    my @intron;
+    my $first_exon = shift @exon;
+    my ($last_start, $last_end) = split /\t/, $first_exon;
+    foreach ( @exon ) {
+        my ($start, $end) = split /\t/, $_;
+        if ($start > $last_end + 1) {
+            my $intron_start = $last_end + 1;
+            my $intron_stop = $start - 1;
+            push @intron, "$intron_start\t$intron_stop";
+        }
+        else {
+            my $value = $start - $last_end - 1;
+			#print STDERR "Warning: a intron length (value is $value) of mRNA $mRNA_ID was detected:\n\tThe former CDS/Exon: $last_start - $last_end\n\tThe latter CDS/Exon: $start - $end\n";
+        }
+        ($last_start, $last_end) = ($start, $end);
+    }
+
+    return @intron;
+}
+
+# 子程序，对GFF3的Gene位置进行索引。索引窗口大小为1000bp，返回索引哈希信息：
+# chr_ID => strand => position(kb) => gene_ID => 1
+sub index_geneModels {
+    my %gene_info = %{$_[0]};
+    my %index;
+    foreach my $gene_ID ( keys %gene_info ) {
+        my @gene_header = split /\t/, $gene_info{$gene_ID}{"header"};
+        my $index1 = int($gene_header[3] / 1000);
+        my $index2 = int($gene_header[4] / 1000);
+
+        foreach ($index1 .. $index2) {
+            $index{$gene_header[0]}{$gene_header[6]}{$_}{$gene_ID} = 1;
+        }
+    }
+    return %index;
+}
+
+
+# 子程序，返回基因的GFF3哈希信息：
+# gene_ID => "header" => gene_header
+# gene_ID => "mRNA_ID" => 数组
+# gene_ID => "mRNA_header" => mRNA_ID => mRNA_header
+# gene_ID => "mRNA_info" => mRNA_ID => mRNA_Info
+sub get_geneModels_from_GFF3 {
+    my %gene_info;
+    # 第一轮，找gene信息
+    open IN, $_[0] or die "Can not open file $_[0], $!";
+    while (<IN>) {
+        if ( m/\tgene\t.*ID=([^;\s]+)/ ) {
+            $gene_info{$1}{"header"} = $_;
+        }
+    }
+    close IN;
+    # 第二轮，找Parent值是geneID的信息，包含但不限于 mRNA 信息
+    my %mRNA_ID2gene_ID;
+    open IN, $_[0] or die "Can not open file $_[0], $!";
+    while (<IN>) {
+        if ( m/Parent=([^;]+)/ ) {
+            my $parent = $1;
+            if ( exists $gene_info{$parent} ) {
+                if ( m/ID=([^;]+)/ ) {
+                    push @{$gene_info{$parent}{"mRNA_ID"}}, $1;
+                    $gene_info{$parent}{"mRNA_header"}{$1} = $_;
+                    $mRNA_ID2gene_ID{$1} = $parent;
+                }
+            }
+        }
+    }
+    close IN;
+    # 第三轮，找Parent值不是geneID的信息
+    open IN, $_[0] or die "Can not open file $_[0], $!";
+    while (<IN>) {
+        if ( m/Parent=([^;]+)/ && exists $mRNA_ID2gene_ID{$1} ) {
+            my $parent = $1;
+            $gene_info{$mRNA_ID2gene_ID{$1}}{"mRNA_info"}{$parent} .= $_;
+        }
+    }
+    close IN;
+
+    return %gene_info;
+}
+

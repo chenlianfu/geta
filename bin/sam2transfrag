@@ -12,11 +12,11 @@ Usage:
     程序分两步走：（1）首先，程序根据碱基和intron的测序深度来对有基因表达的区域进行打断，打断后的每个区域相当于一个基因表达区域；（2）然后，对各个区域进行转录本序列搜索，输出覆盖度最高的转录本序列。
 
     --fraction <FLOAT>  default: 0.05
-        对下面两类参数expressed_base_depth和junction_depth取阈值的时候，其阈值与SAM文件比对区域的最高碱基测序深度Dmax相关。Dmax乘以该系数得到阈值D。D值和下面4个参数一起决定参参数expressed_base_depth和junction_depth的设定。
+        对下面两类参数expressed_base_depth和junction_depth取阈值的时候，其阈值与SAM文件比对区域的最高碱基测序深度Dmax相关。Dmax乘以该系数得到阈值D。D值和下面4个参数一起决定参数expressed_base_depth和junction_depth的设定。
 
     --min_expressed_base_depth <INT>  default: 2
     --max_expressed_base_depth <INT>  default: 10
-        这两个参数和--fraction参数一起决定expressed_base_depth的阈值。对SAM文件中的连续比对区域区进行打断的时候，若位点的碱基测序深度低于expressed_base_depth阈值，则在该位点前后对比对区域进行打断。默认设置表示：对某个比对区域进行分析的时候，根据SAM文件计算出该区域的最高单碱基测序深度Dmax；D=Dmax * 0.05；若D小于取2，则expressed_base_depth阈值=2；若D值大于10，则expressed_base_depth阈值=10；若D值在2和10之间，则expressed_base_depth阈值=D。
+        这两个参数和--fraction参数一起决定expressed_base_depth的阈值。对SAM文件中的连续比对区域区进行打断的时候，若位点的碱基测序深度低于expressed_base_depth阈值，则在该位点前后对比对区域进行打断。默认设置表示：对某个比对区域进行分析的时候，根据SAM文件计算出该区域的最高单碱基测序深度Dmax；D=Dmax * 0.05；若D小于2，则expressed_base_depth阈值=2；若D值大于10，则expressed_base_depth阈值=10；若D值在2和10之间，则expressed_base_depth阈值=D。
 
     --min_junction_depth <INT>  default:2
     --max_junction_depth <INT>  default:10
@@ -26,7 +26,10 @@ Usage:
         输出transfrags信息的时候，必须要求transfrags被支持的fragment数目大于该值。
     
     --intron_info_out <String>
-        若设定此参数，则会输出intron信息到指定的文件中，否则不会输出intron信息。虽然程序仅输出覆盖度最高的转录本，但是输出的intron信息是包含可变剪接信息的。且intron是经过一定阈值过滤后的结果。
+        若设定此参数，则会输出intron信息到指定的文件中，否则不会输出intron信息。虽然程序仅输出覆盖度最高的转录本，但是输出的intron信息是包含可变剪接信息的。且intron是经过一定阈值过滤后的结果。该文件有利于后续可变剪接分析。
+
+    --base_depth_out <String>
+        若设定此参数，则会输出所有碱基的测序深度信息到指定的文件中。该文件有利于后续可变剪接分析。
 
     --genome_fasta <String>
         输入基因组序列Fasta文件。若输入的SAM文件不是使用Hisat2得到的时候，其剪接性比对结果的剪接位点可能不是常规的GT-AG,GC-AG或AT-AC，因此，需要删除不属于常规剪接位点的intron信息。例如，当SAM文件是由PacBio数据得到的，由于PacBio数据有较多的Indel错误，极易导致错误的剪接位点，这时需要加上该参数。而Hisat2比对结果的剪接位点符合常规，不建议加上此参数（特别是当Hisat2数据库中添加有SNP/INDEL信息时，其比对结果可能在参考基因组序列上不符和常规剪接位点，但实际上是符合的）。
@@ -48,7 +51,7 @@ Usage:
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($fraction, $min_expressed_base_depth, $max_expressed_base_depth, $min_junction_depth, $max_junction_depth, $min_fragment_count_per_transfrags, $filter_transcript, $gff3, $intron_info_out, $genome_fasta, $min_intron_length, $no_strand_specific, $no_PE_sequencing);
+my ($fraction, $min_expressed_base_depth, $max_expressed_base_depth, $min_junction_depth, $max_junction_depth, $min_fragment_count_per_transfrags, $filter_transcript, $gff3, $intron_info_out, $base_depth_out, $genome_fasta, $min_intron_length, $no_strand_specific, $no_PE_sequencing);
 GetOptions(
     "fraction:s" => \$fraction,
     "min_expressed_base_depth:s" => \$min_expressed_base_depth,
@@ -58,6 +61,7 @@ GetOptions(
     "min_fragment_count_per_transfrags:s" => \$min_fragment_count_per_transfrags,
     "filter_transcript:s" => \$filter_transcript,
     "intron_info_out:s" => \$intron_info_out,
+    "base_depth_out:s" => \$base_depth_out,
     "genome_fasta:s" => \$genome_fasta,
     "min_intron_length:i" => \$min_intron_length,
     "gff3!" => \$gff3,
@@ -79,6 +83,15 @@ if ($filter_transcript =~ m/(\S+)\s+(\d+)/) {
 }
 else {
     die "The value of --filter_transcript should not be '$filter_transcript'! \n";
+}
+
+if ($intron_info_out) {
+    open INTRON_OUT, ">", $intron_info_out or die "Can not create file $intron_info_out, $!";
+    print INTRON_OUT "#Transcript_region\tChromosome\tStrand\tIntron_start\tIntron_end\tIntron_depth\tMedian_base_depth_in_intron\n";
+}
+if ($base_depth_out) {
+    open BASE_DEPTH_OUT, ">", $base_depth_out or die "Can not create file $base_depth_out, $!";
+    print BASE_DEPTH_OUT "#Chromosome\tStrand\tPosition\tDepth\n";
 }
 
 # 根据SAM文件第6列信息找intron位点和每个碱基位点的测序深度：
@@ -216,6 +229,7 @@ foreach my $scaffold_id (sort keys %depth) {
         my @site;
         foreach (sort {$a <=> $b} keys %{$depth{$scaffold_id}{$strand}}) {
             push @site, $_ if $depth{$scaffold_id}{$strand}{$_} >= $min_expressed_base_depth;
+            print BASE_DEPTH_OUT "$scaffold_id\t$strand\t$_\t$depth{$scaffold_id}{$strand}{$_}\n" if $base_depth_out;
         }
 
         my %intron_start;
@@ -260,7 +274,7 @@ foreach my $scaffold_id (sort keys %depth) {
     }
 }
 
-# 由于是分开在两条链上进行transcfrag分析，若是非链特异性测序，则结果是：一条链上是由intron连接的transfrag，另外一条链上则是和该transfrag对应的exons的transfrags。需要对这些单exons的transfrag进行去除。例如：
+# 由于是分开在两条链上进行transfrag分析，若是非链特异性测序，则结果是：一条链上是由intron连接的transfrag，另外一条链上则是和该transfrag对应的exons的transfrags。需要对这些单exons的transfrag进行去除。例如：
 #     =======----==========-----=============----====-----========>       正确的含有intron的transfrag
 #     =======    =============  =====================     =========       在另外一条链上能找到的single exon类型transfrag
 # 非链特异性测序的这些single exon类型需要过滤掉。若single exon和另外一条链上有intron的transcfrag的exons有重叠，就去除掉。
@@ -343,16 +357,21 @@ foreach my $scaffold_id (sort {$a cmp $b} keys %transfrags) {
 
                 # 输出 intron 信息
                 if ($intron_info_out) {
-                    #open OUT, ">", $intron_info_out or die $!;
                     foreach my $intron_start (sort {$a <=> $b} keys %{$intron{$scaffold_id}{$strand}}) {
-                        open OUT, ">>", $intron_info_out or die $!;
                         foreach my $intron_end (sort {$a <=> $b} keys %{$intron{$scaffold_id}{$strand}{$intron_start}}) {
                             if ($intron_start >= $region[0] && $intron_end <= $region[-1] && $intron{$scaffold_id}{$strand}{$intron_start}{$intron_end} >= $junction_threshold{$scaffold_id}{$strand}{$region}) {
-                                print OUT "$scaffold_id\_$strand_name\_$region[0]\_$region[1]\t$scaffold_id\t$strand\t$intron_start\t$intron_end\t$intron{$scaffold_id}{$strand}{$intron_start}{$intron_end}\n";
+                                my @base_depth_in_intron;
+                                foreach ($intron_start .. $intron_end) {
+                                    my $base_depth_in_intron_of_one_base = 0;
+                                    $base_depth_in_intron_of_one_base = $depth{$scaffold_id}{$strand}{$_} if $depth{$scaffold_id}{$strand}{$_};
+                                    push @base_depth_in_intron, $base_depth_in_intron_of_one_base;
+                                }
+                                @base_depth_in_intron = sort {$a <=> $b} @base_depth_in_intron;
+                                my $median_base_depth_in_intron = $base_depth_in_intron[@base_depth_in_intron/2];
+                                print INTRON_OUT "$scaffold_id\_$strand_name\_$region[0]\_$region[1]\t$scaffold_id\t$strand\t$intron_start\t$intron_end\t$intron{$scaffold_id}{$strand}{$intron_start}{$intron_end}\t$median_base_depth_in_intron\n";
                             }
                         }
                     }
-                    close OUT;
                 }
 
                 my ($gff3_out, $gtf_out, $mRNA_number);
@@ -407,6 +426,8 @@ foreach my $scaffold_id (sort {$a cmp $b} keys %transfrags) {
     }
 }
 
+close INTRON_OUT;
+close BASE_DEPTH_OUT;
 
 # 子程序 find_isoforms 用于寻找指定区域的 transfrags
 sub find_isoforms {

@@ -560,7 +560,7 @@ unless (-e "3.transcript.ok") {
     $no_strand_specific = "" if $strand_specific;
     while (<IN>) {
         s/\.sam\n//;
-        print CMD "$dirname/bin/sam2transfrag $config{'sam2transfrag'} $no_strand_specific --intron_info_out $_.intron $_.sam > $_.gtf\n";
+        print CMD "$dirname/bin/sam2transfrag $config{'sam2transfrag'} $no_strand_specific --intron_info_out $_.intron --base_depth_out $_.base_depth $_.sam > $_.gtf\n";
     }
     close CMD;
     close IN;
@@ -574,6 +574,7 @@ unless (-e "3.transcript.ok") {
     open IN, "splited_sam_files.list" or die $!;
     open OUT1, ">", "transfrag.gtf" or die $!;
     open OUT2, ">", "intron.txt"  or die $!;
+	open OUT3, ">", "base_depth.txt" or die $!;
     while (<IN>) {
         s/\.sam\n//;
         open IN1, "$_.gtf" or die "Cannot open file $_.gtf, $!\n";
@@ -581,11 +582,18 @@ unless (-e "3.transcript.ok") {
         close IN1;
         if (-e "$_.intron") {
             open IN1, "$_.intron" or die $!;
+			<IN1>;
             print OUT2 <IN1>;
             close IN1;
         }
+		if ( -e "$_.base_depth") {
+			open IN1, "$_.base_depth" or die "Cannot open file $_.base_depth, $!\n";
+			<IN1>;
+			print OUT3 <IN1>;
+			close IN1;
+		}
     }
-    close OUT2; close OUT1; close IN;
+    close OUT3; close OUT2; close OUT1; close IN;
 
     # 将GTF文件转换成GFF3文件和transcripts序列
     # 若是非链特异性测序，则得到的single exon转录本序列是没有方向的。
@@ -1445,7 +1453,7 @@ chdir "../";
 $pwd = `pwd`; print STDERR "PWD: $pwd";
 
 # 7.1 输出GFF3格式文件基因结构注释信息
-$cmdString = "$dirname/bin/GFF3Clear --GFF3_source GETA --gene_prefix $gene_prefix --genome $genome --no_attr_add $out_prefix.tmp/6.combineGeneModels/genome.filter.completed.gff3 > $out_prefix.GeneModels.gff3 2> /dev/null";
+$cmdString = "$dirname/bin/GFF3Clear --GFF3_source GETA --gene_prefix $gene_prefix --genome $genome $out_prefix.tmp/6.combineGeneModels/genome.filter.completed.gff3 > $out_prefix.GeneModels.gff3 2> /dev/null";
 #$cmdString = "cp $out_prefix.tmp/7.addAlternativeSplicing/genome.addAS.gff3 $out_prefix.gff3";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -1486,7 +1494,7 @@ close IN; close OUT;
 
 unless ( $RM_lib ) {
     open IN, "$out_prefix.tmp/0.RepeatMasker/repeatModeler/species-families.fa" or die "Can not open file $out_prefix.tmp/0.RepeatMasker/repeatModeler/species-families.fa, $!";
-    open OUT, ">", "$out_prefix.repeat.lib, $!" or die "Can not create file $out_prefix.repeat.lib, $!";
+    open OUT, ">", "$out_prefix.repeat.lib" or die "Can not create file $out_prefix.repeat.lib, $!";
     print OUT <IN>;
     close IN; close OUT;
 }
