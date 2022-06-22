@@ -397,8 +397,9 @@ foreach my $gene_ID (@gene_ID) {
 
         $source = $GFF3_source if $GFF3_source;
         $mRNA_number ++;
+		my $mRNA_code = '0' x ( 2 - length($mRNA_number) ) . $mRNA_number;
         my $mRNAID = $mRNA_ID;
-        $mRNAID = "$geneID.t$mRNA_number" if $gene_prefix;
+        $mRNAID = "$geneID.t$mRNA_code" if $gene_prefix;
         my $attribute = "ID=$mRNAID;Parent=$geneID;$gff3_attr{$mRNA_ID}";
         if ($gene_prefix) {
             $attribute .= "Source=$mRNA_ID;" unless $no_attr_add;
