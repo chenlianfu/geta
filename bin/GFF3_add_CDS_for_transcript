@@ -1,0 +1,113 @@
+#!/usr/bin/env perl
+
+use strict;
+use Getopt::Long;
+use Cwd qw/abs_path getcwd cwd/;
+use File::Basename;
+
+my $usage = <<USAGE;
+Usage:
+    $0 [options] genome.fasta GeneModelsInput.gff3 > GeneModelsOutput.gff3
+    
+    本程序能对GFF3文件中没有CDS信息的转录本进行ORF分析并将CDS信息填补进去。
+
+    --tmp_dir <string>    default: tmp_\$date_\$pid
+    程序运行时临时文件夹名称。
+
+    --help    default: None
+    display this help and exit.
+
+USAGE
+if (@ARGV==0){die $usage}
+
+my ($help_flag, $tmp_dir);
+GetOptions(
+    "tmp_dir:s" => \$tmp_dir,
+    "help" => \$help_flag,
+);
+if ( $help_flag ) { die $usage }
+
+my $date = `date +%Y%m%d%H%M%S`; chomp($date);
+$tmp_dir ||= "tmp_$date$$";
+$tmp_dir = abs_path($tmp_dir);
+mkdir $tmp_dir unless -e $tmp_dir;
+print STDERR "程序运行时使用了临时文件夹 $tmp_dir 。\n\n";
+
+# 读取基因组序列
+my %seq = &read_genome($ARGV[0]);
+#foreach (keys %seq) { print ">$_\n$seq{$_}\n"; }
+
+# 读取GFF3文件
+my %gene_info = &get_geneModels_from_GFF3($ARGV[1]);
+
+# 得到没有CDS信息的转录本数据。
+my (%transcript_info);
+open OUT, ">", "$tmp_dir/transcript.fasta" or die "Can not create file $tmp_dir/transcript.fasta, $!";
+foreach my $gene_ID ( keys %gene_info ) {
+    foreach my $mRNA_ID ( @{$gene_info{$gene_ID}{"mRNA_ID"}} ) {
+        my $mRNA_info = $gene_info{$gene_ID}{"mRNA_info"}{$mRNA_ID};
+        next unless m/\tCDS\t/;
+    }
+}
+
+
+# 子程序，返回基因的GFF3哈希信息：
+# gene_ID => "header" => gene_header
+# gene_ID => "mRNA_ID" => 数组
+# gene_ID => "mRNA_header" => mRNA_ID => mRNA_header
+# gene_ID => "mRNA_info" => mRNA_ID => mRNA_Info
+sub get_geneModels_from_GFF3 {
+    my %gene_info;
+    # 第一轮，找gene信息
+    open IN, $_[0] or die "Can not open file $_[0], $!";
+    while (<IN>) {
+        if ( m/\tgene\t.*ID=([^;\s]+)/ ) {
+            $gene_info{$1}{"header"} = $_;
+        }
+    }
+    close IN;
+    # 第二轮，找Parent值是geneID的信息，包含但不限于 mRNA 信息
+    my %mRNA_ID2gene_ID;
+    open IN, $_[0] or die "Can not open file $_[0], $!";
+    while (<IN>) {
+        if ( m/Parent=([^;]+)/ ) {
+            my $parent = $1;
+            if ( exists $gene_info{$parent} ) {
+                if ( m/ID=([^;]+)/ ) {
+                    push @{$gene_info{$parent}{"mRNA_ID"}}, $1;
+                    $gene_info{$parent}{"mRNA_header"}{$1} = $_;
+                    $mRNA_ID2gene_ID{$1} = $parent;
+                }
+            }
+        }
+    }
+    close IN;
+    # 第三轮，找Parent值不是geneID的信息
+    open IN, $_[0] or die "Can not open file $_[0], $!";
+    while (<IN>) {
+        if ( m/Parent=([^;]+)/ && exists $mRNA_ID2gene_ID{$1} ) {
+            my $parent = $1;
+            $gene_info{$mRNA_ID2gene_ID{$1}}{"mRNA_info"}{$parent} .= $_;
+        }
+    }
+    close IN;
+
+    return %gene_info;
+}
+
+sub read_genome {
+    open IN, $_[0] or die "Can not open file $_[0], $!";
+    my ($seq_id, %seq);
+    while (<IN>) {
+        if (m/^>(\S+)/) {
+            $seq_id = $1;
+        }
+        else {
+            chomp;
+            s/[^ATCGatcg]/N/g;
+            tr/atcgn/ATCGN/;
+            $seq{$seq_id} .= $_;
+        }
+    }
+    return %seq;
+}
