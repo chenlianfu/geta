@@ -13,6 +13,9 @@ Usage:
     本程序补齐基因模型首尾的原理：（1）对基因模型尾部直接进行延长，直至遇到终止密码子或到基因组序列最尾部；（2）对基因模型首部直接进行延长，直至遇到终止密码子，再吐出密码子碱基直至遇到起始密码子。
     程序最终输出包含所有基因模型的GFF3文件，并给出统计信息：所有的基因模型数量、完整基因模型数量、不完整的基因模型数量、填补成完整的基因模型数量、不能填补成完整基因模型的数量。
 
+    --nonCompletedGeneModels <string>    default: None
+    添加该参数后，程序将不能填补完整的基因模型输入到指定的文件中，在默认的标准输出中仅给完整基因模型。若不添加该参数，则将所有的基因模型都输出到标准输出。
+
     --start_codon <string>    default: ATG
     设置起始密码子。
 
@@ -25,16 +28,20 @@ Usage:
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($help_flag, $start_codon, $stop_codon);
+my ($help_flag, $start_codon, $stop_codon, $nonCompletedGeneModels);
 GetOptions(
     "help" => \$help_flag,
     "start_codon:s" => \$start_codon,
     "stop_codon:s" => \$stop_codon,
+    "nonCompletedGeneModels:s" => \$nonCompletedGeneModels,
 );
 
 if ( $help_flag ) { die $usage }
 $start_codon ||= "ATG";
 $stop_codon ||= "TAG,TGA,TAA";
+if ($nonCompletedGeneModels) {
+    open OUT, ">", $nonCompletedGeneModels or die "Can not create file $nonCompletedGeneModels, $!";
+}
 
 my (%start_codon, %stop_codon);
 foreach (split /,/, $start_codon) { $start_codon{$_} = 1; }
@@ -78,11 +85,30 @@ foreach my $gene_ID ( sort keys %gene_info ) {
         #print "$mRNA_ID\tCDS\n$mRNA_CDSs\n$mRNA_ID\texon\n$mRNA_exons\n";
     }
 
-    #输入GFF3
+    # 输出GFF3
     $gene_header[3] = $gene_start;
     $gene_header[4] = $gene_end;
-    print (join "\t", @gene_header);
-    print "$mRNA_out\n";
+    # 若添加了 --nonCompletedGeneModels 参数，则将完整基因和不完整基因分别输出
+    if ($nonCompletedGeneModels) {
+        if ( $gene_fill_need == 0 ) {
+            print (join "\t", @gene_header);
+            print "$mRNA_out\n";
+        }
+        else {
+            if ( $gene_fill_ok == 0 ) {
+                print OUT (join "\t", @gene_header);
+                print OUT "$mRNA_out\n";
+            }
+            else {
+                print (join "\t", @gene_header);
+                print "$mRNA_out\n";
+            }
+        }
+    }
+    else {
+        print (join "\t", @gene_header);
+        print "$mRNA_out\n";
+    }
 
     # 统计
     if ($gene_fill_need == 0) {
@@ -99,6 +125,7 @@ foreach my $gene_ID ( sort keys %gene_info ) {
         }
     }
 }
+close OUT;
 print STDERR "共有 $num_total 个基因模型进行了分析；其中有 $num_complete 个完整的基因模型；有 $num_partial 个不完整的基因模型；
 对其中 $num_filled 个基因模型成功进行了首尾填补；有 $num_not_filled 个基因模型未能进行完整填补。\n";
 
@@ -663,10 +690,10 @@ sub get_geneModels_from_GFF3 {
     my %mRNA_ID2gene_ID;
     open IN, $_[0] or die "Can not open file $_[0], $!";
     while (<IN>) {
-        if ( m/Parent=([^;]+)/ ) {
+        if ( m/Parent=([^;\s]+)/ ) {
             my $parent = $1;
             if ( exists $gene_info{$parent} ) {
-                if ( m/ID=([^;]+)/ ) {
+                if ( m/ID=([^;\s]+)/ ) {
                     push @{$gene_info{$parent}{"mRNA_ID"}}, $1;
                     $gene_info{$parent}{"mRNA_header"}{$1} = $_;
                     $mRNA_ID2gene_ID{$1} = $parent;
@@ -678,7 +705,7 @@ sub get_geneModels_from_GFF3 {
     # 第三轮，找Parent值不是geneID的信息
     open IN, $_[0] or die "Can not open file $_[0], $!";
     while (<IN>) {
-        if ( m/Parent=([^;]+)/ && exists $mRNA_ID2gene_ID{$1} ) {
+        if ( m/Parent=([^;\s]+)/ && exists $mRNA_ID2gene_ID{$1} ) {
             my $parent = $1;
             $gene_info{$mRNA_ID2gene_ID{$1}}{"mRNA_info"}{$parent} .= $_;
         }

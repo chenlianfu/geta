@@ -9,10 +9,11 @@ my $usage = <<USAGE;
 Usage:
     $0 [options] genome.fasta GeneModelsInput.gff3 > GeneModelsOutput.gff3
     
-    本程序能对GFF3文件中没有CDS信息的转录本进行ORF分析并将CDS信息填补进去。
-
-    --tmp_dir <string>    default: tmp_\$date_\$pid
-    程序运行时临时文件夹名称。
+    本程序能对GFF3文件中没有CDS信息的转录本进行ORF分析并将CDS信息填补进去。程序运行步骤和原理如下：
+    （1）对每个基因的每个转录本数据进行分析。
+    （2）若转录本的GFF3信息中没有CDS信息，则对其进行ORF分析，在目标链上直接通过3个读码框分析所有以M开头以*结尾的ORFs，选择最长的ORF作为CDS。
+    （3）对转录本添加CDS信息，输出GFF3文件信息。
+    （4）本程序运行完毕后，推荐再使用GFF3Clear进行格式修正，添加intron信息。
 
     --help    default: None
     display this help and exit.
@@ -20,18 +21,11 @@ Usage:
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($help_flag, $tmp_dir);
+my ($help_flag);
 GetOptions(
-    "tmp_dir:s" => \$tmp_dir,
     "help" => \$help_flag,
 );
 if ( $help_flag ) { die $usage }
-
-my $date = `date +%Y%m%d%H%M%S`; chomp($date);
-$tmp_dir ||= "tmp_$date$$";
-$tmp_dir = abs_path($tmp_dir);
-mkdir $tmp_dir unless -e $tmp_dir;
-print STDERR "程序运行时使用了临时文件夹 $tmp_dir 。\n\n";
 
 # 读取基因组序列
 my %seq = &read_genome($ARGV[0]);
@@ -41,15 +35,310 @@ my %seq = &read_genome($ARGV[0]);
 my %gene_info = &get_geneModels_from_GFF3($ARGV[1]);
 
 # 得到没有CDS信息的转录本数据。
-my (%transcript_info);
-open OUT, ">", "$tmp_dir/transcript.fasta" or die "Can not create file $tmp_dir/transcript.fasta, $!";
-foreach my $gene_ID ( keys %gene_info ) {
+foreach my $gene_ID ( sort keys %gene_info ) {
     foreach my $mRNA_ID ( @{$gene_info{$gene_ID}{"mRNA_ID"}} ) {
+        my $mRNA_header = $gene_info{$gene_ID}{"mRNA_header"}{$mRNA_ID};
+        my @mRNA_header = split /\t/, $mRNA_header;
         my $mRNA_info = $gene_info{$gene_ID}{"mRNA_info"}{$mRNA_ID};
-        next unless m/\tCDS\t/;
+
+        unless ($mRNA_info =~ m/\tCDS\t/) {
+            # 得到没有CDS信息的转录本序列，若基因在负义链上，则该转录本序列经过了反向互补。
+            my ($transcript_sequence, $exon_info) = &get_transcript_sequence($mRNA_info, \%seq);
+            #print "TEST: $mRNA_ID $mRNA_ID\nOK1: $transcript_sequence\nOK2: $exon_info\n";
+            
+            # 分析转录本的最优 ORFs，仅在转录本序列正链上寻找ORF，并选出最长的ORF
+            my $best_ORF = &find_best_ORF($transcript_sequence);
+
+            # 分析最优 ORFs 占 exon 的比例，ORF的 CDS 长度。
+            my ($ratio_of_ORF, $CDS_length) = &cal_ratio_of_ORF($best_ORF, $exon_info);
+			#print "TEST: $mRNA_ID $best_ORF $ratio_of_ORF $CDS_length\n\n";
+
+            # 分析 CDS 信息
+            my @cds_info = &cal_cds_info($best_ORF, $exon_info, $mRNA_header[6]);
+			foreach ( @cds_info ) {
+				@_ = split /\t/;
+				$gene_info{$gene_ID}{"mRNA_info"}{$mRNA_ID} .= "$mRNA_header[0]\t$mRNA_header[1]\tCDS\t$_[0]\t$_[1]\t\.\t$mRNA_header[6]\t$_[2]\tID=$mRNA_ID.CDS;Parent=$mRNA_ID\n";
+			}
+        }
     }
 }
 
+# 输出GFF3结果
+foreach my $gene_ID ( sort keys %gene_info ) {
+	print $gene_info{$gene_ID}{"header"};
+	foreach my $mRNA_ID ( @{$gene_info{$gene_ID}{"mRNA_ID"}} ) {
+		print $gene_info{$gene_ID}{"mRNA_header"}{$mRNA_ID};
+		print $gene_info{$gene_ID}{"mRNA_info"}{$mRNA_ID};
+	}
+}
+
+sub cal_cds_info {
+	# 获得ORF位置信息、exon信息和正负链信息。
+    my ($best_ORF, $exon_info, $strand) = @_;
+	#print "TEST, [sub cal_cds_info] exon info :\n$exon_info\n";
+	#print "TEST, [sub cal_cds_info] Best ORF : $best_ORF\n";
+	#print "TEST, [sub cal_cds_info] Strand: $strand\n";
+
+	# 获得ORF的起始和结束位置
+    my ($CDS_start, $CDS_end) = split /\t/, $best_ORF;
+    my @exon = split /\n/, $exon_info;
+
+	# 若转录本位于负义链，将ORF的起始和结束位置转换成正义链上的位置信息。
+	my $exon_total_length = 0;
+	foreach ( @exon ) {
+		@_ = split /\t/;
+		$exon_total_length += $_[1] - $_[0] + 1;
+	}
+	if ( $strand eq "-" ) {
+		my $CDS_start_old = $CDS_start; my $CDS_end_old = $CDS_end;
+		$CDS_end = $exon_total_length - $CDS_start_old + 1;
+		$CDS_start = $exon_total_length - $CDS_end_old + 1;
+	}
+	#print "TEST, [sub cal_cds_info] Strand, Start and End: $strand\t$CDS_start\t$CDS_end\n\n";
+
+	# 在正义链上根据exon信息和ORF位置信息转换出CDS位置信息。
+    my @CDS;
+    @exon = sort {$a <=> $b} @exon;
+    my $pos = 0;
+    my ($exon_length, $CDS_length) = (0, 0);
+    foreach ( @exon ) {
+        @_ = split /\t/;
+        my $length = $_[1] - $_[0] + 1;
+        $exon_length += $length;
+		# 找到第一个CDS
+        if ( $exon_length >= $CDS_start && @CDS == 0 ) {
+            my $start_site = $_[0] + $CDS_start - ($exon_length - $length) - 1;
+            push @CDS, "$start_site\t$_[1]";
+            $CDS_length += $_[1] - $start_site + 1;
+        }
+		# 找到其它的CDS
+        elsif ( @CDS > 0 ) {
+			if ( $CDS_length < ($CDS_end - $CDS_start + 1) ) {
+				push @CDS, $_;
+				$CDS_length += $length;
+			}
+		}
+		#print "CDS_length:$CDS_length\n";
+		# 对最后一个CDS结束位点进行修正
+		if ( $CDS_length > ($CDS_end - $CDS_start + 1) ) {
+			my $last_CDS_region = pop @CDS;
+			my ($last_CDS_start, $last_CDS_end) = split /\t/, $last_CDS_region;
+			$last_CDS_end = $last_CDS_end - ( $CDS_length - ($CDS_end - $CDS_start + 1) );
+			push @CDS, "$last_CDS_start\t$last_CDS_end";
+			$CDS_length = ($CDS_end - $CDS_start + 1);
+		}
+    }
+
+	#my $total_length = 0; foreach (@CDS) { print "$_\n"; @_ = split /\t/; $total_length += ($_[1] - $_[0] + 1); } print "Total Length: $total_length\n\n";
+	
+	# 添加Frame信息
+	@CDS = sort { $a <=> $b } @CDS;
+	@CDS = sort { $b <=> $a } @CDS if $strand eq "-";
+
+	my @out;
+	my ($frame, $frame_length) = (0, 0);
+	foreach ( @CDS ) {
+		$frame = $frame_length % 3;
+		$frame = 2 if $frame == 1;
+		$frame = 1 if $frame == 2;
+		push @out, "$_\t$frame";
+		@_ = split /\t/;
+		$frame_length += $_[1] - $_[0] + 1;
+	}
+
+	return @out;
+}
+
+sub add_attr {
+    my $mRNA_header = $_[0];
+    my $add_attr = $_[1];
+    chomp($mRNA_header);
+    $mRNA_header =~ s/(.*)\t(.*)/$1/;
+    my $attr = $2;
+    $attr =~ s/;$//;
+
+    my (%attr, %attr_sort, $sort_num);
+    foreach ( split /;/, $attr ) {
+        if (m/(.*)\=(.*)/) {
+            $sort_num ++;
+            $attr{$1} = $2;
+            $attr_sort{$1} = $sort_num unless exists $attr_sort{$1}; 
+        }
+    }
+    if ( $add_attr =~ m/(.*)\=(.*)/ ) {
+        $sort_num ++;
+        $attr{$1} = $2;
+        $attr_sort{$1} = $sort_num unless exists $attr_sort{$1};
+    }
+
+    my @out;
+    foreach ( sort { $attr_sort{$a} <=> $attr_sort{$b} } keys %attr ) {
+        push @out, "$_=$attr{$_}";
+    }
+    my $out = join ";", @out;
+    return "$mRNA_header\t$out\n";
+}
+
+sub cal_ratio_of_ORF {
+    my ($best_ORF, $exon_info) = @_;
+    @_ = split /\t/, $best_ORF;
+    my $length_ORF = $_[1] - $_[0] + 1;
+    my $length_exon = 0;
+    foreach ( split /\n/, $exon_info ) {
+        @_ = split /\t/, $_;
+        $length_exon += $_[1] - $_[0] + 1;
+    }
+
+    my $out_ratio = 0;
+    $out_ratio = $length_ORF / $length_exon if $length_exon;
+    return ($out_ratio, $length_ORF);
+}
+
+# 子程序，使用标准遗传密码寻找最优ORF
+sub find_best_ORF {
+    my $transcript_sequence = $_[0];
+    my %cds2pep = ( "TTT" => "F", "TTC" => "F", "TTA" => "L", "TTG" => "L", "TCT" => "S", "TCC" => "S", "TCA" => "S", "TCG" => "S", "TAT" => "Y", "TAC" => "Y", "TAA" => "*", "TAG" => "*", "TGT" => "C", "TGC" => "C", "TGA" => "*", "TGG" => "W", "CTT" => "L", "CTC" => "L", "CTA" => "L", "CTG" => "L", "CCT" => "P", "CCC" => "P", "CCA" => "P", "CCG" => "P", "CAT" => "H", "CAC" => "H", "CAA" => "Q", "CAG" => "Q", "CGT" => "R", "CGC" => "R", "CGA" => "R", "CGG" => "R", "ATT" => "I", "ATC" => "I", "ATA" => "I", "ATG" => "M", "ACT" => "T", "ACC" => "T", "ACA" => "T", "ACG" => "T", "AAT" => "N", "AAC" => "N", "AAA" => "K", "AAG" => "K", "AGT" => "S", "AGC" => "S", "AGA" => "R", "AGG" => "R", "GTT" => "V", "GTC" => "V", "GTA" => "V", "GTG" => "V", "GCT" => "A", "GCC" => "A", "GCA" => "A", "GCG" => "A", "GAT" => "D", "GAC" => "D", "GAA" => "E", "GAG" => "E", "GGT" => "G", "GGC" => "G", "GGA" => "G", "GGG" => "G");
+
+    # 得到正链上3个读码框强行翻译的蛋白序列。
+    my ($pep_frame_1, $pep_frame_2, $pep_frame_3);
+    my $seq = $transcript_sequence;
+    while ((length $seq) >= 3) {
+        $seq =~ s/(\w{3})//;
+        if (exists $cds2pep{$1}) {
+            $pep_frame_1 .= $cds2pep{$1};
+        }
+        else {
+            $pep_frame_1 .= 'X';
+        }
+    }
+    $seq = $transcript_sequence; $seq =~ s/^\w//;
+    while ((length $seq) >= 3) {
+        $seq =~ s/(\w{3})//;
+        if (exists $cds2pep{$1}) {
+            $pep_frame_2 .= $cds2pep{$1};
+        }
+        else {
+            $pep_frame_2 .= 'X';
+        }
+    }
+    $seq = $transcript_sequence; $seq =~ s/^\w\w//;
+    while ((length $seq) >= 3) {
+        $seq =~ s/(\w{3})//;
+        if (exists $cds2pep{$1}) {
+            $pep_frame_3 .= $cds2pep{$1};
+        }
+        else {
+            $pep_frame_3 .= 'X';
+        }
+    }
+
+    my %ORF;
+    # 分别分析3个强行翻译的蛋白序列，分析所有ORF（以M开始以*结尾，允许5'端ORF不以M开始，允许3'端ORF不以*结尾）的位置及其长度。
+    # 对第一个读码框进行分析
+    my ($start, $end, $prime5) = (0, 0, 0);
+    while ( $pep_frame_1 =~ s/^(.)// ) {
+        $end += 3;
+        # 找到以 M 起始的位置，作为ORF的起始。
+        $start = $end - 2 if ($1 eq 'M' && $start == 0);
+        # 找 * 的位置，作为ORF的终止。
+        if ( $1 eq '*') {
+            # 允许 5' 端ORF不以 M 开始。
+            if ($prime5 == 0) {
+                $start = 1 if $start == 0;
+                $ORF{"$start\t$end"} = $end - $start + 1;
+                $prime5 = 1;
+            }
+            else {
+                $ORF{"$start\t$end"} = $end - $start + 1 if $start;
+            }
+            $start = 0;
+        }
+    }
+    # 允许3'端ORF不以*结尾，前提是要求前端能找到 M 起始密码子。
+    if ( $start ) {
+        $ORF{"$start\t$end"} = $end - $start + 1;
+    }
+    # 也可能会存在一种情况，以上操作都未能找到 ORF，说明氨基酸序列中未能找到 M 和 * ，则以整条序列作为 ORF。
+    unless ( %ORF ) {
+        $ORF{"1\t$end"} = $end;
+    }
+
+    # 对第二个读码框进行分析
+    my ($start, $end, $prime5) = (0, 1, 0);
+    while ( $pep_frame_2 =~ s/^(.)// ) {
+        $end += 3;
+        $start = $end - 2 if ($1 eq 'M' && $start == 0);
+        if ( $1 eq '*') {
+            if ($prime5 == 0) {
+                $start = 2 if $start == 0;
+                $ORF{"$start\t$end"} = $end - $start + 1;
+                $prime5 = 1;
+            }
+            else {
+                $ORF{"$start\t$end"} = $end - $start + 1 if $start;
+            }
+            $start = 0;
+        }
+    }
+    if ( $start ) {
+        $ORF{"$start\t$end"} = $end - $start + 1;
+    }
+    unless ( %ORF ) {
+        $ORF{"2\t$end"} = $end;
+    }
+
+    # 对第三个读码框进行分析
+    my ($start, $end, $prime5) = (0, 2, 0);
+    while ( $pep_frame_3 =~ s/^(.)// ) {
+        $end += 3;
+        $start = $end - 2 if ($1 eq 'M' && $start == 0);
+        if ( $1 eq '*') {
+            if ($prime5 == 0) {
+                $start = 3 if $start == 0;
+                $ORF{"$start\t$end"} = $end - $start + 1;
+                $prime5 = 1;
+            }
+            else {
+                $ORF{"$start\t$end"} = $end - $start + 1 if $start;
+            }
+            $start = 0;
+        }
+    }
+    if ( $start )  {
+        $ORF{"$start\t$end"} = $end - $start + 1;
+    }
+    unless ( %ORF ) {
+        $ORF{"2\t$end"} = $end;
+    }
+
+    my @ORF = sort {$ORF{$b} <=> $ORF{$a} or $a <=> $b} keys %ORF;
+    return $ORF[0];
+}
+
+# 子程序，得到转录本序列
+sub get_transcript_sequence {
+    my $mRNA_info = $_[0];
+    my %seq = %{$_[1]};
+    my ($chr, $strand, $out_transcript_sequence, $out_exon, @out_exon);
+    foreach ( split /\n/, $mRNA_info ) {
+        @_ = split /\t/, $_;
+        if ( $_[2] eq "exon" ) {
+            push @out_exon, "$_[3]\t$_[4]";
+            $chr = $_[0]; $strand = $_[6];
+        }
+    }
+    @out_exon = sort {$a <=> $b} @out_exon;
+    $out_exon = join "\n", @out_exon;
+    foreach ( @out_exon ) {
+        @_ = split /\t/, $_;
+        $out_transcript_sequence .= substr($seq{$chr}, $_[0] - 1, $_[1] - $_[0] + 1);
+    }
+    if ($strand eq "-") {
+        $out_transcript_sequence = reverse $out_transcript_sequence;
+        $out_transcript_sequence =~ tr/ATCGNatcgn/TAGCNTAGCN/;
+    }
+    return ($out_transcript_sequence, $out_exon);
+}
 
 # 子程序，返回基因的GFF3哈希信息：
 # gene_ID => "header" => gene_header
@@ -70,10 +359,10 @@ sub get_geneModels_from_GFF3 {
     my %mRNA_ID2gene_ID;
     open IN, $_[0] or die "Can not open file $_[0], $!";
     while (<IN>) {
-        if ( m/Parent=([^;]+)/ ) {
+        if ( m/Parent=([^;\s]+)/ ) {
             my $parent = $1;
             if ( exists $gene_info{$parent} ) {
-                if ( m/ID=([^;]+)/ ) {
+                if ( m/ID=([^;\s]+)/ ) {
                     push @{$gene_info{$parent}{"mRNA_ID"}}, $1;
                     $gene_info{$parent}{"mRNA_header"}{$1} = $_;
                     $mRNA_ID2gene_ID{$1} = $parent;
@@ -85,7 +374,7 @@ sub get_geneModels_from_GFF3 {
     # 第三轮，找Parent值不是geneID的信息
     open IN, $_[0] or die "Can not open file $_[0], $!";
     while (<IN>) {
-        if ( m/Parent=([^;]+)/ && exists $mRNA_ID2gene_ID{$1} ) {
+        if ( m/Parent=([^;\s]+)/ && exists $mRNA_ID2gene_ID{$1} ) {
             my $parent = $1;
             $gene_info{$mRNA_ID2gene_ID{$1}}{"mRNA_info"}{$parent} .= $_;
         }

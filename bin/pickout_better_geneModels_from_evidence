@@ -242,10 +242,10 @@ sub get_geneModels_from_GFF3 {
     # 第二轮，找Parent值是geneID的信息，包含但不限于 mRNA 信息
     my %mRNA_ID2gene_ID;
     foreach (@lines) {
-        if ( m/Parent=([^;]+)/ ) {
+        if ( m/Parent=([^;\s]+)/ ) {
             my $parent = $1;
             if ( exists $gene_info{$parent} ) {
-                if ( m/ID=([^;]+)/ ) {
+                if ( m/ID=([^;\s]+)/ ) {
                     push @{$gene_info{$parent}{"mRNA_ID"}}, $1;
                     $gene_info{$parent}{"mRNA_header"}{$1} = $_;
                     $mRNA_ID2gene_ID{$1} = $parent;
@@ -255,7 +255,7 @@ sub get_geneModels_from_GFF3 {
     }
     # 第三轮，找Parent值不是geneID的信息
     foreach (@lines) {
-        if ( m/Parent=([^;]+)/ && exists $mRNA_ID2gene_ID{$1} ) {
+        if ( m/Parent=([^;\s]+)/ && exists $mRNA_ID2gene_ID{$1} ) {
             my $parent = $1;
             $gene_info{$mRNA_ID2gene_ID{$1}}{"mRNA_info"}{$parent} .= $_;
         }

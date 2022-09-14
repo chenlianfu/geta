@@ -1224,17 +1224,72 @@ unless (-e "6.combineGeneModels.ok") {
     chdir "6.combineGeneModels";
     $pwd = `pwd`; print STDERR "PWD: $pwd";
 
-    # 6.1 以AUGUSTUS结果为主，进行三种基因预测结果的整合
+    # 6.1 第一轮基因预测结果整合：以AUGUSTUS结果为主，进行三种基因预测结果的整合
     # 对三种基因预测结果进行第一轮整合，以Augustus结果为准。得到 combine.1.gff3 为有Evidence支持的结果，combine.2.gff3为支持不足的结果。
     $cmdString = "$dirname/bin/paraCombineGeneModels $config{'paraCombineGeneModels'} --cpu $cpu ../5.augustus/augustus.gff3 ../3.transcript/transfrag.genome.gff3 ../4.homolog/genewise.gff3 ../5.augustus/hints.gff &> /dev/null";
     unless (-e "01.paraCombineGeneModels.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+		$cmdString = "ln -s combine.1.gff3 geneModels.a.gff3; ln -s combine.2.gff3 geneModels.b.gff3";
+		print STDERR (localtime) . ": CMD: $cmdString\n";
+		system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
         open OUT, ">", "01.paraCombineGeneModels.ok" or die $!; close OUT;
     }
     else {
         print STDERR "CMD(Skipped): $cmdString\n";
     }
+
+	# 6.2 第二轮基因预测结果整合：以转录本和同源蛋白预测结果为准，对上一步的基因模型进行优化。
+	my $cmdString1 = "ln -s ../5.augustus/training/geneModels.gff3 geneModels.c.gff3;";
+	my $cmdString2 = "$dirname/bin/pickout_better_geneModels_from_evidence $config{'pickout_better_geneModels_from_evidence'} geneModels.a.gff3 geneModels.c.gff3 > picked_evidence_geneModels.gff3 2> picked_evidence_geneModels.log";
+    my $cmdString3 = "$dirname/bin/GFF3Clear --genome $genome --no_attr_add picked_evidence_geneModels.gff3 geneModels.a.gff3 > geneModels.d.gff3 2> GFF3Clear.1.log";
+	unless (-e "02.pickout_better_geneModels_from_evidence.ok") {
+		# 先挑选出更优的有Evidence支持的基因模型
+		print STDERR (localtime) . ": CMD: $cmdString1\n";
+		system("$cmdString1") == 0 or die "failed to execute: $cmdString1\n";
+		# 再用更优的有Evidence支持的基因模型替换掉相应的基因模型
+		print STDERR (localtime) . ": CMD: $cmdString2\n";
+		system("$cmdString2") == 0 or die "failed to execute: $cmdString2\n";
+		print STDERR (localtime) . ": CMD: $cmdString3\n";
+		system("$cmdString3") == 0 or die "failed to execute: $cmdString3\n";
+		open OUT, ">", "02.pickout_better_geneModels_from_evidence.ok" or die $!; close OUT;
+	}
+	else {
+		print STDERR "CMD(Skipped): $cmdString1\n";
+		print STDERR "CMD(Skipped): $cmdString2\n";
+		print STDERR "CMD(Skipped): $cmdString3\n";
+	}
+
+	# 6.3 对不完整基因模型进行首尾补齐。
+	$cmdString = "$dirname/bin/fillingEndsOfGeneModels --nonCompletedGeneModels geneModels.f.gff3 $genome geneModels.d.gff3 > geneModels.e.gff3 2> fillingEndsOfGeneModels.log";
+	unless ( -e "03.fillingEndsOfGeneModels.ok" ) {
+		print STDERR (localtime) . ": CMD: $cmdString\n";
+		system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+		open OUT, ">", "03.fillingEndsOfGeneModels.ok" or die $!; close OUT;
+	}
+	else {
+		print STDERR "CMD(Skipped): $cmdString\n";
+	}
+
+	# 6.4 对完整基因模型（geneModels.b.gff3和geneModels.e.gff3）进行可变剪接分析
+	$cmdString1 = "cat geneModels.b.gff3 geneModels.e.gff3 > geneModels.be.gff3";
+	$cmdString2 = "alternative_splicing_analysis geneModels.be.gff3 ../3.transcript/intron.txt ../3.transcript/base_depth.txt > geneModels.g1.gff3 2> alternative_splicing.stats";
+	unless ( -e "04a.alternative_splicing_analysis.ok" ) {
+		print STDERR (localtime) . ": CMD: $cmdString1\n";
+		system("$cmdString1") == 0 or die "failed to execute: $cmdString1\n";
+		print STDERR (localtime) . ": CMD: $cmdString2\n";
+		system("$cmdString2") == 0 or die "failed to execute: $cmdString2\n";
+		open OUT, ">", "04a.alternative_splicing_analysis.ok" or die $!; close OUT;
+	}
+	else {
+		print STDERR "CMD(Skipped): $cmdString1\n";
+		print STDERR "CMD(Skipped): $cmdString2\n";
+	}
+
+	
+
+
+	
 
     # 6.2 对缺少evidence支持的，AUGUSTUS重头预测的基因模型使用HMM算法进行检验和过滤
     # 对 evidence 支持不足的基因模型 combine.2.gff3 进行HMM检验，挑选有HMM匹配结果的基因模型 combine2.filter_pass.gff3
@@ -1265,50 +1320,12 @@ unless (-e "6.combineGeneModels.ok") {
         }
     }
 
-    # 对三种基因预测结果进行第二轮整合：（1）以主要来自Augustus预测的 combine.1.gff3 基因模型为参考，从完全由Evidence获得基因模型中挑出更好的结果；（2）再合并结果，优先选择Evidence基因模型；（3）对基因模型进行首尾填补。
-    # 6.3 从完全由Evidence得到的基因模型中挑选准确的基因模型
-    $cmdString = "$dirname/bin/pickout_better_geneModels_from_evidence $config{'pickout_better_geneModels_from_evidence'} combine.1.gff3 ../5.augustus/training/geneModels.gff3 > picked_evidence_geneModels.gff3 2> picked_evidence_geneModels.log";
-    unless (-e "03.pickout_better_geneModels_from_evidence.ok") {
-        print STDERR (localtime) . ": CMD: $cmdString\n";
-        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-        $cmdString = "perl -p -i -e 's/Integrity=.*;//' picked_evidence_geneModels.gff3";
-        print STDERR (localtime) . ": CMD: $cmdString\n";
-        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-        open OUT, ">", "03.pickout_better_geneModels_from_evidence.ok" or die $!; close OUT;
-    }
-    else {
-        print STDERR "CMD(Skipped): $cmdString\n";
-    }
 
-    # 6.4 合并并优先选择完全由Evidence支持的基因模型
-    $cmdString = "$dirname/bin/GFF3Clear --genome $genome --no_attr_add picked_evidence_geneModels.gff3 combine.1.gff3 combine2.filter_pass.gff3 > genome.all.gff3 2> GFF3Clear.1.log";
-    unless (-e "04.GFF3Clear.ok") {
-        print STDERR (localtime) . ": CMD: $cmdString\n";
-        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-        open OUT, ">", "04.GFF3Clear.ok" or die $!; close OUT;
-    }
-    else {
-        print STDERR "CMD(Skipped): $cmdString\n";
-    }
-
-    # 6.5 对所有基因模型进行首尾强制填补
-    $cmdString = "$dirname/bin/fillingEndsOfGeneModels $genome genome.all.gff3 > genome.all.filledEnds.gff3 2> fillingEndsOfGeneModels.log";
-    unless (-e "05.fillingEndsOfGeneModels.ok") {
-        print STDERR (localtime) . ": CMD: $cmdString\n";
-        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-        open OUT, ">", "05.fillingEndsOfGeneModels.ok" or die $!; close OUT;
-    }
-    else {
-        print STDERR "CMD(Skipped): $cmdString\n";
-    }
 
     # 6.6 去除CDS区域和转座子序列重叠过多(默认重叠比例>= 0.3)的基因模型
     $cmdString = "$dirname/bin/remove_genes_in_repeats $config{'remove_genes_in_repeats1'} --filtered_gene_models genome.all.filledEnds.genes_in_repeats1.gff3 ../0.RepeatMasker/genome.repeat.gff3 genome.all.filledEnds.gff3 > genome.all.filledEnds.rm_genes_in_repeats1.gff3 2> remove_genes_in_repeats1.txt";
     unless (-e "06.remove_genes_in_repeats.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
-        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-        open OUT, ">", "06.remove_genes_in_repeats.ok" or die $!; close OUT;
-    }
     else {
         print STDERR "CMD(Skipped): $cmdString\n";
     }
@@ -1526,6 +1543,9 @@ if ($protein) {
 
 # 7.5 输出GETA流程信息，用于追踪基因预测结果的可靠性
 open OUT, ">", "$out_prefix.gene_prediction.summary" or die "Can not create file $out_prefix.gene_prediction.summary, $!";
+
+# 7.5 输出GETA流程信息，用于追踪基因预测结果的可靠性
+open OUT, ">", "$out_prefix.gene_prediction.summary" or die "Can not create file $out_prefix.gene_prediction.summary, $!";
 open IN, "$out_prefix.tmp/0.RepeatMasker/genome.repeat.stats" or die "Can not open file $out_prefix.tmp/0.RepeatMasker/genome.repeat.stats, $!";
 while (<IN>) {
     print OUT $_ if m/^Genome Size/;
@@ -1613,29 +1633,29 @@ my ($gene_num1, $gene_num2, $gene_num3, $gene_num4) = (0, 0, 0, 0);
 open IN, "$out_prefix.GeneModels.gff3" or die "Can not open file $out_prefix.GeneModels.gff3, $!";
 while (<IN>) {
     $gene_num1 ++ if m/\tgene\t/;
+    print OUT $_ if m/^Genome Size/;
+    print OUT "$_\n" if m/^Repeat Ratio/;
 }
 close IN;
-open IN, "$out_prefix.Incomplete_GeneModels.gff3" or die "Can not open file $out_prefix.Incomplete_GeneModels.gff3, $!";
-while (<IN>) {
-    $gene_num2 ++ if m/\tgene\t/;
-}
-close IN;
-open IN, "$out_prefix.InRepeatRegion_GeneModels.gff3" or die "Can not open file $out_prefix.InRepeatRegion_GeneModels.gff3, $!";
-while (<IN>) {
-    $gene_num3 ++ if m/\tgene\t/;
-}
-close IN;
-open IN, "$out_prefix.ShortCDS_GeneModels.gff3" or die "Can not open file $out_prefix.ShortCDS_GeneModels.gff3, $!";
-while (<IN>) {
-    $gene_num4 ++ if m/\tgene\t/;
-}
-close IN;
-print OUT "The number of final complete gene models is: $gene_num1\n";
-print OUT "The number of Incomplete gene models is: $gene_num2\n";
-print OUT "The number of gene models whose CDS region overlap to Repeat Region > $1 is: $gene_num3\n" if $config{"remove_genes_in_repeats"} =~ m/([\d\.]+)/;
-print OUT "The number of gene models whose CDS length < $1 and cannot find ortholog in HMM validation is: $gene_num4\n" if $config{"remove_short_genes"} =~ m/([\d\.]+)/;
-
-
-
-print STDERR "\n============================================\n";
-print STDERR "GETA complete successfully! " . "(" . (localtime) . ")" . "\n\n";
+if ( -e "$out_prefix.tmp/2.hisat2/hisat2.log" ) {
+    open IN, "$out_prefix.tmp/2.hisat2/hisat2.log" or die $!;
+    while (<IN>) {
+        print OUT "The alignment rate of RNA-Seq reads is: $1\n\n" if m/^(\S+) overall alignment rate/;
+    }
+    close IN;
+    open IN, "$out_prefix.tmp/3.transcript/transfrag.genome.gff3" or die "Can not open file $out_prefix.tmp/3.transcript/transfrag.genome.gff3, $!";
+    my ($num1, $num2, $num3, $num4, $num5);
+    while (<IN>) {
+        if (m/\tgene\t/) {
+            $num1 ++;
+            if (m/Integrity=complete/) {
+                $num2 ++;
+            }
+            elsif (m/Integrity=5prime_partial/) {
+                $num3 ++;
+            }
+            elsif (m/Integrity=3prime_partial/) {
+                $num4 ++;
+            }
+            elsif (m/Integrity=internal/) {
+                $num5 ++;
