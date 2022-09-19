@@ -1,14 +1,27 @@
 #!/usr/bin/perl
 use strict;
+use Getopt::Long;
 
 my $usage = <<USAGE;
 Usage:
-    perl $0 genome.fasta genome.gff3 > proteins.fasta
+    perl $0 genome.fasta input1.gff3 [input2.gff3 ...] > proteins.fasta
+
+    本程序用于根据GFF3中mRNA信息的CDS Feature，使用基因组序列转换出所有转录本的Protein序列。
+
+    --out_CDS    default: None
+    添加该参数后，程序输出CDS序列，而不是默认的Protein序列。
 
 USAGE
 if (@ARGV==0){die $usage}
 
-open IN, $ARGV[0] or die $!;
+my ($help_flag, $out_CDS);
+GetOptions(
+    "help" => \$help_flag,
+    "out_CDS!" => \$out_CDS,
+);
+
+my $genome_file = shift @ARGV;
+open IN, $genome_file or die "Can not open file $genome_file, $!";
 my (%seq, $seq_id);
 while (<IN>) {
     chomp;
@@ -17,18 +30,20 @@ while (<IN>) {
 }
 close IN;
 
-open IN, $ARGV[1] or die $!;
 my (%cds, %locus, %strand);
-while (<IN>) {
-    if (/\tCDS\t/) {
-        @_ = split /\t/;
-        $_[8] =~ m/Parent=([^;\s]+)/;
-        $cds{$1}{"$_[3]\t$_[4]\t$_[7]"} = $_[3];
-        $locus{$1} = $_[0];
-        $strand{$1} = $_[6];
+foreach ( @ARGV ) {
+    open IN, $_ or die "Can not open file $_, $!";
+    while (<IN>) {
+        if (/\tCDS\t/) {
+            @_ = split /\t/;
+            $_[8] =~ m/Parent=([^;\s]+)/;
+            $cds{$1}{"$_[3]\t$_[4]\t$_[7]"} = $_[3];
+            $locus{$1} = $_[0];
+            $strand{$1} = $_[6];
+        }
     }
+    close IN;
 }
-close IN;
 
 foreach my $id (sort keys %cds) {
     my @cds = sort {$cds{$id}{$a} <=> $cds{$id}{$b}} keys %{$cds{$id}};
@@ -42,7 +57,12 @@ foreach my $id (sort keys %cds) {
         $frame = $1 if $cds[0] =~ m/(\d+)$/;
         print STDERR "Warning: $id\tthe frame not equal 0\n" if $frame != 0;
         my $pep = &cds2pep($cds_seq, $frame);
-        print ">$id\n$pep\n";
+        if ( $out_CDS ) {
+            print ">$id\n$cds_seq\n";
+        }
+        else {
+            print ">$id\n$pep\n";
+        }
     }
     elsif ($strand{$id} eq "-") {
         $cds_seq = &rc($cds_seq);
@@ -50,7 +70,12 @@ foreach my $id (sort keys %cds) {
         $frame = $1 if $cds[-1] =~ m/(\d+)$/;
         print STDERR "Warning: $id\tthe frame not equal 0\n" if $frame != 0;
         my $pep = &cds2pep($cds_seq, $frame);
-        print ">$id\n$pep\n";
+        if ( $out_CDS ) {
+            print ">$id\n$cds_seq\n";
+        }
+        else {
+            print ">$id\n$pep\n";
+        }
     }
 }
 

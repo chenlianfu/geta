@@ -1,0 +1,253 @@
+#!/usr/bin/env perl
+
+use strict;
+use Getopt::Long;
+use Cwd qw/abs_path getcwd cwd/;
+use File::Basename;
+
+my $usage = <<USAGE;
+Usage:
+    $0 [options] repeat.gff3 file1.gff3 [file2.gff3 . . .] > transcriptID_for_filtering.txt
+
+    本程序输入的第一个GFF3文件是重复序列数据，对后续的一个或多个GFF3文件进行分析，找到结构不好的转录本ID，以用于后续的HMM和BLASTP检测。将以下三类转录本的ID记录下来并输出到标准输出。
+    （1）CDS占转录本长度比例较低（默认 < 0.3）的转录本；
+    （2）所有转录本的CDS长度都较短（默认 < 600 bp）的基因，对应的所有转录本；
+    （3）所有转录本的CDS和重复序列区域重叠比例都较高（默认 >= 30%）的基因，对应的所有转录本。
+
+    --min_CDS_ratio <float>    default: 0.3
+    设置最小的CDS占转录本长度比值。若CDS占转录本长度比例 < 本阈值，则认为转录本结构较差，输出该转录本ID。
+
+    --min_CDS_length <int>    default: 600
+    设置最小的CDS长度。若CDS长度 < 本阈值，则认为转录本结构较差，输出该转录本ID。
+
+    --max_repeat_overlap_ratio <float>    default: 0.3
+    设置最大的CDS和重复序列区域重叠比例。若CDS和重复序列区域重叠比例 >= 本阈值，则认为转录本结构较差，输出该转录本ID。
+
+    --ignore_repeat_Name <string>    default: Simple_repeat,Low_complexity,Satellite,Unknown,Tandem_repeat
+    程序读取repeat信息GFF3文件时，若其第九列中的Name值属于本参数设定的多个值，则忽略相应信息。该参数的值可以设置多个并使用逗号分割。
+
+USAGE
+if (@ARGV==0){die $usage}
+
+my ($min_CDS_ratio, $min_CDS_length, $max_repeat_overlap_ratio, $ignore_repeat_Name);
+GetOptions (
+    "min_CDS_ratio:f" => \$min_CDS_ratio,
+    "min_CDS_length:i" => \$min_CDS_length,
+    "max_repeat_overlap_ratio:f" => \$max_repeat_overlap_ratio,
+    "ignore_repeat_Name:s" => \$ignore_repeat_Name,
+);
+$min_CDS_ratio ||= 0.3;
+$min_CDS_length ||= 600;
+$max_repeat_overlap_ratio ||= 0.3;
+$ignore_repeat_Name ||= "Simple_repeat,Low_complexity,Satellite,Unknown,Tandem_repeat";
+my %ignore_repeat_Name;
+foreach ( split /,/, $ignore_repeat_Name ) {
+    $ignore_repeat_Name{$_} = 1;
+}
+
+# 程序先读取Repeat信息，将重复序列的位置信息存储于 %repeat 中。
+my $repeat_file = shift @ARGV;
+open IN, $repeat_file or die "Can not open file $repeat_file, $!\n";
+my %repeat;
+while (<IN>) {
+    next if m/^#/;
+    next if m/^\s*$/;
+    next if ( m/Name=([^;]+)/ && exists $ignore_repeat_Name{$1} );
+
+    @_ = split /\t/;
+    my $index1 = int($_[3] / 1000);
+    my $index2 = int($_[4] / 1000);
+    foreach ($index1 .. $index2) {
+        $repeat{$_[0]}{$_}{"$_[3]\t$_[4]"} = 1;
+        #print "$_[0]\t$_\t$_[3]\t$_[4]\n";
+    }
+}
+close IN;
+
+# 将程序后输入的多个文件内容合并到一个文件中。
+open OUT, ">", "GFF3_extract_TranscriptID_for_filtering.$$.gff3" or die "Can not create file GFF3_extract_TranscriptID_for_filtering.$$.gff3, $!";
+foreach ( @ARGV ) {
+    open IN, $_ or die "Can not open file $_, $!";
+    print OUT <IN>;
+    close IN;
+}
+close OUT;
+
+# 读取所有的GFF3信息
+my %gene_info = &get_geneModels_from_GFF3("GFF3_extract_TranscriptID_for_filtering.$$.gff3");
+
+foreach my $gene_ID ( sort keys %gene_info ) {
+    my ($out_CDS_length, $out_CDS_repeatOverlapRatio) = (1, 1);
+    my ($CDS_length_out, $CDS_repeatOverlapRatio_out);
+    foreach my $mRNA_ID ( @{$gene_info{$gene_ID}{"mRNA_ID"}} ) {
+        my $mRNA_header = $gene_info{$gene_ID}{"mRNA_header"}{$mRNA_ID};
+        my @mRNA_header = split /\t/, $mRNA_header;
+        my $mRNA_info = $gene_info{$gene_ID}{"mRNA_info"}{$mRNA_ID};
+
+        # 计算转录本的CDS信息
+        my @CDS = &get_feature($mRNA_info, "CDS");
+        my $CDS_length = &cal_length(\@CDS);
+        
+        # 计算转录本的exon信息
+        my @exon = &get_feature($mRNA_info, "exon");
+        my $exon_length = &cal_length(\@exon);
+        
+        # 计算CDS和重复序列重叠长度
+        my $overlap_length = 0;
+        foreach ( @CDS ) {
+            $overlap_length += &cal_overlap_length("$mRNA_header[0]\t$_");
+        }
+
+        my $CDS_ratio = 0;
+        $CDS_ratio = $CDS_length / $exon_length if $exon_length;
+        my $overlap_ratio = 0;
+        $overlap_ratio = $overlap_length / $CDS_length if $CDS_length;
+
+        if ( $CDS_ratio < $min_CDS_ratio ) {
+            print "$mRNA_ID\tCDS_Ratio_lt_$min_CDS_ratio\t$CDS_ratio\n";
+        }
+        if ( $CDS_length < $min_CDS_length ) {
+            $CDS_length_out .= "$mRNA_ID\tCDS_Length_lt_${min_CDS_length}bp\t${CDS_length}bp\n";
+        }
+        else {
+            $out_CDS_length = 0;
+        }
+        if ( $overlap_ratio >= $max_repeat_overlap_ratio ) {
+            $CDS_repeatOverlapRatio_out .= "$mRNA_ID\tCDS_RepeatOverlapRatio_ge_$max_repeat_overlap_ratio\t$overlap_ratio\n";
+        }
+        else {
+            $out_CDS_repeatOverlapRatio = 0;
+        }
+
+        #print STDERR "$gene_ID, $mRNA_ID:\n";
+        #print STDERR ((join "\n", @CDS) . "\n");
+        #print STDERR "CDS_Length: $CDS_length\n";
+        #print STDERR ((join "\n", @exon) . "\n");
+        #print STDERR "Exon_Length: $exon_length\n";
+        #print STDERR "Overlap_Length: $overlap_length\n";
+    }
+    print $CDS_length_out if $out_CDS_length == 1;
+    print $CDS_repeatOverlapRatio_out if $out_CDS_repeatOverlapRatio == 1;
+}
+
+unlink "GFF3_extract_TranscriptID_for_filtering.$$.gff3";
+
+# 子程序，计算GFF3信息中指定Feature name的第四列和第五列位置信息，返回数组。
+sub get_feature {
+    my ($info, $feature_name) = @_;
+    my @out;
+    foreach ( split /\n/, $info ) {
+        @_ = split /\t/;
+        if ( $_[2] eq $feature_name ) {
+            push @out, "$_[3]\t$_[4]";
+        }
+    }
+    return @out;
+}
+
+# 子程序，输入数据是一个数组，数组中每个元素是制表符分割的两个数字；根据每个元素的两个数据计算长度信息，计算所有元素的总长度，返回一个数字。
+sub cal_length {
+    my @region = @{$_[0]};
+    my $out;
+    foreach (@region) {
+        @_ = split /\t/;
+        $out += abs($_[1] - $_[0]) + 1;
+    }
+    return $out;
+}
+
+# 子程序，计算一个CDS和重复序列的重叠的碱基数。
+sub cal_overlap_length {
+    my @i = split /\t/, $_[0];
+    my $length;
+
+    my $index1 = int($i[1] / 1000);
+    my $index2 = int($i[2] / 1000);
+    my %repeat_info;
+    foreach ($index1 .. $index2) {
+        foreach (keys %{$repeat{$i[0]}{$_}}) {
+            $repeat_info{$_} = 1;
+        }
+    }
+    my @repeat = sort {$a <=> $b} keys %repeat_info;
+
+    my $start = $i[1];
+    foreach (@repeat) {
+        #print "OK1: $i[0]\t$i[1]\t$i[2]\t$_\n";
+        @_ = split /\t/;
+        if ($_[0] <= $i[2] && $_[1] >= $start) {
+#CDS:   ($start)============($i[2])
+#repeat:     ($_[0])============($_[1])
+#repeat:            ======
+#repeat:     ======================
+#repeat:     ============
+            if ($start <= $_[0]) {
+                if ($i[2] < $_[1]) {
+                    $length += ($i[2] - $_[0] + 1);
+                    last;
+                }
+                else {
+                    $length += ($_[1] - $_[0] + 1);
+                    $start = $_[1] + 1;
+                }
+            }
+            else {
+                if ($i[2] < $_[1]) {
+                    $length += ($i[2] - $start + 1);
+                    last;
+                }
+                else {
+                    $length += ($_[1] - $start + 1);
+                    $start = $_[1] + 1;
+                }
+            }
+        }
+    }
+
+    return $length;
+}
+
+# 子程序，返回基因的GFF3哈希信息：
+# gene_ID => "header" => gene_header
+# gene_ID => "mRNA_ID" => 数组
+# gene_ID => "mRNA_header" => mRNA_ID => mRNA_header
+# gene_ID => "mRNA_info" => mRNA_ID => mRNA_Info
+sub get_geneModels_from_GFF3 {
+    my %gene_info;
+    # 第一轮，找gene信息
+    open IN, $_[0] or die "Can not open file $_[0], $!";
+    while (<IN>) {
+        if ( m/\tgene\t.*ID=([^;\s]+)/ ) {
+            $gene_info{$1}{"header"} = $_;
+        }
+    }
+    close IN;
+    # 第二轮，找Parent值是geneID的信息，包含但不限于 mRNA 信息
+    my %mRNA_ID2gene_ID;
+    open IN, $_[0] or die "Can not open file $_[0], $!";
+    while (<IN>) {
+        if ( m/Parent=([^;\s]+)/ ) {
+            my $parent = $1;
+            if ( exists $gene_info{$parent} ) {
+                if ( m/ID=([^;\s]+)/ ) {
+                    push @{$gene_info{$parent}{"mRNA_ID"}}, $1;
+                    $gene_info{$parent}{"mRNA_header"}{$1} = $_;
+                    $mRNA_ID2gene_ID{$1} = $parent;
+                }
+            }
+        }
+    }
+    close IN;
+    # 第三轮，找Parent值不是geneID的信息
+    open IN, $_[0] or die "Can not open file $_[0], $!";
+    while (<IN>) {
+        if ( m/Parent=([^;\s]+)/ && exists $mRNA_ID2gene_ID{$1} ) {
+            my $parent = $1;
+            $gene_info{$mRNA_ID2gene_ID{$1}}{"mRNA_info"}{$parent} .= $_;
+        }
+    }
+    close IN;
+
+    return %gene_info;
+}
+

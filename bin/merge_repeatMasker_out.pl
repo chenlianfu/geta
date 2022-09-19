@@ -48,6 +48,7 @@ foreach (@ARGV) {
             $ratio = ($aaa[13] - $aaa[12] + 1) / ($aaa[13] + $1) if ($aaa[13] + $1) != 0;
         }
         next if $ratio < $min_coverge_ratio;
+        $ratio = sprintf("%.4f", $ratio);
 
         $locus{$aaa[5]}{"$aaa[6]\t$aaa[7]"}{"description"} = $_;
         $locus{$aaa[5]}{"$aaa[6]\t$aaa[7]"}{"start"} = $aaa[6];
@@ -55,6 +56,7 @@ foreach (@ARGV) {
         $locus{$aaa[5]}{"$aaa[6]\t$aaa[7]"}{"name"} = $aaa[10];
         $locus{$aaa[5]}{"$aaa[6]\t$aaa[7]"}{"repeatClass"}  = $aaa[11];
         $locus{$aaa[5]}{"$aaa[6]\t$aaa[7]"}{"target"} = "$aaa[12]\t$aaa[13]\t$aaa[14]";
+        $locus{$aaa[5]}{"$aaa[6]\t$aaa[7]"}{"ratio"} = $ratio;
 
         push @scaffold, $aaa[5] unless exists $scaffold{$aaa[5]};
         $scaffold{$aaa[5]} = 1;
@@ -76,7 +78,8 @@ foreach my $scaffold (@scaffold) {
         my $target = &target($locus{$scaffold}{$locus}{"name"}, $locus{$scaffold}{$locus}{"target"});
         my $strand = '+';
         $strand = '-' if $locus{$scaffold}{$locus}{"strand"} eq 'C';
-        print GFF3 "$scaffold\tRepeatMasker\tsimilarity\t$start_end[0]\t$start_end[1]\t\.\t$strand\t\.\tName=$name;Target=$target;\n";
+        my $Ratio = $locus{$scaffold}{$locus}{"ratio"};
+        print GFF3 "$scaffold\tRepeatMasker\tsimilarity\t$start_end[0]\t$start_end[1]\t\.\t$strand\t\.\tName=$name;Target=$target;Ratio=$Ratio\n";
 
         $total_repeat{"num"} ++;
         $total_repeat{"regions"}{"$scaffold\t$start_end[0]\t$start_end[1]"} = 1;

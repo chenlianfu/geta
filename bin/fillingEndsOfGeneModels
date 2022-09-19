@@ -16,6 +16,9 @@ Usage:
     --nonCompletedGeneModels <string>    default: None
     添加该参数后，程序将不能填补完整的基因模型输入到指定的文件中，在默认的标准输出中仅给完整基因模型。若不添加该参数，则将所有的基因模型都输出到标准输出。
 
+    --filling_need_transcriptID <string>    default: None
+    添加该参数后，程序将需要进行填补的转录本ID输出到指定的文件中。
+
     --start_codon <string>    default: ATG
     设置起始密码子。
 
@@ -28,12 +31,13 @@ Usage:
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($help_flag, $start_codon, $stop_codon, $nonCompletedGeneModels);
+my ($help_flag, $start_codon, $stop_codon, $nonCompletedGeneModels, $filling_need_transcriptID);
 GetOptions(
     "help" => \$help_flag,
     "start_codon:s" => \$start_codon,
     "stop_codon:s" => \$stop_codon,
     "nonCompletedGeneModels:s" => \$nonCompletedGeneModels,
+    "filling_need_transcriptID:s" => \$filling_need_transcriptID,
 );
 
 if ( $help_flag ) { die $usage }
@@ -41,6 +45,9 @@ $start_codon ||= "ATG";
 $stop_codon ||= "TAG,TGA,TAA";
 if ($nonCompletedGeneModels) {
     open OUT, ">", $nonCompletedGeneModels or die "Can not create file $nonCompletedGeneModels, $!";
+}
+if ($filling_need_transcriptID) {
+    open OUT1, ">", $filling_need_transcriptID or die "Can not create file $filling_need_transcriptID, $!";
 }
 
 my (%start_codon, %stop_codon);
@@ -72,6 +79,7 @@ foreach my $gene_ID ( sort keys %gene_info ) {
         my ($fill_need, $fill_ok, $mRNA_CDSs, $mRNA_exons) = &fillingEnd($mRNA_info, $genome_seq, $strand, $mRNA_ID);
         $gene_fill_need = 1 if $fill_need == 1;
         $gene_fill_ok = 1 if $fill_ok == 1;
+        print OUT1 "$mRNA_ID\n" if $fill_need == 1;
 
         my ($mRNA_start, $mRNA_end, $mRNA_content) = &get_mRNA_info($mRNA_CDSs, $mRNA_exons, $mRNA_ID, $mRNA_header[0], $strand);
         $mRNA_header[3] = $mRNA_start;
@@ -126,6 +134,7 @@ foreach my $gene_ID ( sort keys %gene_info ) {
     }
 }
 close OUT;
+close OUT1;
 print STDERR "共有 $num_total 个基因模型进行了分析；其中有 $num_complete 个完整的基因模型；有 $num_partial 个不完整的基因模型；
 对其中 $num_filled 个基因模型成功进行了首尾填补；有 $num_not_filled 个基因模型未能进行完整填补。\n";
 
@@ -410,6 +419,7 @@ sub fillingEnd {
 
     # 根据CDS获取mRNA的起始密码子和结束密码子
     my ($mRNA_start_codon, $mRNA_end_codon) = &get_start_and_stop_codon(\@CDS, $genome_seq, $strand);
+	#print STDERR "$mRNA_start_codon\t$mRNA_end_codon\n";
     $fill_need = 0 if ( exists $stop_codon{$mRNA_end_codon}  && exists $start_codon{$mRNA_start_codon} );
     #print "$mRNA_start_codon\t$mRNA_end_codon\n";
     if ( ! exists $stop_codon{$mRNA_end_codon} ) {
@@ -648,27 +658,33 @@ sub get_start_and_stop_codon {
     $_ = shift @_;
     my @CDS = @{$_};
     my ($genome_seq, $strand) = @_;
+    
+    # 得到CDS序列
     @CDS = sort {$a <=> $b} @CDS;
+    my $CDS_seq;
+    foreach ( @CDS ) {
+        @_ = split /\t/, $_;
+        $CDS_seq .= substr($genome_seq, $_[0] - 1, $_[1] - $_[0] + 1);
+    }
+    if ( $strand eq "-" ) {
+        $CDS_seq = reverse $CDS_seq;
+        $CDS_seq =~ tr/ATCGatcgn/TAGCTAGCN/;
+    }
 
-    my ($out_codon_start, $out_cond_end);
+    # 消除CDS序列的读码框偏移
+    my $frame = 0;
     if ( $strand eq "+" ) {
-        @_ = split /\t/, $CDS[0];
-        $out_codon_start = substr($genome_seq, $_[0] - 1, 3);
-        @_ = split /\t/, $CDS[-1];
-        $out_cond_end = substr($genome_seq, $_[1] - 3, 3);
+        $frame = $1 if $CDS[0] =~ m/(\d+)$/;
     }
     elsif ( $strand eq "-" ) {
-        @_ = split /\t/, $CDS[-1];
-        $out_codon_start = substr($genome_seq, $_[1] - 3, 3);
-        $out_codon_start = reverse($out_codon_start);
-        $out_codon_start =~ tr/ATCGatcg/TAGCTAGC/;
-        @_ = split /\t/, $CDS[0];
-        $out_cond_end = substr($genome_seq, $_[0] - 1, 3);
-        $out_cond_end = reverse($out_cond_end);
-        $out_cond_end =~ tr/ATCGatcg/TAGCTAGC/;
+        $frame = $1 if $CDS[-1] =~ m/(\d+)$/;
     }
+    $CDS_seq =~ s/^\w{$frame}//;
 
-    return ($out_codon_start, $out_cond_end);
+    my ($out_codon_start, $out_codon_end);
+    $out_codon_start = $1 if $CDS_seq =~ m/^(\w\w\w)/;
+    $out_codon_end = $1 if $CDS_seq =~ m/(\w\w\w)$/;
+    return ($out_codon_start, $out_codon_end);
 }
 
 # 子程序，返回基因的GFF3哈希信息：

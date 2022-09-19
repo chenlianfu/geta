@@ -76,7 +76,7 @@ while (<IN>) {
 }
 close IN;
 
-my ( %gff, %gff3_attr, %cds, %gene_CDS, %gene_CDS_length, %chr, %strand, %source );
+my ( %gff, %gff3_attr, %cds, %gene_CDS, %gene_CDS_length, %chr, %strand, %source, %lnc_RNA_transcripID );
 # %gff 存放最终有效基因的 mRNA / CDS / exon / UTR /intron 信息。
 # %gff3_attr 存放 gene 或 mRNA 第 9 列 attribute 信息。
 # %cds 存放 CDS 的索引信息
@@ -93,7 +93,7 @@ foreach my $input_file ( @ARGV ) {
     my ( %lines, $gene_id, $mRNA_id, %mRNAID2geneID );
     # 先读取gene和mRNA信息，存储GFF3第9列attribute信息，得到mRNA ID和gene ID之间的对应关系
     while ( <IN> ) {
-        if ( m/\tmRNA\t/ ) {
+        if ( m/\tmRNA\t/ or m/\tlnc_RNA\t/ ) {
             @_ = split /\t/;
             if ( $_[8] =~ /ID=([^;\s]+)/ ) {
                 $mRNA_id = $1;
@@ -111,6 +111,7 @@ foreach my $input_file ( @ARGV ) {
             $mRNAID2geneID{$mRNA_id} = $gene_id;
 
             $gff3_attr{$mRNA_id} = &get_attr($_[8]);
+            $lnc_RNA_transcripID{$mRNA_id} = 1;
         }
         elsif ( m/\tgene\t/) {
             @_ = split /\t/;
@@ -153,7 +154,7 @@ foreach my $input_file ( @ARGV ) {
             my $info = $gff3{$gene_ID}{$mRNA_ID};
 
             # 去除不包含CDS信息的mRNA
-            next unless $info =~ m/\tCDS\t/;
+            #next unless $info =~ m/\tCDS\t/;
 
             #print "$gene_ID\t$mRNA_ID\n$info";
             $info =~ s/^\s*//;
@@ -397,14 +398,19 @@ foreach my $gene_ID (@gene_ID) {
 
         $source = $GFF3_source if $GFF3_source;
         $mRNA_number ++;
-		my $mRNA_code = '0' x ( 2 - length($mRNA_number) ) . $mRNA_number;
+        my $mRNA_code = '0' x ( 2 - length($mRNA_number) ) . $mRNA_number;
         my $mRNAID = $mRNA_ID;
         $mRNAID = "$geneID.t$mRNA_code" if $gene_prefix;
         my $attribute = "ID=$mRNAID;Parent=$geneID;$gff3_attr{$mRNA_ID}";
         if ($gene_prefix) {
             $attribute .= "Source=$mRNA_ID;" unless $no_attr_add;
         }
-        print "$chr\t$source\tmRNA\t$mRNA_border{$mRNA_ID}\t\.\t$strand\t\.\t$attribute\n";
+        if ( exists $lnc_RNA_transcripID{$mRNA_ID} ) {
+            print "$chr\t$source\tlnc_RNA\t$mRNA_border{$mRNA_ID}\t\.\t$strand\t\.\t$attribute\n";
+        }
+        else {
+            print "$chr\t$source\tmRNA\t$mRNA_border{$mRNA_ID}\t\.\t$strand\t\.\t$attribute\n";
+        }
 
         my (%sort, %sort_UTR, $CDS_num, $exon_num, $intron_num, $UTR3_num, $UTR5_num);
         if ($strand eq "+") {
@@ -451,6 +457,7 @@ foreach my $gene_ID (@gene_ID) {
             }
 
             foreach (sort {$sort{$a} <=> $sort{$b} or $sort_UTR{$a} <=> $sort_UTR{$b}} keys %sort) {
+                next if ( exists $lnc_RNA_transcripID{$mRNA_ID} && m/(five|three)_prime_UTR\t/ );
                 print;
             }
         }
@@ -498,6 +505,7 @@ foreach my $gene_ID (@gene_ID) {
             }
 
             foreach (sort {$sort{$b} <=> $sort{$a} or $sort_UTR{$a} <=> $sort_UTR{$b}} keys %sort) {
+                next if ( exists $lnc_RNA_transcripID{$mRNA_ID} && m/(five|three)_prime_UTR\t/ );
                 print;
             }
         }

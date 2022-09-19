@@ -56,6 +56,9 @@ Parameters:
     --HMM_db <string>    default: None
     the absolute path of protein family HMM database which was used for filtering of false positive gene models.
 
+	--BLASTP_db <string>    default: None
+	the absolute path of protein family diamond database which was used for filtering of false positive gene models. 若该参数没有设置，程序会以homologous protein构建diamond数据库，进行基因模型过滤。
+
     --gene_prefix <string>    default: gene
     the prefix of gene id shown in output file.
 
@@ -80,7 +83,7 @@ Version: 2.5.1
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($RM_species, $RM_lib, $genome, $out_prefix, $pe1, $pe2, $single_end, $protein, $cpu, $trimmomatic, $strand_specific, $sam2transfrag, $ORF2bestGeneModels, $augustus_species, $HMM_db, $gene_prefix, $cmdString, $enable_augustus_training_iteration, $config, $use_existed_augustus_species);
+my ($RM_species, $RM_lib, $genome, $out_prefix, $pe1, $pe2, $single_end, $protein, $cpu, $trimmomatic, $strand_specific, $sam2transfrag, $ORF2bestGeneModels, $augustus_species, $HMM_db, $BLASTP_db, $gene_prefix, $cmdString, $enable_augustus_training_iteration, $config, $use_existed_augustus_species);
 GetOptions(
     "RM_species:s" => \$RM_species,
     "RM_lib:s" => \$RM_lib,
@@ -95,6 +98,7 @@ GetOptions(
     "augustus_species:s" => \$augustus_species,
     "use_existed_augustus_species:s" => \$use_existed_augustus_species,
     "HMM_db:s" => \$HMM_db,
+	"BLASTP_db:s" => \$BLASTP_db,
     "gene_prefix:s" => \$gene_prefix,
     "enable_augustus_training_iteration!" => \$enable_augustus_training_iteration,
     "config:s" => \$config,
@@ -254,6 +258,10 @@ my %config = (
     'paraAugusutusWithHints' => '--gene_prefix augustus --min_intron_len 20',
     'paraCombineGeneModels' => '--overlap 30 --min_augustus_transcriptSupport_percentage 10.0 --min_augustus_intronSupport_number 1 --min_augustus_intronSupport_ratio 0.01',
     'pickout_better_geneModels_from_evidence' => '--overlap_ratio 0.2 --ratio1 2 --ratio2 1.5 --ratio3 0.85 --ratio4 0.85',
+	'para_hmmscan' => '--evalue1 1e-5 --evalue2 1e-3 --hmm_length 80 --coverage 0.25 --no_cut_ga --chunk 20 --hmmscan_cpu 2',
+	'para_blast' => '--chunk 10 --blast-threads 1 --evalue 1e-3 --max-target-seqs 20 --completed_ratio 0.9',
+	'dimanod' => '--sensitive --max-target-seqs 20 --evalue 1e-5 --id 10 --index-chunks 1 --block-size 5',
+	'parsing_blast_result.pl' => '--evalue 1e-9 --identity 0.1 --CIP 0.4 --subject-coverage 0.4 --query-coverage 0.4',
     'HMMValidateABinitio' => '--CDS_length 750 --CDS_num 2 --evalue 1e-5 --coverage 0.25',
     'remove_genes_in_repeats1' => '--ratio 0.3 --ignore_Simple_repeat --ignore_Unknown',
     'remove_genes_in_repeats2' => '--ratio 0.8',
@@ -1261,7 +1269,7 @@ unless (-e "6.combineGeneModels.ok") {
 	}
 
 	# 6.3 对不完整基因模型进行首尾补齐。
-	$cmdString = "$dirname/bin/fillingEndsOfGeneModels --nonCompletedGeneModels geneModels.f.gff3 $genome geneModels.d.gff3 > geneModels.e.gff3 2> fillingEndsOfGeneModels.log";
+	$cmdString = "$dirname/bin/fillingEndsOfGeneModels --filling_need_transcriptID filling_need_transcriptID.txt --nonCompletedGeneModels geneModels.f.gff3 $genome geneModels.d.gff3 > geneModels.e.gff3 2> fillingEndsOfGeneModels.log";
 	unless ( -e "03.fillingEndsOfGeneModels.ok" ) {
 		print STDERR (localtime) . ": CMD: $cmdString\n";
 		system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -1271,61 +1279,137 @@ unless (-e "6.combineGeneModels.ok") {
 		print STDERR "CMD(Skipped): $cmdString\n";
 	}
 
-	# 6.4 对完整基因模型（geneModels.b.gff3和geneModels.e.gff3）进行可变剪接分析
-	$cmdString1 = "cat geneModels.b.gff3 geneModels.e.gff3 > geneModels.be.gff3";
-	$cmdString2 = "alternative_splicing_analysis geneModels.be.gff3 ../3.transcript/intron.txt ../3.transcript/base_depth.txt > geneModels.g1.gff3 2> alternative_splicing.stats";
-	unless ( -e "04a.alternative_splicing_analysis.ok" ) {
+	# 6.4 分别对对基因模型 geneModels.b.gff3, geneModels.e.gff3 and geneModels.f.gff3 进行可变剪接分析
+	$cmdString1 = "$dirname/bin/alternative_splicing_analysis geneModels.b.gff3 ../3.transcript/intron.txt ../3.transcript/base_depth.txt > geneModels.gb_AS.gff3 2> alternative_splicing.gb.stats; $dirname/bin/GFF3_add_CDS_for_transcript $genome geneModels.gb_AS.gff3 > geneModels.gb.gff3";
+	$cmdString2 = "$dirname/bin/alternative_splicing_analysis geneModels.e.gff3 ../3.transcript/intron.txt ../3.transcript/base_depth.txt > geneModels.ge_AS.gff3 2> alternative_splicing.ge.stats; $dirname/bin/GFF3_add_CDS_for_transcript $genome geneModels.ge_AS.gff3 > geneModels.ge.gff3";
+	$cmdString3 = "$dirname/bin/alternative_splicing_analysis geneModels.f.gff3 ../3.transcript/intron.txt ../3.transcript/base_depth.txt > geneModels.gf_AS.gff3 2> alternative_splicing.gf.stats; $dirname/bin/GFF3_add_CDS_for_transcript $genome geneModels.gf_AS.gff3 > geneModels.gf.gff3";
+	unless ( -e "04.alternative_splicing_analysis.ok" ) {
 		print STDERR (localtime) . ": CMD: $cmdString1\n";
 		system("$cmdString1") == 0 or die "failed to execute: $cmdString1\n";
 		print STDERR (localtime) . ": CMD: $cmdString2\n";
 		system("$cmdString2") == 0 or die "failed to execute: $cmdString2\n";
-		open OUT, ">", "04a.alternative_splicing_analysis.ok" or die $!; close OUT;
+		print STDERR (localtime) . ": CMD: $cmdString3\n";
+		system("$cmdString3") == 0 or die "failed to execute: $cmdString3\n";
+		open OUT, ">", "04.alternative_splicing_analysis.ok" or die $!; close OUT;
+	}
+	else {
+		print STDERR "CMD(Skipped): $cmdString1\n";
+		print STDERR "CMD(Skipped): $cmdString2\n";
+		print STDERR "CMD(Skipped): $cmdString3\n";
+	}
+
+	# 6.5 提取待过滤的转录本ID，对 geneModels.b.gff3, geneModels.e.gff3 and geneModels.f.gff3 中的基因模型进行过滤。
+	#########################################################################
+	# 以下几种类型的转录本用于过滤：
+	# 1. CDS占转录本长度比例较低（< 30%）的转录本；
+	# 2. 所有转录本的CDS长度较短（< 600 bp）的基因，对应的所有转录本；
+	# 3. 所有转录本的CDS和重复序列区域重叠比例都较高（默认 >= 30%）的基因，对应的所有转录本；
+	# 4. 没有足够证据支持的基因，对应的所有转录本；
+	# 5. 没法填补完整的基因，对应的所有转录本；
+	# 6. 通过填补而完整的基因，对应的所有转录本。
+	#########################################################################
+	# 提取CDS占转录本长度比例较低、CDS长度较短和CDS和重复序列区域重叠比例较高的转录本ID
+	my $cmdString1 = "$dirname/bin/GFF3_extract_TranscriptID_for_filtering ../0.RepeatMasker/genome.repeat.gff3 geneModels.gb.gff3 geneModels.ge.gff3 geneModels.gf.gff3 > transcriptID_for_filtering.txt";
+	# 提取没有足够证据基因的所有转录本ID
+	my $cmdString2 = "perl -ne 'print \"\$1\\tNotEnoughEvidence\\n\" if m/ID=([^;]*\\.t\\d+);/;' geneModels.gb.gff3 >> transcriptID_for_filtering.txt";
+	# 提取没法填补完整基因的所有转录本ID
+	my $cmdString3 = "perl -ne 'print \"\$1\\tFilling2Uncomplete\\n\" if m/ID=([^;]*\\.t\\d+);/;' geneModels.gf.gff3 >> transcriptID_for_filtering.txt";
+	# 提取通过填补而完整的基因的所有转录本ID
+	my $cmdString4 = "perl -e 'open IN, \"filling_need_transcriptID.txt\"; while (<IN>) { s/.t\\d+\\n//; \$gene{\$_} = 1; } while (<>) { print \"\$1\\tFilling2Complete\\n\" if m/ID=(([^;]+)\\.t\\d+);/ && exists \$gene{\$2} }' geneModels.ge_AS.gff3 >> transcriptID_for_filtering.txt";
+	unless ( -e "05.extract_TranscriptID_for_filtering.ok" ) {
+		print STDERR (localtime) . ": CMD: $cmdString1\n";
+		system("$cmdString1") == 0 or die "failed to execute: $cmdString1\n";
+		print STDERR (localtime) . ": CMD: $cmdString2\n";
+		system("$cmdString2") == 0 or die "failed to execute: $cmdString2\n";
+		print STDERR (localtime) . ": CMD: $cmdString3\n";
+		system("$cmdString3") == 0 or die "failed to execute: $cmdString3\n";
+		print STDERR (localtime) . ": CMD: $cmdString4\n";
+		system("$cmdString4") == 0 or die "failed to execute: $cmdString4\n";
+		open OUT, ">", "05.extract_TranscriptID_for_filtering.ok" or die $!; close OUT;
+	}
+	else {
+		print STDERR "CMD(Skipped): $cmdString1\n";
+		print STDERR "CMD(Skipped): $cmdString2\n";
+		print STDERR "CMD(Skipped): $cmdString3\n";
+		print STDERR "CMD(Skipped): $cmdString4\n";
+	}
+	
+	# 6.6 提取待过滤转录本的蛋白序列。
+	my $cmdString1 = "$dirname/bin/gff3_to_protein.pl $genome geneModels.gb.gff3 geneModels.gf.gff3 geneModels.ge.gff3 > proteins_all.fasta 2> gff3_to_protein.log";
+	my $cmdString2 = "perl -p -i -e 's/\\*\$//' proteins_all.fasta";
+	my $cmdString3 = "$dirname/bin/fasta_extract_subseqs_from_list.pl proteins_all.fasta transcriptID_for_filtering.txt > proteins_for_filtering.fasta 2> fasta_extract_subseqs_from_list.log";
+	unless ( -e "06.extract_proteins_for_filtering.ok" ) {
+		print STDERR (localtime) . ": CMD: $cmdString1\n";
+		system("$cmdString1") == 0 or die "failed to execute: $cmdString1\n";
+		print STDERR (localtime) . ": CMD: $cmdString2\n";
+		system("$cmdString2") == 0 or die "failed to execute: $cmdString2\n";
+		print STDERR (localtime) . ": CMD: $cmdString3\n";
+		system("$cmdString3") == 0 or die "failed to execute: $cmdString3\n";
+		open OUT, ">", "06.extract_proteins_for_filtering.ok" or die $!; close OUT;
+	}
+	else {
+		print STDERR "CMD(Skipped): $cmdString1\n";
+		print STDERR "CMD(Skipped): $cmdString2\n";
+		print STDERR "CMD(Skipped): $cmdString3\n";
+	}
+	
+	# 6.7 对蛋白序列进行HMM和BLASTP验证。
+	if ( $HMM_db ) {
+		$cmdString1 = "$dirname/bin/para_hmmscan $config{'para_hmmscan'} --outformat --cpu $cpu --no_cut_ga --hmm_db $HMM_db proteins_for_filtering.fasta > validation_hmmscan.tab";
+	}
+	if ( $BLASTP_db ) {
+		$cmdString2 = "diamond blastp $config{'diamond'} --outfmt 5 --db $BLASTP_db --query proteins_for_filtering.fasta --out validation_blastp.xml&> diamond_blastp.log";
+		$cmdString3 = "$dirname/bin/parsing_blast_result.pl $config{'parsing_blast_result.pl'} validation_blastp.xml > validation_blastp.tab";
+	}
+	else {
+		$cmdString2 = "diamond makedb --db homolog --in ../homolog.fasta &> diamond_makedb.log; diamond blastp $config{'diamond'} --outfmt 5 --db homolog --query proteins_for_filtering.fasta --out validation_blastp.xml &> diamond_blastp.log";
+		$cmdString3 = "$dirname/bin/parsing_blast_result.pl $config{'parsing_blast_result.pl'} validation_blastp.xml > validation_blastp.tab";
+	}
+	unless ( -e "07.validating.ok" ) {
+		if ( $HMM_db ) {
+			print STDERR (localtime) . ": CMD: $cmdString1\n";
+			system("$cmdString1") == 0 or die "failed to execute: $cmdString1\n";
+		}
+		print STDERR (localtime) . ": CMD: $cmdString2\n";
+		system("$cmdString2") == 0 or die "failed to execute: $cmdString2\n";
+		print STDERR (localtime) . ": CMD: $cmdString3\n";
+		system("$cmdString3") == 0 or die "failed to execute: $cmdString3\n";
+		open OUT, ">", "07.validating.ok" or die $!; close OUT;
+	}
+	else {
+		if ( $HMM_db ) {
+			print STDERR "CMD(Skipped): $cmdString1\n";
+		}
+		if ( $BLASTP_db ) {
+			print STDERR "CMD(Skipped): $cmdString2\n";
+			print STDERR "CMD(Skipped): $cmdString3\n";
+		}
+	}
+
+	# 6.8 根据HMM和BLASTP验证结果对基因模型进行过滤。
+	# 获得验证通过的转录本ID
+	my $cmdString1 = "cat validation_*.tab > transcriptID_validating_passed.tab";
+	my $cmdString2 = "$dirname/bin/get_valid_geneModels transcriptID_for_filtering.txt transcriptID_validating_passed.tab geneModels.gb.gff3 geneModels.ge.gff3 geneModels.gf.gff3 2> get_valid_geneModels.log";
+	unless ( -e "08.get_valid_geneModels.ok" ) {
+		print STDERR (localtime) . ": CMD: $cmdString1\n";
+		system("$cmdString1") == 0 or die "failed to execute: $cmdString1\n";
+		print STDERR (localtime) . ": CMD: $cmdString2\n";
+		system("$cmdString2") == 0 or die "failed to execute: $cmdString2\n";
 	}
 	else {
 		print STDERR "CMD(Skipped): $cmdString1\n";
 		print STDERR "CMD(Skipped): $cmdString2\n";
 	}
 
-	
-
 
 	
-
-    # 6.2 对缺少evidence支持的，AUGUSTUS重头预测的基因模型使用HMM算法进行检验和过滤
-    # 对 evidence 支持不足的基因模型 combine.2.gff3 进行HMM检验，挑选有HMM匹配结果的基因模型 combine2.filter_pass.gff3
-    if ($HMM_db) {
-        #$cmdString = "rm -rf command.hmmscan.list* hmmscan.tmp for_HMM_search.fasta";
-        #print STDERR (localtime) . ": CMD: $cmdString\n";
-        #system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-
-        $cmdString = "$dirname/bin/HMMValidateABinitio --out_prefix combine2 --cpu $cpu --HMM_db $HMM_db $config{'HMMValidateABinitio'} combine.2.gff3 $genome 2> HMMValidateABinitio.1.log";
-        unless (-e "02.HMMValidateABinitio.ok") {
-            print STDERR (localtime) . ": CMD: $cmdString\n";
-            system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-            open OUT, ">", "02.HMMValidateABinitio.ok" or die $!; close OUT;
-        }
-        else {
-            print STDERR "CMD(Skipped): $cmdString\n";
-        }
-    }
-    else {
-        $cmdString = "cp combine.2.gff3 combine2.filter_pass.gff3";
-        unless (-e "02.cp.ok") {
-            print STDERR (localtime) . ": CMD: $cmdString\n";
-            system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-            open OUT, ">", "02.cp.ok" or die $!; close OUT;
-        }
-        else {
-            print STDERR "CMD(Skipped): $cmdString\n";
-        }
-    }
-
 
 
     # 6.6 去除CDS区域和转座子序列重叠过多(默认重叠比例>= 0.3)的基因模型
     $cmdString = "$dirname/bin/remove_genes_in_repeats $config{'remove_genes_in_repeats1'} --filtered_gene_models genome.all.filledEnds.genes_in_repeats1.gff3 ../0.RepeatMasker/genome.repeat.gff3 genome.all.filledEnds.gff3 > genome.all.filledEnds.rm_genes_in_repeats1.gff3 2> remove_genes_in_repeats1.txt";
     unless (-e "06.remove_genes_in_repeats.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
+	}
     else {
         print STDERR "CMD(Skipped): $cmdString\n";
     }
@@ -1659,3 +1743,66 @@ if ( -e "$out_prefix.tmp/2.hisat2/hisat2.log" ) {
             }
             elsif (m/Integrity=internal/) {
                 $num5 ++;
+				}
+        }
+    }
+    print OUT "$num1 genes were predicted by Homolog, including $num2 complete, $num3 5prime_partial, $num4 3prime_partial, $num5 internal genes.\n\n";
+}
+if (-e "$out_prefix.tmp/5.augustus/augustus.2.gff3") {
+    open IN, "$out_prefix.tmp/5.augustus/training_again/secondtest.out" or die "Can not open file $out_prefix.tmp/5.augustus/training_again/secondtest.out, $!";
+}
+else {
+    open IN, "$out_prefix.tmp/5.augustus/training/secondtest.out" or die "Can not open file $out_prefix.tmp/5.augustus/training/secondtest.out, $!";
+}
+my ($accuary1, $accuary2, $accuary3, $accuary4, $accuary5, $accuary6, $out);
+while (<IN>) {
+    if (m/^nucleotide level/) {
+        @_ = m/([\d\.]+)/g;
+        $out .= "nucleotide_level\t$_[0]\t$_[1]\n";
+        ($accuary1, $accuary2) = ($_[-2], $_[-1]);
+    }
+    elsif (m/^exon level/) {
+        @_ = m/([\d\.]+)/g;
+        $out .= "exon_level\t$_[-2]\t$_[-1]\n";
+        ($accuary3, $accuary4) = ($_[-2], $_[-1]);
+    }
+    elsif (m/^gene level/) {
+        @_ = m/([\d\.]+)/g;
+        $out .= "gene_level\t$_[-2]\t$_[-1]\n";
+        ($accuary5, $accuary6) = ($_[-2], $_[-1]);
+    }
+}
+my $accuary = ($accuary1 * 3 + $accuary2 * 2 + $accuary3 * 4 + $accuary4 * 3 + $accuary5 * 2 + $accuary6 * 1) / 15;
+$accuary = int($accuary * 10000) / 100;
+$out = "The accuary of AUGUSTUS Training is $accuary\%.\nLevel\tSensitivity\tSpecificity\n$out\n";
+print OUT $out;
+my ($gene_num1, $gene_num2, $gene_num3, $gene_num4) = (0, 0, 0, 0);
+open IN, "$out_prefix.GeneModels.gff3" or die "Can not open file $out_prefix.GeneModels.gff3, $!";
+while (<IN>) {
+    $gene_num1 ++ if m/\tgene\t/;
+}
+close IN;
+open IN, "$out_prefix.Incomplete_GeneModels.gff3" or die "Can not open file $out_prefix.Incomplete_GeneModels.gff3, $!";
+while (<IN>) {
+    $gene_num2 ++ if m/\tgene\t/;
+}
+close IN;
+open IN, "$out_prefix.InRepeatRegion_GeneModels.gff3" or die "Can not open file $out_prefix.InRepeatRegion_GeneModels.gff3, $!";
+while (<IN>) {
+    $gene_num3 ++ if m/\tgene\t/;
+}
+close IN;
+open IN, "$out_prefix.ShortCDS_GeneModels.gff3" or die "Can not open file $out_prefix.ShortCDS_GeneModels.gff3, $!";
+while (<IN>) {
+    $gene_num4 ++ if m/\tgene\t/;
+}
+close IN;
+print OUT "The number of final complete gene models is: $gene_num1\n";
+print OUT "The number of Incomplete gene models is: $gene_num2\n";
+print OUT "The number of gene models whose CDS region overlap to Repeat Region > $1 is: $gene_num3\n" if $config{"remove_genes_in_repeats"} =~ m/([\d\.]+)/;
+print OUT "The number of gene models whose CDS length < $1 and cannot find ortholog in Pfam validation is: $gene_num4\n" if $config{"remove_short_genes"} =~ m/([\d\.]+)/;
+
+
+
+print STDERR "\n============================================\n";
+print STDERR "GETA complete successfully! " . "(" . (localtime) . ")" . "\n\n";
