@@ -258,11 +258,14 @@ my %config = (
     'paraAugusutusWithHints' => '--gene_prefix augustus --min_intron_len 20',
     'paraCombineGeneModels' => '--overlap 30 --min_augustus_transcriptSupport_percentage 10.0 --min_augustus_intronSupport_number 1 --min_augustus_intronSupport_ratio 0.01',
     'pickout_better_geneModels_from_evidence' => '--overlap_ratio 0.2 --ratio1 2 --ratio2 1.5 --ratio3 0.85 --ratio4 0.85',
+	'fillingEndsOfGeneModels' => '--start_codon ATG --stop_codon TAG,TGA,TAA',
+	'alternative_splicing_analysis' => '--min_intron_depth 1 --min_base_depth_ratio_for_ref_specific_intron 0.3 --min_intron_depth_ratio_for_evidence_specific_intron 0.2 --min_base_depth_ratio_for_common_intron 0.2 --min_gene_depth 10 --min_transcript_confidence_for_output 0.05 --transcript_num_for_output_when_all_low_confidence 8 --added_mRNA_ID_prefix t',
+	'GFF3_extract_TranscriptID_for_filtering' => '--min_CDS_ratio 0.3 --min_CDS_length 600 --max_repeat_overlap_ratio 0.3 --ignore_repeat_Name Simple_repeat,Low_complexity,Satellite,Unknown,Tandem_repeat',
     'para_hmmscan' => '--evalue1 1e-5 --evalue2 1e-3 --hmm_length 80 --coverage 0.25 --no_cut_ga --chunk 20 --hmmscan_cpu 2',
     'para_blast' => '--chunk 10 --blast-threads 1 --evalue 1e-3 --max-target-seqs 20 --completed_ratio 0.9',
     'dimanod' => '--sensitive --max-target-seqs 20 --evalue 1e-5 --id 10 --index-chunks 1 --block-size 5',
     'parsing_blast_result.pl' => '--evalue 1e-9 --identity 0.1 --CIP 0.4 --subject-coverage 0.4 --query-coverage 0.4',
-    'HMMValidateABinitio' => '--CDS_length 750 --CDS_num 2 --evalue 1e-5 --coverage 0.25',
+	'get_valid_geneModels' => '',
     'remove_genes_in_repeats1' => '--ratio 0.3 --ignore_Simple_repeat --ignore_Unknown',
     'remove_genes_in_repeats2' => '--ratio 0.8',
     'remove_short_genes' => '--cds_length 300',
@@ -1292,7 +1295,7 @@ geneModels.i.coding.gff3\t对geneModels.h.coding.gff3中的基因模型进行了
     }
 
     # 6.3 对不完整基因模型进行首尾补齐。
-    $cmdString = "$dirname/bin/fillingEndsOfGeneModels --filling_need_transcriptID filling_need_transcriptID.txt --nonCompletedGeneModels geneModels.f.gff3 $genome geneModels.d.gff3 > geneModels.e.gff3 2> fillingEndsOfGeneModels.1.log";
+    $cmdString = "$dirname/bin/fillingEndsOfGeneModels $config{'fillingEndsOfGeneModels'} --filling_need_transcriptID filling_need_transcriptID.txt --nonCompletedGeneModels geneModels.f.gff3 $genome geneModels.d.gff3 > geneModels.e.gff3 2> fillingEndsOfGeneModels.1.log";
     unless ( -e "03.fillingEndsOfGeneModels.ok" ) {
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -1303,9 +1306,9 @@ geneModels.i.coding.gff3\t对geneModels.h.coding.gff3中的基因模型进行了
     }
 
     # 6.4 分别对对基因模型 geneModels.b.gff3, geneModels.e.gff3 and geneModels.f.gff3 进行可变剪接分析
-    $cmdString1 = "$dirname/bin/alternative_splicing_analysis geneModels.b.gff3 ../3.transcript/intron.txt ../3.transcript/base_depth.txt > geneModels.gb_AS.gff3 2> alternative_splicing.gb.stats; $dirname/bin/GFF3_add_CDS_for_transcript $genome geneModels.gb_AS.gff3 > geneModels.gb.gff3";
-    $cmdString2 = "$dirname/bin/alternative_splicing_analysis geneModels.e.gff3 ../3.transcript/intron.txt ../3.transcript/base_depth.txt > geneModels.ge_AS.gff3 2> alternative_splicing.ge.stats; $dirname/bin/GFF3_add_CDS_for_transcript $genome geneModels.ge_AS.gff3 > geneModels.ge.gff3";
-    $cmdString3 = "$dirname/bin/alternative_splicing_analysis geneModels.f.gff3 ../3.transcript/intron.txt ../3.transcript/base_depth.txt > geneModels.gf_AS.gff3 2> alternative_splicing.gf.stats; $dirname/bin/GFF3_add_CDS_for_transcript $genome geneModels.gf_AS.gff3 > geneModels.gf.gff3";
+    $cmdString1 = "$dirname/bin/alternative_splicing_analysis config{'alternative_splicing_analysis'} geneModels.b.gff3 ../3.transcript/intron.txt ../3.transcript/base_depth.txt > geneModels.gb_AS.gff3 2> alternative_splicing.gb.stats; $dirname/bin/GFF3_add_CDS_for_transcript $genome geneModels.gb_AS.gff3 > geneModels.gb.gff3";
+    $cmdString2 = "$dirname/bin/alternative_splicing_analysis config{'alternative_splicing_analysis'} geneModels.e.gff3 ../3.transcript/intron.txt ../3.transcript/base_depth.txt > geneModels.ge_AS.gff3 2> alternative_splicing.ge.stats; $dirname/bin/GFF3_add_CDS_for_transcript $genome geneModels.ge_AS.gff3 > geneModels.ge.gff3";
+    $cmdString3 = "$dirname/bin/alternative_splicing_analysis config{'alternative_splicing_analysis'} geneModels.f.gff3 ../3.transcript/intron.txt ../3.transcript/base_depth.txt > geneModels.gf_AS.gff3 2> alternative_splicing.gf.stats; $dirname/bin/GFF3_add_CDS_for_transcript $genome geneModels.gf_AS.gff3 > geneModels.gf.gff3";
     unless ( -e "04.alternative_splicing_analysis.ok" ) {
         print STDERR (localtime) . ": CMD: $cmdString1\n";
         system("$cmdString1") == 0 or die "failed to execute: $cmdString1\n";
@@ -1332,7 +1335,7 @@ geneModels.i.coding.gff3\t对geneModels.h.coding.gff3中的基因模型进行了
     # 6. 通过填补而完整的基因，对应的所有转录本。
     #########################################################################
     # 提取CDS占转录本长度比例较低、CDS长度较短和CDS和重复序列区域重叠比例较高的转录本ID
-    my $cmdString1 = "$dirname/bin/GFF3_extract_TranscriptID_for_filtering ../0.RepeatMasker/genome.repeat.gff3 geneModels.gb.gff3 geneModels.ge.gff3 geneModels.gf.gff3 > transcriptID_for_filtering.txt";
+    my $cmdString1 = "$dirname/bin/GFF3_extract_TranscriptID_for_filtering $config{'GFF3_extract_TranscriptID_for_filtering'} ../0.RepeatMasker/genome.repeat.gff3 geneModels.gb.gff3 geneModels.ge.gff3 geneModels.gf.gff3 > transcriptID_for_filtering.txt";
     # 提取没有足够证据基因的所有转录本ID
     my $cmdString2 = "perl -ne 'print \"\$1\\tNotEnoughEvidence\\n\" if m/ID=([^;]*\\.t\\d+);/;' geneModels.gb.gff3 >> transcriptID_for_filtering.txt";
     # 提取没法填补完整基因的所有转录本ID
@@ -1426,7 +1429,7 @@ geneModels.i.coding.gff3\t对geneModels.h.coding.gff3中的基因模型进行了
     }
 
     # 6.9 再次对基因模型进行首尾填补。
-    $cmdString = "$dirname/bin/fillingEndsOfGeneModels $genome geneModels.h.coding.gff3 > geneModels.i.coding.gff3 2> fillingEndsOfGeneModels.2.log";
+    $cmdString = "$dirname/bin/fillingEndsOfGeneModels $config{'fillingEndsOfGeneModels'} $genome geneModels.h.coding.gff3 > geneModels.i.coding.gff3 2> fillingEndsOfGeneModels.2.log";
     unless ( -e "09.fillingEndsOfGeneModels" ) {
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
