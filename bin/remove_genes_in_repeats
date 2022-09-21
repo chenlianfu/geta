@@ -15,11 +15,11 @@ Usage:
     --filtered_gene_models <string>    default: None
     Output the filtered gene Models in GFF3 format.
 
-	--ignore_Simple_repeat   default: None
-	添加该参数后，则忽略Simple_repeat和Satellite类型的重复序列。
+    --ignore_Simple_repeat   default: None
+    添加该参数后，则忽略Simple_repeat和Satellite类型的重复序列。
 
-	--ignore_Unknown    default: None
-	添加该参数后，则忽略Unknown类型的重复序列。
+    --ignore_Unknown    default: None
+    添加该参数后，则忽略Unknown类型的重复序列。
 
 USAGE
 if (@ARGV==0){die $usage}
@@ -28,8 +28,8 @@ my ($ratio, $filtered_gene_models, $ignore_Simple_repeat, $ignore_Unknown);
 GetOptions(
     "ratio:f" => \$ratio,
     "filtered_gene_models:s" => \$filtered_gene_models,
-	"ignore_Simple_repeat" => \$ignore_Simple_repeat,
-	"ignore_Unknown" => \$ignore_Unknown,
+    "ignore_Simple_repeat" => \$ignore_Simple_repeat,
+    "ignore_Unknown" => \$ignore_Unknown,
 );
 $ratio ||= 0.8;
 
@@ -39,17 +39,17 @@ while (<IN>) {
     next if m/^#/;
     next if m/^\s*$/;
 
-	# 忽略简单重复序列或Unknow类型重复序列
-	if ( $ignore_Simple_repeat ) {
-		if ( m/Name=([^;]+)/ && ($1 eq "Simple_repeat" or $1 eq "Satellite") ) {
-			next;
-		}
-	}
-	if ( $ignore_Unknown ) {
-		if ( m/Name=([^;]+)/ && $1 eq "Unknown" ) {
-			next;
-		}
-	}
+    # 忽略简单重复序列或Unknow类型重复序列
+    if ( $ignore_Simple_repeat ) {
+        if ( m/Name=([^;]+)/ && ($1 eq "Simple_repeat" or $1 eq "Satellite") ) {
+            next;
+        }
+    }
+    if ( $ignore_Unknown ) {
+        if ( m/Name=([^;]+)/ && $1 eq "Unknown" ) {
+            next;
+        }
+    }
 
     @_ = split /\t/;
     my $index1 = int($_[3] / 1000);

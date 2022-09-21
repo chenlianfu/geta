@@ -234,16 +234,16 @@ foreach my $transcript_id (@transcript) {
             }
         }
         warn "Warning: $transcript_id: the cds length is not multiple of 3!\n" if $frame != 0;
-		#if ($align_strand eq "+") {
-			foreach (sort {$out{$a} <=> $out{$b} or $b cmp $a} keys %out) {
-				print;
-			}
-		#}
-		#elsif ($align_strand eq "-") {
-		#	foreach (sort {$out{$b} <=> $out{$a} or $b cmp $a} keys %out) {
-		#		print;
-		#	}
-		#}
+        #if ($align_strand eq "+") {
+            foreach (sort {$out{$a} <=> $out{$b} or $b cmp $a} keys %out) {
+                print;
+            }
+        #}
+        #elsif ($align_strand eq "-") {
+        #    foreach (sort {$out{$b} <=> $out{$a} or $b cmp $a} keys %out) {
+        #        print;
+        #    }
+        #}
         print "\n";
     }
 }

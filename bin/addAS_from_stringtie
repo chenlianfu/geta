@@ -12,9 +12,9 @@ if (@ARGV==0){die $usage}
 open IN, $ARGV[2] or die "Cannot open the file $ARGV[2], $!";
 my (%seq, $seq_id);
 while (<IN>) {
-	chomp;
-	if (m/^>(\S+)/) { $seq_id = $1; }
-	else { $seq{$seq_id} .= $_; }
+    chomp;
+    if (m/^>(\S+)/) { $seq_id = $1; }
+    else { $seq{$seq_id} .= $_; }
 }
 close IN;
 
@@ -22,12 +22,12 @@ close IN;
 open IN, $ARGV[1] or die "Cannot open the file $ARGV[1], $!";
 my (%st_exon, %index);
 while (<IN>) {
-	if (m/\texon\t/) {
-		@_ = split /\t/;
-		my $gene_id = $1 if m/gene_id \"(.*?)\"/;
-		my $transcript_id = $1 if m/transcript_id \"(.*?)\"/;
-		$st_exon{$gene_id}{$transcript_id}{"$_[3]\t$_[4]"} = 1;
-	}
+    if (m/\texon\t/) {
+        @_ = split /\t/;
+        my $gene_id = $1 if m/gene_id \"(.*?)\"/;
+        my $transcript_id = $1 if m/transcript_id \"(.*?)\"/;
+        $st_exon{$gene_id}{$transcript_id}{"$_[3]\t$_[4]"} = 1;
+    }
 }
 close IN;
 
@@ -35,21 +35,21 @@ close IN;
 
 open IN, $ARGV[1] or die "Cannot open the file $ARGV[1], $!";
 while (<IN>) {
-	if (m/\ttranscript\t/) {
-		my $gene_id = $1 if m/gene_id \"(.*?)\"/;
-		my @transcript_id = keys %{$st_exon{$gene_id}};
-		if (@transcript_id > 1) {
-			@_ = split /\t/;
-			my $index1 = int($_[3] / 1000);
-			my $index2 = int($_[4] / 1000) + 1;
-			foreach ($index1 .. $index2) {
-				$index{$_[0]}{$_[6]}{$_}{$gene_id} = 1;
-			}
-		}
-		else {
-			delete $st_exon{$gene_id};
-		}
-	}
+    if (m/\ttranscript\t/) {
+        my $gene_id = $1 if m/gene_id \"(.*?)\"/;
+        my @transcript_id = keys %{$st_exon{$gene_id}};
+        if (@transcript_id > 1) {
+            @_ = split /\t/;
+            my $index1 = int($_[3] / 1000);
+            my $index2 = int($_[4] / 1000) + 1;
+            foreach ($index1 .. $index2) {
+                $index{$_[0]}{$_[6]}{$_}{$gene_id} = 1;
+            }
+        }
+        else {
+            delete $st_exon{$gene_id};
+        }
+    }
 }
 close IN;
 
@@ -58,372 +58,372 @@ close IN;
 # get intron from exon
 my %st_intron;
 foreach my $gene_id (keys %st_exon) {
-	foreach my $transcript_id (keys %{$st_exon{$gene_id}}) {
-		my @exon = sort {$a <=> $b} keys %{$st_exon{$gene_id}{$transcript_id}};
-		my $intron = &get_intron_from_exon(@exon);
-		$st_intron{$gene_id}{$intron} = 1;
-	}
+    foreach my $transcript_id (keys %{$st_exon{$gene_id}}) {
+        my @exon = sort {$a <=> $b} keys %{$st_exon{$gene_id}{$transcript_id}};
+        my $intron = &get_intron_from_exon(@exon);
+        $st_intron{$gene_id}{$intron} = 1;
+    }
 }
 
 # reading genome.gff3
 open IN, $ARGV[0] or die $!;
 my (%gene, $gene_id, @gene_id);
 while (<IN>) {
-	next if m/^#/;
-	next if m/^\s*$/;
-	if (m/\tgene\t.*ID=([^;]*)/) {
-		$gene_id = $1;
-		push @gene_id, $gene_id;
-	}
-	$gene{$gene_id} .= $_;
+    next if m/^#/;
+    next if m/^\s*$/;
+    if (m/\tgene\t.*ID=([^;]*)/) {
+        $gene_id = $1;
+        push @gene_id, $gene_id;
+    }
+    $gene{$gene_id} .= $_;
 }
 close IN;
 
 # analysising alternative splicing
 foreach my $gene_id (@gene_id) {
-	my $gene_info = $gene{$gene_id};
-	print $gene_info;
-	my @gene_info = split /\n/, $gene_info;
-	@_ = split /\t/, $gene_info[0];
-	my ($chr, $gene_start, $gene_end, $strand) = ($_[0], $_[3], $_[4], $_[6]);
+    my $gene_info = $gene{$gene_id};
+    print $gene_info;
+    my @gene_info = split /\n/, $gene_info;
+    @_ = split /\t/, $gene_info[0];
+    my ($chr, $gene_start, $gene_end, $strand) = ($_[0], $_[3], $_[4], $_[6]);
 
-	#detecting whether this gene can overlap with stringtie gtf
-	my $index1 = int($_[3] / 1000);
-	my $index2 = int($_[4] / 1000) + 1;
-	my %overlap_st_gene;
-	foreach my $index ($index1 .. $index2) {
-		if (exists $index{$_[0]}{$_[6]}{$index}) {
-			foreach (keys %{$index{$_[0]}{$_[6]}{$index}}) {
-				$overlap_st_gene{$_} = 1;
-			}
-		}
-	}
+    #detecting whether this gene can overlap with stringtie gtf
+    my $index1 = int($_[3] / 1000);
+    my $index2 = int($_[4] / 1000) + 1;
+    my %overlap_st_gene;
+    foreach my $index ($index1 .. $index2) {
+        if (exists $index{$_[0]}{$_[6]}{$index}) {
+            foreach (keys %{$index{$_[0]}{$_[6]}{$index}}) {
+                $overlap_st_gene{$_} = 1;
+            }
+        }
+    }
 
-	#detecting whether this gene can perfectly overlap (exact intron matching) with stringtie gtf
-	my $overlap_st_gene; 
-	if (%overlap_st_gene) {
-		my @exon;
-		foreach (@gene_info) {
-			if (m/\texon\t/) {
-				@_ = split /\t/;
-				push @exon, "$_[3]\t$_[4]";
-			}
-		}
-		my $intron = &get_intron_from_exon(@exon);
+    #detecting whether this gene can perfectly overlap (exact intron matching) with stringtie gtf
+    my $overlap_st_gene; 
+    if (%overlap_st_gene) {
+        my @exon;
+        foreach (@gene_info) {
+            if (m/\texon\t/) {
+                @_ = split /\t/;
+                push @exon, "$_[3]\t$_[4]";
+            }
+        }
+        my $intron = &get_intron_from_exon(@exon);
 
-		STGENE: foreach my $st_gene (keys %overlap_st_gene) {
-			my @st_intron = keys %{$st_intron{$st_gene}};
-			foreach (@st_intron) { 
-				if ($intron eq $_) {
-					$overlap_st_gene = $st_gene;
-					delete $st_intron{$st_gene}{$intron};
-					last STGENE;
-				}
-			}
-		}
+        STGENE: foreach my $st_gene (keys %overlap_st_gene) {
+            my @st_intron = keys %{$st_intron{$st_gene}};
+            foreach (@st_intron) { 
+                if ($intron eq $_) {
+                    $overlap_st_gene = $st_gene;
+                    delete $st_intron{$st_gene}{$intron};
+                    last STGENE;
+                }
+            }
+        }
 
-		foreach (keys %{$st_intron{$overlap_st_gene}}) {
-			m/(\d+)/;
-			my $intron_start = $1;
-			m/(\d+)$/;
-			my $intron_end = $1;
-			delete $st_intron{$overlap_st_gene}{$_} if $intron_start <=$gene_start;
-			delete $st_intron{$overlap_st_gene}{$_} if $intron_end >= $gene_end;
-		}
-	}
+        foreach (keys %{$st_intron{$overlap_st_gene}}) {
+            m/(\d+)/;
+            my $intron_start = $1;
+            m/(\d+)$/;
+            my $intron_end = $1;
+            delete $st_intron{$overlap_st_gene}{$_} if $intron_start <=$gene_start;
+            delete $st_intron{$overlap_st_gene}{$_} if $intron_end >= $gene_end;
+        }
+    }
 
-	# get alternative splicing exon
-	if ($overlap_st_gene && %st_intron) {
-		my $mRNA_suffix_num = 0;
-		foreach my $intron (keys %{$st_intron{$overlap_st_gene}}) {
-			next unless $intron;
-			print STDERR "$gene_id\t$overlap_st_gene\t$intron\t$gene_start\t$gene_end\n";
-			$mRNA_suffix_num ++;
-			my $mRNA_suffix = "stringtie" . $mRNA_suffix_num;
-			my $gff3_out = &get_gff3($intron, $chr, $strand, $gene_start, $gene_end, $mRNA_suffix, $gene_id);
-			print $gff3_out;
-		}
-	}
+    # get alternative splicing exon
+    if ($overlap_st_gene && %st_intron) {
+        my $mRNA_suffix_num = 0;
+        foreach my $intron (keys %{$st_intron{$overlap_st_gene}}) {
+            next unless $intron;
+            print STDERR "$gene_id\t$overlap_st_gene\t$intron\t$gene_start\t$gene_end\n";
+            $mRNA_suffix_num ++;
+            my $mRNA_suffix = "stringtie" . $mRNA_suffix_num;
+            my $gff3_out = &get_gff3($intron, $chr, $strand, $gene_start, $gene_end, $mRNA_suffix, $gene_id);
+            print $gff3_out;
+        }
+    }
 
-	print "\n";
+    print "\n";
 }
 
 sub get_gff3 {
-	# 输入intron，基因起始终止信息
-	my ($intron, $chr, $strand, $gene_start, $gene_end, $mRNA_suffix, $gene_id) = @_;
-	my $gff3_out;
-	$gff3_out = "$chr\t\.\tmRNA\t$gene_start\t$gene_end\t\.\t$strand\t\.\tID=$gene_id.$mRNA_suffix;Parent=$gene_id;\n";
+    # 输入intron，基因起始终止信息
+    my ($intron, $chr, $strand, $gene_start, $gene_end, $mRNA_suffix, $gene_id) = @_;
+    my $gff3_out;
+    $gff3_out = "$chr\t\.\tmRNA\t$gene_start\t$gene_end\t\.\t$strand\t\.\tID=$gene_id.$mRNA_suffix;Parent=$gene_id;\n";
 
-	# 将intron、基因起始终止信息转换成exon
-	my @intron = split /\t/, $intron;
-	my @exon;
-	my $first = shift @intron;
-	my ($start, $end) = split /,/, $first;
-	my $exon_end = $start - 1;
-	my $exon_start = $gene_start;
-	push @exon, "$exon_start\t$exon_end";
-	foreach (@intron) {
-		my ($start_new, $end_new) = split /,/, $_;
-		$exon_start = $end + 1;
-		$exon_end = $start_new - 1;
-		push @exon, "$exon_start\t$exon_end";
-		($start, $end) = ($start_new, $end_new);
-	}
-	$exon_start = $end + 1;
-	push @exon, "$exon_start\t$gene_end";
+    # 将intron、基因起始终止信息转换成exon
+    my @intron = split /\t/, $intron;
+    my @exon;
+    my $first = shift @intron;
+    my ($start, $end) = split /,/, $first;
+    my $exon_end = $start - 1;
+    my $exon_start = $gene_start;
+    push @exon, "$exon_start\t$exon_end";
+    foreach (@intron) {
+        my ($start_new, $end_new) = split /,/, $_;
+        $exon_start = $end + 1;
+        $exon_end = $start_new - 1;
+        push @exon, "$exon_start\t$exon_end";
+        ($start, $end) = ($start_new, $end_new);
+    }
+    $exon_start = $end + 1;
+    push @exon, "$exon_start\t$gene_end";
 
-	# 由exon提取transcript序列，找最长ORF 
-	my ($transcript_seq, $orf_start, $orf_end);
-	foreach (@exon) {
-		@_ = split /\t/;
-		$transcript_seq .= substr($seq{$chr}, $_[0] - 1, $_[1] - $_[0] + 1);
-	}
-	if ($strand eq "-") {
-		$transcript_seq = reverse $transcript_seq;
-		$transcript_seq =~ tr/ATCGatcg/TAGCTAGC/;
-	}
-	my $transcript_length = length($transcript_seq);
+    # 由exon提取transcript序列，找最长ORF 
+    my ($transcript_seq, $orf_start, $orf_end);
+    foreach (@exon) {
+        @_ = split /\t/;
+        $transcript_seq .= substr($seq{$chr}, $_[0] - 1, $_[1] - $_[0] + 1);
+    }
+    if ($strand eq "-") {
+        $transcript_seq = reverse $transcript_seq;
+        $transcript_seq =~ tr/ATCGatcg/TAGCTAGC/;
+    }
+    my $transcript_length = length($transcript_seq);
 
-	#print STDERR "finding ORF of $gene_id: $intron\t$gene_start\t$gene_end\t$transcript_length\n";
-	my $orf = &find_orf($transcript_seq);
-	($orf_start, $orf_end) = split /\t/, $orf;
-	if ($strand eq "-") {
-		@_ = split /\t/, $orf;
-		$orf_start = $transcript_length - $_[1] + 1;
-		$orf_end = $transcript_length - $_[0] + 1;
-	}
-	#print "$gene_id\t$strand\tORF_start:$orf_start\tORF_end:$orf_end\texon_length:$transcript_length\n";
+    #print STDERR "finding ORF of $gene_id: $intron\t$gene_start\t$gene_end\t$transcript_length\n";
+    my $orf = &find_orf($transcript_seq);
+    ($orf_start, $orf_end) = split /\t/, $orf;
+    if ($strand eq "-") {
+        @_ = split /\t/, $orf;
+        $orf_start = $transcript_length - $_[1] + 1;
+        $orf_end = $transcript_length - $_[0] + 1;
+    }
+    #print "$gene_id\t$strand\tORF_start:$orf_start\tORF_end:$orf_end\texon_length:$transcript_length\n";
 
-	# 根据ORF将exon转换出CDS和UTR
-	my %split = &split_exon_to_utr_and_cds($orf_start, $orf_end, @exon);
+    # 根据ORF将exon转换出CDS和UTR
+    my %split = &split_exon_to_utr_and_cds($orf_start, $orf_end, @exon);
 
-	# 输出GFF3信息
-	my ($utr5_num, $utr3_num, $exon_num, $cds_num, @utr5, %feature, @utr3);
-	my @up_utr = sort {$a <=> $b} keys %{$split{"up_utr"}};
-	my @down_utr = sort {$a <=> $b} keys %{$split{"down_utr"}};
-	my @cds = sort {$a <=> $b} keys %{$split{"cds"}};
-	@cds = &add_cds_frame($strand, @cds);
-	if ($strand eq "+") {
-		@utr5 = @up_utr;
-		@utr3 = @down_utr;
-	}
-	elsif ($strand eq "-") {
-		@utr5 = sort {$b <=> $a} @down_utr;
-		@utr3 = sort {$b <=> $a} @up_utr;
-		@cds = sort {$b <=> $a} @cds;
-		@exon = sort {$b <=> $a} @exon;
-	}
+    # 输出GFF3信息
+    my ($utr5_num, $utr3_num, $exon_num, $cds_num, @utr5, %feature, @utr3);
+    my @up_utr = sort {$a <=> $b} keys %{$split{"up_utr"}};
+    my @down_utr = sort {$a <=> $b} keys %{$split{"down_utr"}};
+    my @cds = sort {$a <=> $b} keys %{$split{"cds"}};
+    @cds = &add_cds_frame($strand, @cds);
+    if ($strand eq "+") {
+        @utr5 = @up_utr;
+        @utr3 = @down_utr;
+    }
+    elsif ($strand eq "-") {
+        @utr5 = sort {$b <=> $a} @down_utr;
+        @utr3 = sort {$b <=> $a} @up_utr;
+        @cds = sort {$b <=> $a} @cds;
+        @exon = sort {$b <=> $a} @exon;
+    }
 
-	foreach (@utr5) {
-		$utr5_num ++;
-		$feature{"$chr\t\.\tfive_prime_UTR\t$_\t\.\t$strand\t.\tID=$gene_id.$mRNA_suffix.5UTR$utr5_num;Parent=$gene_id.$mRNA_suffix;\n"} = $_;
-	}
-	foreach (@utr3) {
-		$utr3_num ++;
-	    $feature{"$chr\t\.\tthree_prime_UTR\t$_\t\.\t$strand\t.\tID=$gene_id.$mRNA_suffix.5UTR$utr3_num;Parent=$gene_id.$mRNA_suffix;\n"} = $_;
-	}
-	foreach (@cds) {
-		$cds_num ++;
-		@_ = split /\t/;
-		$feature{"$chr\t\.\tCDS\t$_[0]\t$_[1]\t\.\t$strand\t$_[2]\tID=$gene_id.$mRNA_suffix.CDS$cds_num;Parent=$gene_id.$mRNA_suffix;\n"} = $_;
-	}
-	foreach (@exon) {
-		$exon_num ++;
-		$feature{"$chr\t\.\texon\t$_\t\.\t$strand\t.\tID=$gene_id.$mRNA_suffix.exon$exon_num;Parent=$gene_id.$mRNA_suffix;\n"} = $_;
-	}
-	if ($strand eq "+") {
-		foreach (sort {$feature{$a} <=> $feature{$b} or $b cmp $a} keys %feature) { $gff3_out .= $_; }
-	}
-	elsif ($strand eq "-") {
-		foreach (sort {$feature{$b} <=> $feature{$a} or $a cmp $b} keys %feature) { $gff3_out .= $_; }
-	}
+    foreach (@utr5) {
+        $utr5_num ++;
+        $feature{"$chr\t\.\tfive_prime_UTR\t$_\t\.\t$strand\t.\tID=$gene_id.$mRNA_suffix.5UTR$utr5_num;Parent=$gene_id.$mRNA_suffix;\n"} = $_;
+    }
+    foreach (@utr3) {
+        $utr3_num ++;
+        $feature{"$chr\t\.\tthree_prime_UTR\t$_\t\.\t$strand\t.\tID=$gene_id.$mRNA_suffix.5UTR$utr3_num;Parent=$gene_id.$mRNA_suffix;\n"} = $_;
+    }
+    foreach (@cds) {
+        $cds_num ++;
+        @_ = split /\t/;
+        $feature{"$chr\t\.\tCDS\t$_[0]\t$_[1]\t\.\t$strand\t$_[2]\tID=$gene_id.$mRNA_suffix.CDS$cds_num;Parent=$gene_id.$mRNA_suffix;\n"} = $_;
+    }
+    foreach (@exon) {
+        $exon_num ++;
+        $feature{"$chr\t\.\texon\t$_\t\.\t$strand\t.\tID=$gene_id.$mRNA_suffix.exon$exon_num;Parent=$gene_id.$mRNA_suffix;\n"} = $_;
+    }
+    if ($strand eq "+") {
+        foreach (sort {$feature{$a} <=> $feature{$b} or $b cmp $a} keys %feature) { $gff3_out .= $_; }
+    }
+    elsif ($strand eq "-") {
+        foreach (sort {$feature{$b} <=> $feature{$a} or $a cmp $b} keys %feature) { $gff3_out .= $_; }
+    }
 
-	return $gff3_out
+    return $gff3_out
 }
 
 sub add_cds_frame {
-	my $strand = shift @_;
-	my (@cds, @cds_out);
-	if ($strand eq "+") {
-		@cds = sort {$a <=> $b} @_;
-	}
-	elsif ($strand eq "-") {
-		@cds = sort {$b <=> $a} @_;
-	}
+    my $strand = shift @_;
+    my (@cds, @cds_out);
+    if ($strand eq "+") {
+        @cds = sort {$a <=> $b} @_;
+    }
+    elsif ($strand eq "-") {
+        @cds = sort {$b <=> $a} @_;
+    }
 
-	my ($cds_length, $frame) = (0, 0);
-	my $first_cds = shift @cds;
-	@_ = split /\t/, $first_cds;
-	$cds_length += $_[1] - $_[0] + 1;
-	push @cds_out, "$_[0]\t$_[1]\t$frame";
-	foreach (@cds) {
-		$frame = 0 if ($cds_length % 3) == 0;
-		$frame = 1 if ($cds_length % 3) == 2;
-		$frame = 2 if ($cds_length % 3) == 1;
-		@_ = split /\t/;
-		push @cds_out, "$_[0]\t$_[1]\t$frame";
-		$cds_length += $_[1] - $_[0] + 1;
-	}
+    my ($cds_length, $frame) = (0, 0);
+    my $first_cds = shift @cds;
+    @_ = split /\t/, $first_cds;
+    $cds_length += $_[1] - $_[0] + 1;
+    push @cds_out, "$_[0]\t$_[1]\t$frame";
+    foreach (@cds) {
+        $frame = 0 if ($cds_length % 3) == 0;
+        $frame = 1 if ($cds_length % 3) == 2;
+        $frame = 2 if ($cds_length % 3) == 1;
+        @_ = split /\t/;
+        push @cds_out, "$_[0]\t$_[1]\t$frame";
+        $cds_length += $_[1] - $_[0] + 1;
+    }
 
-	@cds_out = sort {$a <=> $b} @cds_out;
-	return @cds_out;
+    @cds_out = sort {$a <=> $b} @cds_out;
+    return @cds_out;
 }
 
 sub split_exon_to_utr_and_cds {
-	# 输入exon信息，orf位置信息
-	my $orf_start = shift @_;
-	my $orf_end = shift @_;
-	my @exon = sort {$a <=> $b} @_;
-	my %split;
+    # 输入exon信息，orf位置信息
+    my $orf_start = shift @_;
+    my $orf_end = shift @_;
+    my @exon = sort {$a <=> $b} @_;
+    my %split;
 
-	# 定位起始密码子和终止密码子在第几个exon上，距离该exon的结束位点多远
-	my ($locus_start_number, $locus_end_number, $locus_start_distance, $locus_end_distance, $exon_eat_length);
-	my @exon_tmp = @exon;
-	until ($exon_eat_length >= $orf_start) {
-		$locus_start_number ++;
-		$locus_end_number ++;
-		my $exon_tmp = shift @exon_tmp;
-		@_ = split /\t/, $exon_tmp;
-		$exon_eat_length += $_[1] - $_[0] + 1;
-	}
-	$locus_start_distance = $exon_eat_length - $orf_start;
-	until ($exon_eat_length >= $orf_end) {
-		$locus_end_number ++;
-		my $exon_tmp = shift @exon_tmp;
-		@_ = split /\t/, $exon_tmp;
-		$exon_eat_length += $_[1] - $_[0] + 1;
-	}
-	$locus_end_distance = $exon_eat_length - $orf_end;
+    # 定位起始密码子和终止密码子在第几个exon上，距离该exon的结束位点多远
+    my ($locus_start_number, $locus_end_number, $locus_start_distance, $locus_end_distance, $exon_eat_length);
+    my @exon_tmp = @exon;
+    until ($exon_eat_length >= $orf_start) {
+        $locus_start_number ++;
+        $locus_end_number ++;
+        my $exon_tmp = shift @exon_tmp;
+        @_ = split /\t/, $exon_tmp;
+        $exon_eat_length += $_[1] - $_[0] + 1;
+    }
+    $locus_start_distance = $exon_eat_length - $orf_start;
+    until ($exon_eat_length >= $orf_end) {
+        $locus_end_number ++;
+        my $exon_tmp = shift @exon_tmp;
+        @_ = split /\t/, $exon_tmp;
+        $exon_eat_length += $_[1] - $_[0] + 1;
+    }
+    $locus_end_distance = $exon_eat_length - $orf_end;
 
-	# 得到上游的UTR 
-	if ($locus_start_number > 1) {
-		foreach my $exon_num (1 .. $locus_start_number - 1) {
-			$split{"up_utr"}{$exon[$exon_num - 1]} = 1;
-		}
-	}
-	@_ = split /\t/, $exon[$locus_start_number - 1];
-	my $first_cds_start = $_[1] - $locus_start_distance;
-	my $last_up_utr_end = $first_cds_start - 1;
-	$split{"up_utr"}{"$_[0]\t$last_up_utr_end"} = 1 if $last_up_utr_end >= $_[0];
+    # 得到上游的UTR 
+    if ($locus_start_number > 1) {
+        foreach my $exon_num (1 .. $locus_start_number - 1) {
+            $split{"up_utr"}{$exon[$exon_num - 1]} = 1;
+        }
+    }
+    @_ = split /\t/, $exon[$locus_start_number - 1];
+    my $first_cds_start = $_[1] - $locus_start_distance;
+    my $last_up_utr_end = $first_cds_start - 1;
+    $split{"up_utr"}{"$_[0]\t$last_up_utr_end"} = 1 if $last_up_utr_end >= $_[0];
 
-	# 得到CDS和第一个下游UTR
-	if ($locus_end_number > $locus_start_number) {
-		$split{"cds"}{"$first_cds_start\t$_[1]"} = 1;
-		foreach my $exon_num ($locus_start_number + 1 .. $locus_end_number - 1) {
-			@_ = split /\t/, $exon[$exon_num - 1];
-			$split{"cds"}{"$_[0]\t$_[1]"} = 1;
-		}
+    # 得到CDS和第一个下游UTR
+    if ($locus_end_number > $locus_start_number) {
+        $split{"cds"}{"$first_cds_start\t$_[1]"} = 1;
+        foreach my $exon_num ($locus_start_number + 1 .. $locus_end_number - 1) {
+            @_ = split /\t/, $exon[$exon_num - 1];
+            $split{"cds"}{"$_[0]\t$_[1]"} = 1;
+        }
 
-		@_ = split /\t/, $exon[$locus_end_number - 1];
-		my $last_cds_end = $_[1] - $locus_end_distance;
-		my $first_down_utr_start = $last_cds_end + 1;
-		$split{"cds"}{"$_[0]\t$last_cds_end"} = 1;
-		$split{"down_utr"}{"$first_down_utr_start\t$_[1]"} = 1 if $first_down_utr_start <= $_[1];
-	}
-	elsif ($locus_end_number == $locus_start_number) {
-		@_ = split /\t/, $exon[$locus_end_number - 1];
-		my $last_cds_end = $_[1] - $locus_end_distance;
-		$split{"cds"}{"$first_cds_start\t$last_cds_end"} = 1;
-		my $first_down_utr_start = $last_cds_end + 1;
-		$split{"down_utr"}{"$first_down_utr_start\t$_[1]"} = 1 if $first_down_utr_start <= $_[1];
-	}
+        @_ = split /\t/, $exon[$locus_end_number - 1];
+        my $last_cds_end = $_[1] - $locus_end_distance;
+        my $first_down_utr_start = $last_cds_end + 1;
+        $split{"cds"}{"$_[0]\t$last_cds_end"} = 1;
+        $split{"down_utr"}{"$first_down_utr_start\t$_[1]"} = 1 if $first_down_utr_start <= $_[1];
+    }
+    elsif ($locus_end_number == $locus_start_number) {
+        @_ = split /\t/, $exon[$locus_end_number - 1];
+        my $last_cds_end = $_[1] - $locus_end_distance;
+        $split{"cds"}{"$first_cds_start\t$last_cds_end"} = 1;
+        my $first_down_utr_start = $last_cds_end + 1;
+        $split{"down_utr"}{"$first_down_utr_start\t$_[1]"} = 1 if $first_down_utr_start <= $_[1];
+    }
 
-	# 得到下游UTR
-	foreach my $exon_num ($locus_end_number + 1 .. @exon) {
-		$split{"down_utr"}{$exon[$exon_num - 1]} = 1;
-	}
+    # 得到下游UTR
+    foreach my $exon_num ($locus_end_number + 1 .. @exon) {
+        $split{"down_utr"}{$exon[$exon_num - 1]} = 1;
+    }
 
-	return %split;
+    return %split;
 }
 
 # 在正义链找最长ORF的位置信息
 sub find_orf {
-	my $seq = shift @_;
-	my @out_orf;
+    my $seq = shift @_;
+    my @out_orf;
 
-	my $seq1 = $seq;
-	my $start_ok = 0;
-	my $pos = 1;
-	my $start;
-	while (length($seq1) > 3) {
-		$seq1 =~ s/(\w{3})//;
-		my $end = $pos + 2;
-		if ($start_ok) {
-			if ($1 eq 'TGA' or $1 eq 'TAG' or $1 eq 'TAA') {
-				my $length = $end - $start + 1;
-				push @out_orf, "$length\t$start\t$end";
-				$start_ok = 0;
-			}
-		}
-		elsif ($1 eq 'ATG') {
-			$start_ok = 1;
-			$start = $pos;
-		}
-		$pos = $pos + 3;
-	}
+    my $seq1 = $seq;
+    my $start_ok = 0;
+    my $pos = 1;
+    my $start;
+    while (length($seq1) > 3) {
+        $seq1 =~ s/(\w{3})//;
+        my $end = $pos + 2;
+        if ($start_ok) {
+            if ($1 eq 'TGA' or $1 eq 'TAG' or $1 eq 'TAA') {
+                my $length = $end - $start + 1;
+                push @out_orf, "$length\t$start\t$end";
+                $start_ok = 0;
+            }
+        }
+        elsif ($1 eq 'ATG') {
+            $start_ok = 1;
+            $start = $pos;
+        }
+        $pos = $pos + 3;
+    }
 
-	my $seq2 = $seq;
-	$seq2 =~ s/\w//;
-	my $start_ok = 0;
-	my $pos = 2;
-	my $start;
-	while (length($seq2) > 3) {
-		$seq2 =~ s/(\w{3})//;
-		my $end = $pos + 2;
-		if ($start_ok) {
-			if ($1 eq 'TGA' or $1 eq 'TAG' or $1 eq 'TAA') {
-				my $length = $end - $start + 1;
-				push @out_orf, "$length\t$start\t$end";
-				$start_ok = 0;
-			}
-		}
-		elsif ($1 eq 'ATG') {
-			$start_ok = 1;
-			$start = $pos;
-		}
-		$pos = $pos + 3;
-	}
+    my $seq2 = $seq;
+    $seq2 =~ s/\w//;
+    my $start_ok = 0;
+    my $pos = 2;
+    my $start;
+    while (length($seq2) > 3) {
+        $seq2 =~ s/(\w{3})//;
+        my $end = $pos + 2;
+        if ($start_ok) {
+            if ($1 eq 'TGA' or $1 eq 'TAG' or $1 eq 'TAA') {
+                my $length = $end - $start + 1;
+                push @out_orf, "$length\t$start\t$end";
+                $start_ok = 0;
+            }
+        }
+        elsif ($1 eq 'ATG') {
+            $start_ok = 1;
+            $start = $pos;
+        }
+        $pos = $pos + 3;
+    }
 
-	my $seq3 = $seq;
-	$seq3  =~ s/\w\w//;
-	my $start_ok = 0;
-	my $pos = 3;
-	my $start;
-	while (length($seq3) > 3) {
-		$seq3 =~ s/(\w{3})//;
-		my $end = $pos + 2;
-		if ($start_ok) {
-			if ($1 eq 'TGA' or $1 eq 'TAG' or $1 eq 'TAA') {
-				my $length = $end - $start + 1;
-				push @out_orf, "$length\t$start\t$end";
-				$start_ok = 0;
-			}
-		}
-		elsif ($1 eq 'ATG') {
-			$start_ok = 1;
-			$start = $pos;
-		}
-		$pos = $pos + 3;
-	}
+    my $seq3 = $seq;
+    $seq3  =~ s/\w\w//;
+    my $start_ok = 0;
+    my $pos = 3;
+    my $start;
+    while (length($seq3) > 3) {
+        $seq3 =~ s/(\w{3})//;
+        my $end = $pos + 2;
+        if ($start_ok) {
+            if ($1 eq 'TGA' or $1 eq 'TAG' or $1 eq 'TAA') {
+                my $length = $end - $start + 1;
+                push @out_orf, "$length\t$start\t$end";
+                $start_ok = 0;
+            }
+        }
+        elsif ($1 eq 'ATG') {
+            $start_ok = 1;
+            $start = $pos;
+        }
+        $pos = $pos + 3;
+    }
 
-	@out_orf = sort {$b <=> $a} @out_orf;
-	my @longest_orf = split /\t/, $out_orf[0];
-	my $longest_orf = "$longest_orf[1]\t$longest_orf[2]";
-	return $longest_orf;
+    @out_orf = sort {$b <=> $a} @out_orf;
+    my @longest_orf = split /\t/, $out_orf[0];
+    my $longest_orf = "$longest_orf[1]\t$longest_orf[2]";
+    return $longest_orf;
 }
 
 sub get_intron_from_exon {
-	@_ = sort {$a <=> $b} @_;
-	my @intron;
-	my $first = shift @_;
-	my ($start, $end) = split /\t/, $first;
-	foreach (@_) {
-		my ($start_new, $end_new) = split /\t/, $_;
-		my $intron_start = $end + 1;
-		my $intron_end = $start_new - 1;
-		push @intron, "$intron_start,$intron_end";
-		($start, $end) = ($start_new, $end_new);
-	}
-	my $intron = join "\t", @intron;
-	return $intron;
+    @_ = sort {$a <=> $b} @_;
+    my @intron;
+    my $first = shift @_;
+    my ($start, $end) = split /\t/, $first;
+    foreach (@_) {
+        my ($start_new, $end_new) = split /\t/, $_;
+        my $intron_start = $end + 1;
+        my $intron_end = $start_new - 1;
+        push @intron, "$intron_start,$intron_end";
+        ($start, $end) = ($start_new, $end_new);
+    }
+    my $intron = join "\t", @intron;
+    return $intron;
 }

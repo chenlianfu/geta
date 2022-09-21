@@ -52,20 +52,20 @@ while (<IN>) {
     my $homolog_seq = $homolog_seq{$_[3]};
     open OUT, ">", "geneRegion_genewise.tmp/$_[3].fasta" or die $!;
     print OUT ">$_[3]\n$homolog_seq\n";
-	close OUT;
+    close OUT;
 
     my $strand = $_[4];
     if ($strand eq "plus") {
-		my $command =  "genewise geneRegion_genewise.tmp/$_[3].fasta geneRegion_genewise.tmp/$_[0].$_[1]\_$_[2].fasta -tfor -gff -quiet -silent -sum > geneRegion_genewise.tmp/$_[0].$_[1]\_$_[2].gff\n";
-		$command{$command} = $length;
+        my $command =  "genewise geneRegion_genewise.tmp/$_[3].fasta geneRegion_genewise.tmp/$_[0].$_[1]\_$_[2].fasta -tfor -gff -quiet -silent -sum > geneRegion_genewise.tmp/$_[0].$_[1]\_$_[2].gff\n";
+        $command{$command} = $length;
     }
     else {
         my $command = "genewise geneRegion_genewise.tmp/$_[3].fasta geneRegion_genewise.tmp/$_[0].$_[1]\_$_[2].fasta -trev -gff -quiet -silent -sum > geneRegion_genewise.tmp/$_[0].$_[1]\_$_[2].gff\n";
-		$command{$command} = $length;
+        $command{$command} = $length;
     }
 }
 foreach (sort {$command{$b} <=> $command{$a}} keys %command) {
-	print COMMAND;
+    print COMMAND;
 }
 close COMMAND;
 

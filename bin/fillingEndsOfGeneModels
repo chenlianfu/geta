@@ -10,8 +10,10 @@ Usage:
     $0 [options] genome.fasta GeneModelsInput.gff3 > GeneModelsOutput.gff3
 
     本程序用于填补基因模型的首尾，使之完整。在GETA基因预测过程中，有一些基因模型未能被Augustus预测出来，此时仅根据transcripts或homolog预测的结果，往往首尾缺失。此时，使用本程序将首尾缺失的基因模型进行补齐。
-    本程序补齐基因模型首尾的原理：（1）对基因模型尾部直接进行延长，直至遇到终止密码子或到基因组序列最尾部；（2）对基因模型首部直接进行延长，直至遇到终止密码子，再吐出密码子碱基直至遇到起始密码子。
+    本程序补齐基因模型首尾的原理：（1）对基因模型尾部直接进行延长，直至遇到终止密码子或到基因组序列最尾部；（2）对基因模型首部直接进行延长，直至遇到终止密码子，再吐出密码子碱基直至遇到起始密码子;（3）若遇到没有CDS信息的转录本，例如lnc_RNA，不会对其进行补齐，程序同时支持含有可变剪接的GFF3文件。
     程序最终输出包含所有基因模型的GFF3文件，并给出统计信息：所有的基因模型数量、完整基因模型数量、不完整的基因模型数量、填补成完整的基因模型数量、不能填补成完整基因模型的数量。
+    程序对成功填补完整的mRNA，在GFF3文件第九列增加Filling2Complete=True信息；对未能填补完整的mRNA，在GFF3文件第九列增加Filling2Uncomplete=True信息。
+    程序对转录本进行强制填补后，会导致基因的范围发生改变，于是会对基因的范围信息和其它转录本的范围和exon边界进行修正。
 
     --nonCompletedGeneModels <string>    default: None
     添加该参数后，程序将不能填补完整的基因模型输入到指定的文件中，在默认的标准输出中仅给完整基因模型。若不添加该参数，则将所有的基因模型都输出到标准输出。
@@ -72,8 +74,16 @@ foreach my $gene_ID ( sort keys %gene_info ) {
 
     # 分别对每个mRNA进行修正
     foreach my $mRNA_ID ( @{$gene_info{$gene_ID}{"mRNA_ID"}} ) {
-        my @mRNA_header = split /\t/, $gene_info{$gene_ID}{"mRNA_header"}{$mRNA_ID};
+        my $mRNA_header = $gene_info{$gene_ID}{"mRNA_header"}{$mRNA_ID};
+        my @mRNA_header = split /\t/, $mRNA_header;
         my $mRNA_info = $gene_info{$gene_ID}{"mRNA_info"}{$mRNA_ID};
+
+        # 不对没有CDS信息的转录本进行修正。
+        unless ( $mRNA_info =~ m/\tCDS\t/ ) {
+            $mRNA_out .= "$mRNA_header$mRNA_info";
+            next;
+        }
+
         my $genome_seq = $seq{$gene_header[0]};
         my $strand = $gene_header[6];
         my ($fill_need, $fill_ok, $mRNA_CDSs, $mRNA_exons) = &fillingEnd($mRNA_info, $genome_seq, $strand, $mRNA_ID);
@@ -84,7 +94,16 @@ foreach my $gene_ID ( sort keys %gene_info ) {
         my ($mRNA_start, $mRNA_end, $mRNA_content) = &get_mRNA_info($mRNA_CDSs, $mRNA_exons, $mRNA_ID, $mRNA_header[0], $strand);
         $mRNA_header[3] = $mRNA_start;
         $mRNA_header[4] = $mRNA_end;
-        $mRNA_out .= (join "\t", @mRNA_header);
+        $mRNA_header = join "\t", @mRNA_header;
+        if ( $fill_need ==  1 ) {
+            if ( $fill_ok ==  1 ) {
+                $mRNA_header = &add_attr($mRNA_header, "Filling2Complete=True");
+            }
+            else {
+                $mRNA_header = &add_attr($mRNA_header, "Filling2Uncomplete=True");
+            }
+        }
+        $mRNA_out .= $mRNA_header;
         $mRNA_out .= $mRNA_content;
 
         $gene_start = $mRNA_start if $gene_start > $mRNA_start;
@@ -92,6 +111,9 @@ foreach my $gene_ID ( sort keys %gene_info ) {
 
         #print "$mRNA_ID\tCDS\n$mRNA_CDSs\n$mRNA_ID\texon\n$mRNA_exons\n";
     }
+
+    # 若有基因进行修正后，对所有转录本的起始和结束位置进行修正，对转录本对应的首尾exon进行修正。
+    $mRNA_out = &correct_ends_of_transcript_and_exon($mRNA_out, $gene_start, $gene_end);
 
     # 输出GFF3
     $gene_header[3] = $gene_start;
@@ -104,7 +126,9 @@ foreach my $gene_ID ( sort keys %gene_info ) {
         }
         else {
             if ( $gene_fill_ok == 0 ) {
-                print OUT (join "\t", @gene_header);
+                my $nonCompletedGeneModels_gene_header = join "\t", @gene_header;
+                $nonCompletedGeneModels_gene_header = &add_attr($nonCompletedGeneModels_gene_header, "Filtered_for_Filling2Uncomplete=True");
+                print OUT $nonCompletedGeneModels_gene_header;
                 print OUT "$mRNA_out\n";
             }
             else {
@@ -136,7 +160,7 @@ foreach my $gene_ID ( sort keys %gene_info ) {
 close OUT;
 close OUT1;
 print STDERR "共有 $num_total 个基因模型进行了分析；其中有 $num_complete 个完整的基因模型；有 $num_partial 个不完整的基因模型；
-对其中 $num_filled 个基因模型成功进行了首尾填补；有 $num_not_filled 个基因模型未能进行完整填补。\n";
+对其中 $num_filled 个基因模型成功进行了首尾填补（基因的任意一个转录本成功填补即可）；有 $num_not_filled 个基因模型未能进行完整填补（基因所有包含CDS信息的转录本都未能成功填补）。\n";
 
 
 # 子程序，根据输入的CDSs和exons信息，返回mRNA起始结束位置和详细内容
@@ -419,7 +443,7 @@ sub fillingEnd {
 
     # 根据CDS获取mRNA的起始密码子和结束密码子
     my ($mRNA_start_codon, $mRNA_end_codon) = &get_start_and_stop_codon(\@CDS, $genome_seq, $strand);
-	#print STDERR "$mRNA_start_codon\t$mRNA_end_codon\n";
+    #print STDERR "$mRNA_start_codon\t$mRNA_end_codon\n";
     $fill_need = 0 if ( exists $stop_codon{$mRNA_end_codon}  && exists $start_codon{$mRNA_start_codon} );
     #print "$mRNA_start_codon\t$mRNA_end_codon\n";
     if ( ! exists $stop_codon{$mRNA_end_codon} ) {
@@ -747,4 +771,99 @@ sub read_genome {
         }
     }
     return %seq;
+}
+
+sub add_attr {
+    my $mRNA_header = $_[0];
+    my $add_attr = $_[1];
+    chomp($mRNA_header);
+    $mRNA_header =~ s/(.*)\t(.*)/$1/;
+    my $attr = $2;
+    $attr =~ s/;$//;
+
+    my (%attr, %attr_sort, $sort_num);
+    foreach ( split /;/, $attr ) {
+        if (m/(.*)\=(.*)/) {
+            $sort_num ++;
+            $attr{$1} = $2;
+            $attr_sort{$1} = $sort_num unless exists $attr_sort{$1};
+        }
+    }
+    if ( $add_attr =~ m/(.*)\=(.*)/ ) {
+        $sort_num ++;
+        $attr{$1} = $2;
+        $attr_sort{$1} = $sort_num unless exists $attr_sort{$1};
+    }
+
+    my @out;
+    foreach ( sort { $attr_sort{$a} <=> $attr_sort{$b} } keys %attr ) {
+        push @out, "$_=$attr{$_}";
+    }
+    my $out = join ";", @out;
+    return "$mRNA_header\t$out\n";
+}
+
+sub correct_ends_of_transcript_and_exon {
+    my ($transcript_info, $geneStart, $geneEnd) = @_;
+    my $out;
+
+    # 解析转录本ID。有些转录本Feature Name可能不是mRNA，同时输入数据中不包含Gene Feature Name，因此使用parent信息来确定转录本ID。
+    my (%parent, %transcript_ID);
+    foreach ( split /\n/, $transcript_info ) {
+        my ($ID, $parent) = ("null", "null");
+        $ID = $1 if m/ID=([^;]+)/;
+        $parent = $1 if m/Parent=([^;]+)/;
+        $parent{$ID} = $parent if ($ID && $parent);
+    }
+    foreach ( keys %parent ) {
+        $transcript_ID{$_} = 1 unless exists $parent{$parent{$_}};
+    }
+
+    # 解析得到各个转录本的内容和头部信息
+    my (%transcript_content, %transcript_header);
+    foreach ( split /\n/, $transcript_info ) {
+        my ($ID, $parent) = ("null", "null");
+        $ID = $1 if m/ID=([^;]+)/;
+        $parent = $1 if m/Parent=([^;]+)/;
+        if ( exists $transcript_ID{$ID} ) {
+            $transcript_header{$ID} = $_;
+        }
+        elsif ( exists $transcript_ID{$parent} ) {
+            $transcript_content{$parent} .= "$_\n";
+        }
+    }
+
+    # 对各个转录本的头部和内容进行修正
+    foreach my $transcript_ID ( sort keys %transcript_ID ) {
+        # 修改头部
+        my $transcript_header = $transcript_header{$transcript_ID};
+        my @transcript_header = split /\t/, $transcript_header;
+        $transcript_header[3] = $geneStart;
+        $transcript_header[4] = $geneEnd;
+        $transcript_header = join "\t", @transcript_header;
+        $out .= "$transcript_header\n";;
+
+        # 修改exon部分。
+        # 先找到exon起始和结束位置。
+        my @exon;
+        foreach ( split /\n/, $transcript_content{$transcript_ID} ) {
+            @_ = split /\t/;
+            push @exon, "$_[3]\t$_[4]" if $_[2] eq "exon";
+        }
+        @exon = sort {$a <=> $b} @exon;
+        my @exon_first = split /\t/, $exon[0];
+        my @exon_last = split /\t/, $exon[-1];
+        my ($exon_start, $exon_end) = ($exon_first[0], $exon_last[-1]);
+        # 在对转录本内容中的exon进行修改
+        foreach ( split /\n/, $transcript_content{$transcript_ID} ) {
+            @_ = split /\t/;
+            if ( $_[2] eq "exon" ) {
+                s/\texon\t$exon_start\t/\texon\t$geneStart\t/;
+                s/\texon\t(\d+)\t$exon_end\t/\texon\t$1\t$geneEnd\t/;
+            }
+            $out .= "$_\n";
+        }
+    }
+
+    return $out;
 }

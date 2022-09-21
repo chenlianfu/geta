@@ -13,20 +13,20 @@ Usage:
     程序根据transcriptID_for_filtering.txt和transcriptID_validating_passed.tab解析需要过滤的基因或需要转换为lncRNA的转录本。过滤掉不可靠的基因，在标准输出中得到有效的基因模型结果，在标准错误输出给出统计结果。
 
     程序运行步骤：
-    (1) 根据transcriptID_for_filtering.txt文件内容找到五类需要过滤的候选基因及其对应的所有转录本ID，找到候选的lncRNA的转录本ID。
-        (a) 所有转录本的CDS长度都较短的基因；
-        (b) 所有转录本的CDS和重复序列区域重叠比例都较高的基因；
-        (c) 没有足够证据支持的基因；
-        (d) 没法填补完整的基因；
-        (e) 通过填补而完整的基因；
-        (f) CDS占转录本长度比例较低的转录本。
-    (2) 根据transcriptID_validating_passed.tab文件内容来确定需要过滤的基因和需要转换为lncRNA的转录本。
-        所有转录本都未通过验证的候选基因，对基因进行标记；在gene feature行第九列使用Filter标签来标记基因，该标签的值为过滤的原因，若有多个过滤的原因，则多个原因之间使用双下划线连接。
-        转录本未通过验证的候选lncRNA，对转录本进行标记；将mRNA的feature名称修改为lnc_RNA。
+    (1) 根据transcriptID_for_filtering.txt文件内容找到因如下原因需要过滤的所有转录本ID。
+        (a) CDS占转录本长度比例较低（默认 < 0.3）的转录本；
+        (b) CDS长度较短（默认 < 600 bp）的转录本；
+        (c) CDS和重复序列区域重叠比例较高（默认 >= 30%）的转录本；
+        (d) 没有足够证据支持基因的所有转录本；
+        (e) 没法填补完整基因的所有转录本；
+        (f) 通过填补而完整基因的所有转录本。
+    (2) 根据transcriptID_validating_passed.tab文件内容和GFF3文件信息来确定需要过滤的基因和需要转换为lncRNA的转录本。
+        若某基因的所有转录本都在transcriptID_for_filtering.txt文件中有记录，且都未能通过验证，则对该基因进行过滤。在相应的被过滤GFF3信息第九列增加Filter开头的标签进行标记。
+        有些CDS占转录本长度比例较低（默认 < 0.3）的转录本，若未能通过验证，则标记为lncRNA。将mRNA的feature名称修改为lnc_RNA。
     (3) 输出结果文件。
         geneModels.coding.gff3             高质量的蛋白编码基因，部分转录本可能属于lnc_RNA。
-        geneModels.lncRNA.gff3             被过滤的全部转录本都属于lnc_RNA的基因。
-        geneModels.lowQuality.gff3         因为a-e五种原因被过滤的低质量基因。
+        geneModels.lncRNA.gff3             被过滤且包含lnc_RNA的基因，部分或全部转录本可能属于lnc_RNA。
+        geneModels.lowQuality.gff3         所有转录本都因为b-f五种原因被过滤的低质量基因。
 
     --out_prefix    default: geneModels
     程序输出3个文件，本参数设置输出文件的前缀。
@@ -43,10 +43,12 @@ Usage:
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($help_flag, $out_prefix);
+my ($help_flag, $out_prefix, $retain_Filling2Complete, $discard_Filling2Uncomplete);
 GetOptions(
     "help" => \$help_flag,
     "out_prefix:s" => \$out_prefix,
+    "discard_Filling2Uncomplete" => \$discard_Filling2Uncomplete,
+    "retain_Filling2Complete" => \$retain_Filling2Complete,
 );
 $out_prefix ||= "geneModels";
 if ( $help_flag ) { die $usage }
@@ -60,6 +62,9 @@ while (<IN>) {
     chomp;
     @_ = split /\t/;
     $_[2] = "True" unless $_[2];
+    if ( $retain_Filling2Complete ) {
+        next if $_[1] eq "Filling2Complete";
+    }
     $filtered_reason_of_transcript{$_[0]}{"Filtered_for_$_[1]"} = $_[2];
     $all_transcript_ID{$_[0]} = 1;
     $all_gene_ID{$1} = 1 if $_[0] =~ m/(.*)\.t\d+/;
@@ -103,8 +108,28 @@ my $num_of_valid_gene_ID = 0; $num_of_valid_gene_ID = %valid_gene_ID;
 my $num_of_valid_transcript_ID = 0; $num_of_valid_transcript_ID = %valid_transcript_ID;
 print STDERR "结果：有 $num_of_valid_gene_ID 个基因的 $num_of_valid_transcript_ID 转录本通过了验证。\n";
 
+########## 3. 读取GFF3文件 ##########
+# 将程序后输入的多个文件内容合并到一个文件中。
+open OUT, ">", "GFF3_extract_TranscriptID_for_filtering.$$.gff3" or die "Can not create file GFF3_extract_TranscriptID_for_filtering.$$.gff3, $!";
+foreach ( @ARGV ) {
+    open IN, $_ or die "Can not open file $_, $!";
+    print OUT <IN>;
+    close IN;
+}
+close OUT;
 
-########## 3. 分析并统计需要过滤的基因 ##########
+# 读取所有的GFF3信息
+my %gene_info = &get_geneModels_from_GFF3("GFF3_extract_TranscriptID_for_filtering.$$.gff3");
+
+# 获取基因和转录本的对应关系
+my %transcriptID_of_gene;
+foreach my $gene_ID ( sort keys %gene_info ) {
+    foreach my $mRNA_ID ( @{$gene_info{$gene_ID}{"mRNA_ID"}} ) {
+        $transcriptID_of_gene{$gene_ID}{$mRNA_ID} = 1;
+    }
+}
+
+########## 4. 分析并统计需要过滤的基因 ##########
 # 统计lncRNA数量
 my $num_of_candidate_lncRNA_transcript_ID = %candidate_lncRNA_transcript_ID;
 my $num_of_candidate_lncRNA_gene_ID = %candidate_lncRNA_gene_ID;
@@ -114,9 +139,17 @@ my ( %filtered_gene_ID, %num_of_filtered_reason, %gene_have_lncRNA, %lncRNA_gene
 foreach my $gene_ID ( keys %all_gene_ID ) {
     if ( exists $candidate_gene{$gene_ID} ) {
         my $filter = 1;
-        # 默认情况下，候选基因需要过滤；但只要该基因对应的任何转录本能有HMM或BLASTP比对结果，则不需要过滤。
-        foreach my $mRNA_ID ( keys %{$candidate_gene{$gene_ID}} ) {
+        # 默认情况下，候选基因需要过滤；（1）但只要该基因对应的任何转录本能有HMM或BLASTP比对结果，则不需要过滤。
+        foreach my $mRNA_ID ( keys %{$transcriptID_of_gene{$gene_ID}} ) {
             $filter = 0 if exists $valid_transcript_ID{$mRNA_ID};
+        }
+        # 默认情况下，候选基因需要过滤；（2）但只要该基因对应的任何一个转录本未在transcriptID_for_filtering.txt中有记录，则不需要过滤。
+        foreach my $mRNA_ID ( keys %{$transcriptID_of_gene{$gene_ID}} ) {
+            $filter = 0 unless exists $all_transcript_ID{$mRNA_ID};
+        }
+        # 若存在 --discard_Filling2Uncomplete 参数，则强制舍弃不完整基因模型。
+        if ($discard_Filling2Uncomplete) {
+            $filter = 1 if exists $filtered_reason_of_gene{$gene_ID}{"Filling2Uncomplete"};
         }
         if ( $filter == 1 ) {
             foreach ( keys %{$filtered_reason_of_gene{$gene_ID}} ) {
@@ -157,30 +190,22 @@ foreach my $reason ( sort keys %filtered_reason_of_gene_num ) {
     $out_stats .= sprintf("    因 %-29s 原因对 %6s 个基因 %6s 个转录本的蛋白序列进行分析，有 %6s 个基因未能通过验证。\n", $reason, $number1, $number2, $num_of_filtered_reason{$reason});
 }
 my $num_of_filtered_gene_ID = 0; $num_of_filtered_gene_ID = %filtered_gene_ID;
-print STDERR "其中，有 $num_of_candidate_gene 个基因需要考虑过滤。因如下原因，对其相应的 $num_of_candidate_transcript_ID 个转录本的蛋白序列进行HMM或BLASTP验证。结果：有 $num_of_filtered_gene_ID 个基因未能通过验证。\n";
+print STDERR "其中，有 $num_of_candidate_gene 个基因因如下原因需要考虑过滤。对其相应的 $num_of_candidate_transcript_ID 个转录本的蛋白序列进行HMM或BLASTP验证。结果：有 $num_of_filtered_gene_ID 个基因未能通过验证。\n";
 print STDERR $out_stats;
+
+open OUT, ">", "aa1"; foreach ( keys %valid_gene_ID ) { print OUT "$_\n"; } close OUT;
+open OUT, ">", "aa2"; foreach ( keys %filtered_gene_ID ) { print OUT "$_\n"; } close OUT;
+open OUT, ">", "aa3"; foreach ( keys %lncRNA_gene_ID_validating_failed ) { print OUT "$_\n"; } close OUT;
 
 print STDERR "\n########## 简洁统计 ##########\n";
 print STDERR "# 有 $num_of_all_gene_ID 个基因的 $num_of_all_transcript_ID 个转录本可能存在问题，需要进行HMM或BLASTP验证。结果表明：\n";
 print STDERR "#     有 $num_of_valid_gene_ID 个基因的 $num_of_valid_transcript_ID 转录本通过了验证，属于编码基因；\n";
-print STDERR "#     有 $num_of_filtered_gene_ID 个基因属于a-e五种原因被过滤的低质量基因；\n";
+print STDERR "#     有 $num_of_filtered_gene_ID 个基因属于b-f五种原因被过滤的低质量基因；\n";
 print STDERR "#     有 $num_of_lncRNA_gene_ID_validating_failed 个基因的问题转录本全是lncRNA且不因其它五种原因过滤。\n";
 print STDERR "##############################\n";
 
 
-########## 4. 输出过滤后的结果 #########
-# 将程序后输入的多个文件内容合并到一个文件中。
-open OUT, ">", "GFF3_extract_TranscriptID_for_filtering.$$.gff3" or die "Can not create file GFF3_extract_TranscriptID_for_filtering.$$.gff3, $!";
-foreach ( @ARGV ) {
-    open IN, $_ or die "Can not open file $_, $!";
-    print OUT <IN>;
-    close IN;
-}
-close OUT;
-
-# 读取所有的GFF3信息
-my %gene_info = &get_geneModels_from_GFF3("GFF3_extract_TranscriptID_for_filtering.$$.gff3");
-
+########## 5. 输出过滤后的结果 #########
 my (%geneModelsID_coding, %geneModelsID_lncRNA1, %geneModelsID_lncRNA2, %geneModelsID_lowQuality);
 
 foreach my $gene_ID ( sort keys %gene_info ) {
@@ -298,7 +323,7 @@ my $number5 = $number2 + $number3;
 my $total_number = %gene_info;
 print STDERR "\n总共输入了 $total_number 个基因；
 编码基因有 $number1 个，保存到了 $out_prefix.coding.gff3 文件中；
-lncRNA基因有 $number5 个，保存到了 $out_prefix.lncRNA.gff3 文件中（同时被五种原因过滤的有 $number2 个，所有转录本全是 lncRNA 的有 $number3  个）；
+lncRNA基因有 $number5 个，保存到了 $out_prefix.lncRNA.gff3 文件中（同时因b-f五种原因过滤的有 $number2 个，所有转录本全是 lncRNA 的有 $number3  个）；
 低质量基因有 $number4 个，保存到了 $out_prefix.lowQuality.gff3 文件中。\n";
 
 

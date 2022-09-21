@@ -111,7 +111,7 @@ foreach my $input_file ( @ARGV ) {
             $mRNAID2geneID{$mRNA_id} = $gene_id;
 
             $gff3_attr{$mRNA_id} = &get_attr($_[8]);
-            $lnc_RNA_transcripID{$mRNA_id} = 1;
+            $lnc_RNA_transcripID{$mRNA_id} = 1 if m/\tlnc_RNA\t/;
         }
         elsif ( m/\tgene\t/) {
             @_ = split /\t/;

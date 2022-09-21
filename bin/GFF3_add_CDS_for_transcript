@@ -51,52 +51,52 @@ foreach my $gene_ID ( sort keys %gene_info ) {
 
             # 分析最优 ORFs 占 exon 的比例，ORF的 CDS 长度。
             my ($ratio_of_ORF, $CDS_length) = &cal_ratio_of_ORF($best_ORF, $exon_info);
-			#print "TEST: $mRNA_ID $best_ORF $ratio_of_ORF $CDS_length\n\n";
+            #print "TEST: $mRNA_ID $best_ORF $ratio_of_ORF $CDS_length\n\n";
 
             # 分析 CDS 信息
             my @cds_info = &cal_cds_info($best_ORF, $exon_info, $mRNA_header[6]);
-			foreach ( @cds_info ) {
-				@_ = split /\t/;
-				$gene_info{$gene_ID}{"mRNA_info"}{$mRNA_ID} .= "$mRNA_header[0]\t$mRNA_header[1]\tCDS\t$_[0]\t$_[1]\t\.\t$mRNA_header[6]\t$_[2]\tID=$mRNA_ID.CDS;Parent=$mRNA_ID\n";
-			}
+            foreach ( @cds_info ) {
+                @_ = split /\t/;
+                $gene_info{$gene_ID}{"mRNA_info"}{$mRNA_ID} .= "$mRNA_header[0]\t$mRNA_header[1]\tCDS\t$_[0]\t$_[1]\t\.\t$mRNA_header[6]\t$_[2]\tID=$mRNA_ID.CDS;Parent=$mRNA_ID\n";
+            }
         }
     }
 }
 
 # 输出GFF3结果
 foreach my $gene_ID ( sort keys %gene_info ) {
-	print $gene_info{$gene_ID}{"header"};
-	foreach my $mRNA_ID ( @{$gene_info{$gene_ID}{"mRNA_ID"}} ) {
-		print $gene_info{$gene_ID}{"mRNA_header"}{$mRNA_ID};
-		print $gene_info{$gene_ID}{"mRNA_info"}{$mRNA_ID};
-	}
+    print $gene_info{$gene_ID}{"header"};
+    foreach my $mRNA_ID ( @{$gene_info{$gene_ID}{"mRNA_ID"}} ) {
+        print $gene_info{$gene_ID}{"mRNA_header"}{$mRNA_ID};
+        print $gene_info{$gene_ID}{"mRNA_info"}{$mRNA_ID};
+    }
 }
 
 sub cal_cds_info {
-	# 获得ORF位置信息、exon信息和正负链信息。
+    # 获得ORF位置信息、exon信息和正负链信息。
     my ($best_ORF, $exon_info, $strand) = @_;
-	#print "TEST, [sub cal_cds_info] exon info :\n$exon_info\n";
-	#print "TEST, [sub cal_cds_info] Best ORF : $best_ORF\n";
-	#print "TEST, [sub cal_cds_info] Strand: $strand\n";
+    #print "TEST, [sub cal_cds_info] exon info :\n$exon_info\n";
+    #print "TEST, [sub cal_cds_info] Best ORF : $best_ORF\n";
+    #print "TEST, [sub cal_cds_info] Strand: $strand\n";
 
-	# 获得ORF的起始和结束位置
+    # 获得ORF的起始和结束位置
     my ($CDS_start, $CDS_end) = split /\t/, $best_ORF;
     my @exon = split /\n/, $exon_info;
 
-	# 若转录本位于负义链，将ORF的起始和结束位置转换成正义链上的位置信息。
-	my $exon_total_length = 0;
-	foreach ( @exon ) {
-		@_ = split /\t/;
-		$exon_total_length += $_[1] - $_[0] + 1;
-	}
-	if ( $strand eq "-" ) {
-		my $CDS_start_old = $CDS_start; my $CDS_end_old = $CDS_end;
-		$CDS_end = $exon_total_length - $CDS_start_old + 1;
-		$CDS_start = $exon_total_length - $CDS_end_old + 1;
-	}
-	#print "TEST, [sub cal_cds_info] Strand, Start and End: $strand\t$CDS_start\t$CDS_end\n\n";
+    # 若转录本位于负义链，将ORF的起始和结束位置转换成正义链上的位置信息。
+    my $exon_total_length = 0;
+    foreach ( @exon ) {
+        @_ = split /\t/;
+        $exon_total_length += $_[1] - $_[0] + 1;
+    }
+    if ( $strand eq "-" ) {
+        my $CDS_start_old = $CDS_start; my $CDS_end_old = $CDS_end;
+        $CDS_end = $exon_total_length - $CDS_start_old + 1;
+        $CDS_start = $exon_total_length - $CDS_end_old + 1;
+    }
+    #print "TEST, [sub cal_cds_info] Strand, Start and End: $strand\t$CDS_start\t$CDS_end\n\n";
 
-	# 在正义链上根据exon信息和ORF位置信息转换出CDS位置信息。
+    # 在正义链上根据exon信息和ORF位置信息转换出CDS位置信息。
     my @CDS;
     @exon = sort {$a <=> $b} @exon;
     my $pos = 0;
@@ -105,48 +105,48 @@ sub cal_cds_info {
         @_ = split /\t/;
         my $length = $_[1] - $_[0] + 1;
         $exon_length += $length;
-		# 找到第一个CDS
+        # 找到第一个CDS
         if ( $exon_length >= $CDS_start && @CDS == 0 ) {
             my $start_site = $_[0] + $CDS_start - ($exon_length - $length) - 1;
             push @CDS, "$start_site\t$_[1]";
             $CDS_length += $_[1] - $start_site + 1;
         }
-		# 找到其它的CDS
+        # 找到其它的CDS
         elsif ( @CDS > 0 ) {
-			if ( $CDS_length < ($CDS_end - $CDS_start + 1) ) {
-				push @CDS, $_;
-				$CDS_length += $length;
-			}
-		}
-		#print "CDS_length:$CDS_length\n";
-		# 对最后一个CDS结束位点进行修正
-		if ( $CDS_length > ($CDS_end - $CDS_start + 1) ) {
-			my $last_CDS_region = pop @CDS;
-			my ($last_CDS_start, $last_CDS_end) = split /\t/, $last_CDS_region;
-			$last_CDS_end = $last_CDS_end - ( $CDS_length - ($CDS_end - $CDS_start + 1) );
-			push @CDS, "$last_CDS_start\t$last_CDS_end";
-			$CDS_length = ($CDS_end - $CDS_start + 1);
-		}
+            if ( $CDS_length < ($CDS_end - $CDS_start + 1) ) {
+                push @CDS, $_;
+                $CDS_length += $length;
+            }
+        }
+        #print "CDS_length:$CDS_length\n";
+        # 对最后一个CDS结束位点进行修正
+        if ( $CDS_length > ($CDS_end - $CDS_start + 1) ) {
+            my $last_CDS_region = pop @CDS;
+            my ($last_CDS_start, $last_CDS_end) = split /\t/, $last_CDS_region;
+            $last_CDS_end = $last_CDS_end - ( $CDS_length - ($CDS_end - $CDS_start + 1) );
+            push @CDS, "$last_CDS_start\t$last_CDS_end";
+            $CDS_length = ($CDS_end - $CDS_start + 1);
+        }
     }
 
-	#my $total_length = 0; foreach (@CDS) { print "$_\n"; @_ = split /\t/; $total_length += ($_[1] - $_[0] + 1); } print "Total Length: $total_length\n\n";
-	
-	# 添加Frame信息
-	@CDS = sort { $a <=> $b } @CDS;
-	@CDS = sort { $b <=> $a } @CDS if $strand eq "-";
+    #my $total_length = 0; foreach (@CDS) { print "$_\n"; @_ = split /\t/; $total_length += ($_[1] - $_[0] + 1); } print "Total Length: $total_length\n\n";
+    
+    # 添加Frame信息
+    @CDS = sort { $a <=> $b } @CDS;
+    @CDS = sort { $b <=> $a } @CDS if $strand eq "-";
 
-	my @out;
-	my ($frame, $frame_length) = (0, 0);
-	foreach ( @CDS ) {
-		$frame = $frame_length % 3;
-		$frame = 2 if $frame == 1;
-		$frame = 1 if $frame == 2;
-		push @out, "$_\t$frame";
-		@_ = split /\t/;
-		$frame_length += $_[1] - $_[0] + 1;
-	}
+    my @out;
+    my ($frame, $frame_length) = (0, 0);
+    foreach ( @CDS ) {
+        $frame = $frame_length % 3;
+        $frame = 2 if $frame == 1;
+        $frame = 1 if $frame == 2;
+        push @out, "$_\t$frame";
+        @_ = split /\t/;
+        $frame_length += $_[1] - $_[0] + 1;
+    }
 
-	return @out;
+    return @out;
 }
 
 sub add_attr {

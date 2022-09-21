@@ -9,10 +9,11 @@ my $usage = <<USAGE;
 Usage:
     $0 [options] repeat.gff3 file1.gff3 [file2.gff3 . . .] > transcriptID_for_filtering.txt
 
-    本程序输入的第一个GFF3文件是重复序列数据，对后续的一个或多个GFF3文件进行分析，找到结构不好的转录本ID，以用于后续的HMM和BLASTP检测。将以下三类转录本的ID记录下来并输出到标准输出。
+    本程序输入的第一个GFF3文件是重复序列数据，对其后输入的一个或多个GFF3文件进行分析，找到结构不好的转录本ID，以用于后续的HMM和BLASTP检测。程序记录以下三类转录本的ID。
     （1）CDS占转录本长度比例较低（默认 < 0.3）的转录本；
-    （2）所有转录本的CDS长度都较短（默认 < 600 bp）的基因，对应的所有转录本；
-    （3）所有转录本的CDS和重复序列区域重叠比例都较高（默认 >= 30%）的基因，对应的所有转录本。
+    （2）CDS长度较短（默认 < 600 bp）的转录本；
+    （3）CDS和重复序列区域重叠比例较高（默认 >= 30%）的转录本。
+    程序最后分析以上三类转录本ID，找到它们对应的基因ID；对于第二类和第三类转录本ID，仅当一个基因所有的转录本都有记录时，才输出相应信息；对于第一类转录本ID，程序全部输出。
 
     --min_CDS_ratio <float>    default: 0.3
     设置最小的CDS占转录本长度比值。若CDS占转录本长度比例 < 本阈值，则认为转录本结构较差，输出该转录本ID。
@@ -77,12 +78,13 @@ close OUT;
 my %gene_info = &get_geneModels_from_GFF3("GFF3_extract_TranscriptID_for_filtering.$$.gff3");
 
 foreach my $gene_ID ( sort keys %gene_info ) {
-    my ($out_CDS_length, $out_CDS_repeatOverlapRatio) = (1, 1);
     my ($CDS_length_out, $CDS_repeatOverlapRatio_out);
+    my (%all_mRNA, %candidate_mRNA);
     foreach my $mRNA_ID ( @{$gene_info{$gene_ID}{"mRNA_ID"}} ) {
         my $mRNA_header = $gene_info{$gene_ID}{"mRNA_header"}{$mRNA_ID};
         my @mRNA_header = split /\t/, $mRNA_header;
         my $mRNA_info = $gene_info{$gene_ID}{"mRNA_info"}{$mRNA_ID};
+        $all_mRNA{$mRNA_ID} = 1;
 
         # 计算转录本的CDS信息
         my @CDS = &get_feature($mRNA_info, "CDS");
@@ -105,18 +107,15 @@ foreach my $gene_ID ( sort keys %gene_info ) {
 
         if ( $CDS_ratio < $min_CDS_ratio ) {
             print "$mRNA_ID\tCDS_Ratio_lt_$min_CDS_ratio\t$CDS_ratio\n";
+            $candidate_mRNA{$mRNA_ID} = 1;
         }
         if ( $CDS_length < $min_CDS_length ) {
             $CDS_length_out .= "$mRNA_ID\tCDS_Length_lt_${min_CDS_length}bp\t${CDS_length}bp\n";
-        }
-        else {
-            $out_CDS_length = 0;
+            $candidate_mRNA{$mRNA_ID} = 1;
         }
         if ( $overlap_ratio >= $max_repeat_overlap_ratio ) {
             $CDS_repeatOverlapRatio_out .= "$mRNA_ID\tCDS_RepeatOverlapRatio_ge_$max_repeat_overlap_ratio\t$overlap_ratio\n";
-        }
-        else {
-            $out_CDS_repeatOverlapRatio = 0;
+            $candidate_mRNA{$mRNA_ID} = 1;
         }
 
         #print STDERR "$gene_ID, $mRNA_ID:\n";
@@ -126,8 +125,8 @@ foreach my $gene_ID ( sort keys %gene_info ) {
         #print STDERR "Exon_Length: $exon_length\n";
         #print STDERR "Overlap_Length: $overlap_length\n";
     }
-    print $CDS_length_out if $out_CDS_length == 1;
-    print $CDS_repeatOverlapRatio_out if $out_CDS_repeatOverlapRatio == 1;
+    print $CDS_length_out if %all_mRNA == %candidate_mRNA;
+    print $CDS_repeatOverlapRatio_out if %all_mRNA == %candidate_mRNA;
 }
 
 unlink "GFF3_extract_TranscriptID_for_filtering.$$.gff3";
