@@ -174,7 +174,7 @@ sub get_mRNA_info {
     @CDS = sort {$a <=> $b} @CDS;
     @exon = sort {$a <=> $b} @exon;
     my ($mRNA_start, $mRNA_end, $mRNA_introns, $mRNA_UTR);
-       ($mRNA_start, $mRNA_end, $mRNA_exons, $mRNA_introns) = &modify_exon(\@CDS, \@exon);
+    ($mRNA_start, $mRNA_end, $mRNA_exons, $mRNA_introns) = &modify_exon(\@CDS, \@exon);
     $mRNA_UTR = &get_UTR(\@CDS, \@exon, $strand);
 
     # 对mRNA内容进行排序
@@ -355,7 +355,7 @@ sub modify_exon {
     }
     foreach (@exon) {
         @_ = split /\t/, $_;
-        push @pos, @_;
+        push @pos, ($_[0], $_[1]);
     }
     @pos = sort {$a <=> $b} @pos;
     ($mRNA_start, $mRNA_end) = ($pos[0], $pos[-1]);
@@ -397,6 +397,7 @@ sub modify_exon {
     # 根据mRNA边界和introns信息得到准确的exons信息
     my @exon_out;
     my @intron = sort {$a <=> $b} keys %intron;
+    my @intron_out = sort {$a <=> $b} keys %intron;
     if (@intron) {
         my $first_intron = shift @intron;
         ($last_start, $last_end) = split /\t/, $first_intron;
@@ -417,7 +418,7 @@ sub modify_exon {
 
     #print ( "$mRNA_ID: " . (join ";", @exon_out) . "\n");
     my $exon_out = join "\n", @exon_out;
-    my $intron_out = join "\n", @intron;
+    my $intron_out = join "\n", @intron_out;
     return ($mRNA_start, $mRNA_end, $exon_out, $intron_out);
 }
 

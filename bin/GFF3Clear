@@ -780,11 +780,11 @@ sub modify_exon {
     my ($mRNA_start, $mRNA_end, @pos);
     foreach (@cds) {
         @_ = split /\t/, $_;
-        push @pos, @_;
+        push @pos, ($_[0], $_[1]);
     }
     foreach (@exon) {
         @_ = split /\t/, $_;
-        push @pos, @_;
+        push @pos, ($_[0], $_[1]);
     }
     @pos = sort {$a <=> $b} @pos;
     ($mRNA_start, $mRNA_end) = ($pos[0], $pos[-1]);

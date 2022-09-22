@@ -38,7 +38,7 @@ Usage:
     （10）输出比例不小于指定阈值的可变剪接转录本GFF3文件，包含原有的所有可变剪接转录本，并在mRNA信息中添加其比例信息。
 
     --min_intron_depth <int>    default: 1
-    设置最小intron测序深度。若intron.txt文件最后一列测序深度值小于该参数值，则忽略相应行的数据。
+    设置最小intron测序深度。若intron.txt文件第6列表示的intron测序深度值小于该参数值，则忽略相应行的数据。
 
     --min_base_depth_ratio_for_ref_specific_intron <float>    default: 0.3
     比较evidence introns和ref introns，对于ref introns中特有的intron，计算 碱基测序深度 / 基因测序深度 比值，若超过该参数阈值，则存在IR事件。碱基测序深度计算：计算intron区域所有碱基测序深度的中位数；基因测序深度计算：基因非inron区域的碱基测序深度的中位数。
@@ -130,11 +130,14 @@ foreach my $gene_ID (sort keys %gene_info) {
     # 得到intron.txt中位于基因区域的intron信息。
     my $index1 = int($gene_start / 1000);
     my $index2 = int($gene_end  / 1000);
-    my (@intron_evidence, %intron_evidence);
+    my (@intron_evidence, %intron_evidence, %intron_evidence_depth);
     foreach ($index1 .. $index2) {
         foreach my $intron_region ( keys %{$intron_index{$chr}{$strand}{$_}} ) {
             @_ = split /\t/, $intron_region;
-            $intron_evidence{$intron_region} = 1 if ($_[0] > $gene_start && $_[1] < $gene_end);
+            if ( $_[0] > $gene_start && $_[1] < $gene_end ) {
+                $intron_evidence{$intron_region} = 1;
+                $intron_evidence_depth{"$_[0]\t$_[1]"} = $_[2];
+            }
         }
     }
     @intron_evidence = sort {$a <=> $b} keys %intron_evidence;
@@ -155,33 +158,34 @@ foreach my $gene_ID (sort keys %gene_info) {
         @ref_mRNA_exon = sort {$a <=> $b} @ref_mRNA_exon;
         my @ref_mRNA_intron = &get_intron_from_exons(\@ref_mRNA_exon, $ref_mRNA_ID);
 
-        my @ref_mRNA_intron_out;
+        my (@ref_mRNA_intron_out, @ref_mRNA_intron_out_without_depth);
         foreach ( sort {$a <=> $b} @ref_mRNA_intron ) {
             @_ = split /\t/, $_;
-            push @ref_mRNA_intron_out, "$_[0]\t$_[1]";
-            $intron_ref{"$_[0]\t$_[1]"} = $_[1];
+            # 计算 ref intron 的测序深度及其碱基测序深度中位数
+            my ($intron_ref_depth, $intron_ref_base_depth) = (0, 0);
+            $intron_ref_depth = $intron_evidence_depth{"$_[0]\t$_[1]"} if exists $intron_evidence_depth{"$_[0]\t$_[1]"};
+            my @site_depth;
+            foreach ( $_[0] .. $_[1] ) {
+                my $depth = 0;
+                $depth = $depth{$chr}{$strand}{$_} if $depth{$chr}{$strand}{$_};
+                push @site_depth, $depth;
+            }
+            $intron_ref_base_depth = $site_depth[@site_depth*0.5] if @site_depth;
+            push @ref_mRNA_intron_out, "$_[0]\t$_[1]\t$intron_ref_depth\t$intron_ref_base_depth";
+            push @ref_mRNA_intron_out_without_depth, "$_[0]\t$_[1]";
+            $intron_ref{"$_[0]\t$_[1]\t$intron_ref_depth\t$intron_ref_base_depth"} = $_[1];
         }
-        my $ref_mRNA_intron_out = join "\n", @ref_mRNA_intron_out;
-        $ref_mRNA_intron_out = "No_intron" unless $ref_mRNA_intron_out;
+        my $ref_mRNA_intron_out = "No_intron";
+        $ref_mRNA_intron_out = join "\n", @ref_mRNA_intron_out if @ref_mRNA_intron_out;
+        my $ref_mRNA_intron_out_without_depth = "No_intron";
+        $ref_mRNA_intron_out_without_depth = join "\n", @ref_mRNA_intron_out_without_depth if @ref_mRNA_intron_out_without_depth;
         unless ( exists $ref_transcript_intron{$ref_mRNA_intron_out} ) {
-            $ref_transcript_intron{$ref_mRNA_intron_out} = $ref_mRNA_ID;
+            $ref_transcript_intron{$ref_mRNA_intron_out_without_depth} = $ref_mRNA_ID;
             $ref_mRNA_ID{$ref_mRNA_ID} = $ref_mRNA_intron_out;
         }
     }
 
-    # 计算ref intron的碱基测序深度中位数
-    my @intron_ref;
-    foreach ( sort { $a <=> $b or $intron_ref{$a} <=> $intron_ref{$b} } keys %intron_ref ) {
-        my @site_depth;
-        @_ = split /\t/, $_;
-        foreach ( $_[0] .. $_[1] ) {
-            my $depth = 0;
-            $depth = $depth{$chr}{$strand}{$_} if $depth{$chr}{$strand}{$_};
-            push @site_depth, $depth;
-        }
-        @site_depth = sort {$b <=> $a} @site_depth;
-        push @intron_ref, "$_[0]\t$_[1]\t0\t$site_depth[@site_depth*0.5]";
-    }
+    my @intron_ref = sort { $a <=> $b or $intron_ref{$a} <=> $intron_ref{$b} } keys %intron_ref;
 
     # 计算ref exon区域的碱基测序深度中位数，即基因的测序深度。
     my (%intron_pos, @depth_exon_base);
@@ -398,10 +402,31 @@ sub get_mRNA_GFF3_info {
     $ratio = $ratio * 100;
     $ratio = sprintf("%.2f%", $ratio);
 
-    # 若输入了参考转录本信息，则直接输出其信息
+    # 若输入了参考转录本信息，修改intron信息，再返回输出其信息
     if ($mRNA_header) {
         $mRNA_header =~ s/;*$/;Transcript_Ratio=$ratio;/;
-        return "$mRNA_header$mRNA_info";
+        my $out = $mRNA_header;
+
+        my @intron = sort {$a <=> $b} split "\n", $out_mRNA_intron;
+        my %intron_depth;
+        foreach ( @intron ) {
+            @_ = split /\t/, $_;
+            $intron_depth{"$_[0]\t$_[1]"} = "$_[2]\t$_[3]";
+        }
+
+        foreach ( split /\n/, $mRNA_info ) {
+            if ( m/\tintron\t(\d+\t\d+)/ ) {
+                my ($intron_depth, $base_depth_median) = (0, 0);
+                ($intron_depth, $base_depth_median) = split /\t/, $intron_depth{$1};
+                s/(\tintron\t\d+\t\d+)\t\S+/$1\t$intron_depth/;
+                $_ = &add_attr($_, "intron_depth=$intron_depth");
+                $_ = &add_attr($_, "base_depth_median=$base_depth_median");
+                chomp;
+            }
+            $out .= "$_\n";
+        }
+
+        return $out;
     }
 
     # 若没有intron信息
@@ -456,17 +481,11 @@ sub get_mRNA_GFF3_info {
         foreach ( @intron ) {
             $num ++;
             @_ = split /\t/, $_;
-            my $score = '.';
-            my $attr;
-            if ( $_[2] ) {
-                $score = $_[2];
-                $attr .= "intron_depth=$score;base_depth_median=$_[3];";
-            }
-            elsif ( $_[3] ) {
-                $attr .= "base_depth_median=$_[3];"
-            }
-            $out{"$chr\t$source\tintron\t$_[0]\t$_[1]\t$score\t$strand\t\.\tID=$mRNA_ID.intron$num;Parent=$mRNA_ID;$attr\n"} = $_[0];
+            my ($intron_depth, $base_depth_median) = (0, 0);
+            ($intron_depth, $base_depth_median) = ($_[2], $_[3]);
+            $out{"$chr\t$source\tintron\t$_[0]\t$_[1]\t$intron_depth\t$strand\t\.\tID=$mRNA_ID.intron$num;Parent=$mRNA_ID;intron_depth=$intron_depth;base_depth_median=$base_depth_median\n"} = $_[0];
         }
+
         
         my @out = sort {$out{$a} <=> $out{$b}} keys %out;
         $out .= join "", @out;
@@ -731,3 +750,32 @@ sub get_geneModels_from_GFF3 {
     return %gene_info;
 }
 
+sub add_attr {
+    my $mRNA_header = $_[0];
+    my $add_attr = $_[1];
+    chomp($mRNA_header);
+    $mRNA_header =~ s/(.*)\t(.*)/$1/;
+    my $attr = $2;
+    $attr =~ s/;$//;
+
+    my (%attr, %attr_sort, $sort_num);
+    foreach ( split /;/, $attr ) {
+        if (m/(.*)\=(.*)/) {
+            $sort_num ++;
+            $attr{$1} = $2;
+            $attr_sort{$1} = $sort_num unless exists $attr_sort{$1};
+        }
+    }
+    if ( $add_attr =~ m/(.*)\=(.*)/ ) {
+        $sort_num ++;
+        $attr{$1} = $2;
+        $attr_sort{$1} = $sort_num unless exists $attr_sort{$1};
+    }
+
+    my @out;
+    foreach ( sort { $attr_sort{$a} <=> $attr_sort{$b} } keys %attr ) {
+        push @out, "$_=$attr{$_}";
+    }
+    my $out = join ";", @out;
+    return "$mRNA_header\t$out\n";
+}
