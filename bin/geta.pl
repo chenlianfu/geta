@@ -56,10 +56,10 @@ Parameters:
     enable the ability of analysing the strand-specific information provided by the tag "XS" from SAM format alignments. If this parameter was set, the paramter "--rna-strandness" of hisat2 should be set to "RF" usually.
 
     --HMM_db <string>    default: None
-    the absolute path of protein family HMM database which was used for filtering of false positive gene models.
+    the absolute path of protein family HMM database which was used for filtering of false positive gene models. multiple databases can be input, and the prefix of database files should be seperated by comma.
 
     --BLASTP_db <string>    default: None
-    the absolute path of protein family diamond database which was used for filtering of false positive gene models. 若该参数没有设置，程序会以homologous protein构建diamond数据库，进行基因模型过滤。
+    the absolute path of protein family diamond database which was used for filtering of false positive gene models. 若该参数没有设置，程序会以homologous protein构建diamond数据库，进行基因模型过滤。multiple databases can be input, and the prefix of database files should be seperated by comma.
 
     --gene_prefix <string>    default: gene
     the prefix of gene id shown in output file.
@@ -107,83 +107,13 @@ GetOptions(
     "config:s" => \$config,
 );
 
-# 检测依赖的软件
-print STDERR "\n============================================\n";
-print STDERR "Detecting the dependency softwares:\n";
-# 检测RepeatMasker
-my $software_info = `RepeatMasker`;
-if ($software_info =~ m/RepeatMasker/) {
-    print STDERR "RepeatMasker:\tOK\n";
-}
-else {
-    die "RepeatMasker:\tFailed\n\n";
-}
-# 检测RepeatModeler
-$software_info = `RepeatModeler`;
-if ($software_info =~ m/RepeatModeler/) {
-    print STDERR "RepeatModeler:\tOK\n";
-}
-else {
-    die "RepeatModeler:\tFailed\n\n";
-}
-# 检测ParaFly
-$software_info = `ParaFly 2>&1`;
-if ($software_info =~ m/Usage: ParaFly/) {
-    print STDERR "ParaFly:\tOK\n";
-}
-else {
-    die "ParaFly:\tFailed\n\n";
-}
-# 检测JAVA
-my $software_info = `java -version 2>&1`;
-if ($software_info =~ m/Runtime Environment/) {
-    print STDERR "java:\tOK\n";
-}
-else {
-    die "java:\tFailed\n\n";
-}
-# 检测HISAT2
-$software_info = `hisat2 --version`;
-if ($software_info =~ m/version 2.(\d+)\.(\d+)/) {
-    print STDERR "HISAT2:\tOK\n";
-}
-else {
-    die "HISAT2:\tFailed\n\n";
-}
-# 检测samtools
-$software_info = `samtools --version`;
-if ($software_info =~ m/samtools 1.(\d+)/) {
-    print STDERR "samtools:\tOK\n";
-}
-else {
-    die "samtools:\tFailed\n\n";
-}
-# 检测hmmer
-$software_info = `hmmscan -h`;
-if ($software_info =~ m/HMMER 3.(\d+)/) {
-    print STDERR "hmmer:\tOK\n";
-}
-else {
-    die "hmmer:\tFailed\n\n";
-}
-# 检测diamond
-$software_info = `diamond version`;
-if ($software_info =~ m/diamond version/) {
-    print STDERR "diamond:\tOK\n";
-}
-else {
-    die "diamond:\tFailed\n\n";
-}
-print STDERR "============================================\n\n";
-my $pwd = `pwd`; chomp($pwd);
-print STDERR "PWD: $pwd\n";
-print STDERR (localtime) . ": CMD: $0 $command_line_geta\n\n"; 
+# 检测依赖的软件是否满足。
+&detecting_dependent_softwares();
 
 # 参数设置
-# 检查输入文件
+$genome = abs_path($genome);
 die "No genome fasta input\n" unless $genome;
-$genome =~ s/^/$pwd\// unless $genome =~ m/^\//;
-$protein  =~ s/^/$pwd\// unless $protein =~ m/^\//;
+$protein = abs_path($genome);
 unless (($pe1 && $pe2) or $single_end or $protein) {
     die "No RNA-Seq short reads or homologous proteins as input\n";
 }
@@ -199,12 +129,8 @@ if ($use_existed_augustus_species) {
         die "The AUGUSUTS HMM files of $use_existed_augustus_species does not exists!\n";
     }
 }
-if ($RM_lib) {
-    $RM_lib =~ s/^/$pwd\// unless $RM_lib =~ m/^\//;
-}
-if ($config) {
-    $config =~ s/^/$pwd\// unless $config =~ m/^\//;
-}
+$RM_lib = abs_path($RM_lib) if $RM_lib;
+$config = abs_path($config) if $config;
 my (%pe_reads, %se_reads);
 if ($pe1 && $pe2) {
     my @pe1 = split /,/, $pe1;
@@ -213,10 +139,10 @@ if ($pe1 && $pe2) {
     my $pe2_num = @pe2;
     if ($pe1_num != $pe2_num) { die "the input file number of -1 was not equal to -2.\n" };
     foreach (@pe1) {
-        s/^/$pwd\// unless m/^\//;
+        $_ = abs_path($_);
         my $pe_file = $_;
         $_ = shift @pe2;
-        s/^/$pwd\// unless m/^\//;
+        $_ = abs_path($_);
         $pe_file .= "\t$_";
         $pe_reads{$pe_file} = 1;
     }
@@ -224,13 +150,25 @@ if ($pe1 && $pe2) {
 if ($single_end) {
     my @se = split /,/, $single_end;
     foreach (@se) {
-        s/^/$pwd\// unless m/^\//;
+        $_ = abs_path($_);
         $se_reads{$_} = 1;
     }
 }
-
 $out_prefix ||= "out";
 $cpu ||= 4;
+my (%HMM_db, %BLASTP_db);
+if ( $HMM_db ) {
+    foreach ( split /,/, $HMM_db ) {
+        $_ = abs_path($_);
+        $HMM_db{$_} = basename($_);
+    }
+}
+if ( $BLASTP_db ) {
+    foreach ( split /,/, $BLASTP_db ) {
+        $BLASTP_db{$_} = basename($_);
+    }
+}
+
 # 各个主要命令的参数设置
 my %config = (
     'RepeatMasker' => '-e ncbi -gff',
@@ -252,7 +190,6 @@ my %config = (
     'alternative_splicing_analysis' => '--min_intron_depth 1 --min_base_depth_ratio_for_ref_specific_intron 0.3 --min_intron_depth_ratio_for_evidence_specific_intron 0.2 --min_base_depth_ratio_for_common_intron 0.2 --min_gene_depth 10 --min_transcript_confidence_for_output 0.05 --transcript_num_for_output_when_all_low_confidence 8 --added_mRNA_ID_prefix t',
     'GFF3_extract_TranscriptID_for_filtering' => '--min_CDS_ratio 0.3 --min_CDS_length 600 --max_repeat_overlap_ratio 0.3 --ignore_repeat_Name Simple_repeat,Low_complexity,Satellite,Unknown,Tandem_repeat',
     'para_hmmscan' => '--evalue1 1e-5 --evalue2 1e-3 --hmm_length 80 --coverage 0.25 --no_cut_ga --chunk 20 --hmmscan_cpu 2',
-    'para_blast' => '--chunk 10 --blast-threads 1 --evalue 1e-3 --max-target-seqs 20 --completed_ratio 0.9',
     'dimanod' => '--sensitive --max-target-seqs 20 --evalue 1e-5 --id 10 --index-chunks 1 --block-size 5',
     'parsing_blast_result.pl' => '--evalue 1e-9 --identity 0.1 --CIP 0.4 --subject-coverage 0.4 --query-coverage 0.4',
     'get_valid_geneModels' => '',
@@ -274,11 +211,10 @@ if ($config) {
     close IN;
 }
 
-
 # 生成临时文件夹
 mkdir "$out_prefix.tmp" unless -e "$out_prefix.tmp";
 chdir "$out_prefix.tmp";
-$pwd = `pwd`; print STDERR "PWD: $pwd";
+my $pwd = `pwd`; print STDERR "PWD: $pwd";
 
 # 准备基因组序列：读取FASTA序列以>开始的头部时，去除第一个空及之后的字符；去除基因组序列中尾部的换行符。
 unless (-e "genome.fasta") {
@@ -1273,7 +1209,7 @@ geneModels.i.coding.gff3\t对geneModels.h.coding.gff3中的基因模型进行了
     # 6.2 第二轮基因预测结果整合：以转录本和同源蛋白预测结果为准，对上一步的基因模型进行优化。
     my $cmdString1 = "perl -p -e 's/(=[^;]+)\.t1/\$1.t01/g;' ../5.augustus/training/geneModels.gff3 > geneModels.c.gff3;";
     my $cmdString2 = "$dirname/bin/pickout_better_geneModels_from_evidence $config{'pickout_better_geneModels_from_evidence'} geneModels.a.gff3 geneModels.c.gff3 > picked_evidence_geneModels.gff3 2> picked_evidence_geneModels.log";
-    my $cmdString3 = "$dirname/bin/GFF3Clear --genome $genome --no_attr_add picked_evidence_geneModels.gff3 geneModels.a.gff3 > geneModels.d.gff3 2> GFF3Clear.1.log";
+    my $cmdString3 = "$dirname/bin/GFF3Clear --genome $genome --no_attr_add picked_evidence_geneModels.gff3 geneModels.a.gff3 > geneModels.d.gff3 2> /dev/null";
     my $cmdString4 = "perl -p -i -e 's/Integrity=[^;]+;?//g' geneModels.d.gff3";
     unless (-e "02.pickout_better_geneModels_from_evidence.ok") {
         # 先挑选出更优的有Evidence支持的基因模型
@@ -1381,12 +1317,19 @@ geneModels.i.coding.gff3\t对geneModels.h.coding.gff3中的基因模型进行了
     }
     
     # 6.7 对蛋白序列进行HMM和BLASTP验证。
+    my ($cmdString1, $cmdString2, $cmdString3);
     if ( $HMM_db ) {
-        $cmdString1 = "$dirname/bin/para_hmmscan $config{'para_hmmscan'} --outformat --cpu $cpu --no_cut_ga --hmm_db $HMM_db proteins_for_filtering.fasta > validation_hmmscan.tab 2> para_hmmscan.1.log; $dirname/bin/para_hmmscan $config{'para_hmmscan'} --chunk 1 --outformat --cpu $cpu --no_cut_ga --hmm_db $HMM_db proteins_for_filtering.fasta > validation_hmmscan.tab 2> para_hmmscan.2.log";
+        open OUT, ">", "validation_hmmscan.tab" or die "Can not create file validation_hmmscan.tab, $!", close OUT;
+        foreach ( sort keys %HMM_db ) {
+            $cmdString1 .= "$dirname/bin/para_hmmscan $config{'para_hmmscan'} --outformat --cpu $cpu --no_cut_ga --hmm_db $_ --tmp_prefix $HMM_db{$_} proteins_for_filtering.fasta >> validation_hmmscan.tab 2>> para_hmmscan.1.log; $dirname/bin/para_hmmscan $config{'para_hmmscan'} --chunk 1 --outformat --cpu $cpu --no_cut_ga --hmm_db $_ --tmp_prefix $HMM_db{$_} proteins_for_filtering.fasta >> validation_hmmscan.tab 2>> para_hmmscan.2.log; ";
+        }
     }
     if ( $BLASTP_db ) {
-        $cmdString2 = "diamond blastp $config{'diamond'} --outfmt 5 --db $BLASTP_db --query proteins_for_filtering.fasta --out validation_blastp.xml&> diamond_blastp.log";
-        $cmdString3 = "$dirname/bin/parsing_blast_result.pl $config{'parsing_blast_result.pl'} validation_blastp.xml > validation_blastp.tab";
+        open OUT, ">", "validation_blastp.tab" or die "Can not create file validation_blastp.tab, $!", close OUT;
+        foreach ( sort keys %BLASTP_db ) {
+            $cmdString2 .= "diamond blastp $config{'diamond'} --outfmt 5 --db $_ --query proteins_for_filtering.fasta --out validation_blastp_$BLASTP_db{$_}.xml &>> diamond_blastp.log; ";
+            $cmdString3 = "$dirname/bin/parsing_blast_result.pl $config{'parsing_blast_result.pl'} validation_blastp_$BLASTP_db{$_}.xml >> validation_blastp.tab; ";
+        }
     }
     else {
         $cmdString2 = "diamond makedb --db homolog --in ../homolog.fasta &> diamond_makedb.log; diamond blastp $config{'diamond'} --outfmt 5 --db homolog --query proteins_for_filtering.fasta --out validation_blastp.xml &> diamond_blastp.log";
@@ -1581,7 +1524,7 @@ if (-e "$out_prefix.tmp/5.augustus/augustus.2.gff3") {
 else {
     open IN, "$out_prefix.tmp/5.augustus/training/secondtest.out" or die "Can not open file $out_prefix.tmp/5.augustus/training/secondtest.out, $!";
 }
-# (5) 获取AUGUSTUS Training的准确率信息
+# (5) 获取AUGUSTUS Training的准确率信息和预测基因数量统计
 my ($accuary1, $accuary2, $accuary3, $accuary4, $accuary5, $accuary6, $out);
 while (<IN>) {
     if (m/^nucleotide level/) {
@@ -1602,8 +1545,14 @@ while (<IN>) {
 }
 my $accuary = ($accuary1 * 3 + $accuary2 * 2 + $accuary3 * 4 + $accuary4 * 3 + $accuary5 * 2 + $accuary6 * 1) / 15;
 $accuary = int($accuary * 10000) / 100;
-$out = "The accuary of AUGUSTUS Training is $accuary\%.\nLevel\tSensitivity\tSpecificity\n$out\n";
+$out = "The accuary of AUGUSTUS Training is $accuary\%.\nLevel\tSensitivity\tSpecificity\n$out";
 print OUT $out;
+my $num_of_gene_predicted_by_AUGUSTUS = 0;
+open IN, "$out_prefix.tmp/5.augustus/augustus.gff3" or die "Can not open file $out_prefix.tmp/5.augustus/augustus.gff3, $!";
+while (<IN>) {
+    $num_of_gene_predicted_by_AUGUSTUS ++ if m/\tgene\t/;
+}
+print OUT "$num_of_gene_predicted_by_AUGUSTUS genes were predicted by AUGUSTUS.\n\n";
 
 # (6) 获取基因预测整合过滤的统计信息
 print OUT "Statistics of the combination of 3 gene prediction methods and filtration of gene models:\n";
@@ -1687,3 +1636,78 @@ print OUT "(6) $num_of_gene3 gene models were filtered, and $num_of_gene1 of whi
 
 print STDERR "\n============================================\n";
 print STDERR "GETA complete successfully! " . "(" . (localtime) . ")" . "\n\n";
+
+
+sub detecting_dependent_softwares {
+    # 检测依赖的软件
+    print STDERR "\n============================================\n";
+    print STDERR "Detecting the dependent softwares:\n";
+    # 检测RepeatMasker
+    my $software_info = `RepeatMasker`;
+    if ($software_info =~ m/RepeatMasker/) {
+        print STDERR "RepeatMasker:\tOK\n";
+    }
+    else {
+        die "RepeatMasker:\tFailed\n\n";
+    }
+    # 检测RepeatModeler
+    $software_info = `RepeatModeler`;
+    if ($software_info =~ m/RepeatModeler/) {
+        print STDERR "RepeatModeler:\tOK\n";
+    }
+    else {
+        die "RepeatModeler:\tFailed\n\n";
+    }
+    # 检测ParaFly
+    $software_info = `ParaFly 2>&1`;
+    if ($software_info =~ m/Usage: ParaFly/) {
+        print STDERR "ParaFly:\tOK\n";
+    }
+    else {
+        die "ParaFly:\tFailed\n\n";
+    }
+    # 检测JAVA
+    my $software_info = `java -version 2>&1`;
+    if ($software_info =~ m/Runtime Environment/) {
+        print STDERR "java:\tOK\n";
+    }
+    else {
+        die "java:\tFailed\n\n";
+    }
+    # 检测HISAT2
+    $software_info = `hisat2 --version`;
+    if ($software_info =~ m/version 2.(\d+)\.(\d+)/) {
+        print STDERR "HISAT2:\tOK\n";
+    }
+    else {
+        die "HISAT2:\tFailed\n\n";
+    }
+    # 检测samtools
+    $software_info = `samtools --version`;
+    if ($software_info =~ m/samtools 1.(\d+)/) {
+        print STDERR "samtools:\tOK\n";
+    }
+    else {
+        die "samtools:\tFailed\n\n";
+    }
+    # 检测hmmer
+    $software_info = `hmmscan -h`;
+    if ($software_info =~ m/HMMER 3.(\d+)/) {
+        print STDERR "hmmer:\tOK\n";
+    }
+    else {
+        die "hmmer:\tFailed\n\n";
+    }
+    # 检测diamond
+    $software_info = `diamond version`;
+    if ($software_info =~ m/diamond version/) {
+        print STDERR "diamond:\tOK\n";
+    }
+    else {
+        die "diamond:\tFailed\n\n";
+    }
+    print STDERR "============================================\n\n";
+    my $pwd = `pwd`; chomp($pwd);
+    print STDERR "PWD: $pwd\n";
+    print STDERR (localtime) . ": CMD: $0 $command_line_geta\n\n"; 
+}

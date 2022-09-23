@@ -155,11 +155,11 @@ if ($fasta) {
     close OUT;
 }
 close CMD;
-print STDERR "将对 $gene_num_for_analysis 个基因进行 hmmscan 分析。\n";
+print STDERR "将对 $gene_num_for_analysis 条序列进行 hmmscan 分析。\n";
 
 my $cmdString = "ParaFly -c $tmp_prefix.command.list -CPU $cpu &> /dev/null";
 print STDERR "CMD: $cmdString\n";
-system $cmdString;
+(system $cmdString) == 0 or warn "Warning: Failed to execute: $cmdString\n";
 
 print "#GeneID\tHMM_Accession\tHMM_Name\tE-value\tScore\tCoverage\tDescription\n" if $outfmat;
 unshift @chunk, "$tmp_prefix.tmp/completed_result" if -e "$tmp_prefix.tmp/completed_result.domtbl";

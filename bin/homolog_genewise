@@ -120,10 +120,10 @@ else {
 }
 
 #$cmdString = "$path/homolog_paraBlast tblastn genome $homologProteinFastaFile 1e-5 $cpu out 6";
-my $blast_thread = 8;
+my $blast_thread = 1;
 my $blastpl_CPU = int($cpu / $blast_thread + 0.5);
 $blastpl_CPU = 1 if $blastpl_CPU < 1;
-$cmdString = "$path/para_blast --completed_ratio 0.9 --chunk 100 --blast-threads $blast_thread --CPU $blastpl_CPU --blast-program tblastn --evalue 1e-5 --outfmt 6 genome $homologProteinFastaFile 1e-5 > out.tab";
+$cmdString = "$path/para_blast --chunk_file 30 --chunk_dir 30 --blast_threads $blast_thread --CPU $blastpl_CPU --blast_program tblastn --evalue 1e-5 genome $homologProteinFastaFile 1e-5 > out.xml 2> para_blast.log; $path/para_blast --chunk_file 1 --chunk_dir 30 --blast_threads $blast_thread --CPU $blastpl_CPU --blast_program tblastn --evalue 1e-5 genome $homologProteinFastaFile 1e-5 > out.xml 2>> para_blast.log; parsing_blast_result.pl --no-header --evalue $evalue --subject-coverage 0.000000001 --query-coverage $coverage_ratio out.xml > out.tab";
 print "CMD 2/4: $cmdString\n";
 unless (-e "blast.ok") {
     unlink "FailedCommands" if -e "FailedCommands";
