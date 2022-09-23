@@ -1,0 +1,91 @@
+## Set the detail parameters of the modules during GETA pipeline through this config file.
+# the parameters set below will rewrite the default threashold.
+# the template conf_for_small_genome.txt in GETA software was the default values.
+# the anotated lines start with # will be ingnored. the blank lines will be ignored.
+
+[RepeatMasker]
+-e ncbi -gff
+# During the step of RepeatMasker: -species was passed by --RM_species; -pa was passed by --CPU.
+
+[trimmomatic]
+TruSeq3-PE-2.fa:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:50 TOPHRED33
+# note: must start with the adapter file name.
+
+[hisat2-build]
+-p 1
+# note: the multi threads parameter -p was set to 1 by default, which was not passed by --CPU as usual.
+
+[hisat2]
+--min-intronlen 20 --max-intronlen 20000 --dta --score-min L,0.0,-0.4
+# During the step of hisat2: -x was set to "genome"; -p was passed by --CPU; 
+
+[sam2transfrag]
+--fraction 0.05 --min_expressed_base_depth 2 --max_expressed_base_depth 50 --min_junction_depth 2 --max_junction_depth 50 --min_fragment_count_per_transfrags 10 --min_intron_length 20
+# During the step of sam2transfrag: --no_strand_specific was passed reversely by --strand_specific; 
+# If RNA-Seq reads containig single-end data, the --no_PE_sequencing should be added. Otherwise, the alignment of single-end will be ignored.
+# The defalut value means: the dynamic coverage threshold of mapping regions (come frome SAM file) was determinated by the maximum base depth of each region * 0.05, as well as this threshold should between 2 and 50.
+
+[TransDecoder.LongOrfs]
+-m 100 -G universal
+# note: the strand specific parameter -S will be set automatically if transcripts had introns which could determinated the direction.
+
+[TransDecoder.Predict]
+--retain_long_orfs_mode dynamic
+# note: when predicting the ORF of transfrag with single exon, the parameter --train will be set automatically to the result of transfrag with multi exons.
+
+[homolog_genewise]
+--coverage_ratio 0.4 --evalue 1e-9
+# During the step of homolog_genewise: --cpu was passed by --CPU; --max_gene_length, --segmentSize and --overlapSize were automatically calculated.
+
+[homolog_genewiseGFF2GFF3]
+--min_score 15 --gene_prefix genewise --filterMiddleStopCodon
+# During the step of homolog_genewiseGFF2GFF3: --input_genewise_start_info was fixed to "genewise.start_info.txt"; --output_start_and_stop_hints_of_augustus was fixed to "genewise.start_stop_hints.gff".
+
+[geneModels2AugusutsTrainingInput]
+--min_evalue 1e-9 --min_identity 0.8 --min_coverage_ratio 0.8 --min_cds_num 2 --min_cds_length 450 --min_cds_exon_ratio 0.60
+# During the step of geneModels2AugusutsTrainingInput: --cpu was passed by --CPU; --out_prefix was set to ati.
+# if gene models number of ati.filter2.gff3 was few, recommed to decrease --min_cds_exon_ratio and increase --min_coverage_ratio.
+
+[BGM2AT]
+--min_gene_number_for_augustus_training 500 --gene_number_for_accuracy_detection 200 --min_gene_number_of_optimize_augustus_chunk 50 --max_gene_number_of_optimize_augustus_chunk 200
+# During the step of BGM2AT: --flanking_length was automatically calculated; --stopAfterFirstEtraining was set or not set at different steps; --onlytrain_GFF3 was set to a intermediate file.
+
+[prepareAugusutusHints]
+--margin 20
+# note: to obtain the exonpart or cdspart hints, the margin 20bp will be removed.
+
+[paraAugusutusWithHints]
+--gene_prefix augustus --min_intron_len 20
+# During the step of paraAugusutusWithHints: --species was passed by --augustus_species; --cpu was passed by --CPU; --segmentSize and --overlapSize were automatically calculated.
+
+[paraCombineGeneModels]
+--overlap 30 --min_augustus_transcriptSupport_percentage 10.0 --min_augustus_intronSupport_number 1 --min_augustus_intronSupport_ratio 0.01
+# During the step of paraAugusutusWithHints: --cpu was passed by --CPU.
+
+[pickout_better_geneModels_from_evidence]
+--overlap_ratio 0.2 --ratio1 2 --ratio2 1.5 --ratio3 0.85 --ratio4 0.85
+# 本步骤用于挑选完全来自evidence的基因模型。当evidence基因模型的CDS重叠比例低于--overlap_ratio参数值，则挑选之；当 CDS重叠区碱基数 / evidence基因模型CDS总碱基数 >= 阈值[0.2]，认为基因有重叠，进一步挑选：当evidence基因模型的CDS范围（首尾CDS坐标差）> ref基因模型的CDS范围 * 系数阈值[2]，则挑选出来；当evidence基因模型的CDS长度 > ref基因模型 * 系数阈值[1.5]，则挑选出来；当完整evidence基因模型(根据GFF3文件中的Integrity=complete信息)的CDS范围（首尾CDS坐标差）> ref基因模型的CDS范围 * 系数阈值[0.85]，则挑选出来；当完整evidence基因模型的CDS长度 > ref基因模型的CDS长度 * 系数阈值[0.85]，则挑选出来。
+
+[fillingEndsOfGeneModels]
+--start_codon ATG --stop_codon TAG,TGA,TAA
+
+[alternative_splicing_analysis]
+--min_intron_depth 1 --min_base_depth_ratio_for_ref_specific_intron 0.3 --min_intron_depth_ratio_for_evidence_specific_intron 0.2 --min_base_depth_ratio_for_common_intron 0.2 --min_gene_depth 10 --min_transcript_confidence_for_output 0.05 --transcript_num_for_output_when_all_low_confidence 8 --added_mRNA_ID_prefix t
+
+[GFF3_extract_TranscriptID_for_filtering]
+--min_CDS_ratio 0.3 --min_CDS_length 600 --max_repeat_overlap_ratio 0.3 --ignore_repeat_Name Simple_repeat,Low_complexity,Satellite,Unknown,Tandem_repeat
+
+[para_hmmscan]
+--evalue1 1e-5 --evalue2 1e-3 --hmm_length 80 --coverage 0.25 --no_cut_ga --chunk 20 --hmmscan_cpu 2
+
+[para_blast]
+--chunk 10 --blast-threads 1 --evalue 1e-3 --max-target-seqs 20 --completed_ratio 0.9
+
+[dimanod]
+--sensitive --max-target-seqs 20 --evalue 1e-5 --id 10 --index-chunks 1 --block-size 5
+
+[parsing_blast_result.pl]
+--evalue 1e-9 --identity 0.1 --CIP 0.4 --subject-coverage 0.4 --query-coverage 0.4
+
+[get_valid_geneModels]
+# None
