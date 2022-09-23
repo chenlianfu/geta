@@ -6,6 +6,8 @@ use Cwd qw/abs_path getcwd cwd/;
 use File::Basename;
 
 my $command_line_geta = join " ", @ARGV;
+my $dirname = dirname($0);
+$dirname =~ s/\/bin$//;
 
 my $usage = <<USAGE;
 Usage:
@@ -16,9 +18,6 @@ For example:
 
 Parameters:
 [General]
-    --RM_species <string>    Required
-    species identifier for RepeatMasker.
-
     --genome <string>     Required
     genome file in fasta format.
 
@@ -44,8 +43,11 @@ Parameters:
     --config <string>    default: None
     Input a file containing the parameters of several main programs (such as trimmomatic, hisat2 and augustus) during the pipeline. If you do not input this file, the default parameters should be suitable for most situation.
     
+    --RM_species <string>    default: None
+    species identifier for RepeatMasker. The acceptable value of this parameter can be found in file $dirname/RepeatMasker_species.txt. Such as, Eukaryota for eucaryon, Fungi for fungi, Viridiplantae for plants, Metazoa for animals. The repeats in genome sequences would be searched aganist the Repbase database when this parameter set. 
+
     --RM_lib <string>    default: None
-    A fasta file of repeat sequences. Generally to be the result of RepeatModeler. If not set, RepeatModeler will be used for producing this file automaticly, which shall time-consuming.
+    A fasta file of repeat sequences. Generally to be the result of RepeatModeler. If not set, RepeatModeler will be used to product this file automaticly, which shall time-consuming.
 
     --cpu <int>    default: 4
     the number of threads.
@@ -66,17 +68,18 @@ Parameters:
     开启augustus_training_iteration，运行在第一次Augustus training后，根据基因预测的结果，选择有证据支持的基因模型，再一次进行Augustus training（迭代）。此举会消耗较多计算时间，且可能对基因预测没有改进，或产生不好的影响。
 
 
-This script was tested on CentOS 6.8 with such softwares can be run directly in terminal:
-1. ParaFly
-2. java (version: 1.8.0_282)
-3. hisat2 (version: 2.1.0)
-4. samtools (version: 1.10)
-5. hmmscan (version: 3.3.1)
-6. makeblastdb/tblastn/blastp (version: 2.6.0)
-7. RepeatMasker (version: 4.1.2-p1)
-8. RepeatModeler (version: 2.0.3)
-9. genewise (version: 2.4.1)
+This script was tested on CentOS 8.4 with such softwares can be run directly in terminal:
+01. ParaFly
+02. java (version: 1.8.0_282)
+03. hisat2 (version: 2.1.0)
+04. samtools (version: 1.10)
+05. hmmscan (version: 3.3.1)
+06. makeblastdb/tblastn/blastp (version: 2.6.0)
+07. RepeatMasker (version: 4.1.2-p1)
+08. RepeatModeler (version: 2.0.3)
+09. genewise (version: 2.4.1)
 10. augustus/etraining (version: 3.4.0)
+11. diamond (version 2.0.2.140)
 
 Version: 2.5.1
 
@@ -133,13 +136,8 @@ else {
 }
 # 检测JAVA
 my $software_info = `java -version 2>&1`;
-if ($software_info =~ m/version \"(1.(\d).*?)\"/) {
-    if ($2 == 8) {
-        print STDERR "java:\tOK\n";
-    }
-    else {
-        print STDERR "java:\tthis java version $1 may not work properly, version 1.8 is desired\n";
-    }
+if ($software_info =~ m/Runtime Environment/) {
+	print STDERR "java:\tOK\n";
 }
 else {
     die "java:\tFailed\n\n";
@@ -147,12 +145,7 @@ else {
 # 检测HISAT2
 $software_info = `hisat2 --version`;
 if ($software_info =~ m/version 2.(\d+)\.(\d+)/) {
-    if ($1 >= 1) {
-        print STDERR "HISAT2:\tOK\n";
-    }
-    else {
-        print STDERR "HISAT2:\tthis HISAT2 version 2.$1.$2 may not work properly, version 2.1.0 is desired\n";
-    }
+	print STDERR "HISAT2:\tOK\n";
 }
 else {
     die "HISAT2:\tFailed\n\n";
@@ -160,12 +153,7 @@ else {
 # 检测samtools
 $software_info = `samtools --version`;
 if ($software_info =~ m/samtools 1.(\d+)/) {
-    if ($1 >= 3) {
-        print STDERR "samtools:\tOK\n";
-    }
-    else {
-        print STDERR "samtools:\tthis samtools version 1.$1.$2 may not work properly, version 1.3.1 is desired\n";
-    }
+	print STDERR "samtools:\tOK\n";
 }
 else {
     die "samtools:\tFailed\n\n";
@@ -173,15 +161,18 @@ else {
 # 检测hmmer
 $software_info = `hmmscan -h`;
 if ($software_info =~ m/HMMER 3.(\d+)/) {
-    if ($1 >= 1) {
-        print STDERR "hmmer:\tOK\n";
-    }
-    else {
-        print STDERR "hmmer:\tthis hmmer version 3.$1 may not work properly, version 3.3.1 is desired\n";
-    }
+	print STDERR "hmmer:\tOK\n";
 }
 else {
     die "hmmer:\tFailed\n\n";
+}
+# 检测diamond
+$software_info = `diamond version`;
+if ($software_info =~ m/diamond version/) {
+	print STDERR "diamond:\tOK\n";
+}
+else {
+	die "diamond:\tFailed\n\n";
 }
 print STDERR "============================================\n\n";
 my $pwd = `pwd`; chomp($pwd);
@@ -190,7 +181,6 @@ print STDERR (localtime) . ": CMD: $0 $command_line_geta\n\n";
 
 # 参数设置
 # 检查输入文件
-die "--RM_species shoud be set!" unless $RM_species;
 die "No genome fasta input\n" unless $genome;
 $genome =~ s/^/$pwd\// unless $genome =~ m/^\//;
 $protein  =~ s/^/$pwd\// unless $protein =~ m/^\//;
@@ -284,8 +274,6 @@ if ($config) {
     close IN;
 }
 
-my $dirname = dirname($0);
-$dirname =~ s/bin$//;
 
 # 生成临时文件夹
 mkdir "$out_prefix.tmp" unless -e "$out_prefix.tmp";
@@ -348,7 +336,12 @@ unless (-e "0.RepeatMasker.ok") {
     # 进行RepeatMasker分析
     mkdir "repeatMasker" unless -e "repeatMasker";
     my $cpu_RepeatMasker = int($cpu / 4);
-    $cmdString = "RepeatMasker $config{'RepeatMasker'} -pa $cpu_RepeatMasker -species $RM_species -dir repeatMasker/ $genome &> repeatmasker.log";
+	if ( $RM_species ) {
+		$cmdString = "RepeatMasker $config{'RepeatMasker'} -pa $cpu_RepeatMasker -species $RM_species -dir repeatMasker/ $genome &> repeatmasker.log";
+	}
+	else {
+		$cmdString = "touch repeatMasker/genome.fasta.out";
+	}
     unless (-e "RepeatMasker.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -372,7 +365,7 @@ unless (-e "0.RepeatMasker.ok") {
         else {
             print STDERR "CMD(Skipped): $cmdString\n";
         }
-    my $cpu_RepeatModeler = int($cpu / 4);
+		my $cpu_RepeatModeler = int($cpu / 4);
         $cmdString = "RepeatModeler -pa $cpu_RepeatModeler -database species -LTRStruct &> RepeatModeler.log";
         unless (-e "RepeatModeler.ok") {
             print STDERR (localtime) . ": CMD: $cmdString\n";
@@ -1256,8 +1249,9 @@ geneModels.i.coding.gff3\t对geneModels.h.coding.gff3中的基因模型进行了
     # 6.1 第一轮基因预测结果整合：以AUGUSTUS结果为主，进行三种基因预测结果的整合
     # 对三种基因预测结果进行第一轮整合，以Augustus结果为准。得到 combine.1.gff3 为有Evidence支持的结果，combine.2.gff3为支持不足的结果。
     my $cmdString1 = "$dirname/bin/paraCombineGeneModels $config{'paraCombineGeneModels'} --cpu $cpu ../5.augustus/augustus.gff3 ../3.transcript/transfrag.genome.gff3 ../4.homolog/genewise.gff3 ../5.augustus/hints.gff &> /dev/null";
-    my $cmdString2 = "perl -p -e 's/(=[^;]+)\.t1/\$1.t01/g' combine.1.gff3 > geneModels.a.gff3";
-    my $cmdString3 = "perl -p -e 's/(=[^;]+)\.t1/\$1.t01/g' combine.2.gff3 > geneModels.b.gff3";
+	my $cmdString2 = "$dirname/bin/GFF3Clear --genome $genome --no_attr_add --coverage 0.8 combine.1.gff3 > geneModels.a.gff3 &> /dev/null";
+	my $cmdString3 = "$dirname/bin/GFF3Clear --genome $genome --no_attr_add --coverage 0.8 combine.2.gff3 > geneModels.b.gff3 &> /dev/null";
+    my $cmdString4 = "perl -p -i -e 's/(=[^;]+)\.t1/\$1.t01/g' geneModels.a.gff3 geneModels.b.gff3";
     unless (-e "01.paraCombineGeneModels.ok") {
         print STDERR (localtime) . ": CMD: $cmdString1\n";
         system("$cmdString1") == 0 or die "failed to execute: $cmdString1\n";
@@ -1265,12 +1259,15 @@ geneModels.i.coding.gff3\t对geneModels.h.coding.gff3中的基因模型进行了
         system("$cmdString2") == 0 or die "failed to execute: $cmdString2\n";
         print STDERR (localtime) . ": CMD: $cmdString3\n";
         system("$cmdString3") == 0 or die "failed to execute: $cmdString3\n";
+        print STDERR (localtime) . ": CMD: $cmdString4\n";
+        system("$cmdString4") == 0 or die "failed to execute: $cmdString4\n";
         open OUT, ">", "01.paraCombineGeneModels.ok" or die $!; close OUT;
     }
     else {
         print STDERR "CMD(Skipped): $cmdString1\n";
         print STDERR "CMD(Skipped): $cmdString2\n";
         print STDERR "CMD(Skipped): $cmdString3\n";
+        print STDERR "CMD(Skipped): $cmdString4\n";
     }
 
     # 6.2 第二轮基因预测结果整合：以转录本和同源蛋白预测结果为准，对上一步的基因模型进行优化。
