@@ -123,6 +123,7 @@ print STDERR "Read over $ARGV[2]\n";
 
 # 分别对各个基因进行可变剪接分析
 foreach my $gene_ID (sort keys %gene_info) {
+    #print STDERR "$gene_ID\n";
     # 得到gene的起始和结束位置
     my @gene_header = split /\t/, $gene_info{$gene_ID}{"header"};
     my ($chr, $source, $gene_start, $gene_end, $strand) = ($gene_header[0], $gene_header[1],  $gene_header[3], $gene_header[4], $gene_header[6]);
@@ -292,6 +293,29 @@ foreach my $gene_ID (sort keys %gene_info) {
                 $transcript_intron{$intron_info} = $intron_splicing{$intron_info};
             }
         }
+
+        my $number = %transcript_intron;
+        my $number_info = join "\n", keys %transcript_intron;
+
+        # 当转录本数量过多时，仅挑选排名靠前（默认前20）的转录本，去除排名靠后的转录本。
+        # 计算出一个基因允许的最大转录本数量。
+        my $max_num_of_transcript = 10000;
+        $max_num_of_transcript = int(1 / $min_transcript_confidence_for_output + 0.5) if $max_num_of_transcript;
+        # 当转录本数量超过最大转录本数量时，得去除比例过低的转录本，以减少计算量和内存消耗。否则，该程序遇到一些intron数量较多，测序深度较大的基因时，容易遇到非常多的转录本情况，导致消耗计算量极其极其大。
+        if ( %transcript_intron > $max_num_of_transcript ) {
+            # 对转录本按比例从大到小排序，找到达到最大转录本数量时对应的转录本比例，作为最低转录本比例。
+            my ($num_of_transcript, $min_ratio_of_transcript) = (0, 0);
+            foreach ( sort {$transcript_intron{$b} <=> $transcript_intron{$a}} keys %transcript_intron ) {
+                $num_of_transcript ++;
+                if ( $num_of_transcript == $max_num_of_transcript ) {
+                    $min_ratio_of_transcript = $transcript_intron{$_};
+                    last;
+                }
+            }
+            foreach ( keys %transcript_intron ) {
+                delete $transcript_intron{$_} if $transcript_intron{$_} < $min_ratio_of_transcript;
+            }
+        }
     }
     # 若是单外显子，则给一个转录本
     $transcript_intron{"No_intron"} = 1 unless @cluster_intron;
@@ -371,9 +395,9 @@ foreach my $gene_ID (sort keys %gene_info) {
     foreach my $mRNA_ID ( @out_transcript_ID ) {
         my $out_mRNA_intron = $out_transcript_intron{$mRNA_ID}{"introns"};
         my $ratio = $out_transcript_intron{$mRNA_ID}{"ratio"};
-        my ($mRNA_header, $mRNA_info);
-        my $out = &get_mRNA_GFF3_info($out_mRNA_intron, $ratio, $chr, $source, $gene_start, $gene_end, $strand, $gene_ID, $mRNA_ID, $mRNA_header, $mRNA_info);
         if ($ratio >= $min_transcript_confidence_for_output) {
+            my ($mRNA_header, $mRNA_info);
+            my $out = &get_mRNA_GFF3_info($out_mRNA_intron, $ratio, $chr, $source, $gene_start, $gene_end, $strand, $gene_ID, $mRNA_ID, $mRNA_header, $mRNA_info);
             print "$out";
             $out_transcript_valid_ratio_num ++;
         }

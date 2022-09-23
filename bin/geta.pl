@@ -137,7 +137,7 @@ else {
 # 检测JAVA
 my $software_info = `java -version 2>&1`;
 if ($software_info =~ m/Runtime Environment/) {
-	print STDERR "java:\tOK\n";
+    print STDERR "java:\tOK\n";
 }
 else {
     die "java:\tFailed\n\n";
@@ -145,7 +145,7 @@ else {
 # 检测HISAT2
 $software_info = `hisat2 --version`;
 if ($software_info =~ m/version 2.(\d+)\.(\d+)/) {
-	print STDERR "HISAT2:\tOK\n";
+    print STDERR "HISAT2:\tOK\n";
 }
 else {
     die "HISAT2:\tFailed\n\n";
@@ -153,7 +153,7 @@ else {
 # 检测samtools
 $software_info = `samtools --version`;
 if ($software_info =~ m/samtools 1.(\d+)/) {
-	print STDERR "samtools:\tOK\n";
+    print STDERR "samtools:\tOK\n";
 }
 else {
     die "samtools:\tFailed\n\n";
@@ -161,7 +161,7 @@ else {
 # 检测hmmer
 $software_info = `hmmscan -h`;
 if ($software_info =~ m/HMMER 3.(\d+)/) {
-	print STDERR "hmmer:\tOK\n";
+    print STDERR "hmmer:\tOK\n";
 }
 else {
     die "hmmer:\tFailed\n\n";
@@ -169,10 +169,10 @@ else {
 # 检测diamond
 $software_info = `diamond version`;
 if ($software_info =~ m/diamond version/) {
-	print STDERR "diamond:\tOK\n";
+    print STDERR "diamond:\tOK\n";
 }
 else {
-	die "diamond:\tFailed\n\n";
+    die "diamond:\tFailed\n\n";
 }
 print STDERR "============================================\n\n";
 my $pwd = `pwd`; chomp($pwd);
@@ -336,12 +336,12 @@ unless (-e "0.RepeatMasker.ok") {
     # 进行RepeatMasker分析
     mkdir "repeatMasker" unless -e "repeatMasker";
     my $cpu_RepeatMasker = int($cpu / 4);
-	if ( $RM_species ) {
-		$cmdString = "RepeatMasker $config{'RepeatMasker'} -pa $cpu_RepeatMasker -species $RM_species -dir repeatMasker/ $genome &> repeatmasker.log";
-	}
-	else {
-		$cmdString = "touch repeatMasker/genome.fasta.out";
-	}
+    if ( $RM_species ) {
+        $cmdString = "RepeatMasker $config{'RepeatMasker'} -pa $cpu_RepeatMasker -species $RM_species -dir repeatMasker/ $genome &> repeatmasker.log";
+    }
+    else {
+        $cmdString = "touch repeatMasker/genome.fasta.out";
+    }
     unless (-e "RepeatMasker.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -365,7 +365,7 @@ unless (-e "0.RepeatMasker.ok") {
         else {
             print STDERR "CMD(Skipped): $cmdString\n";
         }
-		my $cpu_RepeatModeler = int($cpu / 4);
+        my $cpu_RepeatModeler = int($cpu / 4);
         $cmdString = "RepeatModeler -pa $cpu_RepeatModeler -database species -LTRStruct &> RepeatModeler.log";
         unless (-e "RepeatModeler.ok") {
             print STDERR (localtime) . ": CMD: $cmdString\n";
@@ -1249,8 +1249,8 @@ geneModels.i.coding.gff3\t对geneModels.h.coding.gff3中的基因模型进行了
     # 6.1 第一轮基因预测结果整合：以AUGUSTUS结果为主，进行三种基因预测结果的整合
     # 对三种基因预测结果进行第一轮整合，以Augustus结果为准。得到 combine.1.gff3 为有Evidence支持的结果，combine.2.gff3为支持不足的结果。
     my $cmdString1 = "$dirname/bin/paraCombineGeneModels $config{'paraCombineGeneModels'} --cpu $cpu ../5.augustus/augustus.gff3 ../3.transcript/transfrag.genome.gff3 ../4.homolog/genewise.gff3 ../5.augustus/hints.gff &> /dev/null";
-	my $cmdString2 = "$dirname/bin/GFF3Clear --genome $genome --no_attr_add --coverage 0.8 combine.1.gff3 > geneModels.a.gff3 &> /dev/null";
-	my $cmdString3 = "$dirname/bin/GFF3Clear --genome $genome --no_attr_add --coverage 0.8 combine.2.gff3 > geneModels.b.gff3 &> /dev/null";
+    my $cmdString2 = "$dirname/bin/GFF3Clear --genome $genome --no_attr_add --coverage 0.8 combine.1.gff3 > geneModels.a.gff3 &> /dev/null";
+    my $cmdString3 = "$dirname/bin/GFF3Clear --genome $genome --no_attr_add --coverage 0.8 combine.2.gff3 > geneModels.b.gff3 &> /dev/null";
     my $cmdString4 = "perl -p -i -e 's/(=[^;]+)\.t1/\$1.t01/g' geneModels.a.gff3 geneModels.b.gff3";
     unless (-e "01.paraCombineGeneModels.ok") {
         print STDERR (localtime) . ": CMD: $cmdString1\n";
@@ -1274,7 +1274,7 @@ geneModels.i.coding.gff3\t对geneModels.h.coding.gff3中的基因模型进行了
     my $cmdString1 = "perl -p -e 's/(=[^;]+)\.t1/\$1.t01/g;' ../5.augustus/training/geneModels.gff3 > geneModels.c.gff3;";
     my $cmdString2 = "$dirname/bin/pickout_better_geneModels_from_evidence $config{'pickout_better_geneModels_from_evidence'} geneModels.a.gff3 geneModels.c.gff3 > picked_evidence_geneModels.gff3 2> picked_evidence_geneModels.log";
     my $cmdString3 = "$dirname/bin/GFF3Clear --genome $genome --no_attr_add picked_evidence_geneModels.gff3 geneModels.a.gff3 > geneModels.d.gff3 2> GFF3Clear.1.log";
-	my $cmdString4 = "perl -p -i -e 's/Integrity=[^;]+;?//g' geneModels.d.gff3";
+    my $cmdString4 = "perl -p -i -e 's/Integrity=[^;]+;?//g' geneModels.d.gff3";
     unless (-e "02.pickout_better_geneModels_from_evidence.ok") {
         # 先挑选出更优的有Evidence支持的基因模型
         print STDERR (localtime) . ": CMD: $cmdString1\n";
@@ -1382,7 +1382,7 @@ geneModels.i.coding.gff3\t对geneModels.h.coding.gff3中的基因模型进行了
     
     # 6.7 对蛋白序列进行HMM和BLASTP验证。
     if ( $HMM_db ) {
-        $cmdString1 = "$dirname/bin/para_hmmscan $config{'para_hmmscan'} --outformat --cpu $cpu --no_cut_ga --hmm_db $HMM_db proteins_for_filtering.fasta > validation_hmmscan.tab";
+        $cmdString1 = "$dirname/bin/para_hmmscan $config{'para_hmmscan'} --outformat --cpu $cpu --no_cut_ga --hmm_db $HMM_db proteins_for_filtering.fasta > validation_hmmscan.tab 2> para_hmmscan.1.log; $dirname/bin/para_hmmscan $config{'para_hmmscan'} --chunk 1 --outformat --cpu $cpu --no_cut_ga --hmm_db $HMM_db proteins_for_filtering.fasta > validation_hmmscan.tab 2> para_hmmscan.2.log";
     }
     if ( $BLASTP_db ) {
         $cmdString2 = "diamond blastp $config{'diamond'} --outfmt 5 --db $BLASTP_db --query proteins_for_filtering.fasta --out validation_blastp.xml&> diamond_blastp.log";

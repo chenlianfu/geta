@@ -66,29 +66,84 @@ $hmmscan_cpu ||= 2;
 $hmm_db ||= "/opt/biosoft/hmmer-3.3.2/Pfam-AB.hmm";
 $tmp_prefix ||= "hmmscan";
 
-mkdir "$tmp_prefix.tmp" unless -e "$tmp_prefix.tmp";
+# 检测输入的FASTA文件的基因ID信息。
+my (%seq, $seq_ID);
 open IN, $ARGV[0] or die "Can not open the input file: $ARGV[0]\n$!\n";
-open CMD, ">", "$tmp_prefix.command.list"  or die "Cannot create file $tmp_prefix.command.list\n$!\n";
-my ($fasta, $number, $chunk_number, @chunk);
 while (<IN>) {
-    if (m/^>/) {
-        $number ++;
-        if ($number > $chunk) {
-            $chunk_number ++;
-            push @chunk, "$tmp_prefix.tmp/chunk.$chunk_number";
-            open OUT, ">", "$tmp_prefix.tmp/chunk.$chunk_number.fasta" or die "Can not create file $tmp_prefix.tmp/chunk.$chunk_number.fasta\n$!\n";
-            print OUT $fasta;
-            my $out = "hmmscan --cpu $hmmscan_cpu --cut_ga -o $tmp_prefix.tmp/chunk.$chunk_number.txt --tblout $tmp_prefix.tmp/chunk.$chunk_number.tbl --domtblout $tmp_prefix.tmp/chunk.$chunk_number.domtbl --pfamtblout $tmp_prefix.tmp/chunk.$chunk_number.pfamtbl $hmm_db $tmp_prefix.tmp/chunk.$chunk_number.fasta\n";
-            $out =~ s/--cut_ga// if $no_cut_ga;
-            print CMD $out;
-            close OUT;
-            $number  = 1;
-            $fasta = "";
-        }
+    chomp;
+    if (m/^>(\S+)/) {
+        $seq_ID = $1;
     }
-    $fasta .= $_;
+    else {
+        $seq{$seq_ID} .= $_;
+    }
 }
 close IN;
+
+# 检测已经存在的结果，将已经存在的结果放入到 $tmp_prefix.tmp/completed_result.domtbl。
+my (%complete_gene_ID, $chunk_number);
+if ( -e "$tmp_prefix.tmp" ) {
+    # 得到进行了hmmscan分析的基因ID。
+    while ( <$tmp_prefix.tmp/*.txt> ) {
+        open IN, $_ or die "Can not open file $_, $!";
+        while (<IN>) {
+            $complete_gene_ID{$1} = 1 if m/^Query:\s+(\S+)/;
+        }
+        close IN;
+    }
+
+    # 将对目标文件中对应基因的比对结果放到文件 $tmp_prefix.tmp/completed_result.domtbl 中。
+    open OUT, ">", "$tmp_prefix.tmp/completed_result.domtbl" or die "Can not create file $tmp_prefix.tmp/completed_result.domtbl, $!";
+    while ( <$tmp_prefix.tmp/*.domtbl> ) {
+        open IN, $_ or die "Can not open file $_, $!";
+        my $out_head = <IN>; $out_head .= <IN>; $out_head .= <IN>;
+        close IN;
+        last;
+    }
+    while ( <$tmp_prefix.tmp/*.domtbl> ) {
+        next if $_ eq "$tmp_prefix.tmp/completed_result.domtbl";
+        open IN, $_ or die "Can not open file $_, $!";
+        while (<IN>) {
+            next if m/^#/;
+            if ( m/^\S+\s+\S+\s+\S+\s+(\S+)/ && exists $seq{$1} ) {
+                print OUT;
+            }
+        }
+        close IN;
+    }
+    close OUT;
+
+    # 得到chunk_number编号，再次运行本程序，将未完成的基因放入新的chunk中。
+    while ( <$tmp_prefix.tmp/chunk*.fasta> ) {
+        $chunk_number = $1 if ( m/chunk.(\d+).fasta/ && $1 >= $chunk_number );
+    }
+}
+else {
+    mkdir "$tmp_prefix.tmp";
+}
+
+open CMD, ">", "$tmp_prefix.command.list"  or die "Cannot create file $tmp_prefix.command.list\n$!\n";
+my ($fasta, $number, @chunk, $gene_num_for_analysis);
+foreach my $seq_ID ( sort keys %seq ) {
+    next if exists $complete_gene_ID{$seq_ID};
+    $gene_num_for_analysis ++;
+    $number ++;
+
+    if ($number > $chunk) {
+        $chunk_number ++;
+        push @chunk, "$tmp_prefix.tmp/chunk.$chunk_number";
+        open OUT, ">", "$tmp_prefix.tmp/chunk.$chunk_number.fasta" or die "Can not create file $tmp_prefix.tmp/chunk.$chunk_number.fasta\n$!\n";
+        print OUT $fasta;
+        my $out = "hmmscan --cpu $hmmscan_cpu --cut_ga -o $tmp_prefix.tmp/chunk.$chunk_number.txt --tblout $tmp_prefix.tmp/chunk.$chunk_number.tbl --domtblout $tmp_prefix.tmp/chunk.$chunk_number.domtbl --pfamtblout $tmp_prefix.tmp/chunk.$chunk_number.pfamtbl $hmm_db $tmp_prefix.tmp/chunk.$chunk_number.fasta\n";
+        $out =~ s/--cut_ga// if $no_cut_ga;
+        print CMD $out;
+        close OUT;
+        $number  = 1;
+        $fasta = "";
+    }
+
+    $fasta .= ">$seq_ID\n$seq{$seq_ID}\n";
+}
 if ($fasta) {
     $chunk_number ++;
     push @chunk, "$tmp_prefix.tmp/chunk.$chunk_number";
@@ -100,12 +155,14 @@ if ($fasta) {
     close OUT;
 }
 close CMD;
+print STDERR "将对 $gene_num_for_analysis 个基因进行 hmmscan 分析。\n";
 
 my $cmdString = "ParaFly -c $tmp_prefix.command.list -CPU $cpu &> /dev/null";
 print STDERR "CMD: $cmdString\n";
-(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+system $cmdString;
 
 print "#GeneID\tHMM_Accession\tHMM_Name\tE-value\tScore\tCoverage\tDescription\n" if $outfmat;
+unshift @chunk, "$tmp_prefix.tmp/completed_result" if -e "$tmp_prefix.tmp/completed_result.domtbl";
 foreach (@chunk) {
     open IN, "$_.domtbl" or die "Can not open file $_.domtbl\n$!\n";
     my ($out_head, $out_tail, %info);
