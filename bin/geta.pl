@@ -190,7 +190,7 @@ my %config = (
     'alternative_splicing_analysis' => '--min_intron_depth 1 --min_base_depth_ratio_for_ref_specific_intron 0.3 --min_intron_depth_ratio_for_evidence_specific_intron 0.2 --min_base_depth_ratio_for_common_intron 0.2 --min_gene_depth 10 --min_transcript_confidence_for_output 0.05 --transcript_num_for_output_when_all_low_confidence 8 --added_mRNA_ID_prefix t',
     'GFF3_extract_TranscriptID_for_filtering' => '--min_CDS_ratio 0.3 --min_CDS_length 600 --max_repeat_overlap_ratio 0.3 --ignore_repeat_Name Simple_repeat,Low_complexity,Satellite,Unknown,Tandem_repeat',
     'para_hmmscan' => '--evalue1 1e-5 --evalue2 1e-3 --hmm_length 80 --coverage 0.25 --no_cut_ga --chunk 20 --hmmscan_cpu 2',
-    'dimanod' => '--sensitive --max-target-seqs 20 --evalue 1e-5 --id 10 --index-chunks 1 --block-size 5',
+    'diamond' => '--sensitive --max-target-seqs 20 --evalue 1e-5 --id 10 --index-chunks 1 --block-size 5',
     'parsing_blast_result.pl' => '--evalue 1e-9 --identity 0.1 --CIP 0.4 --subject-coverage 0.4 --query-coverage 0.4',
     'get_valid_geneModels' => '',
     'remove_genes_in_repeats1' => '--ratio 0.3 --ignore_Simple_repeat --ignore_Unknown',
@@ -351,6 +351,7 @@ mkdir "1.trimmomatic" unless -e "1.trimmomatic";
 unless (($pe1 && $pe2) or $single_end) {
     open OUT, ">", "1.trimmomatic.ok" or die $!; close OUT;
 }
+my (@paired_end_reads_prefix, @single_end_reads_prefix);
 unless (-e "1.trimmomatic.ok") {
     chdir "1.trimmomatic";
     $pwd = `pwd`; print STDERR "PWD: $pwd";
@@ -358,47 +359,37 @@ unless (-e "1.trimmomatic.ok") {
         my @pe_reads = sort keys %pe_reads;
         my $pe_reads_num = @pe_reads;
         my $number = 0;
+        open OUT, ">", "command.trimmomatic_pe.list" or die "Can not create file command.trimmomatic_pe.list, $!";
         foreach (@pe_reads) {
             $number ++;
             my $code = "0" x ( length($pe_reads_num) - length($number) ) . $number;
+            push @paired_end_reads_prefix, "reads$code";
             @_ = split /\t/;
-            $cmdString = "java -jar $dirname/Trimmomatic-0.38/trimmomatic-0.38.jar PE -threads $cpu $_[0] $_[1] reads$code.1.fastq reads$code.1.unpaired.fastq reads$code.2.fastq reads$code.2.unpaired.fastq ILLUMINACLIP:$dirname/Trimmomatic-0.38/adapters/$config{'trimmomatic'} &> reads$code.trimmomatic.log";
-            print STDERR (localtime) . ": CMD: $cmdString\n";
-            system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+            print OUT "java -jar $dirname/Trimmomatic-0.38/trimmomatic-0.38.jar PE -threads 16 $_[0] $_[1] reads$code.1.fastq reads$code.1.unpaired.fastq reads$code.2.fastq reads$code.2.unpaired.fastq ILLUMINACLIP:$dirname/Trimmomatic-0.38/adapters/$config{'trimmomatic'} &> reads$code.trimmomatic.log";
         }
-        if ($pe_reads_num == 1) {
-            $cmdString = "ln -sf reads1.1.fastq reads.1.fastq && ln -sf reads1.2.fastq reads.2.fastq";
-            print STDERR (localtime) . ": CMD: $cmdString\n";
-            system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-        }
-        else {
-            $cmdString = "cat reads*.1.fastq > reads.1.fastq && cat reads*.2.fastq > reads.2.fastq";
-            print STDERR (localtime) . ": CMD: $cmdString\n";
-            system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-        }
+        close OUT;
+        my $paraFly_CPU = $cpu / 8; $paraFly_CPU = 1 if $paraFly_CPU < 1;
+        $cmdString = "ParaFly -c command.trimmomatic_pe.list -CPU $paraFly_CPU &> /dev/null";
+        print STDERR (localtime) . ": CMD: $cmdString\n";
+        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
     }
     if ($single_end) {
         my @se_reads = sort keys %se_reads;
         my $se_reads_num = @se_reads;
         my $number = 0;
+        open OUT, ">", "command.trimmomatic_se.list" or die "Can not create file command.trimmomatic_se.list, $!";
         foreach (@se_reads) {
             $number ++;
             my $code = "0" x ( length($se_reads_num) - length($number) ) . $number;
+            push @single_end_reads_prefix, "reads$code";
             @_ = split /\t/;
-            $cmdString = "java -jar $dirname/Trimmomatic-0.38/trimmomatic-0.38.jar SE -threads $cpu $single_end reads$code.fastq ILLUMINACLIP:$dirname/Trimmomatic-0.38/adapters/$config{'trimmomatic'} &> reads$code.trimmomatic.log";
-            print STDERR (localtime) . ": CMD: $cmdString\n";
-            system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+            print OUT "java -jar $dirname/Trimmomatic-0.38/trimmomatic-0.38.jar SE -threads $cpu $single_end reads$code.fastq ILLUMINACLIP:$dirname/Trimmomatic-0.38/adapters/$config{'trimmomatic'} &> reads$code.trimmomatic.log";
         }
-        if ($se_reads_num == 1) {
-            $cmdString = "ln -sf reads1.fastq reads.fastq";
-            print STDERR (localtime) . ": CMD: $cmdString\n";
-            system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-        }
-        else {
-            $cmdString = "cat reads*.fastq > reads.fastq";
-            print STDERR (localtime) . ": CMD: $cmdString\n";
-            system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-        }
+        close OUT;
+        my $paraFly_CPU = $cpu / 8; $paraFly_CPU = 1 if $paraFly_CPU < 1;
+        $cmdString = "ParaFly -c command.trimmomatic_pe.list -CPU $paraFly_CPU &> /dev/null";
+        print STDERR (localtime) . ": CMD: $cmdString\n";
+        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
     }
     chdir "../";
     open OUT, ">", "1.trimmomatic.ok" or die $!; close OUT;
@@ -433,10 +424,22 @@ unless (-e "2.hisat2.ok") {
     # 能处理单端，双端，链特异性与链非特异性数据
     my $input;
     if ($pe1 && $pe2) {
-        $input = "-1 ../1.trimmomatic/reads.1.fastq -2 ../1.trimmomatic/reads.2.fastq";
+        my (@input_pe1, @input_pe2, $input_pe1, $input_pe2);
+        foreach ( @paired_end_reads_prefix ) {
+            push @input_pe1, "../1.trimmomatic/$_.1.fastq";
+            push @input_pe2, "../1.trimmomatic/$_.2.fastq";
+        }
+        $input_pe1 = join ",", @input_pe1;
+        $input_pe2 = join ",", @input_pe2;
+        $input = "-1 $input_pe1 -2 $input_pe2";
     }
     if ($single_end) {
-        $input .= " -U ../1.trimmomatic/reads.fastq"
+        my (@input_se, $input_se);
+        foreach ( @single_end_reads_prefix ) {
+            push @input_se, "../1.trimmomatic/$_.fastq";
+        }
+        $input_se = join ",", @input_se;
+        $input .= " -U $input_se"
     }
     if ($strand_specific) {
         $input .= " --rna-strandness RF";
@@ -1327,12 +1330,12 @@ geneModels.i.coding.gff3\t对geneModels.h.coding.gff3中的基因模型进行了
     if ( $BLASTP_db ) {
         open OUT, ">", "validation_blastp.tab" or die "Can not create file validation_blastp.tab, $!", close OUT;
         foreach ( sort keys %BLASTP_db ) {
-            $cmdString2 .= "diamond blastp $config{'diamond'} --outfmt 5 --db $_ --query proteins_for_filtering.fasta --out validation_blastp_$BLASTP_db{$_}.xml &>> diamond_blastp.log; ";
+            $cmdString2 .= "diamond blastp $config{'diamond'} --outfmt 5 --db $_ --query proteins_for_filtering.fasta --out validation_blastp_$BLASTP_db{$_}.xml --threads $cpu &>> diamond_blastp.log; ";
             $cmdString3 = "$dirname/bin/parsing_blast_result.pl $config{'parsing_blast_result.pl'} validation_blastp_$BLASTP_db{$_}.xml >> validation_blastp.tab; ";
         }
     }
     else {
-        $cmdString2 = "diamond makedb --db homolog --in ../homolog.fasta &> diamond_makedb.log; diamond blastp $config{'diamond'} --outfmt 5 --db homolog --query proteins_for_filtering.fasta --out validation_blastp.xml &> diamond_blastp.log";
+        $cmdString2 = "diamond makedb --db homolog --in ../homolog.fasta &> diamond_makedb.log; diamond blastp $config{'diamond'} --outfmt 5 --db homolog --query proteins_for_filtering.fasta --out validation_blastp.xml --threads $cpu &> diamond_blastp.log";
         $cmdString3 = "$dirname/bin/parsing_blast_result.pl $config{'parsing_blast_result.pl'} validation_blastp.xml > validation_blastp.tab";
     }
     unless ( -e "07.validating.ok" ) {

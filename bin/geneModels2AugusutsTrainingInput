@@ -1,6 +1,10 @@
 #!/usr/bin/perl
 use strict;
 use Getopt::Long;
+use File::Basename;
+
+my $dirname = dirname($0);
+$dirname =~ s/\/bin$//;
 
 my $usage = <<USAGE;
 Usage:
@@ -141,92 +145,45 @@ foreach my $gene_id (sort keys %gff) {
 close OUT;
 
 # 对proteins序列进行BLAST分析
-my $cmdString = "makeblastdb -in $out_prefix.proteins.fasta -dbtype prot -title $out_prefix -parse_seqids -out $out_prefix -logfile $out_prefix.makeblastdb.log";
-unless (-e "$out_prefix.makeblastdb.ok") {
+my $cmdString = "diamond makedb --db $out_prefix --in $out_prefix.proteins.fasta &> $out_prefix.diamond_makedb.log";
+unless (-e "$out_prefix.diamond_makedb.ok") {
     print STDERR (localtime) . " CMD: $cmdString\n";
     system ($cmdString) == 0 or die "Failed to execute: $cmdString $!\n";
-    open OUT, ">", "$out_prefix.makeblastdb.ok"; close OUT;
+    open OUT, ">", "$out_prefix.diamond_makedb.ok"; close OUT;
 }
 else {
-    print STDERR "Skip CMD: $cmdString, for file $out_prefix.makeblastdb.ok exists\n\n";
+    print STDERR "Skip CMD: $cmdString, for file $out_prefix.diamond_makedb.ok exists\n\n";
 }
 
-$cmdString = "homolog_paraBlast blastp $out_prefix $out_prefix.proteins.fasta $min_evalue $cpu $out_prefix 6";
-unless (-e "$out_prefix.blast.ok") {
+$cmdString = "diamond blastp --sensitive --max-target-seqs 20 --evalue 1e-5 --id 10 --index-chunks 1 --block-size 5 --outfmt 5 --db $out_prefix --query $out_prefix.proteins.fasta --out $out_prefix.dimaond_out.xml --threads $cpu";
+unless (-e "$out_prefix.blastp.ok") {
     print STDERR (localtime) . " CMD: $cmdString\n";
     system ($cmdString) == 0 or die "Failed to execute: $cmdString $!\n";
-    open OUT, ">", "$out_prefix.blast.ok" unless -e "FailedCommands"; close OUT;
+    open OUT, ">", "$out_prefix.blastp.ok" unless -e "FailedCommands"; close OUT;
 }
 else {
-    print STDERR "Skip CMD: $cmdString, for file $out_prefix.blast.ok exists\n\n";
+    print STDERR "Skip CMD: $cmdString, for file $out_prefix.blastp.ok exists\n\n";
+}
+
+$cmdString = "$dirname/bin/parsing_blast_result.pl --CIP $min_identity --evalue $min_evalue --subject-coverage $min_coverage_ratio --query-coverage $min_coverage_ratio $out_prefix.dimaond_out.xml --out-hit-confidence > $out_prefix.tab";
+unless (-e "$out_prefix.parsing_blast_result.ok") {
+    print STDERR (localtime) . " CMD: $cmdString\n";
+    system ($cmdString) == 0 or die "Failed to execute: $cmdString $!\n";
+    open OUT, ">", "$out_prefix.parsing_blast_result.ok" unless -e "FailedCommands"; close OUT;
+}
+else {
+    print STDERR "Skip CMD: $cmdString, for file $out_prefix.parsing_blast_result.ok exists\n\n";
 }
 
 # 对BLAST结果进行分析，将需要去除的冗余基因模型ID存放到%delete中
-my %overlap;
+my (%overlap_gene, %delete);
 open IN, "$out_prefix.tab"  or die "Can not open file $out_prefix.tab, $!\n";
 while (<IN>) {
     @_ = split /\t/;
     next if $_[0] eq $_[1];
-    next if $_[2] < $min_identity;
-
-    my ($start, $end) = ($_[6], $_[7]);
-    ($start, $end) = ($_[7], $_[6]) if $_[7] < $_[6];
-    $overlap{"$_[0]\t$_[1]"}{$_[0]}{"$start\t$end"} = 1;
-    ($start, $end) = ($_[8], $_[9]);
-    ($start, $end) = ($_[9], $_[8]) if $_[9] < $_[8];
-    $overlap{"$_[0]\t$_[1]"}{$_[1]}{"$start\t$end"} = 1;
+    $overlap_gene{$_[0]}{$_[1]} = 1;
+    $overlap_gene{$_[1]}{$_[0]} = 1;
 }
-close IN;
-
-my %overlap_length;
-foreach my $two_id (keys %overlap) {
-    foreach my $id (keys %{$overlap{$two_id}}) {
-        my @region = sort {$a <=> $b} keys %{$overlap{$two_id}{$id}};
-        my ($start, $end) = split /\t/, $region[0];
-        shift @region;
-        my $length += $end - $start + 1;
-        foreach (@region) {
-            @_ = split /\t/;
-            if ($_[0] > $end) {
-                $length += $_[1] - $_[0] + 1;
-                ($start, $end) = @_;
-            }
-            elsif ($_[1] > $end) {
-                $length += $_[1] - $end;
-                $end = $_[1];
-            }
-        }
-        $overlap_length{$two_id}{$id} = $length;
-    }
-}
-
-my (%delete, %overlap_gene);
-open OUT, ">", "$out_prefix.blast.out" or die "Can not create file $out_prefix.blast.out, $!\n";
-print OUT "gene_id\tgene_length\tmatch_coverage_ratio\tgene_id\tgene_length\tmatch_coverage_ratio\n";
-foreach my $two_id (keys %overlap) {
-    my @id = keys %{$overlap{$two_id}};
-    my $length0_seq = $length{$id[0]};
-    my $length0_ovr = $overlap_length{$two_id}{$id[0]};
-    my $length0_ratio = $length0_ovr / $length0_seq;
-    my $length1_seq = $length{$id[1]};
-    my $length1_ovr = $overlap_length{$two_id}{$id[1]};
-    my $length1_ratio = $length1_ovr / $length1_seq;
-
-    # 若一个蛋白序列全长(匹配区覆盖率>=95%)被另外一个蛋白(匹配区覆盖率<80%)包含，则去除被包含的基因。
-    if ($length0_ratio >= 0.95 && $length1_ratio < 0.80) {
-        $delete{$id[0]} = 1;
-    }
-    elsif ($length0_ratio < 0.80 && $length1_ratio >= 0.95) {
-        $delete{$id[1]} = 1;
-    }
-    elsif ($length0_ratio >= $min_coverage_ratio && $length1_ratio >= $min_coverage_ratio) {
-        $overlap_gene{$id[0]}{$id[1]} = 1;
-        $overlap_gene{$id[1]}{$id[0]} = 1;
-    }
-
-    print OUT "$id[0]\t$length0_seq\t$length0_ratio\t$id[1]\t$length1_seq\t$length1_ratio\n";
-}
-close OUT;
 
 # 对重复基因信息进行聚类分析
 my %cluster;
@@ -270,6 +227,7 @@ foreach (keys %cluster) {
         }
     }
 
+    # 优先去除和其它基因关联最多的基因；再根据打分去除低分的基因，即尽量保留transfrag来源和完整的基因；再保留更长的基因。
     my @node_num = sort {$b <=> $a} values %node_num;
     my $node_num = $node_num[0];
     while ($node_num > 1) {
@@ -292,6 +250,7 @@ foreach (keys %cluster) {
         $node_num = $node_num[0];
     }
 
+    # 上一轮去除后，去除了和 >=2 个基因有冗余的基因，留下的基因最多和 1 个其它基因有冗余；若有冗余，继续去除。
     while (%genes) {
         my @gene_pairs = keys %genes;
         my $pairs1 = shift @gene_pairs;
