@@ -113,7 +113,7 @@ GetOptions(
 # 参数设置
 $genome = abs_path($genome);
 die "No genome fasta input\n" unless $genome;
-$protein = abs_path($genome);
+$protein = abs_path($protein);
 unless (($pe1 && $pe2) or $single_end or $protein) {
     die "No RNA-Seq short reads or homologous proteins as input\n";
 }
