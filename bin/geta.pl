@@ -1248,9 +1248,9 @@ geneModels.i.coding.gff3\t对geneModels.h.coding.gff3中的基因模型进行了
     }
 
     # 6.4 分别对对基因模型 geneModels.b.gff3, geneModels.e.gff3 and geneModels.f.gff3 进行可变剪接分析
-    $cmdString1 = "$dirname/bin/alternative_splicing_analysis $config{'alternative_splicing_analysis'} geneModels.b.gff3 ../3.transcript/intron.txt ../3.transcript/base_depth.txt > geneModels.gb_AS.gff3 2> alternative_splicing.gb.stats; $dirname/bin/GFF3_add_CDS_for_transcript $genome geneModels.gb_AS.gff3 > geneModels.gb.gff3";
-    $cmdString2 = "$dirname/bin/alternative_splicing_analysis $config{'alternative_splicing_analysis'} geneModels.e.gff3 ../3.transcript/intron.txt ../3.transcript/base_depth.txt > geneModels.ge_AS.gff3 2> alternative_splicing.ge.stats; $dirname/bin/GFF3_add_CDS_for_transcript $genome geneModels.ge_AS.gff3 > geneModels.ge.gff3";
-    $cmdString3 = "$dirname/bin/alternative_splicing_analysis $config{'alternative_splicing_analysis'} geneModels.f.gff3 ../3.transcript/intron.txt ../3.transcript/base_depth.txt > geneModels.gf_AS.gff3 2> alternative_splicing.gf.stats; $dirname/bin/GFF3_add_CDS_for_transcript $genome geneModels.gf_AS.gff3 > geneModels.gf.gff3";
+    $cmdString1 = "$dirname/bin/alternative_splicing_analysis $config{'alternative_splicing_analysis'} geneModels.b.gff3 ../3.transcript/intron.txt ../3.transcript/base_depth.txt > geneModels.gb_AS.gff3 2> alternative_splicing.gb.stats && $dirname/bin/GFF3_add_CDS_for_transcript $genome geneModels.gb_AS.gff3 > geneModels.gb.gff3";
+    $cmdString2 = "$dirname/bin/alternative_splicing_analysis $config{'alternative_splicing_analysis'} geneModels.e.gff3 ../3.transcript/intron.txt ../3.transcript/base_depth.txt > geneModels.ge_AS.gff3 2> alternative_splicing.ge.stats && $dirname/bin/GFF3_add_CDS_for_transcript $genome geneModels.ge_AS.gff3 > geneModels.ge.gff3";
+    $cmdString3 = "$dirname/bin/alternative_splicing_analysis $config{'alternative_splicing_analysis'} geneModels.f.gff3 ../3.transcript/intron.txt ../3.transcript/base_depth.txt > geneModels.gf_AS.gff3 2> alternative_splicing.gf.stats && $dirname/bin/GFF3_add_CDS_for_transcript $genome geneModels.gf_AS.gff3 > geneModels.gf.gff3";
     unless ( -e "04.alternative_splicing_analysis.ok" ) {
         print STDERR (localtime) . ": CMD: $cmdString1\n";
         system("$cmdString1") == 0 or die "failed to execute: $cmdString1\n";
