@@ -228,8 +228,8 @@ sub sort_mRNA_info {
                 $feature_showname = "utr3p";
                 $num3 ++; $num = $num3; $sort_num = 5;
             }
-            my $out_content = &get_content($chr, $feature_type, $_[0], $_[1], $strand, $mRNA_ID, $num, $feature_showname, \%gff3_score_attr);
-            $sort1{$out_content} = $_[0];
+            my $out_content = &get_content($chr, $feature_type, $_[1], $_[2], $strand, $mRNA_ID, $num, $feature_showname, \%gff3_score_attr);
+            $sort1{$out_content} = $_[1];
             $sort2{$out_content} = $sort_num;
         }
 
@@ -273,8 +273,8 @@ sub sort_mRNA_info {
                 $feature_showname = "utr3p";
                 $num3 ++; $num = $num3; $sort_num = 5;
             }
-            my $out_content = &get_content($chr, $feature_type, $_[0], $_[1], $strand, $mRNA_ID, $num, $feature_showname, \%gff3_score_attr);
-            $sort1{$out_content} = $_[0];
+            my $out_content = &get_content($chr, $feature_type, $_[1], $_[2], $strand, $mRNA_ID, $num, $feature_showname, \%gff3_score_attr);
+            $sort1{$out_content} = $_[1];
             $sort2{$out_content} = $sort_num;
         }
         foreach ( sort { $sort1{$b} <=> $sort1{$a} or $sort2{$a} <=> $sort2{$b} } keys %sort1 ) {
