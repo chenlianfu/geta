@@ -78,9 +78,6 @@ TruSeq3-PE-2.fa:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:50 TOPHRE
 [para_hmmscan]
 --evalue1 1e-5 --evalue2 1e-3 --hmm_length 80 --coverage 0.25 --no_cut_ga --chunk 20 --hmmscan_cpu 2
 
-[para_blast]
---chunk 10 --blast-threads 1 --evalue 1e-3 --max-target-seqs 20 --completed_ratio 0.9
-
 [dimanod]
 --sensitive --max-target-seqs 20 --evalue 1e-5 --id 10 --index-chunks 1 --block-size 5
 

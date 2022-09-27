@@ -7,6 +7,9 @@
 [paraCombineGeneModels]
 --overlap 30 --min_augustus_transcriptSupport_percentage 50.0 --min_augustus_intronSupport_number 1 --min_augustus_intronSupport_ratio 0.5
 
+[GFF3_extract_TranscriptID_for_filtering]
+--min_CDS_ratio 0.5 --min_CDS_length 750 --max_repeat_overlap_ratio 0.2 --ignore_repeat_Name Simple_repeat,Low_complexity,Satellite,Unknown,Tandem_repeat
+
 [para_hmmscan]
 --evalue1 1e-8 --evalue2 1e-5 --hmm_length 80 --coverage 0.3 --no_cut_ga --chunk 20 --hmmscan_cpu 2
 

@@ -365,7 +365,7 @@ unless (-e "1.trimmomatic.ok") {
             my $code = "0" x ( length($pe_reads_num) - length($number) ) . $number;
             push @paired_end_reads_prefix, "reads$code";
             @_ = split /\t/;
-            print OUT "java -jar $dirname/Trimmomatic-0.38/trimmomatic-0.38.jar PE -threads 16 $_[0] $_[1] reads$code.1.fastq reads$code.1.unpaired.fastq reads$code.2.fastq reads$code.2.unpaired.fastq ILLUMINACLIP:$dirname/Trimmomatic-0.38/adapters/$config{'trimmomatic'} &> reads$code.trimmomatic.log";
+            print OUT "java -jar $dirname/Trimmomatic-0.38/trimmomatic-0.38.jar PE -threads 16 $_[0] $_[1] reads$code.1.fastq reads$code.1.unpaired.fastq reads$code.2.fastq reads$code.2.unpaired.fastq ILLUMINACLIP:$dirname/Trimmomatic-0.38/adapters/$config{'trimmomatic'} &> reads$code.trimmomatic.log\n";
         }
         close OUT;
         my $paraFly_CPU = $cpu / 8; $paraFly_CPU = 1 if $paraFly_CPU < 1;
@@ -383,7 +383,7 @@ unless (-e "1.trimmomatic.ok") {
             my $code = "0" x ( length($se_reads_num) - length($number) ) . $number;
             push @single_end_reads_prefix, "reads$code";
             @_ = split /\t/;
-            print OUT "java -jar $dirname/Trimmomatic-0.38/trimmomatic-0.38.jar SE -threads $cpu $single_end reads$code.fastq ILLUMINACLIP:$dirname/Trimmomatic-0.38/adapters/$config{'trimmomatic'} &> reads$code.trimmomatic.log";
+            print OUT "java -jar $dirname/Trimmomatic-0.38/trimmomatic-0.38.jar SE -threads $cpu $single_end reads$code.fastq ILLUMINACLIP:$dirname/Trimmomatic-0.38/adapters/$config{'trimmomatic'} &> reads$code.trimmomatic.log\n";
         }
         close OUT;
         my $paraFly_CPU = $cpu / 8; $paraFly_CPU = 1 if $paraFly_CPU < 1;
@@ -478,6 +478,8 @@ unless (($pe1 && $pe2) or $single_end) {
     open OUT, ">", "3.transcript.ok" or die $!; close OUT;
     chdir "3.transcript";
     open OUT, ">", "transfrag.genome.gff3" or die $!; close OUT;
+    open OUT, ">", "base_depth.txt" or die $!; close OUT;
+    open OUT, ">", "intron.txt" or die $!; close OUT;
     chdir "../";
 }
 unless (-e "3.transcript.ok") {
