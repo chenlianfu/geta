@@ -426,7 +426,7 @@ foreach my $gene_ID (@gene_ID) {
             foreach (sort {$a <=> $b} @CDS) {
                 $CDS_num ++;
                 my $attr_out = "";
-				$attr_out = $gff3_score_and_attr{"$chr\t$strand\tCDS\t$_"}{"attr"} if exists $gff3_score_and_attr{"$chr\t$strand\tCDS\t$_"};
+                $attr_out = $gff3_score_and_attr{"$chr\t$strand\tCDS\t$_"}{"attr"} if exists $gff3_score_and_attr{"$chr\t$strand\tCDS\t$_"};
                 my $out = "$chr\t$source\tCDS\t$_\tID=$mRNAID.CDS$CDS_num;Parent=$mRNAID;$attr_out\n";
                 @_ = split /\t/;
                 $sort{$out} = $_[0];
@@ -491,8 +491,8 @@ foreach my $gene_ID (@gene_ID) {
         elsif ($strand eq "-") {
             foreach (sort {$b <=> $a} @CDS) {
                 $CDS_num ++;
-				my $attr_out = "";
-				$attr_out = $gff3_score_and_attr{"$chr\t$strand\tCDS\t$_"}{"attr"} if exists $gff3_score_and_attr{"$chr\t$strand\tCDS\t$_"};
+                my $attr_out = "";
+                $attr_out = $gff3_score_and_attr{"$chr\t$strand\tCDS\t$_"}{"attr"} if exists $gff3_score_and_attr{"$chr\t$strand\tCDS\t$_"};
                 my $out = "$chr\t$source\tCDS\t$_\tID=$mRNAID.CDS$CDS_num;Parent=$mRNAID;$attr_out\n";
                 @_ = split /\t/;
                 $sort{$out} = $_[0];
@@ -500,7 +500,7 @@ foreach my $gene_ID (@gene_ID) {
             }
             foreach (sort {$b <=> $a} @exon) {
                 $exon_num ++;
-				my $score = '.';
+                my $score = '.';
                 $score = $gff3_score_and_attr{"$chr\t$strand\texon\t$_"}{"score"} if exists $gff3_score_and_attr{"$chr\t$strand\texon\t$_"};
                 my $attr_out = "";
                 $attr_out = $gff3_score_and_attr{"$chr\t$strand\texon\t$_"}{"attr"} if exists $gff3_score_and_attr{"$chr\t$strand\texon\t$_"};
@@ -511,7 +511,7 @@ foreach my $gene_ID (@gene_ID) {
             }
             foreach (sort {$b <=> $a} @intron) {
                 $intron_num ++;
-				my $score = '.';
+                my $score = '.';
                 $score = $gff3_score_and_attr{"$chr\t$strand\tintron\t$_"}{"score"} if exists $gff3_score_and_attr{"$chr\t$strand\tintron\t$_"};
                 my $attr_out = "";
                 $attr_out = $gff3_score_and_attr{"$chr\t$strand\tintron\t$_"}{"attr"} if exists $gff3_score_and_attr{"$chr\t$strand\tintron\t$_"};
@@ -528,22 +528,22 @@ foreach my $gene_ID (@gene_ID) {
             }
             foreach (sort {$UTR_sort{$b} <=> $UTR_sort{$a}} @UTR5) {
                 $UTR5_num ++;
-				my $score = '.';
+                my $score = '.';
                 $score = $gff3_score_and_attr{"$chr\t$strand\tfive_prime_UTR\t$_"}{"score"} if exists $gff3_score_and_attr{"$chr\t$strand\tfive_prime_UTR\t$_"};
                 my $attr_out = "";
                 $attr_out = $gff3_score_and_attr{"$chr\t$strand\tfive_prime_UTR\t$_"}{"attr"} if exists $gff3_score_and_attr{"$chr\t$strand\tfive_prime_UTR\t$_"};
-				my $out = "$chr\t$source\t$_\t$score\t$strand\t\.\tID=$mRNAID.utr5p$UTR5_num;Parent=$mRNAID;$attr_out\n";
+                my $out = "$chr\t$source\t$_\t$score\t$strand\t\.\tID=$mRNAID.utr5p$UTR5_num;Parent=$mRNAID;$attr_out\n";
                 @_ = split /\t/;
                 $sort{$out} = $_[1];
                 $sort_UTR{$out} = 1;
             }
             foreach (sort {$UTR_sort{$a} <=> $UTR_sort{$b}} @UTR3) {
                 $UTR3_num ++;
-				my $score = '.';
-				$score = $gff3_score_and_attr{"$chr\t$strand\tthree_prime_UTR\t$_"}{"score"} if exists $gff3_score_and_attr{"$chr\t$strand\tthree_prime_UTR\t$_"};
+                my $score = '.';
+                $score = $gff3_score_and_attr{"$chr\t$strand\tthree_prime_UTR\t$_"}{"score"} if exists $gff3_score_and_attr{"$chr\t$strand\tthree_prime_UTR\t$_"};
                 my $attr_out = "";
                 $attr_out = $gff3_score_and_attr{"$chr\t$strand\tthree_prime_UTR\t$_"}{"attr"} if exists $gff3_score_and_attr{"$chr\t$strand\tthree_prime_UTR\t$_"};
-				my $out = "$chr\t$source\t$_\t$score\t$strand\t\.\tID=$mRNAID.utr3p$UTR3_num;Parent=$mRNAID;$attr_out\n";
+                my $out = "$chr\t$source\t$_\t$score\t$strand\t\.\tID=$mRNAID.utr3p$UTR3_num;Parent=$mRNAID;$attr_out\n";
                 @_ = split /\t/;
                 $sort{$out} = $_[1];
                 $sort_UTR{$out} = 4;

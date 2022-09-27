@@ -6,6 +6,7 @@ use Cwd qw/abs_path getcwd cwd/;
 use File::Basename;
 use Statistics::Basic qw(:all);
 
+my $dirname = dirname($0);
 my $usage = <<USAGE;
 Usage:
     $0 [options] geneModels.gff3 intron.txt base_depth.txt > out.gff3 2> alternative_splicing.stats
@@ -41,10 +42,10 @@ Usage:
     --cpu <int>    default: 1
     设置并行数。由于程序读取base_depth.txt文件内容可能较大，会比较消耗内存，因此需要注意该值的设置。
 
-	--tmp_dir <string>    default: Alternative_splicing_analysis_tmp
-   	设置临时文件夹路径。
+    --tmp_dir <string>    default: Alternative_splicing_analysis_tmp
+    设置临时文件夹路径。
 
-   	--min_intron_depth <int>    default: 1
+    --min_intron_depth <int>    default: 1
     设置最小intron测序深度。若intron.txt文件第6列表示的intron测序深度值小于该参数值，则忽略相应行的数据。
 
     --min_base_depth_ratio_for_ref_specific_intron <float>    default: 0.3
@@ -74,10 +75,80 @@ Usage:
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($help_flag);
+my ($help_flag, $cpu, $tmp_dir, $min_intron_depth, $min_base_depth_ratio_for_ref_specific_intron, $min_intron_depth_ratio_for_evidence_specific_intron, $min_base_depth_ratio_for_common_intron, $min_transcript_confidence_for_output, $transcript_num_for_output_when_all_low_confidence, $min_gene_depth, $added_mRNA_ID_prefix);
 GetOptions(
     "help" => \$help_flag,
+    "cpu:i" => \$cpu,
+    "tmp_dir:s" =>\$tmp_dir,
+    "min_intron_depth:i" => \$min_intron_depth,
+    "min_base_depth_ratio_for_ref_specific_intron:f" => \$min_base_depth_ratio_for_ref_specific_intron,
+    "min_intron_depth_ratio_for_evidence_specific_intron:f" => \$min_intron_depth_ratio_for_evidence_specific_intron,
+    "min_base_depth_ratio_for_common_intron:f" => \$min_base_depth_ratio_for_common_intron,
+    "min_transcript_confidence_for_output:f" => \$min_transcript_confidence_for_output,
+    "transcript_num_for_output_when_all_low_confidence:i" => \$transcript_num_for_output_when_all_low_confidence,
+    "min_gene_depth:i" => \$min_gene_depth,
+    "added_mRNA_ID_prefix:s" => \$added_mRNA_ID_prefix,
 );
-
+$cpu ||= 1;
+$tmp_dir ||= "paraAlternative_splicing_analysis.tmp";
+$min_intron_depth ||= 1;
+$min_base_depth_ratio_for_ref_specific_intron ||= 0.3;
+$min_intron_depth_ratio_for_evidence_specific_intron ||= 0.2;
+$min_base_depth_ratio_for_common_intron ||= 0.2;
+$min_gene_depth ||= 10;
+$min_transcript_confidence_for_output ||= 0.05;
+$transcript_num_for_output_when_all_low_confidence ||= 8;
+$added_mRNA_ID_prefix ||= "t";
 if ( $help_flag ) { die $usage }
 
+my $file_gff3 = abs_path($ARGV[0]);
+my $file_intron = abs_path($ARGV[1]);
+my $file_baseDepth = abs_path($ARGV[2]);
+$tmp_dir = abs_path($tmp_dir);
+mkdir $tmp_dir unless -e $tmp_dir;
+
+open IN, "$file_gff3" or die "Can not open file $file_gff3, $!";
+open OUT, ">", "$tmp_dir/command.alternative_splicing_analysis.list" or die "Can not create file $tmp_dir/command.alternative_splicing_analysis.list, $!";
+my (%chrID2FH_gff3, %chrID2FH_intron, %chrID2FH_baseDepth, $seq_num, @chunk);
+while (<IN>) {
+    if (m/^(\S+)/) {
+        if (exists $chrID2FH_gff3{$1}) {
+            print {$chrID2FH_gff3{$1}} $_;
+        }
+        else {
+            $seq_num ++;
+            push @chunk, "$tmp_dir/seq$seq_num";
+            print OUT "$dirname/alternative_splicing_analysis --min_intron_depth $min_intron_depth --min_base_depth_ratio_for_ref_specific_intron $min_base_depth_ratio_for_ref_specific_intron --min_intron_depth_ratio_for_evidence_specific_intron $min_intron_depth_ratio_for_evidence_specific_intron --min_base_depth_ratio_for_common_intron $min_base_depth_ratio_for_common_intron --min_gene_depth $min_gene_depth --min_transcript_confidence_for_output $min_transcript_confidence_for_output --transcript_num_for_output_when_all_low_confidence $transcript_num_for_output_when_all_low_confidence --added_mRNA_ID_prefix $added_mRNA_ID_prefix $tmp_dir/seq$seq_num.gff3 $tmp_dir/seq$seq_num.intron.txt $tmp_dir/seq$seq_num.base_depth.txt > $tmp_dir/seq$seq_num.out 2> $tmp_dir/seq$seq_num.stats\n";
+            open my $FH, ">", "$tmp_dir/seq$seq_num.gff3" or die "Can not create file $tmp_dir/seq$seq_num.gff3, $!"; $chrID2FH_gff3{$1} = $FH;
+            open my $FH, ">", "$tmp_dir/seq$seq_num.intron.txt" or die "Can not create file $tmp_dir/seq$seq_num.intron.txt, $!"; $chrID2FH_intron{$1} = $FH;
+            open my $FH, ">", "$tmp_dir/seq$seq_num.base_depth.txt" or die "Can not create file $tmp_dir/seq$seq_num.base_depth.txt, $!"; $chrID2FH_baseDepth{$1} = $FH;
+        }
+    }
+}
+close IN;
+close OUT;
+
+open IN, $file_intron or die "Can not open file $file_intron, $!";
+while (<IN>) {
+    print {$chrID2FH_intron{$1}} $_ if (m/\t(\S+)/ && exists $chrID2FH_intron{$1});
+}
+close IN;
+
+open IN, $file_baseDepth or die "Can not open file $file_baseDepth, $!";
+while (<IN>) {
+    print {$chrID2FH_baseDepth{$1}} $_ if (m/^(\S+)/ && exists $chrID2FH_baseDepth{$1});
+}
+close IN;
+
+my $cmdString = "ParaFly -c $tmp_dir/command.alternative_splicing_analysis.list -CPU $cpu";
+system($cmdString) == 0 or die "failed to execute: $cmdString\n";
+
+foreach ( @chunk ) {
+    open IN, "$_.out" or die "Can not open file $_.out, $!";
+    print <IN>;
+    close IN;
+
+    open IN, "$_.stats" or die "Can not open file $_.stats, $!";
+    print STDERR <IN>;
+    close IN;
+}

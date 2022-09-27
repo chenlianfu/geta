@@ -123,7 +123,7 @@ print STDERR "Read over $ARGV[2]\n";
 
 # 分别对各个基因进行可变剪接分析
 foreach my $gene_ID (sort keys %gene_info) {
-	#print STDERR "$gene_ID\n";
+    #print STDERR "$gene_ID\n";
     # 得到gene的起始和结束位置
     my @gene_header = split /\t/, $gene_info{$gene_ID}{"header"};
     my ($chr, $source, $gene_start, $gene_end, $strand) = ($gene_header[0], $gene_header[1],  $gene_header[3], $gene_header[4], $gene_header[6]);
@@ -206,7 +206,7 @@ foreach my $gene_ID (sort keys %gene_info) {
     my $GFF3_gene_depth = $exon_base_depth_median;
     $exon_base_depth_median = $min_gene_depth if $exon_base_depth_median < $min_gene_depth;
 
-	#print STDERR "TEST:4\n";
+    #print STDERR "TEST:4\n";
     # (4) 比较ref intron和evidence intron，得到特有和共有的introns
     my @intron_ref_specific = &intron_specific(\@intron_evidence, \@intron_ref);
     my @intron_evidence_specific = &intron_specific(\@intron_ref, \@intron_evidence);
@@ -256,15 +256,15 @@ foreach my $gene_ID (sort keys %gene_info) {
     foreach my $cluster_intron ( @cluster_intron ) {
         #print "$gene_ID Intron_Cluster: $cluster_intron\n";
 
-		#print STDERR "TEST:9\n";
+        #print STDERR "TEST:9\n";
         # (9) 对聚类的introns进行可变剪接分析
         my %intron_splicing;
         my @introns = split /;/, $cluster_intron;
 
-		#print STDERR "TEST:9.1\n";
+        #print STDERR "TEST:9.1\n";
         # 对有重叠的introns类进行可变剪接分析，计算各种intron剪接类型及其比例：（1）将有重叠的introns分成多套没有重叠的introns，根据各套introns的平均测序深度来分配其比例；（2）每套没有重叠的introns可能存在IR剪接类型，根据intron测序深度和内部碱基测序深度分配比例；（3）再进一步算出所有，并得到各个intron_splicing的比例。
         if (@introns >= 2) {
-			#print STDERR "TEST:9.2\n";
+            #print STDERR "TEST:9.2\n";
             %intron_splicing = &intron_splcing(\@introns);
             #foreach ( keys %intron_splicing ) { print "TEST3: $intron_splicing{$_}\t$_\n"; }
             #my $AS_type = &AS_type(\%intron_splcing, $strand);
@@ -300,7 +300,7 @@ foreach my $gene_ID (sort keys %gene_info) {
 
         my $number = %transcript_intron;
         my $number_info = join "\n", keys %transcript_intron;
-		#print STDERR "TEST:9.3\n";
+        #print STDERR "TEST:9.3\n";
 
         # 当转录本数量过多时，仅挑选排名靠前（默认前20）的转录本，去除排名靠后的转录本。
         # 计算出一个基因允许的最大转录本数量。
@@ -308,7 +308,7 @@ foreach my $gene_ID (sort keys %gene_info) {
         $max_num_of_transcript = int(1 / $min_transcript_confidence_for_output + 0.5) if $min_transcript_confidence_for_output;
         # 当转录本数量超过最大转录本数量时，得去除比例过低的转录本，以减少计算量和内存消耗。否则，该程序遇到一些intron数量较多，测序深度较大的基因时，容易遇到非常多的转录本情况，导致消耗计算量极其极其大。
         if ( %transcript_intron > $max_num_of_transcript ) {
-			#print STDERR "TEST:9.4\n";
+            #print STDERR "TEST:9.4\n";
             # 对转录本按比例从大到小排序，找到达到最大转录本数量时对应的转录本比例，作为最低转录本比例。
             my ($num_of_transcript, $min_ratio_of_transcript) = (0, 0);
             foreach ( sort {$transcript_intron{$b} <=> $transcript_intron{$a}} keys %transcript_intron ) {
@@ -318,7 +318,7 @@ foreach my $gene_ID (sort keys %gene_info) {
                     last;
                 }
             }
-			#print STDERR "TEST:9.5\n";
+            #print STDERR "TEST:9.5\n";
             foreach ( keys %transcript_intron ) {
                 delete $transcript_intron{$_} if $transcript_intron{$_} < $min_ratio_of_transcript;
             }
@@ -327,7 +327,7 @@ foreach my $gene_ID (sort keys %gene_info) {
     # 若是单外显子，则给一个转录本
     $transcript_intron{"No_intron"} = 1 unless @cluster_intron;
 
-	#print STDERR "TEST:10\n";
+    #print STDERR "TEST:10\n";
 
     # （10）输出比例不小于指定阈值的可变剪接转录本GFF3文件，包含原有的所有可变剪接转录本，并在mRNA信息中添加其比例信息。
     # 收集转录本的Intron信息、ID和比例
@@ -531,7 +531,7 @@ sub get_mRNA_GFF3_info {
 # 子程序，计算各种intron剪接类型及其比例：（1）将有重叠的introns分成多套没有重叠的introns，根据各套introns的平均测序深度来分配其比例；（2）每套没有重叠的introns可能存在IR剪接类型，根据intron测序深度和内部碱基测序深度分配比例；（3）再进一步算出所有，并得到各个intron_splicing的比例。
 sub intron_splcing {
     my @intron = @{$_[0]};
-	#foreach ( @intron ) { print STDERR "TEST01: $_\n"; }
+    #foreach ( @intron ) { print STDERR "TEST01: $_\n"; }
 
     # (0) 根据intron的起始和结束位点进行排序
     my %sort_intron;
@@ -558,7 +558,7 @@ sub intron_splcing {
         }
     }
 
-	#foreach (sort {$a <=> $b} keys %group_intron_end) { print STDERR "TEST02: $_\n"; }
+    #foreach (sort {$a <=> $b} keys %group_intron_end) { print STDERR "TEST02: $_\n"; }
 
     # 计算每套introns的测序深度和分配比例：对单个intron计算其 intron测序深度 + intron内碱基测序深度 值；再算单套所有introns的平均值；再算各套introns的分配比例。
     my (%group_intron_depth, %group_intron_ratio);
@@ -588,11 +588,11 @@ sub intron_splcing {
     # (2) 对每套没有重叠的introns再进一步检测IR可变剪接
         my (%intron_splicing_end, %intron_splicing_ratio);
         my $group_intron_ratio = $group_intron_ratio{$group_intron};
-		#print STDERR "TEST03: $group_intron_ratio\t$group_intron\n";
+        #print STDERR "TEST03: $group_intron_ratio\t$group_intron\n";
 
         my @IR_intron = split /;/, $group_intron;
         foreach my $IR_intron ( @IR_intron ) {
-			#print STDERR "TEST04: $IR_intron\n";
+            #print STDERR "TEST04: $IR_intron\n";
             @_ = split /\t/, $IR_intron;
             # 当intron的测序深度与其碱基测序深度之和为0时，则认为不存在IR可变剪接事件。
             my ($ratio_intron, $ratio_base_depth) = (1, 0);
@@ -600,7 +600,7 @@ sub intron_splcing {
 
             my $IR_intron_add_ok = 0;
             foreach ( keys %intron_splicing_end ) {
-				#print STDERR "TEST05: $_\n";
+                #print STDERR "TEST05: $_\n";
                 if ( $_[0] > $intron_splicing_end{$_} ) {
                     $intron_splicing_ratio{"$_;$IR_intron"} = $intron_splicing_ratio{$_} * $ratio_intron;
                     $intron_splicing_ratio{"$_;Intron_Retention"} = $intron_splicing_ratio{$_} * $ratio_base_depth;
@@ -619,27 +619,27 @@ sub intron_splcing {
                 $intron_splicing_end{"Intron_Retention"} = $_[1];
             }
 
-			# 当转录本数量过多时，仅挑选排名靠前（默认前20）的转录本，去除排名靠后的转录本。
-			# 计算出一个基因允许的最大转录本数量。
-			my $max_num_of_transcript = 10000;
-			$max_num_of_transcript = int(1 / $min_transcript_confidence_for_output + 0.5) if $min_transcript_confidence_for_output;
-			# 当转录本数量超过最大转录本数量时，得去除比例过低的转录本，以减少计算量和内存消耗。否则，该程序遇到一些intron数量较多，测序深度较大的基因时，容易遇到非常多的转录本情况，导致消耗计算量极其极其大。
-			if ( %intron_splicing_end > $max_num_of_transcript ) {
-				my ($num_of_transcript, $min_ratio_of_transcript) = (0, 0);
-				foreach ( sort {$intron_splicing_ratio{$b} <=> $intron_splicing_ratio{$a}} keys %intron_splicing_end ) {
-					$num_of_transcript ++;
-					if ( $num_of_transcript == $max_num_of_transcript ) {
-						$min_ratio_of_transcript = $intron_splicing_ratio{$_};
-						last;
-					}
-				}
-				foreach ( keys %intron_splicing_end ) {
-					if ( $intron_splicing_ratio{$_} < $min_ratio_of_transcript ) {
-						delete $intron_splicing_end{$_};
-						delete $intron_splicing_ratio{$_};
-					}
-				}
-			}
+            # 当转录本数量过多时，仅挑选排名靠前（默认前20）的转录本，去除排名靠后的转录本。
+            # 计算出一个基因允许的最大转录本数量。
+            my $max_num_of_transcript = 10000;
+            $max_num_of_transcript = int(1 / $min_transcript_confidence_for_output + 0.5) if $min_transcript_confidence_for_output;
+            # 当转录本数量超过最大转录本数量时，得去除比例过低的转录本，以减少计算量和内存消耗。否则，该程序遇到一些intron数量较多，测序深度较大的基因时，容易遇到非常多的转录本情况，导致消耗计算量极其极其大。
+            if ( %intron_splicing_end > $max_num_of_transcript ) {
+                my ($num_of_transcript, $min_ratio_of_transcript) = (0, 0);
+                foreach ( sort {$intron_splicing_ratio{$b} <=> $intron_splicing_ratio{$a}} keys %intron_splicing_end ) {
+                    $num_of_transcript ++;
+                    if ( $num_of_transcript == $max_num_of_transcript ) {
+                        $min_ratio_of_transcript = $intron_splicing_ratio{$_};
+                        last;
+                    }
+                }
+                foreach ( keys %intron_splicing_end ) {
+                    if ( $intron_splicing_ratio{$_} < $min_ratio_of_transcript ) {
+                        delete $intron_splicing_end{$_};
+                        delete $intron_splicing_ratio{$_};
+                    }
+                }
+            }
         }
 
     # (3) 合并各套introns的分配比例。
