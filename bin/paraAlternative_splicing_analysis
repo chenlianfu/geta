@@ -1,0 +1,83 @@
+#!/usr/bin/env perl
+
+use strict;
+use Getopt::Long;
+use Cwd qw/abs_path getcwd cwd/;
+use File::Basename;
+use Statistics::Basic qw(:all);
+
+my $usage = <<USAGE;
+Usage:
+    $0 [options] geneModels.gff3 intron.txt base_depth.txt > out.gff3 2> alternative_splicing.stats
+
+    程序将数据按照染色体进行分割，然后使用Parafly并行化调用alternative_splicing_analysis命令进行可变剪接分析。程序根据intron信息进行，在GFF3文件中添加可变剪接转录本信息，并对可变剪接进行统计。
+
+    【输入文件要求】：
+    GFF3文件必须有exon信息，支持输入带可变剪接的GFF3文件，但推荐使用不带可变剪接的GFF3文件。
+    intron.txt文件使用制表符分割，有7列：转录本ID(本程序不利用该列信息)、基因组序列ID、正负链、intron起始、intron结束、intron测序深度、intron区域的碱基测序深度中位数。
+    base_depth.txt文件使用制表符分割，有4列：基因组序列ID、正负链、碱基的坐标位置、碱基测序深度。
+
+    【程序运行原理】：
+    程序对一个个基因模型独立进行分析；先得到单个基因模型中所有mRNA的所有intron，得到基因的ref intron信息；从intron.txt和base_depth.txt文件得到evidence intron和测序深度信息；将intron.txt中的evidence intron信息进行比较，找到所有可信的introns；对有重叠的introns进行进而可变剪接分析；最后得到包含可变剪接的GFF3文件。
+    程序的核心算法是根据有重叠的introns进行可变剪接分析：（1）先将所有的可信introns根据重叠进行聚类；（2）对一类有重叠的introns进行可变剪接分析时，将introns分成多套没有重叠的introns并根据introns测序深度来决定多套之间的比例，再分别对单套introns进行IR类型可变剪接分析，根据intron测序深度得到每种剪接模式的比例；（3）对没有重叠intron进行IR类型可变剪接分析。
+
+    【程序运行步骤】：
+    （1）先根据GFF3文件中基因模型的所有mRNA的所有intron信息，得到ref introns信息。
+    （2）再根据intron.txt文件，得到evidence introns。
+    （3）读取base_depth.txt文件，从而有利于计算基因区域排除了所有intron位点后的测序深度。
+    （4）比较ref introns和evidence introns，找特有intron和共有intron。
+    （5）对于ref introns中特有的intron，计算 碱基测序深度 / 基因测序深度 比值。若超过阈值0.3，则属于IR事件，将该intron进行标记。
+    （6）对于evidence introns中特有的intron，计算 intron测序深度 / 基因测序深度 比值。若超过阈值0.2，则表示intron是可信的，将该intron进行标记；否则忽略之。
+    （7）对于ref introns和evidence introns中共有的intron，计算 碱基测序深度 / 基因测序深度 比值。若超过阈值0.2，则属于IR事件，将intron进行标记。
+    （8）对所有的可信introns根据重叠进行聚类。
+    （9）对聚类的introns进行可变剪接分析，是核心算法。
+        对有重叠的introns类进行可变剪接分析，计算各种intron剪接类型及其比例：（1）将有重叠的introns分成多套没有重叠的introns，根据各
+套introns的平均测序深度来分配其比例；（2）每套没有重叠的introns可能存在IR剪接类型，根据intron测序深度和内部碱基测序深度分配比例；（3）再进一步
+算出所有，并得到各个intron_splicing的比例。
+        没有重叠的single intron若被标记了，则进行IR分析，计算两种剪接方式的比例。
+        没有重叠的single intron若未被标记，则不进行IR分析。
+    （10）输出比例不小于指定阈值的可变剪接转录本GFF3文件，包含原有的所有可变剪接转录本，并在mRNA信息中添加其比例信息。
+
+    --cpu <int>    default: 1
+    设置并行数。由于程序读取base_depth.txt文件内容可能较大，会比较消耗内存，因此需要注意该值的设置。
+
+	--tmp_dir <string>    default: Alternative_splicing_analysis_tmp
+   	设置临时文件夹路径。
+
+   	--min_intron_depth <int>    default: 1
+    设置最小intron测序深度。若intron.txt文件第6列表示的intron测序深度值小于该参数值，则忽略相应行的数据。
+
+    --min_base_depth_ratio_for_ref_specific_intron <float>    default: 0.3
+    比较evidence introns和ref introns，对于ref introns中特有的intron，计算 碱基测序深度 / 基因测序深度 比值，若超过该参数阈值，则存在IR事件。碱基测序深度计算：计算intron区域所有碱基测序深度的中位数；基因测序深度计算：基因非inron区域的碱基测序深度的中位数。
+
+    --min_intron_depth_ratio_for_evidence_specific_intron <float>    default: 0.2
+    比较evidence introns和ref introns，对于evidence introns中特有的intron，计算 intron测序深度 / 基因测序深度 比值，若超过该参数阈值，则表示intron是可信的。基因测序深度计算：基因非inron区域的碱基测序深度的中位数。
+
+    --min_base_depth_ratio_for_common_intron <float>    default: 0.2
+    比较evidence introns和ref introns，对于ref introns和evidence introns中共有的intron，计算 碱基测序深度 / 基因测序深度 比值，若超过该参数阈值，则存在IR事件。基碱基测序深度计算：计算intron区域所有碱基测序深度的中位数；因测序深度计算：基因非inron区域的碱基测序深度的中位数。
+
+    --min_gene_depth <int>    default: 10
+    在以上三个阈值中计算基因测序深度时，若基因测序深度值小于该参数值，则使基因测序深度值值等于该参数值。
+
+    --min_transcript_confidence_for_output <float>    default: 0.05
+    增加的可变剪接转录本所占比例需不低于该参数阈值，否则，不予输出到GFF3文件中。
+
+    --transcript_num_for_output_when_all_low_confidence <int>    default: 8
+    当所有可变剪接转录本的比例都低于--min_transcript_confidence_for_output参数值时（例如，单个基因组出现了5个剪接位点且各个剪接转录本比例一致），则强制性输出比例靠前的可变剪接转录本信息，直至mRNA数量达到本参数设置的值。
+
+    --added_mRNA_ID_prefix <string>    default: t
+    输出GFF3文件中，要给增加的可变剪接转录本按表达量比例从高到低赋予ID，其ID格式为 <geneID>.<prefix><num>。<geneID>是基因的ID；<prefix>是本参数设置的值；<num>是数字编号，由两位数字组成，从1开始编号，若是个位数，则前面加零。若输入GFF3文件已经存在对应编号的转录本ID，则使用顺延的数字编号给增加的可变剪接转录本赋予ID。
+
+    --help    default: None
+    display this help and exit.
+
+USAGE
+if (@ARGV==0){die $usage}
+
+my ($help_flag);
+GetOptions(
+    "help" => \$help_flag,
+);
+
+if ( $help_flag ) { die $usage }
+
