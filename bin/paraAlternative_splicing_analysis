@@ -119,7 +119,10 @@ while (<IN>) {
             $seq_num ++;
             push @chunk, "$tmp_dir/seq$seq_num";
             print OUT "$dirname/alternative_splicing_analysis --min_intron_depth $min_intron_depth --min_base_depth_ratio_for_ref_specific_intron $min_base_depth_ratio_for_ref_specific_intron --min_intron_depth_ratio_for_evidence_specific_intron $min_intron_depth_ratio_for_evidence_specific_intron --min_base_depth_ratio_for_common_intron $min_base_depth_ratio_for_common_intron --min_gene_depth $min_gene_depth --min_transcript_confidence_for_output $min_transcript_confidence_for_output --transcript_num_for_output_when_all_low_confidence $transcript_num_for_output_when_all_low_confidence --added_mRNA_ID_prefix $added_mRNA_ID_prefix $tmp_dir/seq$seq_num.gff3 $tmp_dir/seq$seq_num.intron.txt $tmp_dir/seq$seq_num.base_depth.txt > $tmp_dir/seq$seq_num.out 2> $tmp_dir/seq$seq_num.stats\n";
+
             open my $FH, ">", "$tmp_dir/seq$seq_num.gff3" or die "Can not create file $tmp_dir/seq$seq_num.gff3, $!"; $chrID2FH_gff3{$1} = $FH;
+			print {$chrID2FH_gff3{$1}} $_;
+
             open my $FH, ">", "$tmp_dir/seq$seq_num.intron.txt" or die "Can not create file $tmp_dir/seq$seq_num.intron.txt, $!"; $chrID2FH_intron{$1} = $FH;
             open my $FH, ">", "$tmp_dir/seq$seq_num.base_depth.txt" or die "Can not create file $tmp_dir/seq$seq_num.base_depth.txt, $!"; $chrID2FH_baseDepth{$1} = $FH;
         }
