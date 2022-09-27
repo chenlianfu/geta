@@ -76,9 +76,11 @@ while (<IN>) {
 }
 close IN;
 
-my ( %gff, %gff3_attr, %cds, %gene_CDS, %gene_CDS_length, %chr, %strand, %source, %lnc_RNA_transcripID );
+my ( %gff, %gff3_attr, %gff3_score, %gff3_score_and_attr, %cds, %gene_CDS, %gene_CDS_length, %chr, %strand, %source, %lnc_RNA_transcripID );
 # %gff 存放最终有效基因的 mRNA / CDS / exon / UTR /intron 信息。
-# %gff3_attr 存放 gene 或 mRNA 第 9 列 attribute 信息。
+# %gff3_attr 存放 gene 或 mRNA/lnc_RNA 第 9 列 attribute 信息。
+# %gff3_score 存放 gene 或 mRNA/lnc_RNA 第 6 列的得分信息。
+# %gff3_score_and_attr 存放其它Feature的得分和attribute信息。
 # %cds 存放 CDS 的索引信息
 # %gene_CDS 存放基因所有 CDS 信息
 # %gene_CDS_length 存放基因的 CDS 总长度信息
@@ -111,6 +113,7 @@ foreach my $input_file ( @ARGV ) {
             $mRNAID2geneID{$mRNA_id} = $gene_id;
 
             $gff3_attr{$mRNA_id} = &get_attr($_[8]);
+            $gff3_score{$mRNA_id} = $_[5];
             $lnc_RNA_transcripID{$mRNA_id} = 1 if m/\tlnc_RNA\t/;
         }
         elsif ( m/\tgene\t/) {
@@ -118,10 +121,16 @@ foreach my $input_file ( @ARGV ) {
             if ( $_[8] =~ /ID=([^;\s]+)/ ) {
                 $gene_id = $1;
                 $gff3_attr{$gene_id} = &get_attr($_[8]);
+                $gff3_score{$gene_id} = $_[5];
             }
             else {
                 warn "Warning: In the GFF3 File $input_file, gene Feature have no ID information: $_";
             }
+        }
+        else {
+            @_ = split /\t/;
+            $gff3_score_and_attr{"$_[0]\t$_[6]\t$_[2]\t$_[3]\t$_[4]"}{"score"} = $_[5];
+            $gff3_score_and_attr{"$_[0]\t$_[6]\t$_[2]\t$_[3]\t$_[4]"}{"attr"} = &get_attr($_[8]);
         }
     }
     close IN;
@@ -384,7 +393,7 @@ foreach my $gene_ID (@gene_ID) {
     if ($gene_prefix) {
         $attribute .= "Source=$gene_ID;" unless $no_attr_add;
     }
-    print "$chr{$gene_ID}\t$source\tgene\t$gene_border{$gene_ID}\t\.\t$strand{$gene_ID}\t\.\t$attribute\n";
+    print "$chr{$gene_ID}\t$source\tgene\t$gene_border{$gene_ID}\t$gff3_score{$gene_ID}\t$strand{$gene_ID}\t\.\t$attribute\n";
 
     my $mRNA_number = 0;
     foreach my $mRNA_ID (sort keys %{$gff{$gene_ID}}) {
@@ -406,31 +415,41 @@ foreach my $gene_ID (@gene_ID) {
             $attribute .= "Source=$mRNA_ID;" unless $no_attr_add;
         }
         if ( exists $lnc_RNA_transcripID{$mRNA_ID} ) {
-            print "$chr\t$source\tlnc_RNA\t$mRNA_border{$mRNA_ID}\t\.\t$strand\t\.\t$attribute\n";
+            print "$chr\t$source\tlnc_RNA\t$mRNA_border{$mRNA_ID}\t$gff3_score{$mRNA_ID}\t$strand\t\.\t$attribute\n";
         }
         else {
-            print "$chr\t$source\tmRNA\t$mRNA_border{$mRNA_ID}\t\.\t$strand\t\.\t$attribute\n";
+            print "$chr\t$source\tmRNA\t$mRNA_border{$mRNA_ID}\t$gff3_score{$mRNA_ID}\t$strand\t\.\t$attribute\n";
         }
 
         my (%sort, %sort_UTR, $CDS_num, $exon_num, $intron_num, $UTR3_num, $UTR5_num);
         if ($strand eq "+") {
             foreach (sort {$a <=> $b} @CDS) {
                 $CDS_num ++;
-                my $out = "$chr\t$source\tCDS\t$_\tID=$mRNAID.CDS$CDS_num;Parent=$mRNAID;\n";
+                my $attr_out = "";
+				$attr_out = $gff3_score_and_attr{"$chr\t$strand\tCDS\t$_"}{"attr"} if exists $gff3_score_and_attr{"$chr\t$strand\tCDS\t$_"};
+                my $out = "$chr\t$source\tCDS\t$_\tID=$mRNAID.CDS$CDS_num;Parent=$mRNAID;$attr_out\n";
                 @_ = split /\t/;
                 $sort{$out} = $_[0];
                 $sort_UTR{$out} = 3
             }
             foreach (sort {$a <=> $b} @exon) {
                 $exon_num ++;
-                my $out = "$chr\t$source\texon\t$_\t.\t$strand\t\.\tID=$mRNAID.exon$exon_num;Parent=$mRNAID;\n";
+                my $score = '.';
+                $score = $gff3_score_and_attr{"$chr\t$strand\texon\t$_"}{"score"} if exists $gff3_score_and_attr{"$chr\t$strand\texon\t$_"};
+                my $attr_out = "";
+                $attr_out = $gff3_score_and_attr{"$chr\t$strand\texon\t$_"}{"attr"} if exists $gff3_score_and_attr{"$chr\t$strand\texon\t$_"};
+                my $out = "$chr\t$source\texon\t$_\t$score\t$strand\t\.\tID=$mRNAID.exon$exon_num;Parent=$mRNAID;$attr_out\n";
                 @_ = split /\t/;
                 $sort{$out} = $_[0];
                 $sort_UTR{$out} = 2;
             }
             foreach (sort {$a <=> $b} @intron) {
                 $intron_num ++;
-                my $out = "$chr\t$source\tintron\t$_\t\.\t$strand\t\.\tID=$mRNAID.intron$intron_num;Parent=$mRNAID;\n";
+                my $score = '.';
+                $score = $gff3_score_and_attr{"$chr\t$strand\tintron\t$_"}{"score"} if exists $gff3_score_and_attr{"$chr\t$strand\tintron\t$_"};
+                my $attr_out = "";
+                $attr_out = $gff3_score_and_attr{"$chr\t$strand\tintron\t$_"}{"attr"} if exists $gff3_score_and_attr{"$chr\t$strand\tintron\t$_"};
+                my $out = "$chr\t$source\tintron\t$_\t$score\t$strand\t\.\tID=$mRNAID.intron$intron_num;Parent=$mRNAID;$attr_out\n";
                 @_ = split /\t/;
                 $sort{$out} = $_[0];
             }
@@ -443,14 +462,22 @@ foreach my $gene_ID (@gene_ID) {
             }
             foreach (sort {$UTR_sort{$a} <=> $UTR_sort{$b}} @UTR5) {
                 $UTR5_num ++;
-                my $out = "$chr\t$source\t$_\t.\t$strand\t\.\tID=$mRNAID.utr5p$UTR5_num;Parent=$mRNAID;\n";
+                my $score = '.';
+                $score = $gff3_score_and_attr{"$chr\t$strand\tfive_prime_UTR\t$_"}{"score"} if exists $gff3_score_and_attr{"$chr\t$strand\tfive_prime_UTR\t$_"};
+                my $attr_out = "";
+                $attr_out = $gff3_score_and_attr{"$chr\t$strand\tfive_prime_UTR\t$_"}{"attr"} if exists $gff3_score_and_attr{"$chr\t$strand\tfive_prime_UTR\t$_"};
+                my $out = "$chr\t$source\t$_\t$score\t$strand\t\.\tID=$mRNAID.utr5p$UTR5_num;Parent=$mRNAID;$attr_out\n";
                 @_ = split /\t/;
                 $sort{$out} = $_[1];
                 $sort_UTR{$out} = 1;
             }
             foreach (sort {$UTR_sort{$a} <=> $UTR_sort{$b}} @UTR3) {
                 $UTR3_num ++;
-                my $out = "$chr\t$source\t$_\t.\t$strand\t\.\tID=$mRNAID.utr3p$UTR3_num;Parent=$mRNAID;\n";
+                my $score = '.';
+                $score = $gff3_score_and_attr{"$chr\t$strand\tthree_prime_UTR\t$_"}{"score"} if exists $gff3_score_and_attr{"$chr\t$strand\tthree_prime_UTR\t$_"};
+                my $attr_out = "";
+                $attr_out = $gff3_score_and_attr{"$chr\t$strand\tthree_prime_UTR\t$_"}{"attr"} if exists $gff3_score_and_attr{"$chr\t$strand\tthree_prime_UTR\t$_"};
+                my $out = "$chr\t$source\t$_\t$score\t$strand\t\.\tID=$mRNAID.utr3p$UTR3_num;Parent=$mRNAID;$attr_out\n";
                 @_ = split /\t/;
                 $sort{$out} = $_[1];
                 $sort_UTR{$out} = 4;
@@ -464,21 +491,31 @@ foreach my $gene_ID (@gene_ID) {
         elsif ($strand eq "-") {
             foreach (sort {$b <=> $a} @CDS) {
                 $CDS_num ++;
-                my $out = "$chr\t$source\tCDS\t$_\tID=$mRNAID.CDS$CDS_num;Parent=$mRNAID;\n";
+				my $attr_out = "";
+				$attr_out = $gff3_score_and_attr{"$chr\t$strand\tCDS\t$_"}{"attr"} if exists $gff3_score_and_attr{"$chr\t$strand\tCDS\t$_"};
+                my $out = "$chr\t$source\tCDS\t$_\tID=$mRNAID.CDS$CDS_num;Parent=$mRNAID;$attr_out\n";
                 @_ = split /\t/;
                 $sort{$out} = $_[0];
                 $sort_UTR{$out} = 3;
             }
             foreach (sort {$b <=> $a} @exon) {
                 $exon_num ++;
-                my $out = "$chr\t$source\texon\t$_\t.\t$strand\t\.\tID=$mRNAID.exon$exon_num;Parent=$mRNAID;\n";
+				my $score = '.';
+                $score = $gff3_score_and_attr{"$chr\t$strand\texon\t$_"}{"score"} if exists $gff3_score_and_attr{"$chr\t$strand\texon\t$_"};
+                my $attr_out = "";
+                $attr_out = $gff3_score_and_attr{"$chr\t$strand\texon\t$_"}{"attr"} if exists $gff3_score_and_attr{"$chr\t$strand\texon\t$_"};
+                my $out = "$chr\t$source\texon\t$_\t$score\t$strand\t\.\tID=$mRNAID.exon$exon_num;Parent=$mRNAID;$attr_out\n";
                 @_ = split /\t/;
                 $sort{$out} = $_[0];
                 $sort_UTR{$out} = 2;
             }
             foreach (sort {$b <=> $a} @intron) {
                 $intron_num ++;
-                my $out = "$chr\t$source\tintron\t$_\t\.\t$strand\t\.\tID=$mRNAID.intron$intron_num;Parent=$mRNAID;\n";
+				my $score = '.';
+                $score = $gff3_score_and_attr{"$chr\t$strand\tintron\t$_"}{"score"} if exists $gff3_score_and_attr{"$chr\t$strand\tintron\t$_"};
+                my $attr_out = "";
+                $attr_out = $gff3_score_and_attr{"$chr\t$strand\tintron\t$_"}{"attr"} if exists $gff3_score_and_attr{"$chr\t$strand\tintron\t$_"};
+                my $out = "$chr\t$source\tintron\t$_\t$score\t$strand\t\.\tID=$mRNAID.intron$intron_num;Parent=$mRNAID;$attr_out\n";
                 @_ = split /\t/;
                 $sort{$out} = $_[0];
             }
@@ -491,14 +528,22 @@ foreach my $gene_ID (@gene_ID) {
             }
             foreach (sort {$UTR_sort{$b} <=> $UTR_sort{$a}} @UTR5) {
                 $UTR5_num ++;
-                my $out = "$chr\t$source\t$_\t.\t$strand\t\.\tID=$mRNAID.utr5p$UTR5_num;Parent=$mRNAID;\n";
+				my $score = '.';
+                $score = $gff3_score_and_attr{"$chr\t$strand\tfive_prime_UTR\t$_"}{"score"} if exists $gff3_score_and_attr{"$chr\t$strand\tfive_prime_UTR\t$_"};
+                my $attr_out = "";
+                $attr_out = $gff3_score_and_attr{"$chr\t$strand\tfive_prime_UTR\t$_"}{"attr"} if exists $gff3_score_and_attr{"$chr\t$strand\tfive_prime_UTR\t$_"};
+				my $out = "$chr\t$source\t$_\t$score\t$strand\t\.\tID=$mRNAID.utr5p$UTR5_num;Parent=$mRNAID;$attr_out\n";
                 @_ = split /\t/;
                 $sort{$out} = $_[1];
                 $sort_UTR{$out} = 1;
             }
             foreach (sort {$UTR_sort{$a} <=> $UTR_sort{$b}} @UTR3) {
                 $UTR3_num ++;
-                my $out = "$chr\t$source\t$_\t.\t$strand\t\.\tID=$mRNAID.utr3p$UTR3_num;Parent=$mRNAID;\n";
+				my $score = '.';
+				$score = $gff3_score_and_attr{"$chr\t$strand\tthree_prime_UTR\t$_"}{"score"} if exists $gff3_score_and_attr{"$chr\t$strand\tthree_prime_UTR\t$_"};
+                my $attr_out = "";
+                $attr_out = $gff3_score_and_attr{"$chr\t$strand\tthree_prime_UTR\t$_"}{"attr"} if exists $gff3_score_and_attr{"$chr\t$strand\tthree_prime_UTR\t$_"};
+				my $out = "$chr\t$source\t$_\t$score\t$strand\t\.\tID=$mRNAID.utr3p$UTR3_num;Parent=$mRNAID;$attr_out\n";
                 @_ = split /\t/;
                 $sort{$out} = $_[1];
                 $sort_UTR{$out} = 4;
