@@ -320,7 +320,9 @@ foreach my $gene_ID (sort keys %gene_info) {
             }
             #print STDERR "TEST:9.5\n";
             foreach ( keys %transcript_intron ) {
-                delete $transcript_intron{$_} if $transcript_intron{$_} < $min_ratio_of_transcript;
+				if ( $transcript_intron{$_} < $min_ratio_of_transcript or $transcript_intron{$_} == 0 ) {
+					delete $transcript_intron{$_};
+				}
             }
         }
     }
