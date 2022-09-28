@@ -634,7 +634,7 @@ sub intron_splcing {
                     }
                 }
                 foreach ( keys %intron_splicing_end ) {
-                    if ( $intron_splicing_ratio{$_} < $min_ratio_of_transcript ) {
+                    if ( $intron_splicing_ratio{$_} < $min_ratio_of_transcript or $intron_splicing_ratio{$_} == 0 ) {
                         delete $intron_splicing_end{$_};
                         delete $intron_splicing_ratio{$_};
                     }
