@@ -123,7 +123,7 @@ print STDERR "Read over $ARGV[2]\n";
 
 # 分别对各个基因进行可变剪接分析
 foreach my $gene_ID (sort keys %gene_info) {
-    print STDERR "$gene_ID\n";
+	#print STDERR "$gene_ID\n";
     # 得到gene的起始和结束位置
     my @gene_header = split /\t/, $gene_info{$gene_ID}{"header"};
     my ($chr, $source, $gene_start, $gene_end, $strand) = ($gene_header[0], $gene_header[1],  $gene_header[3], $gene_header[4], $gene_header[6]);
