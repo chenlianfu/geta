@@ -123,7 +123,8 @@ else {
 }
 
 open CMD, ">", "$tmp_prefix.command.list"  or die "Cannot create file $tmp_prefix.command.list\n$!\n";
-my ($fasta, $number, @chunk, $gene_num_for_analysis);
+my ($fasta, $number, @chunk);
+my $gene_num_for_analysis = 0;
 foreach my $seq_ID ( sort keys %seq ) {
     next if exists $complete_gene_ID{$seq_ID};
     $gene_num_for_analysis ++;
