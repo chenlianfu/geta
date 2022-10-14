@@ -1,0 +1,171 @@
+#!/usr/bin/env perl
+
+use strict;
+use Getopt::Long;
+use Cwd qw/abs_path getcwd cwd/;
+use File::Basename;
+
+my $usage = <<USAGE;
+Usage:
+    $0 [options] evidence.gff3 intron.gff augustusOut.gff3 > out.gff3
+
+    程序能根据evidence.gff3中的exon信息，计算Augustus软件的输出结果augustusOut.gff3中每个基因CDS区域被支持的比例。在输出的GFF3结果中的gene feature第9列中增加或改变exonHintRatio标签的值。
+	程序能根据intron.gff中的intron信息，计算Augustus软件的输出结果augustusOut.gff3中每个基因的intron总数和支持的数量。在输出的GFF3结果中的gene feature第9列中增加或改变intronSupport标签的值。
+
+    --help    default: None
+    display this help and exit.
+
+USAGE
+if (@ARGV==0){die $usage}
+
+my ($help_flag);
+GetOptions(
+    "help" => \$help_flag,
+);
+
+if ( $help_flag ) { die $usage }
+
+# 读取exon证据信息
+open IN, $ARGV[0] or die "Can not open file $ARGV[0], $!\n";
+my %evidence_exon;
+while (<IN>) {
+    next unless m/\texon\t/;
+    @_ = split /\t/;
+    my $index1 = int($_[3] / 1000);
+    my $index2 = int($_[4] / 1000);
+    foreach ($index1 .. $index2) {
+        $evidence_exon{$_[0]}{$_}{"$_[3]\t$_[4]"} = 1;
+    }
+}
+close IN;
+
+# 读取intron证据信息
+open IN, $ARGV[1] or die "Can not open file $ARGV[1], $!\n";
+my %evidence_intron;
+while (<IN>) {
+	next unless m/\tintron\t/;
+	@_ = split /\t/;
+	$evidence_intron{"$_[0]\t$_[3]\t$_[4]"} = 1;
+}
+close IN;
+
+# 读取Augustus基因信息
+open IN, $ARGV[2] or die "Can not open file $ARGV[1], $!\n";
+my (%gene, @gene_id, $gene_id);
+while (<IN>) {
+    if (m/\tgene\t.*ID=([^\s;]+)/) {
+        $gene_id = $1;
+        push @gene_id, $gene_id;
+    }
+    $gene{$gene_id} .= $_;
+}
+close IN;
+
+foreach my $gene (@gene_id) {
+    my @line = split /\n/, $gene{$gene};
+
+	# 计算基因的CDS和证据的重叠比例
+    my @CDS = grep { m/\tCDS\t/ } @line;
+    my ($total_length, $overlap_length) = (0, 0);
+    foreach (@CDS) {
+        @_ = split /\t/;
+        $overlap_length += &cal_overlap_length("$_[0]\t$_[3]\t$_[4]");
+        $total_length += ($_[4] - $_[3] + 1);
+    }
+    my $coverage = 0;
+    $coverage = $overlap_length / $total_length if $total_length;
+    $coverage = int($coverage * 10000 + 0.5) / 100;
+    my $gene_info = $gene{$gene};
+
+	# 计算intron的总数和证据支持数量
+	my %intron;
+	foreach ( @line ) {
+		next unless m/\tintron\t/;
+		@_ = split /\t/;
+		$intron{"$_[0]\t$_[3]\t$_[4]"} = 1;
+	}
+	my $total_num_of_intron = 0;
+	$total_num_of_intron = %intron if %intron;
+	my $num_of_supported_intron = 0;
+	foreach ( keys %intron ) {
+		$num_of_supported_intron ++ if exists $evidence_intron{$_};
+	}
+
+	# 修改GFF3文件中gene的attribute信息
+	my $gene_info = $gene{$gene};
+	my $attr = $1 if $gene_info =~ m/\tgene\t.*(ID=.*)/;
+	my (%attr, %sort, $code);
+	foreach ( split /;/, $attr ) {
+		$code ++;
+		if ( m/(.*?)=(.*)/ ) {
+			$attr{$1} = $2;
+			$sort{$1} = $code;
+		}
+	}
+	#print STDERR "$gene\t$num_of_supported_intron/$total_num_of_intron\t$attr{'intronSupport'}\n" if "$num_of_supported_intron/$total_num_of_intron" ne $attr{"intronSupport"};
+	$attr{"intronSupport"} = "$num_of_supported_intron/$total_num_of_intron";
+	$code ++;
+	$sort{"intronSupport"} = $code unless exists $sort{"intronSupport"};
+	$attr{"exonHintRatio"} = $coverage;
+	$code ++;
+	$sort{"exonHintRatio"} = $code unless exists $sort{"exonHintRatio"};
+	my (@attr_neww, $attr_new);
+	foreach ( sort {$sort{$a} <=> $sort{$b}} keys %attr ) {
+		push @attr_neww, "$_=$attr{$_}";
+	}
+	$attr_new = join ";", @attr_neww;
+	$gene_info =~ s/$attr/$attr_new/;
+	print $gene_info;
+}
+
+
+sub cal_overlap_length {
+    my @i = split /\t/, $_[0];
+    my $length;
+
+    my $index1 = int($i[1] / 1000);
+    my $index2 = int($i[2] / 1000);
+    my %repeat_info;
+    foreach ($index1 .. $index2) {
+        foreach (keys %{$evidence_exon{$i[0]}{$_}}) {
+            $repeat_info{$_} = 1;
+        }
+    }
+    my @repeat = sort {$a <=> $b} keys %repeat_info;
+
+    my $start = $i[1];
+    foreach (@repeat) {
+        #print "OK1: $i[0]\t$i[1]\t$i[2]\t$_\n";
+        @_ = split /\t/;
+        if ($_[0] <= $i[2] && $_[1] >= $start) {
+#CDS:   ($start)============($i[2])
+#repeat:     ($_[0])============($_[1])
+#repeat:            ======
+#repeat:     ======================
+#repeat:     ============
+            if ($start <= $_[0]) {
+                if ($i[2] < $_[1]) {
+                    $length += ($i[2] - $_[0] + 1);
+                    last;
+                }
+                else {
+                    $length += ($_[1] - $_[0] + 1);
+                    $start = $_[1] + 1;
+                }
+            }
+            else {
+                if ($i[2] < $_[1]) {
+                    $length += ($i[2] - $start + 1);
+                    last;
+                }
+                else {
+                    $length += ($_[1] - $start + 1);
+                    $start = $_[1] + 1;
+                }
+            }
+        }
+    }
+
+    return $length;
+}
+

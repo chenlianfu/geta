@@ -455,13 +455,15 @@ unless (-e "2.hisat2.ok") {
         print STDERR "CMD(Skipped): $cmdString\n";
     }
 
-    $cmdString = "samtools sort  -o hisat2.sorted.bam -O BAM hisat2.sam";
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-
-    $cmdString = "samtools view -h hisat2.sorted.bam > hisat2.sorted.sam";
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+	########## version 2.5.1 ##########
+	#$cmdString = "samtools sort  -o hisat2.sorted.bam -O BAM hisat2.sam";
+	#print STDERR (localtime) . ": CMD: $cmdString\n";
+	#system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+	#
+	#$cmdString = "samtools view -h hisat2.sorted.bam > hisat2.sorted.sam";
+	#print STDERR (localtime) . ": CMD: $cmdString\n";
+	#system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+	########## version 2.5.1 ##########
 
     chdir "../";
     open OUT, ">", "2.hisat2.ok" or die $!; close OUT;
@@ -837,20 +839,23 @@ unless (-e "5.augustus.ok") {
     }
 
     # Augustus Hint Preparing
-    $cmdString = "bam2hints --source=W --intronsonly --in=../2.hisat2/hisat2.sorted.bam --out=bam2intronHints.gff";
-    unless (($pe1 && $pe2) or $single_end) {
-        open OUT, ">", "bam2hints.ok" or die $!; close OUT;
-        open OUT, ">", "bam2intronHints.gff" or die $!; close OUT;
-    }
-    unless (-e "bam2hints.ok") {
-        print STDERR (localtime) . ": CMD: $cmdString\n";
-        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-        open OUT, ">", "bam2hints.ok" or die $!; close OUT;
-    }
-    else {
-        print STDERR "CMD(Skipped): $cmdString\n";
-    }
-    $cmdString = "$dirname/bin/prepareAugusutusHints $config{'prepareAugusutusHints'} bam2intronHints.gff ../3.transcript/transfrag.genome.gff3 ../4.homolog/genewise.gff3 ../4.homolog/genewise.start_stop_hints.gff > hints.gff";
+	########## version 2.5.1 ##########
+	#$cmdString = "bam2hints --source=W --intronsonly --in=../2.hisat2/hisat2.sorted.bam --out=bam2intronHints.gff";
+	#unless (($pe1 && $pe2) or $single_end) {
+	#    open OUT, ">", "bam2hints.ok" or die $!; close OUT;
+	#    open OUT, ">", "bam2intronHints.gff" or die $!; close OUT;
+	#}
+	#unless (-e "bam2hints.ok") {
+	#    print STDERR (localtime) . ": CMD: $cmdString\n";
+	#    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+	#    open OUT, ">", "bam2hints.ok" or die $!; close OUT;
+	#}
+	#else {
+	#    print STDERR "CMD(Skipped): $cmdString\n";
+	#}
+	#$cmdString = "$dirname/bin/prepareAugusutusHints $config{'prepareAugusutusHints'} bam2intronHints.gff ../3.transcript/transfrag.genome.gff3 ../4.homolog/genewise.gff3 ../4.homolog/genewise.start_stop_hints.gff > hints.gff";
+	########## version 2.5.1 ##########
+	$cmdString = "$dirname/bin/prepareAugusutusHints $config{'prepareAugusutusHints'} ../3.transcript/intron.txt ../3.transcript/transfrag.genome.gff3 ../4.homolog/genewise.gff3 ../4.homolog/genewise.start_stop_hints.gff > hints.gff";
     unless (-e "prepareAugusutusHints.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -921,7 +926,7 @@ unless (-e "5.augustus.ok") {
                     $augustus_gene_id = $1 if $_[8] =~ /ID=([^;\s]+)/;
                     $augustus_gene_model_gene{$augustus_gene_id} = $_;
                     my %attr = $_[8] =~ m/([^;=]+)=([^;=]+)/g;
-                    if ($attr{"hintRatio"} >= 95) {
+                    if ($attr{"exonHintRatio"} >= 95) {
                         $keep = 1;
                         $keep_num ++;
                     }
@@ -1089,7 +1094,7 @@ unless (-e "5.augustus.ok") {
                 print STDERR (localtime) . ": CMD: $cmdString\n";
                 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
-                $cmdString = "ln -sf augustus.2.gff3 augustus.gff3";
+                $cmdString = "$dirname/bin/addHintRatioToAugustusResult training/geneModels.gff3 hints.gff augustus.2.gff3 > augustus.gff3";
                 print STDERR (localtime) . ": CMD: $cmdString\n";
                 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
             }
@@ -1106,7 +1111,7 @@ unless (-e "5.augustus.ok") {
 
                 open OUT, ">", "training_again.ok" or die $!;
 
-                $cmdString = "ln -sf augustus.1.gff3 augustus.gff3";
+                $cmdString = "$dirname/bin/addHintRatioToAugustusResult training/geneModels.gff3 hints.gff augustus.1.gff3 > augustus.gff3";
                 print STDERR (localtime) . ": CMD: $cmdString\n";
                 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
             }
@@ -1140,14 +1145,14 @@ unless (-e "5.augustus.ok") {
                 print STDERR (localtime) . ": CMD: $cmdString\n";
                 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
-                $cmdString = "ln -sf augustus.2.gff3 augustus.gff3";
+                $cmdString = "$dirname/bin/addHintRatioToAugustusResult training/geneModels.gff3 hints.gff augustus.2.gff3 > augustus.gff3";
                 print STDERR (localtime) . ": CMD: $cmdString\n";
                 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
             }
         }
     }
     else {
-        $cmdString = "ln -sf augustus.1.gff3 augustus.gff3";
+        $cmdString = "$dirname/bin/addHintRatioToAugustusResult training/geneModels.gff3 hints.gff augustus.1.gff3 > augustus.gff3";
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
     }

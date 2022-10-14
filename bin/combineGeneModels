@@ -226,7 +226,7 @@ foreach my $gene_id (@aug_gene) {
     @_ = split /\t/, $aug_gene_info{$gene_id};
     my ($chr, $strand, $gene_score) = ($_[0], $_[6], $_[5]);
     my ($augustus_transcriptSupport_percentage, $augustus_intronSupport_number, $augustus_intronSupport_ratio, $augustus_intronSupport);
-    if ($_[8] =~ m/hintRatio=([^;\s]+)/) {
+    if ($_[8] =~ m/exonHintRatio=([^;\s]+)/) {
         $augustus_transcriptSupport_percentage = $1;
     }
     if ($_[8] =~ m/intronSupport=(\d+)\/(\d+)/) {
