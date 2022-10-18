@@ -6,7 +6,7 @@ my $usage = <<USAGE;
 Usage:
     perl $0 [options] file1.gff3 file2.gff3 ... > total.gff3
 
-    程序用于读取一个或多个GFF3文件，对GFF3文件格式进行修正，仅保留编码蛋白(mRNA信息中包含CDS)基因，并去除CDS区有重叠的冗余基因模型。
+    程序用于读取一个或多个GFF3文件，对GFF3文件格式进行修正，仅保留编码蛋白和lncRNA基因，并去除CDS区有重叠的冗余基因模型。
 
     1. 输入的GFF3文件格式要求：必须包含mRNA、CDS这两个Feature信息，且其第九列含有Parent信息; 也可以包含exon和UTR信息; 所有输入的额GFF3文件中的所有基因具有不同的ID编号。程序仅读取GFF3文件的mRNA、CDS、exon信息。
 
@@ -24,6 +24,9 @@ Usage:
     3. 参数信息：
     --genome <string>
     输入基因组fasta文件。该参数是必须的，用于修正尾部的CDS和基因完整性检测。
+
+    --discard_lncRNA    default: None
+    添加该参数后，程序会忽略lncRNA转录本信息。
 
     --min_intron <int>    default: 1
     设置一个最短intron长度阈值。当检测到相邻两CDSs之间相距的碱基距离 < 该阈值时，程序会标准错误输出中给出警告信息。当使用默认参数 1 时，出现警告表示基因模型有错误。
@@ -46,9 +49,10 @@ Usage:
 USAGE
 if(@ARGV==0){die $usage}
 
-my ($genome, $min_intron, $coverage, $gene_prefix, $gene_code_length,  $no_attr_add, $GFF3_source);
+my ($genome, $discard_lncRNA, $min_intron, $coverage, $gene_prefix, $gene_code_length,  $no_attr_add, $GFF3_source);
 GetOptions(
     "genome:s" => \$genome,
+    "discard_lncRNA" => \$discard_lncRNA,
     "min_intron:i" => \$min_intron,
     "coverage:f" => \$coverage,
     "gene_prefix:s" => \$gene_prefix,
@@ -93,8 +97,11 @@ foreach my $input_file ( @ARGV ) {
     # 读取GFF3文件的mRNA、CDS和exon信息。若有 gene 信息，则保存其 attribute 信息
     open IN, $input_file or die "can not open file $input_file, $!";
     my ( %lines, $gene_id, $mRNA_id, %mRNAID2geneID );
-    # 先读取gene和mRNA信息，存储GFF3第9列attribute信息，得到mRNA ID和gene ID之间的对应关系
+    # 先读取gene、mRNA和lncRNA信息，存储GFF3第9列attribute信息，得到mRNA ID和gene ID之间的对应关系
     while ( <IN> ) {
+        if ( $discard_lncRNA ) {
+            next if m/\tlnc_RNA\t/;
+        }
         if ( m/\tmRNA\t/ or m/\tlnc_RNA\t/ ) {
             @_ = split /\t/;
             if ( $_[8] =~ /ID=([^;\s]+)/ ) {

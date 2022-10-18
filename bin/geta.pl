@@ -455,15 +455,13 @@ unless (-e "2.hisat2.ok") {
         print STDERR "CMD(Skipped): $cmdString\n";
     }
 
-	########## version 2.5.1 ##########
-	#$cmdString = "samtools sort  -o hisat2.sorted.bam -O BAM hisat2.sam";
-	#print STDERR (localtime) . ": CMD: $cmdString\n";
-	#system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-	#
-	#$cmdString = "samtools view -h hisat2.sorted.bam > hisat2.sorted.sam";
-	#print STDERR (localtime) . ": CMD: $cmdString\n";
-	#system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-	########## version 2.5.1 ##########
+    $cmdString = "samtools sort  -o hisat2.sorted.bam -O BAM hisat2.sam";
+    print STDERR (localtime) . ": CMD: $cmdString\n";
+    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+	
+    $cmdString = "samtools view -h hisat2.sorted.bam > hisat2.sorted.sam";
+    print STDERR (localtime) . ": CMD: $cmdString\n";
+    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
     chdir "../";
     open OUT, ">", "2.hisat2.ok" or die $!; close OUT;
