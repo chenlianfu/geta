@@ -72,6 +72,7 @@ while (<IN>) {
     if ( exists $blast_transcriptID{$_[0]} ) {
         $out_transcriptID{$_[0]} = 1;
     }
+    $_[5] = &percentage2value($_[5]);
     elsif ( $_[3] <= $hmm_evalue && $_[5] >= $hmm_coverage ) {
         $out_transcriptID{$_[0]} = 1;
     }    
@@ -87,6 +88,9 @@ while (<IN>) {
     if ( exists $hmm_transcriptID{$_[0]} ) {
         $out_transcriptID{$_[0]} = 1;
     }
+    $_[-3] = &percentage2value($_[-3]);
+    $_[-2] = &percentage2value($_[-2]);
+    $_[-1] = &percentage2value($_[-1]);
     elsif ( $_[-5] <= $blast_evalue && $_[-3] >= $blast_CIP && $_[-2] >= $blast_coverage && $_[-1] >= $blast_coverage ) {
         $out_transcriptID{$_[0]} = 1;
     }
@@ -100,4 +104,10 @@ foreach ( sort keys %out_transcriptID ) {
     else {
         print "$_\n";
     }
+}
+
+sub percentage2value {
+    my $value = 1 if m/([\d\.e-]+)/;
+    $value = $value / 100;
+    return $value;
 }
