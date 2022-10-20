@@ -1383,29 +1383,33 @@ geneModels.i.coding.gff3\t对geneModels.h.coding.gff3中的基因模型进行了
         }
     }
 
-    # 6.8 根据HMM和BLASTP验证结果对基因模型进行过滤。
+    # 6.8 / 6.9 根据HMM和BLASTP验证结果对基因模型进行过滤。
     # 获得验证通过的转录本ID
-    my $cmdString1 = "$dirname/bin/get_valid_transcriptID $config{'get_valid_transcriptID'} validation_hmmscan.tab validation_blastp.tab > transcriptID_validating_passed.tab";
-    unless ( -e "08.get_valid_transcriptID.ok" ) 
-    my $cmdString2 = "$dirname/bin/get_valid_geneModels $config{'get_valid_geneModels'} --out_prefix geneModels.h transcriptID_for_filtering.txt transcriptID_validating_passed.tab geneModels.gb.gff3 geneModels.ge.gff3 geneModels.gf.gff3 2> get_valid_geneModels.log";
-    unless ( -e "08.get_valid_geneModels.ok" ) {
-        print STDERR (localtime) . ": CMD: $cmdString1\n";
-        system("$cmdString1") == 0 or die "failed to execute: $cmdString1\n";
-        print STDERR (localtime) . ": CMD: $cmdString2\n";
-        system("$cmdString2") == 0 or die "failed to execute: $cmdString2\n";
-        open OUT, ">", "08.get_valid_geneModels.ok" or die $!; close OUT;
-    }
-    else {
-        print STDERR "CMD(Skipped): $cmdString1\n";
-        print STDERR "CMD(Skipped): $cmdString2\n";
-    }
-
-    # 6.9 再次对基因模型进行首尾填补。
-    $cmdString = "$dirname/bin/fillingEndsOfGeneModels $config{'fillingEndsOfGeneModels'} $genome geneModels.h.coding.gff3 > geneModels.i.coding.gff3 2> fillingEndsOfGeneModels.2.log";
-    unless ( -e "09.fillingEndsOfGeneModels" ) {
+    my $cmdString = "$dirname/bin/get_valid_transcriptID $config{'get_valid_transcriptID'} validation_hmmscan.tab validation_blastp.tab > transcriptID_validating_passed.tab";
+    unless ( -e "08.get_valid_transcriptID.ok" ) {
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-        open OUT, ">", "09.fillingEndsOfGeneModels" or die $!; close OUT;
+        open OUT, ">", "08.get_valid_transcriptID.ok" or die $!; close OUT;
+    }
+    else {
+        print STDERR "CMD(Skipped): $cmdString\n";
+    }
+    my $cmdString = "$dirname/bin/get_valid_geneModels $config{'get_valid_geneModels'} --out_prefix geneModels.h transcriptID_for_filtering.txt transcriptID_validating_passed.tab geneModels.gb.gff3 geneModels.ge.gff3 geneModels.gf.gff3 2> get_valid_geneModels.log";
+    unless ( -e "09.get_valid_geneModels.ok" ) {
+        print STDERR (localtime) . ": CMD: $cmdString\n";
+        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+        open OUT, ">", "09.get_valid_geneModels.ok" or die $!; close OUT;
+    }
+    else {
+        print STDERR "CMD(Skipped): $cmdString\n";
+    }
+
+    # 6.10 再次对基因模型进行首尾填补。
+    $cmdString = "$dirname/bin/fillingEndsOfGeneModels $config{'fillingEndsOfGeneModels'} $genome geneModels.h.coding.gff3 > geneModels.i.coding.gff3 2> fillingEndsOfGeneModels.2.log";
+    unless ( -e "10.fillingEndsOfGeneModels" ) {
+        print STDERR (localtime) . ": CMD: $cmdString\n";
+        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+        open OUT, ">", "10.fillingEndsOfGeneModels" or die $!; close OUT;
     }
     else {
         print STDERR "CMD(Skipped): $cmdString\n";
