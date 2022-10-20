@@ -125,7 +125,7 @@ my $num_of_all_gene_ID = 0; $num_of_all_gene_ID = %all_gene_ID;
 my $num_of_all_transcript_ID = 0; $num_of_all_transcript_ID = %all_transcript_ID;
 my $total_number = %gene_info;
 my $ok_gene_num = $total_number - $num_of_all_gene_ID;
-print STDERR "总共输入了 $ok_gene_num 个基因，有 $num_of_all_gene_ID 个基因的 $num_of_all_transcript_ID 个转录本可能存在问题，需要进行HMM或BLASTP验证。有 $ok_gene_num 个基因不需要验证。";
+print STDERR "总共输入了 $total_number 个基因，有 $num_of_all_gene_ID 个基因的 $num_of_all_transcript_ID 个转录本可能存在问题，需要进行HMM或BLASTP验证。有 $ok_gene_num 个基因不需要验证。";
 
 # 统计有比对结果的基因和转录本数量。
 my $num_of_valid_gene_ID = 0; $num_of_valid_gene_ID = %valid_gene_ID;
