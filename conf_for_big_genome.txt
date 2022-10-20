@@ -15,3 +15,6 @@
 
 [parsing_blast_result.pl]
 --evalue 1e-9 --identity 0.1 --CIP 0.4 --subject-coverage 0.4 --query-coverage 0.4
+
+[get_valid_geneModels]
+--discard_Filling2Uncomplete
