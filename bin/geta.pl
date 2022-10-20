@@ -193,6 +193,7 @@ my %config = (
     'diamond' => '--sensitive --max-target-seqs 20 --evalue 1e-5 --id 10 --index-chunks 1 --block-size 5',
     'parsing_blast_result.pl' => '--evalue 1e-9 --identity 0.1 --CIP 0.4 --subject-coverage 0.4 --query-coverage 0.4',
     'get_valid_geneModels' => '',
+    'get_valid_transcripID' => '--hmm_evalue 1e-7 --hmm_coverage 0.4 --blast_evalue 1e-10 --blast_CIP 0.5 --blast_coverage 0.5',
     'remove_genes_in_repeats1' => '--ratio 0.3 --ignore_Simple_repeat --ignore_Unknown',
     'remove_genes_in_repeats2' => '--ratio 0.8',
     'remove_short_genes' => '--cds_length 300',
@@ -372,15 +373,15 @@ unless (-e "1.trimmomatic.ok") {
         $cmdString = "ParaFly -c command.trimmomatic_pe.list -CPU $paraFly_CPU &> /dev/null";
         print STDERR (localtime) . ": CMD: $cmdString\n";
         unless ( system("$cmdString") == 0 ) {
-			# 特殊情况下 Fastq 文件中碱基质量全部为固定的值时，Trimmomatic不能自动检测phred格式而运行失败。于是强制指定为phred33，符合常规情况。
-			$cmdString = "perl -pe 's/ PE / PE -phred33 /' FailedCommands > command.trimmomatic_phred33; rm FailedCommands";
-			print STDERR (localtime) . ": CMD: $cmdString\n";
-			system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+            # 特殊情况下 Fastq 文件中碱基质量全部为固定的值时，Trimmomatic不能自动检测phred格式而运行失败。于是强制指定为phred33，符合常规情况。
+            $cmdString = "perl -pe 's/ PE / PE -phred33 /' FailedCommands > command.trimmomatic_phred33; rm FailedCommands";
+            print STDERR (localtime) . ": CMD: $cmdString\n";
+            system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
-			$cmdString = "ParaFly -c command.trimmomatic_phred33 -CPU $paraFly_CPU &> /dev/null";
-			print STDERR (localtime) . ": CMD: $cmdString\n";
-			system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-		}
+            $cmdString = "ParaFly -c command.trimmomatic_phred33 -CPU $paraFly_CPU &> /dev/null";
+            print STDERR (localtime) . ": CMD: $cmdString\n";
+            system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+        }
     }
     if ($single_end) {
         my @se_reads = sort keys %se_reads;
@@ -398,15 +399,15 @@ unless (-e "1.trimmomatic.ok") {
         my $paraFly_CPU = $cpu / 8; $paraFly_CPU = 1 if $paraFly_CPU < 1;
         $cmdString = "ParaFly -c command.trimmomatic_pe.list -CPU $paraFly_CPU &> /dev/null";
         print STDERR (localtime) . ": CMD: $cmdString\n";
-		unless ( system("$cmdString") == 0 ) {
-			$cmdString = "perl -pe 's/ SE / SE -phred33 /' FailedCommands > command.trimmomatic_phred33; rm FailedCommands";
-			print STDERR (localtime) . ": CMD: $cmdString\n";
-			system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+        unless ( system("$cmdString") == 0 ) {
+            $cmdString = "perl -pe 's/ SE / SE -phred33 /' FailedCommands > command.trimmomatic_phred33; rm FailedCommands";
+            print STDERR (localtime) . ": CMD: $cmdString\n";
+            system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
-			$cmdString = "ParaFly -c command.trimmomatic_phred33 -CPU $paraFly_CPU &> /dev/null";
-			print STDERR (localtime) . ": CMD: $cmdString\n";
-			system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-		}
+            $cmdString = "ParaFly -c command.trimmomatic_phred33 -CPU $paraFly_CPU &> /dev/null";
+            print STDERR (localtime) . ": CMD: $cmdString\n";
+            system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+        }
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
     }
     chdir "../";
@@ -476,7 +477,7 @@ unless (-e "2.hisat2.ok") {
     $cmdString = "samtools sort  -o hisat2.sorted.bam -O BAM hisat2.sam";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-	
+    
     $cmdString = "samtools view -h hisat2.sorted.bam > hisat2.sorted.sam";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -855,23 +856,23 @@ unless (-e "5.augustus.ok") {
     }
 
     # Augustus Hint Preparing
-	########## version 2.5.1 ##########
-	#$cmdString = "bam2hints --source=W --intronsonly --in=../2.hisat2/hisat2.sorted.bam --out=bam2intronHints.gff";
-	#unless (($pe1 && $pe2) or $single_end) {
-	#    open OUT, ">", "bam2hints.ok" or die $!; close OUT;
-	#    open OUT, ">", "bam2intronHints.gff" or die $!; close OUT;
-	#}
-	#unless (-e "bam2hints.ok") {
-	#    print STDERR (localtime) . ": CMD: $cmdString\n";
-	#    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-	#    open OUT, ">", "bam2hints.ok" or die $!; close OUT;
-	#}
-	#else {
-	#    print STDERR "CMD(Skipped): $cmdString\n";
-	#}
-	#$cmdString = "$dirname/bin/prepareAugusutusHints $config{'prepareAugusutusHints'} bam2intronHints.gff ../3.transcript/transfrag.genome.gff3 ../4.homolog/genewise.gff3 ../4.homolog/genewise.start_stop_hints.gff > hints.gff";
-	########## version 2.5.1 ##########
-	$cmdString = "$dirname/bin/prepareAugusutusHints $config{'prepareAugusutusHints'} ../3.transcript/intron.txt ../3.transcript/transfrag.genome.gff3 ../4.homolog/genewise.gff3 ../4.homolog/genewise.start_stop_hints.gff > hints.gff";
+    ########## version 2.5.1 ##########
+    #$cmdString = "bam2hints --source=W --intronsonly --in=../2.hisat2/hisat2.sorted.bam --out=bam2intronHints.gff";
+    #unless (($pe1 && $pe2) or $single_end) {
+    #    open OUT, ">", "bam2hints.ok" or die $!; close OUT;
+    #    open OUT, ">", "bam2intronHints.gff" or die $!; close OUT;
+    #}
+    #unless (-e "bam2hints.ok") {
+    #    print STDERR (localtime) . ": CMD: $cmdString\n";
+    #    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+    #    open OUT, ">", "bam2hints.ok" or die $!; close OUT;
+    #}
+    #else {
+    #    print STDERR "CMD(Skipped): $cmdString\n";
+    #}
+    #$cmdString = "$dirname/bin/prepareAugusutusHints $config{'prepareAugusutusHints'} bam2intronHints.gff ../3.transcript/transfrag.genome.gff3 ../4.homolog/genewise.gff3 ../4.homolog/genewise.start_stop_hints.gff > hints.gff";
+    ########## version 2.5.1 ##########
+    $cmdString = "$dirname/bin/prepareAugusutusHints $config{'prepareAugusutusHints'} ../3.transcript/intron.txt ../3.transcript/transfrag.genome.gff3 ../4.homolog/genewise.gff3 ../4.homolog/genewise.start_stop_hints.gff > hints.gff";
     unless (-e "prepareAugusutusHints.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -1350,16 +1351,19 @@ geneModels.i.coding.gff3\t对geneModels.h.coding.gff3中的基因模型进行了
             $cmdString1 .= "$dirname/bin/para_hmmscan $config{'para_hmmscan'} --outformat --cpu $cpu --no_cut_ga --hmm_db $_ --tmp_prefix $HMM_db{$_} proteins_for_filtering.fasta >> validation_hmmscan.tab 2>> para_hmmscan.1.log; $dirname/bin/para_hmmscan $config{'para_hmmscan'} --chunk 1 --outformat --cpu $cpu --no_cut_ga --hmm_db $_ --tmp_prefix $HMM_db{$_} proteins_for_filtering.fasta >> validation_hmmscan.tab 2>> para_hmmscan.2.log; ";
         }
     }
+    else {
+        open OUT, ">", "validation_hmmscan.tab" or die "Can not create file validation_hmmscan.tab, $!", close OUT;
+    }
     if ( $BLASTP_db ) {
         open OUT, ">", "validation_blastp.tab" or die "Can not create file validation_blastp.tab, $!", close OUT;
         foreach ( sort keys %BLASTP_db ) {
             $cmdString2 .= "diamond blastp $config{'diamond'} --outfmt 5 --db $_ --query proteins_for_filtering.fasta --out validation_blastp_$BLASTP_db{$_}.xml --threads $cpu &>> diamond_blastp.log; ";
-            $cmdString3 = "$dirname/bin/parsing_blast_result.pl $config{'parsing_blast_result.pl'} validation_blastp_$BLASTP_db{$_}.xml >> validation_blastp.tab; ";
+            $cmdString3 = "$dirname/bin/parsing_blast_result.pl $config{'parsing_blast_result.pl'} --out-hit-confidence validation_blastp_$BLASTP_db{$_}.xml >> validation_blastp.tab; ";
         }
     }
     else {
         $cmdString2 = "diamond makedb --db homolog --in ../homolog.fasta &> diamond_makedb.log; diamond blastp $config{'diamond'} --outfmt 5 --db homolog --query proteins_for_filtering.fasta --out validation_blastp.xml --threads $cpu &> diamond_blastp.log";
-        $cmdString3 = "$dirname/bin/parsing_blast_result.pl $config{'parsing_blast_result.pl'} validation_blastp.xml > validation_blastp.tab";
+        $cmdString3 = "$dirname/bin/parsing_blast_result.pl $config{'parsing_blast_result.pl'} --out-hit-confidence validation_blastp.xml > validation_blastp.tab";
     }
     unless ( -e "07.validating.ok" ) {
         if ( $HMM_db ) {
@@ -1384,7 +1388,7 @@ geneModels.i.coding.gff3\t对geneModels.h.coding.gff3中的基因模型进行了
 
     # 6.8 根据HMM和BLASTP验证结果对基因模型进行过滤。
     # 获得验证通过的转录本ID
-    my $cmdString1 = "cat validation_*.tab > transcriptID_validating_passed.tab";
+    my $cmdString1 = "$dirname/bin/get_valid_transcripID $config{'get_valid_transcripID'} validation_hmmscan.tab validation_blastp.tab > transcriptID_validating_passed.tab";
     my $cmdString2 = "$dirname/bin/get_valid_geneModels $config{'get_valid_geneModels'} --out_prefix geneModels.h transcriptID_for_filtering.txt transcriptID_validating_passed.tab geneModels.gb.gff3 geneModels.ge.gff3 geneModels.gf.gff3 2> get_valid_geneModels.log";
     unless ( -e "08.get_valid_geneModels.ok" ) {
         print STDERR (localtime) . ": CMD: $cmdString1\n";
@@ -1583,9 +1587,11 @@ print OUT "$num_of_gene_predicted_by_AUGUSTUS genes were predicted by AUGUSTUS.\
 # (6) 获取基因预测整合过滤的统计信息
 print OUT "Statistics of the combination of 3 gene prediction methods and filtration of gene models:\n";
 open IN, "$out_prefix.tmp/6.combineGeneModels/geneModels.a.gff3" or die "Can not open file $out_prefix.tmp/6.combineGeneModels/geneModels.a.gff3, $!";
-my ($num_of_gene_a, $num_of_gene_b) = (0, 0);
+my ($num_of_gene_a, $num_of_gene_b, $num_of_gene_c, $num_of_gene_d) = (0, 0, 0, 0);
 while (<IN>) {
-    $num_of_gene_a ++ if m/\tgene\t/;
+    $num_of_gene_a ++ if (m/\tgene\t/ && m/augustus/);
+    $num_of_gene_c ++ if (m/\tgene\t/ && m/transfrag/);
+    $num_of_gene_d ++ if (m/\tgene\t/ && m/genewise/);
 }
 close IN;
 open IN, "$out_prefix.tmp/6.combineGeneModels/geneModels.b.gff3" or die "Can not open file $out_prefix.tmp/6.combineGeneModels/geneModels.b.gff3, $!";
@@ -1593,7 +1599,7 @@ while (<IN>) {
     $num_of_gene_b ++ if m/\tgene\t/;
 }
 close IN;
-print OUT "(1) After first round of combination in which the AUGUSTUS results were mainly used, $num_of_gene_a genes models were supported by enough eviences and $num_of_gene_b genes did not.\n";
+print OUT "(1) After first round of combination in which the AUGUSTUS results were mainly used, $num_of_gene_a genes models were supported by enough evidences, $num_of_gene_c genes models were come from transcript, $num_of_gene_d genes models were come from homolog, and $num_of_gene_b genes did not supported by enough evidences.\n";
 
 open IN, "$out_prefix.tmp/6.combineGeneModels/picked_evidence_geneModels.log" or die "Can not open file $out_prefix.tmp/6.combineGeneModels/picked_evidence_geneModels.log, $!";
 my ($number1, $number2, $number3) = (0, 0, 0);

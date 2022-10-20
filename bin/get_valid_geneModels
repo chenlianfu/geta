@@ -97,6 +97,7 @@ open IN, $inputFile_transcriptID_validating_passed or die "Can not open file $in
 <IN>;
 my (%valid_gene_ID, %valid_transcript_ID);
 while (<IN>) {
+    chomp;
     @_ = split /\t/;
     $valid_transcript_ID{$_[0]} = 1;
     $valid_gene_ID{$1} = 1 if $_[0] =~ m/(.*)\.t\d+/;
@@ -193,9 +194,9 @@ my $num_of_filtered_gene_ID = 0; $num_of_filtered_gene_ID = %filtered_gene_ID;
 print STDERR "其中，有 $num_of_candidate_gene 个基因因如下原因需要考虑过滤。对其相应的 $num_of_candidate_transcript_ID 个转录本的蛋白序列进行HMM或BLASTP验证。结果：有 $num_of_filtered_gene_ID 个基因未能通过验证。\n";
 print STDERR $out_stats;
 
-open OUT, ">", "aa1"; foreach ( keys %valid_gene_ID ) { print OUT "$_\n"; } close OUT;
-open OUT, ">", "aa2"; foreach ( keys %filtered_gene_ID ) { print OUT "$_\n"; } close OUT;
-open OUT, ">", "aa3"; foreach ( keys %lncRNA_gene_ID_validating_failed ) { print OUT "$_\n"; } close OUT;
+#open OUT, ">", "aa1"; foreach ( keys %valid_gene_ID ) { print OUT "$_\n"; } close OUT;
+#open OUT, ">", "aa2"; foreach ( keys %filtered_gene_ID ) { print OUT "$_\n"; } close OUT;
+#open OUT, ">", "aa3"; foreach ( keys %lncRNA_gene_ID_validating_failed ) { print OUT "$_\n"; } close OUT;
 
 print STDERR "\n########## 简洁统计 ##########\n";
 print STDERR "# 有 $num_of_all_gene_ID 个基因的 $num_of_all_transcript_ID 个转录本可能存在问题，需要进行HMM或BLASTP验证。结果表明：\n";

@@ -10,7 +10,7 @@ Usage:
     $0 [options] evidence.gff3 intron.gff augustusOut.gff3 > out.gff3
 
     程序能根据evidence.gff3中的exon信息，计算Augustus软件的输出结果augustusOut.gff3中每个基因CDS区域被支持的比例。在输出的GFF3结果中的gene feature第9列中增加或改变exonHintRatio标签的值。
-	程序能根据intron.gff中的intron信息，计算Augustus软件的输出结果augustusOut.gff3中每个基因的intron总数和支持的数量。在输出的GFF3结果中的gene feature第9列中增加或改变intronSupport标签的值。
+    程序能根据intron.gff中的intron信息，计算Augustus软件的输出结果augustusOut.gff3中每个基因的intron总数和支持的数量。在输出的GFF3结果中的gene feature第9列中增加或改变intronSupport标签的值。
 
     --help    default: None
     display this help and exit.
@@ -43,9 +43,9 @@ close IN;
 open IN, $ARGV[1] or die "Can not open file $ARGV[1], $!\n";
 my %evidence_intron;
 while (<IN>) {
-	next unless m/\tintron\t/;
-	@_ = split /\t/;
-	$evidence_intron{"$_[0]\t$_[3]\t$_[4]"} = 1;
+    next unless m/\tintron\t/;
+    @_ = split /\t/;
+    $evidence_intron{"$_[0]\t$_[3]\t$_[4]"} = 1;
 }
 close IN;
 
@@ -64,7 +64,7 @@ close IN;
 foreach my $gene (@gene_id) {
     my @line = split /\n/, $gene{$gene};
 
-	# 计算基因的CDS和证据的重叠比例
+    # 计算基因的CDS和证据的重叠比例
     my @CDS = grep { m/\tCDS\t/ } @line;
     my ($total_length, $overlap_length) = (0, 0);
     foreach (@CDS) {
@@ -77,45 +77,45 @@ foreach my $gene (@gene_id) {
     $coverage = int($coverage * 10000 + 0.5) / 100;
     my $gene_info = $gene{$gene};
 
-	# 计算intron的总数和证据支持数量
-	my %intron;
-	foreach ( @line ) {
-		next unless m/\tintron\t/;
-		@_ = split /\t/;
-		$intron{"$_[0]\t$_[3]\t$_[4]"} = 1;
-	}
-	my $total_num_of_intron = 0;
-	$total_num_of_intron = %intron if %intron;
-	my $num_of_supported_intron = 0;
-	foreach ( keys %intron ) {
-		$num_of_supported_intron ++ if exists $evidence_intron{$_};
-	}
+    # 计算intron的总数和证据支持数量
+    my %intron;
+    foreach ( @line ) {
+        next unless m/\tintron\t/;
+        @_ = split /\t/;
+        $intron{"$_[0]\t$_[3]\t$_[4]"} = 1;
+    }
+    my $total_num_of_intron = 0;
+    $total_num_of_intron = %intron if %intron;
+    my $num_of_supported_intron = 0;
+    foreach ( keys %intron ) {
+        $num_of_supported_intron ++ if exists $evidence_intron{$_};
+    }
 
-	# 修改GFF3文件中gene的attribute信息
-	my $gene_info = $gene{$gene};
-	my $attr = $1 if $gene_info =~ m/\tgene\t.*(ID=.*)/;
-	my (%attr, %sort, $code);
-	foreach ( split /;/, $attr ) {
-		$code ++;
-		if ( m/(.*?)=(.*)/ ) {
-			$attr{$1} = $2;
-			$sort{$1} = $code;
-		}
-	}
-	#print STDERR "$gene\t$num_of_supported_intron/$total_num_of_intron\t$attr{'intronSupport'}\n" if "$num_of_supported_intron/$total_num_of_intron" ne $attr{"intronSupport"};
-	$attr{"intronSupport"} = "$num_of_supported_intron/$total_num_of_intron";
-	$code ++;
-	$sort{"intronSupport"} = $code unless exists $sort{"intronSupport"};
-	$attr{"exonHintRatio"} = $coverage;
-	$code ++;
-	$sort{"exonHintRatio"} = $code unless exists $sort{"exonHintRatio"};
-	my (@attr_neww, $attr_new);
-	foreach ( sort {$sort{$a} <=> $sort{$b}} keys %attr ) {
-		push @attr_neww, "$_=$attr{$_}";
-	}
-	$attr_new = join ";", @attr_neww;
-	$gene_info =~ s/$attr/$attr_new/;
-	print $gene_info;
+    # 修改GFF3文件中gene的attribute信息
+    my $gene_info = $gene{$gene};
+    my $attr = $1 if $gene_info =~ m/\tgene\t.*(ID=.*)/;
+    my (%attr, %sort, $code);
+    foreach ( split /;/, $attr ) {
+        $code ++;
+        if ( m/(.*?)=(.*)/ ) {
+            $attr{$1} = $2;
+            $sort{$1} = $code;
+        }
+    }
+    #print STDERR "$gene\t$num_of_supported_intron/$total_num_of_intron\t$attr{'intronSupport'}\n" if "$num_of_supported_intron/$total_num_of_intron" ne $attr{"intronSupport"};
+    $attr{"intronSupport"} = "$num_of_supported_intron/$total_num_of_intron";
+    $code ++;
+    $sort{"intronSupport"} = $code unless exists $sort{"intronSupport"};
+    $attr{"exonHintRatio"} = $coverage;
+    $code ++;
+    $sort{"exonHintRatio"} = $code unless exists $sort{"exonHintRatio"};
+    my (@attr_neww, $attr_new);
+    foreach ( sort {$sort{$a} <=> $sort{$b}} keys %attr ) {
+        push @attr_neww, "$_=$attr{$_}";
+    }
+    $attr_new = join ";", @attr_neww;
+    $gene_info =~ s/$attr/$attr_new/;
+    print $gene_info;
 }
 
 

@@ -24,8 +24,8 @@ my %hints;
 open IN, $ARGV[0] or die "Can not open the file $ARGV[0], $!\n";
 while (<IN>) {
     chomp;
-	@_ = split /\t/;
-	$hints{"$_[1]\t\.\tintron\t$_[3]\t$_[4]\t$_[5]\t$_[2]\t\.\tmult=$_[5];pri=4;src=W"} = 1;
+    @_ = split /\t/;
+    $hints{"$_[1]\t\.\tintron\t$_[3]\t$_[4]\t$_[5]\t$_[2]\t\.\tmult=$_[5];pri=4;src=W"} = 1;
 }
 close IN;
 

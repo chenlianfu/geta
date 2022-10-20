@@ -1,0 +1,94 @@
+#!/usr/bin/env perl
+
+use strict;
+use Getopt::Long;
+use Cwd qw/abs_path getcwd cwd/;
+
+my $usage = <<USAGE;
+Usage:
+    $0 [options] validation_hmmscan.tab validation_blastp.tab > transcriptID_validating_passed.tab
+    
+    程序分析两种算法分别得到的有效转录本ID信息，进一步使用更严格的算法得到有效的转录本ID。更严格的算法：（1）若两种算法共有的转录本ID，则输出到结果中；（2）若仅一种算法中有的转录本ID，需要满足如下参数中设置的更严格阈值，才输出到结果中。
+
+    --hmm_evalue <float>    default: 1e-7
+    --hmm_coverage <float>    default: 0.4
+    --blast_evalue <float>    default: 1e-10
+    --blast_CIP <float>    default: 0.5
+    --blast_coverage <float>    default: 0.5
+    当转录本ID仅在一种算法中通过时，采用如上更严格的颜值。
+
+    --help    default: None
+    display this help and exit.
+
+USAGE
+if (@ARGV==0){die $usage}
+
+my ($help_flag, $hmm_evalue, $hmm_coverage, $blast_evalue, $blast_CIP, $blast_coverage);
+GetOptions(
+    "help" => \$help_flag,
+    "hmm_evalue:f" => \$hmm_evalue,
+    "hmm_coverage:f" => \$hmm_coverage,
+    "blast_evalue:f" => \$blast_evalue,
+    "blast_CIP:f" => \$blast_CIP,
+    "blast_coverage:f" => \$blast_coverage,
+);
+$hmm_evalue ||= 1e-7;
+$hmm_coverage ||= 0.4;
+$blast_evalue ||= 1e-10;
+$blast_CIP ||= 0.5;
+$blast_coverage ||= 0.5;
+
+if ( $help_flag ) { die $usage }
+
+# 读取 HMM 算法的有效 transcriptID
+open IN, $ARGV[0] or die "Can not open file $ARGV[0], $!";
+my %hmm_transcriptID;
+<IN>;
+while (<IN>) {
+    $hmm_transcriptID{$1} = 1 if m/^(\S+)/;
+}
+close IN;
+
+# 读取 BLAST 算法的有效 transcriptID
+open IN, $ARGV[1] or die "Can not open file $ARGV[1], $!";
+my %blast_transcriptID;
+<IN>;
+while (<IN>) {
+    $blast_transcriptID{$1} = 1 if m/^(\S+)/;
+}
+close IN;
+
+my %out_transcriptID;
+# 计算 HMM 算法的最终有效 transcriptID
+open IN, $ARGV[0] or die "Can not open file $ARGV[0], $!";
+<IN>;
+while (<IN>) {
+    chomp;
+    @_ = split /\t/;
+    if ( exists $blast_transcriptID{$_[0]} ) {
+        $out_transcriptID{$_[0]} = 1;
+    }
+    elsif ( $_[3] <= $hmm_evalue && $_[5] >= $hmm_coverage ) {
+        $out_transcriptID{$_[0]} = 1;
+    }    
+}
+close IN;
+
+# 计算 BLAST 算法的最终有效 transcriptID
+open IN, $ARGV[1] or die "Can not open file $ARGV[0], $!";
+<IN>;
+while (<IN>) {
+    chomp;
+    @_ = split /\t/;
+    if ( exists $hmm_transcriptID{$_[0]} ) {
+        $out_transcriptID{$_[0]} = 1;
+    }
+    elsif ( $_[-3] <= $blast_CIP && $_[-2] >= $blast_coverage && $_[-1] >= $blast_coverage ) {
+        $out_transcriptID{$_[0]} = 1;
+    }
+}
+close IN;
+
+foreach ( sort keys %out_transcriptID ) {
+    print "$_\n";
+}
