@@ -97,6 +97,7 @@ while (<IN>) {
 }
 close IN;
 
+my ( $number1, $number2, $number3, $number4, $number5 ) = (0, 0, 0, 0, 0);
 foreach ( sort keys %out_transcriptID ) {
     if ( $both_required ) {
         print "$_\n" if ( exists $blast_transcriptID{$_} && exists $hmm_transcriptID{$_} );
@@ -104,7 +105,24 @@ foreach ( sort keys %out_transcriptID ) {
     else {
         print "$_\n";
     }
+    if ( exists $blast_transcriptID{$_} && exists $hmm_transcriptID{$_} ) {
+        $number1 ++;
+    }
+    elsif ( exists $hmm_transcriptID{$_} ) {
+        $nubmer2 ++;
+    }
+    elsif ( exists $blast_transcriptID{$_} ) {
+        $number3 ++;
+    }
 }
+$number4 = %blast_transcriptID;
+$number5 = %hmm_transcriptID;
+print STDERR "
+HMM有效转录本数量：                 $number4
+BLASTP有效转录本数量：              $number5；
+两种算法同时有效转录本数量：        $number1；
+HMM更严格阈值单独有效转录本数量：   $nubmer2；
+BLASTP更严格阈值单独有效转录本数量：$number3。\n";
 
 sub percentage2value {
     my $value = $1 if  $_[0] =~ m/([\d\.e-]+)/;
