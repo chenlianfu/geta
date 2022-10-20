@@ -193,7 +193,7 @@ my %config = (
     'diamond' => '--sensitive --max-target-seqs 20 --evalue 1e-5 --id 10 --index-chunks 1 --block-size 5',
     'parsing_blast_result.pl' => '--evalue 1e-9 --identity 0.1 --CIP 0.4 --subject-coverage 0.4 --query-coverage 0.4',
     'get_valid_geneModels' => '',
-    'get_valid_transcripID' => '--hmm_evalue 1e-7 --hmm_coverage 0.4 --blast_evalue 1e-10 --blast_CIP 0.5 --blast_coverage 0.5',
+    'get_valid_transcriptID' => '--hmm_evalue 1e-7 --hmm_coverage 0.4 --blast_evalue 1e-10 --blast_CIP 0.5 --blast_coverage 0.5',
     'remove_genes_in_repeats1' => '--ratio 0.3 --ignore_Simple_repeat --ignore_Unknown',
     'remove_genes_in_repeats2' => '--ratio 0.8',
     'remove_short_genes' => '--cds_length 300',
@@ -1385,7 +1385,8 @@ geneModels.i.coding.gff3\t对geneModels.h.coding.gff3中的基因模型进行了
 
     # 6.8 根据HMM和BLASTP验证结果对基因模型进行过滤。
     # 获得验证通过的转录本ID
-    my $cmdString1 = "$dirname/bin/get_valid_transcripID $config{'get_valid_transcripID'} validation_hmmscan.tab validation_blastp.tab > transcriptID_validating_passed.tab";
+    my $cmdString1 = "$dirname/bin/get_valid_transcriptID $config{'get_valid_transcriptID'} validation_hmmscan.tab validation_blastp.tab > transcriptID_validating_passed.tab";
+    unless ( -e "08.get_valid_transcriptID.ok" ) 
     my $cmdString2 = "$dirname/bin/get_valid_geneModels $config{'get_valid_geneModels'} --out_prefix geneModels.h transcriptID_for_filtering.txt transcriptID_validating_passed.tab geneModels.gb.gff3 geneModels.ge.gff3 geneModels.gf.gff3 2> get_valid_geneModels.log";
     unless ( -e "08.get_valid_geneModels.ok" ) {
         print STDERR (localtime) . ": CMD: $cmdString1\n";
