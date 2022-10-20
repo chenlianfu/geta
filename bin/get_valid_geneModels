@@ -85,13 +85,6 @@ while (<IN>) {
 }
 close IN;
 
-# 统计有问题的基因极其转录本数量。
-my $num_of_all_gene_ID = 0; $num_of_all_gene_ID = %all_gene_ID;
-my $num_of_all_transcript_ID = 0; $num_of_all_transcript_ID = %all_transcript_ID;
-my $total_number = %gene_info;
-my $ok_gene_num = $total_number - $num_of_all_gene_ID;
-print STDERR "总共输入了 $ok_gene_num 个基因，有 $num_of_all_gene_ID 个基因的 $num_of_all_transcript_ID 个转录本可能存在问题，需要进行HMM或BLASTP验证。有 $ok_gene_num 个基因不需要验证。";
-
 ########## 2. 读取第二个文件 ##########
 my $inputFile_transcriptID_validating_passed = shift @ARGV;
 open IN, $inputFile_transcriptID_validating_passed or die "Can not open file $inputFile_transcriptID_validating_passed, $!";
@@ -105,11 +98,6 @@ while (<IN>) {
     $valid_gene_ID{$1} = 1 if $_[0] =~ m/(.*)\.t\d+/;
 }
 close IN;
-
-# 统计有比对结果的基因和转录本数量。
-my $num_of_valid_gene_ID = 0; $num_of_valid_gene_ID = %valid_gene_ID;
-my $num_of_valid_transcript_ID = 0; $num_of_valid_transcript_ID = %valid_transcript_ID;
-print STDERR "结果：有 $num_of_valid_gene_ID 个基因的 $num_of_valid_transcript_ID 转录本通过了验证。\n";
 
 ########## 3. 读取GFF3文件 ##########
 # 将程序后输入的多个文件内容合并到一个文件中。
@@ -131,6 +119,18 @@ foreach my $gene_ID ( sort keys %gene_info ) {
         $transcriptID_of_gene{$gene_ID}{$mRNA_ID} = 1;
     }
 }
+
+# 统计有问题的基因及其转录本数量。
+my $num_of_all_gene_ID = 0; $num_of_all_gene_ID = %all_gene_ID;
+my $num_of_all_transcript_ID = 0; $num_of_all_transcript_ID = %all_transcript_ID;
+my $total_number = %gene_info;
+my $ok_gene_num = $total_number - $num_of_all_gene_ID;
+print STDERR "总共输入了 $ok_gene_num 个基因，有 $num_of_all_gene_ID 个基因的 $num_of_all_transcript_ID 个转录本可能存在问题，需要进行HMM或BLASTP验证。有 $ok_gene_num 个基因不需要验证。";
+
+# 统计有比对结果的基因和转录本数量。
+my $num_of_valid_gene_ID = 0; $num_of_valid_gene_ID = %valid_gene_ID;
+my $num_of_valid_transcript_ID = 0; $num_of_valid_transcript_ID = %valid_transcript_ID;
+print STDERR "结果：有 $num_of_valid_gene_ID 个基因的 $num_of_valid_transcript_ID 转录本通过了验证。\n";
 
 ########## 4. 分析并统计需要过滤的基因 ##########
 # 统计lncRNA数量
