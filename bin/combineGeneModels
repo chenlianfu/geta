@@ -28,17 +28,19 @@ Usage:
     --min_augustus_transcriptSupport_percentage <float>    default: 10.0
     --min_augustus_intronSupport_number <int>    default: 1
     --min_augustus_intronSupport_ratio <float>    default: 0.01
-    Augustus预测的基因模型结果中包含有hints支持信息。默认阈值下：若基因模型中转录本序列 >=10.0% 区域有hints支持，或 (>= 1个intron有hints支持 && >= 0.01比例的intron有hints支持), 则认为接受该基因模型作为可靠的结果。否则，认为该基因模型属于ab initio预测结果，需要进一步验证。
+    --more_strict    default: None
+    Augustus预测的基因模型结果中包含有hints支持信息。默认阈值下：若基因模型中转录本序列 >=10.0% 区域有hints支持，或/且 (当添加--more_strict参数时，为且，默认为或) (>= 1个intron有hints支持 && >= 0.01比例的intron有hints支持), 则认为接受该基因模型作为可靠的结果。否则，认为该基因模型属于ab initio预测结果，需要进一步验证。
 
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($overlap, $min_augustus_transcriptSupport_percentage, $min_augustus_intronSupport_number, $min_augustus_intronSupport_ratio);
+my ($overlap, $min_augustus_transcriptSupport_percentage, $min_augustus_intronSupport_number, $min_augustus_intronSupport_ratio, $more_strict);
 GetOptions(
     "overlap:i" => \$overlap,
     "min_augustus_transcriptSupport_percentage:f" => \$min_augustus_transcriptSupport_percentage,
     "min_augustus_intronSupport_number:i" => \$min_augustus_intronSupport_number,
     "min_augustus_intronSupport_ratio:f" => \$min_augustus_intronSupport_ratio,
+    "more_strict" => \$more_strict,
 );
 $overlap ||= 30;
 $min_augustus_transcriptSupport_percentage ||= 10.0;
@@ -311,15 +313,21 @@ foreach my $gene_id (@aug_gene) {
     my @gene_pos = sort {$a <=> $b} keys %gene_pos;
     $out = "$chr\t\.\tgene\t$gene_pos[0]\t$gene_pos[-1]\t$gene_score\t$strand\t\.\tID=$gene_id;Augustus_transcriptSupport_percentage=$augustus_transcriptSupport_percentage;Augustus_intronSupport=$augustus_intronSupport;\n" . $out;
 
-    if ( ($augustus_transcriptSupport_percentage >= $min_augustus_transcriptSupport_percentage) or ($augustus_intronSupport_number >= $min_augustus_intronSupport_number && $augustus_intronSupport_ratio >= $min_augustus_intronSupport_ratio) ) {
-        print "$out\n";
+    if ( $more_strict ) {
+        if ( ($augustus_transcriptSupport_percentage >= $min_augustus_transcriptSupport_percentage) && ($augustus_intronSupport_number >= $min_augustus_intronSupport_number && $augustus_intronSupport_ratio >= $min_augustus_intronSupport_ratio) ) {
+            print "$out\n";
+        }
+        else {
+            print STDERR "$out\n";
+        }
     }
-    #elsif ($if_intron_support == 1) {
-    #    $out =~ s/(\tgene\t.*?);?\n/$1;NeedRevise=1;\n/;
-    #    print "$out\n";
-    #}
     else {
-        print STDERR "$out\n";
+        if ( ($augustus_transcriptSupport_percentage >= $min_augustus_transcriptSupport_percentage) or ($augustus_intronSupport_number >= $min_augustus_intronSupport_number && $augustus_intronSupport_ratio >= $min_augustus_intronSupport_ratio) ) {
+            print "$out\n";
+        }
+        else {
+            print STDERR "$out\n";
+        }
     }
 }
 

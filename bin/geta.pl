@@ -371,7 +371,16 @@ unless (-e "1.trimmomatic.ok") {
         my $paraFly_CPU = $cpu / 8; $paraFly_CPU = 1 if $paraFly_CPU < 1;
         $cmdString = "ParaFly -c command.trimmomatic_pe.list -CPU $paraFly_CPU &> /dev/null";
         print STDERR (localtime) . ": CMD: $cmdString\n";
-        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+        unless ( system("$cmdString") == 0 ) {
+			# 特殊情况下 Fastq 文件中碱基质量全部为固定的值时，Trimmomatic不能自动检测phred格式而运行失败。于是强制指定为phred33，符合常规情况。
+			$cmdString = "perl -pe 's/ PE / PE -phred33 /' FailedCommands > command.trimmomatic_phred33; rm FailedCommands";
+			print STDERR (localtime) . ": CMD: $cmdString\n";
+			system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+
+			$cmdString = "ParaFly -c command.trimmomatic_phred33 -CPU $paraFly_CPU &> /dev/null";
+			print STDERR (localtime) . ": CMD: $cmdString\n";
+			system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+		}
     }
     if ($single_end) {
         my @se_reads = sort keys %se_reads;
@@ -389,6 +398,15 @@ unless (-e "1.trimmomatic.ok") {
         my $paraFly_CPU = $cpu / 8; $paraFly_CPU = 1 if $paraFly_CPU < 1;
         $cmdString = "ParaFly -c command.trimmomatic_pe.list -CPU $paraFly_CPU &> /dev/null";
         print STDERR (localtime) . ": CMD: $cmdString\n";
+		unless ( system("$cmdString") == 0 ) {
+			$cmdString = "perl -pe 's/ SE / SE -phred33 /' FailedCommands > command.trimmomatic_phred33; rm FailedCommands";
+			print STDERR (localtime) . ": CMD: $cmdString\n";
+			system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+
+			$cmdString = "ParaFly -c command.trimmomatic_phred33 -CPU $paraFly_CPU &> /dev/null";
+			print STDERR (localtime) . ": CMD: $cmdString\n";
+			system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+		}
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
     }
     chdir "../";

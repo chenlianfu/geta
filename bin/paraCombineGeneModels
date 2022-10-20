@@ -21,13 +21,14 @@ Usage:
     --min_augustus_transcriptSupport_percentage <float>    default: 10.0
     --min_augustus_intronSupport_number <int>    default: 1
     --min_augustus_intronSupport_ratio <float>    default: 0.01
-    Augustus预测的基因模型结果中包含有hints支持信息。默认阈值下：若基因模型中转录本序列 >=10.0% 区域有hints支持，或 (>= 1个intron有hints支持 && >= 0.01比例的intron有hints支持), 则认为接受该基因模型作为可靠的结果。否则，认为该基因模型属于ab initio预测结果，需要进一步验证。
+    --more_strict    default: None
+    Augustus预测的基因模型结果中包含有hints支持信息。默认阈值下：若基因模型中转录本序列 >=10.0% 区域有hints支持，或/且 (当添加--more_strict参数时，为且，默认为或) (>= 1个intron有hints支持 && >= 0.01比例的intron有hints支持), 则认为接受该基因模型作为可靠的结果。否则，认为该基因模型属于ab initio预测结果，需要进一步验证。
 
 
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($cpu, $tmp, $overlap, $min_augustus_transcriptSupport_percentage, $min_augustus_intronSupport_number, $min_augustus_intronSupport_ratio);
+my ($cpu, $tmp, $overlap, $min_augustus_transcriptSupport_percentage, $min_augustus_intronSupport_number, $more_strict, $min_augustus_intronSupport_ratio);
 GetOptions(
     "cpu:i" => \$cpu,
     "tmp:s" => \$tmp,
@@ -35,6 +36,7 @@ GetOptions(
     "min_augustus_transcriptSupport_percentage:f" => \$min_augustus_transcriptSupport_percentage,
     "min_augustus_intronSupport_number:i" => \$min_augustus_intronSupport_number,
     "min_augustus_intronSupport_ratio:f" => \$min_augustus_intronSupport_ratio,
+    "more_strict" => \$more_strict,
 );
 
 $cpu ||= 1;
@@ -44,7 +46,13 @@ $min_augustus_transcriptSupport_percentage ||= 10.0;
 $min_augustus_intronSupport_number ||= 1;
 $min_augustus_intronSupport_ratio ||= 0.01;
 my $dirname = dirname($0);
-my $cmd_name = "$dirname/combineGeneModels --overlap $overlap --min_augustus_transcriptSupport_percentage $min_augustus_transcriptSupport_percentage --min_augustus_intronSupport_number $min_augustus_intronSupport_number --min_augustus_intronSupport_ratio $min_augustus_intronSupport_ratio";
+my $cmd_name;
+if ( $more_strict ) {
+    $cmd_name = "$dirname/combineGeneModels --overlap $overlap --min_augustus_transcriptSupport_percentage $min_augustus_transcriptSupport_percentage --min_augustus_intronSupport_number $min_augustus_intronSupport_number --min_augustus_intronSupport_ratio $min_augustus_intronSupport_ratio --more_strict";
+}
+else {
+    $cmd_name = "$dirname/combineGeneModels --overlap $overlap --min_augustus_transcriptSupport_percentage $min_augustus_transcriptSupport_percentage --min_augustus_intronSupport_number $min_augustus_intronSupport_number --min_augustus_intronSupport_ratio $min_augustus_intronSupport_ratio";
+}
 
 my %chr;
 open IN, $ARGV[0] or die $!;
