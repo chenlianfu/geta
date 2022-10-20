@@ -109,7 +109,7 @@ foreach ( sort keys %out_transcriptID ) {
         $number1 ++;
     }
     elsif ( exists $hmm_transcriptID{$_} ) {
-        $nubmer2 ++;
+        $number2 ++;
     }
     elsif ( exists $blast_transcriptID{$_} ) {
         $number3 ++;
