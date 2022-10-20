@@ -189,7 +189,6 @@ foreach (@chunk) {
                 chomp;
                 @_ = split /\s+/;
                 $evalue = $_[6];
-		next if $evalue > $evalue2;
                 push @match_region_of_hmm, "$_[15]\t$_[16]";
                 $hmm_len = $_[2];
                 $accession = $_[1];
@@ -198,7 +197,8 @@ foreach (@chunk) {
                 $description = join " ", @_;
             }
             my $match_length = &match_length(@match_region_of_hmm);
-            my $hmm_coverage = $match_length / $hmm_len;
+            my $hmm_coverage = 0;
+			$hmm_coverage = $match_length / $hmm_len if $hmm_len;
             next if $hmm_coverage < $coverage;
             next if $evalue > $evalue2;
             next if ($hmm_len >= $hmm_length && $evalue > $evalue1);
