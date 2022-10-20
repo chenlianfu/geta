@@ -1385,7 +1385,7 @@ geneModels.i.coding.gff3\t对geneModels.h.coding.gff3中的基因模型进行了
 
     # 6.8 / 6.9 根据HMM和BLASTP验证结果对基因模型进行过滤。
     # 获得验证通过的转录本ID
-    my $cmdString = "$dirname/bin/get_valid_transcriptID $config{'get_valid_transcriptID'} validation_hmmscan.tab validation_blastp.tab > transcriptID_validating_passed.tab";
+    my $cmdString = "$dirname/bin/get_valid_transcriptID $config{'get_valid_transcriptID'} validation_hmmscan.tab validation_blastp.tab > transcriptID_validating_passed.tab 2> get_valid_transcriptID.log";
     unless ( -e "08.get_valid_transcriptID.ok" ) {
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";

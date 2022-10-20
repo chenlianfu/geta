@@ -22,7 +22,7 @@ Usage:
     设置蛋白序列对hmm模型的覆盖度阈值。
 
     --no_cut_ga    default: none
-    默认设置下，运行hmmscan命令时使用了--cut_ga参数。但当输入的HMM数据库并不是PFam-A时，其HMM数据库中并不包含GA信息，会导致hmmscan运行失败。此时，需要添加该参数，则不会在hmmscan命令中使用--cut_ga参数，从而避免程序运行失败。
+    默认设置下，运行hmmscan命令时使用了--cut_ga参数。但当输入的HMM数据库并不是PFam-A时，其HMM数据库中并不包含GA信息，会导致hmmscan运行失败。此时，需要添加该参数，则不会在hmmscan命令中使用--cut_ga参数，从而避免程序运行失败。运行hmmscan命令时默认使用了--cut_ga参数，则不能同时使用-E和--domE参数。当添加--no_cut_ga参数后，程序默认会加入-E 0.001 --domE 0.001参数运行hmmscan命令，后续在使用本程序中的--evalue1 --evalue2 --hmm_length --coverage参数对hmmscan结果进一步进行过滤。
 
     --chunk <in>    default: 100
     设置每个数据块的protein序列条数。程序将protein.fasta序列从头到尾的分割成多份，每100条相邻的序列分配到一个fasta文件中；每个fasta文件写出一条hmmscan命令。
@@ -136,7 +136,7 @@ foreach my $seq_ID ( sort keys %seq ) {
         open OUT, ">", "$tmp_prefix.tmp/chunk.$chunk_number.fasta" or die "Can not create file $tmp_prefix.tmp/chunk.$chunk_number.fasta\n$!\n";
         print OUT $fasta;
         my $out = "hmmscan --cpu $hmmscan_cpu --cut_ga -o $tmp_prefix.tmp/chunk.$chunk_number.txt --tblout $tmp_prefix.tmp/chunk.$chunk_number.tbl --domtblout $tmp_prefix.tmp/chunk.$chunk_number.domtbl --pfamtblout $tmp_prefix.tmp/chunk.$chunk_number.pfamtbl $hmm_db $tmp_prefix.tmp/chunk.$chunk_number.fasta\n";
-        $out =~ s/--cut_ga// if $no_cut_ga;
+        $out =~ s/--cut_ga/-E 0.001 --domE 0.001/ if $no_cut_ga;
         print CMD $out;
         close OUT;
         $number  = 1;
@@ -150,7 +150,7 @@ if ($fasta) {
     push @chunk, "$tmp_prefix.tmp/chunk.$chunk_number";
     open OUT, ">", "$tmp_prefix.tmp/chunk.$chunk_number.fasta" or die "Can not create file $tmp_prefix.tmp/chunk.$chunk_number.fasta\n$!\n";
     my $out = "hmmscan --cpu $hmmscan_cpu --cut_ga -o $tmp_prefix.tmp/chunk.$chunk_number.txt --tblout $tmp_prefix.tmp/chunk.$chunk_number.tbl --domtblout $tmp_prefix.tmp/chunk.$chunk_number.domtbl --pfamtblout $tmp_prefix.tmp/chunk.$chunk_number.pfamtbl $hmm_db $tmp_prefix.tmp/chunk.$chunk_number.fasta\n";
-    $out =~ s/--cut_ga// if $no_cut_ga;
+    $out =~ s/--cut_ga/-E 0.001 --domE 0.001/ if $no_cut_ga;
     print CMD $out;
     print OUT $fasta;
     close OUT;

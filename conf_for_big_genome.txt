@@ -11,13 +11,13 @@
 --min_CDS_ratio 0.5 --min_CDS_length 750 --max_repeat_overlap_ratio 0.2 --ignore_repeat_Name Simple_repeat,Low_complexity,Satellite,Unknown,Tandem_repeat
 
 [para_hmmscan]
---evalue1 1e-8 --evalue2 1e-5 --hmm_length 80 --coverage 0.3 --no_cut_ga --chunk 20 --hmmscan_cpu 2
+--evalue1 1e-10 --evalue2 1e-6 --hmm_length 80 --coverage 0.5 --no_cut_ga --chunk 20 --hmmscan_cpu 2
 
 [parsing_blast_result.pl]
---evalue 1e-9 --identity 0.1 --CIP 0.4 --subject-coverage 0.4 --query-coverage 0.4
+--evalue 1e-10 --identity 0.1 --CIP 0.5 --subject-coverage 0.5 --query-coverage 0.5
 
 [get_valid_transcriptID]
---hmm_evalue 1e-10 --hmm_coverage 0.6 --blast_evalue 1e-15 --blast_CIP 0.7 --blast_coverage 0.7
+--hmm_evalue 1e-20 --hmm_coverage 0.8 --blast_evalue 1e-20 --blast_CIP 0.8 --blast_coverage 0.8
 # add --both_required for more strcit.
 
 [get_valid_geneModels]
