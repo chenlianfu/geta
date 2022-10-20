@@ -1623,7 +1623,7 @@ open IN, "$out_prefix.tmp/6.combineGeneModels/get_valid_geneModels.log" or die "
 $_ = <IN>; 
 close IN;
 my @number = m/(\d+)/g;
-print OUT "(4) HMM and BLASTP validation were performed to $number[2] protein sequences of $number[1] genes, and $number[5] protein sequences of $number[4] genes had valid alignment results. There are $_[3] accurate gene models which did not need validation\n";
+print OUT "(4) HMM and BLASTP validation were performed to $number[2] protein sequences of $number[1] genes, and $number[5] protein sequences of $number[4] genes had valid alignment results. There are $number[3] accurate gene models which did not need validation.\n";
 
 open IN, "$out_prefix.GeneModels.gff3" or die "Can not open file $out_prefix.GeneModels.gff3, $!";
 my (%gene_ID, %gene2transcript, $num_augustus, $num_transfrag, $num_genewise);
