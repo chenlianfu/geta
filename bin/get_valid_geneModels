@@ -322,7 +322,8 @@ my $number3 = %geneModelsID_lncRNA2;
 my $number4 = %geneModelsID_lowQuality;
 my $number5 = $number2 + $number3;
 my $total_number = %gene_info;
-print STDERR "\n总共输入了 $total_number 个基因；
+my $ok_gene_num = $total_number - $num_of_all_gene_ID;
+print STDERR "\n总共输入了 $total_number 个基因，其中不需要进行过滤的准确基因有 $ok_gene_num 个，对 $num_of_all_gene_ID 个基因进行过滤后，将所有基因分成了如下三类；
 编码基因有 $number1 个，保存到了 $out_prefix.coding.gff3 文件中；
 lncRNA基因有 $number5 个，保存到了 $out_prefix.lncRNA.gff3 文件中（同时因b-f五种原因过滤的有 $number2 个，所有转录本全是 lncRNA 的有 $number3  个）；
 低质量基因有 $number4 个，保存到了 $out_prefix.lowQuality.gff3 文件中。\n";
