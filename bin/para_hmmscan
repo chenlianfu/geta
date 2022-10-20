@@ -188,9 +188,10 @@ foreach (@chunk) {
             foreach (split /\n/, $line) {
                 chomp;
                 @_ = split /\s+/;
+                $evalue = $_[6];
+		next if $evalue > $evalue2;
                 push @match_region_of_hmm, "$_[15]\t$_[16]";
                 $hmm_len = $_[2];
-                $evalue = $_[6];
                 $accession = $_[1];
                 $score = $_[7];
                 foreach (1..22) { shift @_; }
