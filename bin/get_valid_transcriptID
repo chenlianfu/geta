@@ -121,7 +121,7 @@ print STDERR "
 HMM有效转录本数量：                 $number4
 BLASTP有效转录本数量：              $number5；
 两种算法同时有效转录本数量：        $number1；
-HMM更严格阈值单独有效转录本数量：   $nubmer2；
+HMM更严格阈值单独有效转录本数量：   $number2；
 BLASTP更严格阈值单独有效转录本数量：$number3。\n";
 
 sub percentage2value {
