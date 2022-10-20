@@ -17,13 +17,16 @@ Usage:
     --blast_coverage <float>    default: 0.5
     当转录本ID仅在一种算法中通过时，采用如上更严格的颜值。
 
+    --both_required    default: None
+    当添加本参数时，仅输出两种算法中同时有效的转录本ID。
+
     --help    default: None
     display this help and exit.
 
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($help_flag, $hmm_evalue, $hmm_coverage, $blast_evalue, $blast_CIP, $blast_coverage);
+my ($help_flag, $hmm_evalue, $hmm_coverage, $blast_evalue, $blast_CIP, $blast_coverage, $both_required);
 GetOptions(
     "help" => \$help_flag,
     "hmm_evalue:f" => \$hmm_evalue,
@@ -31,6 +34,7 @@ GetOptions(
     "blast_evalue:f" => \$blast_evalue,
     "blast_CIP:f" => \$blast_CIP,
     "blast_coverage:f" => \$blast_coverage,
+    "both_required" => \$both_required,
 );
 $hmm_evalue ||= 1e-7;
 $hmm_coverage ||= 0.4;
@@ -90,5 +94,10 @@ while (<IN>) {
 close IN;
 
 foreach ( sort keys %out_transcriptID ) {
-    print "$_\n";
+    if ( $both_required ) {
+        print "$_\n" if ( exists $blast_transcriptID{$_} && exists $hmm_transcriptID{$_} );
+    }
+    else {
+        print "$_\n";
+    }
 }
