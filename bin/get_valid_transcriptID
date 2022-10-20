@@ -107,7 +107,7 @@ foreach ( sort keys %out_transcriptID ) {
 }
 
 sub percentage2value {
-    my $value = 1 if m/([\d\.e-]+)/;
+    my $value = $1 if  $_[0] =~ m/([\d\.e-]+)/;
     $value = $value / 100;
     return $value;
 }
