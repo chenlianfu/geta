@@ -89,7 +89,6 @@ close IN;
 my $inputFile_transcriptID_validating_passed = shift @ARGV;
 open IN, $inputFile_transcriptID_validating_passed or die "Can not open file $inputFile_transcriptID_validating_passed, $!";
 # 得到所有的有效的转录本ID。
-<IN>;
 my (%valid_gene_ID, %valid_transcript_ID);
 while (<IN>) {
     chomp;
