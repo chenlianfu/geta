@@ -117,17 +117,23 @@ foreach ( sort keys %out_transcriptID ) {
 }
 $number4 = %blast_transcriptID;
 $number5 = %hmm_transcriptID;
-my ($number6, $number7, $number8, $number9) = (0, 0, 0, 0);
+my ($number6, $number7, $number8, $number9, $number10, $number11, $number12) = (0, 0, 0, 0, 0, 0, 0);
 $number6 = $number4 - $number1;
 $number7 = $number5 - $number1;
 $number8 = int($number2 * 100 / $number6) / 100 if $number6;
 $number9 = int($number3 * 100 / $number7) / 100 if $number7;
-print STDERR "
-HMM有效转录本数量：                 $number4
+$number10 = $number1 + $number2 + $number3;
+$number11 = $number1 + $number6 + $number7;
+$number12 = int($number10 * 100 / $number11) / 100 if $number11;
+
+
+print STDERR "HMM有效转录本数量：                 $number4
 BLASTP有效转录本数量：              $number5
 两种算法同时有效转录本数量：        $number1
 HMM更严格阈值单独有效转录本数量：   $number2 / $number6 = $number8
-BLASTP更严格阈值单独有效转录本数量：$number3 / $number7 = $number9\n";
+BLASTP更严格阈值单独有效转录本数量：$number3 / $number7 = $number9
+最终有效的转录本数量：              $number10 / $number11 = $number12
+";
 
 sub percentage2value {
     my $value = $1 if  $_[0] =~ m/([\d\.e-]+)/;
