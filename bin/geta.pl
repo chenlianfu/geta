@@ -415,6 +415,28 @@ unless (-e "1.trimmomatic.ok") {
 }
 else {
     print STDERR "Skip Step 1 for the file 1.trimmomatic.ok exists\n";
+
+    # 跳过Trimmomatic步骤时，需要得到Clean data的数据文件名称，用于下个步骤的输入文件。
+    if ($pe1 && $pe2) {
+        my @pe_reads = sort keys %pe_reads;
+        my $pe_reads_num = @pe_reads;
+        my $number = 0;
+        foreach (@pe_reads) {
+            $number ++;
+            my $code = "0" x ( length($pe_reads_num) - length($number) ) . $number;
+            push @paired_end_reads_prefix, "reads$code";
+        }
+    }
+    if ($single_end) {
+        my @se_reads = sort keys %se_reads;
+        my $se_reads_num = @se_reads;
+        my $number = 0;
+        foreach (@se_reads) {
+            $number ++;
+            my $code = "0" x ( length($se_reads_num) - length($number) ) . $number;
+            push @single_end_reads_prefix, "reads$code";
+        }
+    }
 }
 
 # Step 2: HISAT2
@@ -466,7 +488,7 @@ unless (-e "2.hisat2.ok") {
     $cmdString = "hisat2 -x genome -p $cpu $input -S hisat2.sam $config{'hisat2'} 2> hisat2.log";
     unless (-e "hisat2.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
-        print STDERR "Warning: The HISAT2 parameter --rna-strandness may not set corretly !" if ( ($config{'hisat2'} =~ m/RF/) == 0 && $strand_specific);
+        #print STDERR "Warning: The HISAT2 parameter --rna-strandness may not set corretly !" if ( ($config{'hisat2'} =~ m/RF/) == 0 && $strand_specific);
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
         open OUT, ">", "hisat2.ok" or die $!; close OUT;
     }
@@ -474,7 +496,7 @@ unless (-e "2.hisat2.ok") {
         print STDERR "CMD(Skipped): $cmdString\n";
     }
 
-    $cmdString = "samtools sort  -o hisat2.sorted.bam -O BAM hisat2.sam";
+    $cmdString = "samtools sort -\@ $cpu -o hisat2.sorted.bam -O BAM hisat2.sam";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
     
