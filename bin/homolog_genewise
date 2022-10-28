@@ -110,9 +110,9 @@ else {
 
 my $cmdString = "makeblastdb -in genome.splitting_and_joining.fasta -dbtype nucl -title genome -parse_seqids -out genome &> makeblastdb.log";
 print "CMD 1/4: $cmdString\n";
-unless (-e "makeblastdb.ok") {
+unless (-e "1.makeblastdb.ok") {
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-    open OUT, ">", "makeblastdb.ok" or die $!; close OUT;
+    open OUT, ">", "1.makeblastdb.ok" or die $!; close OUT;
     print "1. Successfully Make Blast Database of genome.splitting_and_joining.fasta\n\n";
 }
 else {
@@ -125,7 +125,7 @@ my $blastpl_CPU = int($cpu / $blast_thread + 0.5);
 $blastpl_CPU = 1 if $blastpl_CPU < 1;
 $cmdString = "$path/para_blast --chunk_file 30 --chunk_dir 30 --blast_threads $blast_thread --CPU $blastpl_CPU --blast_program tblastn --evalue 1e-5 genome $homologProteinFastaFile 1e-5 > out.xml 2> para_blast.log; $path/para_blast --chunk_file 1 --chunk_dir 30 --blast_threads $blast_thread --CPU $blastpl_CPU --blast_program tblastn --evalue 1e-5 genome $homologProteinFastaFile 1e-5 > out.xml 2>> para_blast.log; parsing_blast_result.pl --no-header --evalue $evalue --subject-coverage 0.000000001 --query-coverage $coverage_ratio out.xml > out.tab";
 print "CMD 2/4: $cmdString\n";
-unless (-e "blast.ok") {
+unless (-e "2.blast.ok") {
     unlink "FailedCommands" if -e "FailedCommands";
     system("$cmdString") == 0 or die "failed to execute: $!\n";
     if ( -e "FailedCommands" ) { die "failed to execute: $cmdString\n"; }
@@ -149,7 +149,7 @@ unless (-e "blast.ok") {
     }
     close OUT;
 
-    open OUT, ">", "blast.ok" or die $!; close OUT;
+    open OUT, ">", "2.blast.ok" or die $!; close OUT;
     print "2. Successfully align homolog to genome by tblastn\n\n";
 }
 else {
@@ -158,9 +158,9 @@ else {
 
 $cmdString = "$path/homolog_blast2geneRegion out.correct.tab $homologProteinFastaFile $coverage_ratio $evalue $max_gene_length > homolog_gene_region.tab";
 print "CMD 3/4: $cmdString\n";
-unless (-e "blast2geneRegion.ok") {
+unless (-e "3.blast2geneRegion.ok") {
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-    open OUT, ">", "blast2geneRegion.ok" or die $!; close OUT;
+    open OUT, ">", "3.blast2geneRegion.ok" or die $!; close OUT;
     print "3. Successfully get homolog gene region information\n\n";
 }
 else {

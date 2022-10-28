@@ -1789,7 +1789,7 @@ sub detecting_dependent_softwares {
 # 检测服务器剩余可用内存容量，结果单位是 kB。
 sub get_MemAvailable {
     open IN, "/proc/meminfo" or die "Can not open file /proc/meminfo, $!";
-    my $MemAvailable,
+    my $MemAvailable;
     while (<IN>) {
         if (m/MemAvailable:\s*(\d+)\s*kB/) {
             $MemAvailable = $1;
