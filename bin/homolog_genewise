@@ -29,7 +29,7 @@ Usage:
     --evalue <float>    default: 1e-9
     进行tblastn分析时，要求对同源蛋白的evalue值不大于该值。
 
-    --max_gene_length <int>    default: 2000
+    --max_gene_length <int>    default: 20000
     程序调用homolog_blast2geneRegion进行分析时，需要设置该参数。一个蛋白序列与某条基因组序列若存在多个BLAST匹配区域，若相邻匹配区之间的距离低于此参数值，则认为这两个匹配区隶属于一个基因。
 
 USAGE
@@ -123,7 +123,7 @@ else {
 my $blast_thread = 1;
 my $blastpl_CPU = int($cpu / $blast_thread + 0.5);
 $blastpl_CPU = 1 if $blastpl_CPU < 1;
-$cmdString = "$path/para_blast --chunk_file 30 --chunk_dir 30 --blast_threads $blast_thread --CPU $blastpl_CPU --blast_program tblastn --evalue 1e-5 genome $homologProteinFastaFile 1e-5 > out.xml 2> para_blast.log; $path/para_blast --chunk_file 1 --chunk_dir 30 --blast_threads $blast_thread --CPU $blastpl_CPU --blast_program tblastn --evalue 1e-5 genome $homologProteinFastaFile 1e-5 > out.xml 2>> para_blast.log; parsing_blast_result.pl --no-header --evalue $evalue --subject-coverage 0.000000001 --query-coverage $coverage_ratio out.xml > out.tab";
+$cmdString = "$path/para_blast --chunk_file 30 --chunk_dir 30 --blast_threads $blast_thread --CPU $blastpl_CPU --blast_program tblastn --evalue 1e-5 genome $homologProteinFastaFile 1e-5 > out.xml 2> para_blast.log; $path/para_blast --chunk_file 1 --chunk_dir 30 --blast_threads $blast_thread --CPU $blastpl_CPU --blast_program tblastn --evalue 1e-5 genome $homologProteinFastaFile 1e-5 > out.xml 2>> para_blast.log; $path/parsing_blast_result.pl --no-header --evalue $evalue --subject-coverage 0.000000001 --query-coverage $coverage_ratio out.xml > out.tab";
 print "CMD 2/4: $cmdString\n";
 unless (-e "2.blast.ok") {
     unlink "FailedCommands" if -e "FailedCommands";
