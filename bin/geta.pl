@@ -212,6 +212,10 @@ if ($config) {
     close IN;
 }
 
+# 检测剩余可用内存量
+my $MemAvailable = 0;
+$MemAvailable = &get_MemAvailable();
+
 # 生成临时文件夹
 mkdir "$out_prefix.tmp" unless -e "$out_prefix.tmp";
 chdir "$out_prefix.tmp";
@@ -356,6 +360,14 @@ my (@paired_end_reads_prefix, @single_end_reads_prefix);
 unless (-e "1.trimmomatic.ok") {
     chdir "1.trimmomatic";
     $pwd = `pwd`; print STDERR "PWD: $pwd";
+
+	# 计算Trimmomatic并行化数，同时考虑到单个Trimmomatic命令消耗16G内存。
+	$MemAvailable = &get_MemAvailable();
+    my $paraFly_CPU = 1; 
+	$paraFly_CPU = $cpu / 8 if $paraFly_CPU < ($cpu / 8);
+	$paraFly_CPU = $MemAvailable / 16000000 if $paraFly_CPU > ($MemAvailable / 16000000);
+	$paraFly_CPU = 1 if $paraFly_CPU < 1;
+
     if ($pe1 && $pe2) {
         my @pe_reads = sort keys %pe_reads;
         my $pe_reads_num = @pe_reads;
@@ -369,7 +381,6 @@ unless (-e "1.trimmomatic.ok") {
             print OUT "java -jar $dirname/Trimmomatic-0.38/trimmomatic-0.38.jar PE -threads 16 $_[0] $_[1] reads$code.1.fastq reads$code.1.unpaired.fastq reads$code.2.fastq reads$code.2.unpaired.fastq ILLUMINACLIP:$dirname/Trimmomatic-0.38/adapters/$config{'trimmomatic'} &> reads$code.trimmomatic.log\n";
         }
         close OUT;
-        my $paraFly_CPU = $cpu / 8; $paraFly_CPU = 1 if $paraFly_CPU < 1;
         $cmdString = "ParaFly -c command.trimmomatic_pe.list -CPU $paraFly_CPU &> /dev/null";
         print STDERR (localtime) . ": CMD: $cmdString\n";
         unless ( system("$cmdString") == 0 ) {
@@ -396,7 +407,6 @@ unless (-e "1.trimmomatic.ok") {
             print OUT "java -jar $dirname/Trimmomatic-0.38/trimmomatic-0.38.jar SE -threads $cpu $single_end reads$code.fastq ILLUMINACLIP:$dirname/Trimmomatic-0.38/adapters/$config{'trimmomatic'} &> reads$code.trimmomatic.log\n";
         }
         close OUT;
-        my $paraFly_CPU = $cpu / 8; $paraFly_CPU = 1 if $paraFly_CPU < 1;
         $cmdString = "ParaFly -c command.trimmomatic_pe.list -CPU $paraFly_CPU &> /dev/null";
         print STDERR (localtime) . ": CMD: $cmdString\n";
         unless ( system("$cmdString") == 0 ) {
@@ -496,7 +506,14 @@ unless (-e "2.hisat2.ok") {
         print STDERR "CMD(Skipped): $cmdString\n";
     }
 
-    $cmdString = "samtools sort -\@ $cpu -o hisat2.sorted.bam -O BAM hisat2.sam";
+	# samtools sort 命令最多消耗80%可用内存，并尽可能使用较多的CPU线程。
+	$MemAvailable = &get_MemAvailable();
+	my $samtools_sort_CPU = 1;
+	$samtools_sort_CPU = $cpu if $cpu > 1;
+	$samtools_sort_CPU = ($MemAvailable * 0.8 / 768 / 1024) if $samtools_sort_CPU > ($MemAvailable * 0.8 / 768 / 1024);
+	$samtools_sort_CPU = 1 if $samtools_sort_CPU < 1;
+
+    $cmdString = "samtools sort -\@ $samtools_sort_CPU -o hisat2.sorted.bam -O BAM hisat2.sam";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
     
@@ -1766,4 +1783,19 @@ sub detecting_dependent_softwares {
     my $pwd = `pwd`; chomp($pwd);
     print STDERR "PWD: $pwd\n";
     print STDERR (localtime) . ": CMD: $0 $command_line_geta\n\n"; 
+}
+
+
+# 检测服务器剩余可用内存容量，结果单位是 kB。
+sub get_MemAvailable {
+	open IN, "/proc/meminfo" or die "Can not open file /proc/meminfo, $!";
+	my $MemAvailable,
+	while (<IN>) {
+		if (m/MemAvailable:\s*(\d+)\s*kB/) {
+			$MemAvailable = $1;
+			next;
+		}
+	}
+	close IN;
+	return $MemAvailable;
 }
