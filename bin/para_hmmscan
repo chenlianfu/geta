@@ -198,7 +198,7 @@ foreach (@chunk) {
             }
             my $match_length = &match_length(@match_region_of_hmm);
             my $hmm_coverage = 0;
-			$hmm_coverage = $match_length / $hmm_len if $hmm_len;
+            $hmm_coverage = $match_length / $hmm_len if $hmm_len;
             next if $hmm_coverage < $coverage;
             next if $evalue > $evalue2;
             next if ($hmm_len >= $hmm_length && $evalue > $evalue1);

@@ -361,12 +361,12 @@ unless (-e "1.trimmomatic.ok") {
     chdir "1.trimmomatic";
     $pwd = `pwd`; print STDERR "PWD: $pwd";
 
-	# 计算Trimmomatic并行化数，同时考虑到单个Trimmomatic命令消耗16G内存。
-	$MemAvailable = &get_MemAvailable();
+    # 计算Trimmomatic并行化数，同时考虑到单个Trimmomatic命令消耗16G内存。
+    $MemAvailable = &get_MemAvailable();
     my $paraFly_CPU = 1; 
-	$paraFly_CPU = $cpu / 8 if $paraFly_CPU < ($cpu / 8);
-	$paraFly_CPU = $MemAvailable / 16000000 if $paraFly_CPU > ($MemAvailable / 16000000);
-	$paraFly_CPU = 1 if $paraFly_CPU < 1;
+    $paraFly_CPU = $cpu / 8 if $paraFly_CPU < ($cpu / 8);
+    $paraFly_CPU = $MemAvailable / 16000000 if $paraFly_CPU > ($MemAvailable / 16000000);
+    $paraFly_CPU = 1 if $paraFly_CPU < 1;
 
     if ($pe1 && $pe2) {
         my @pe_reads = sort keys %pe_reads;
@@ -506,12 +506,12 @@ unless (-e "2.hisat2.ok") {
         print STDERR "CMD(Skipped): $cmdString\n";
     }
 
-	# samtools sort 命令最多消耗80%可用内存，并尽可能使用较多的CPU线程。
-	$MemAvailable = &get_MemAvailable();
-	my $samtools_sort_CPU = 1;
-	$samtools_sort_CPU = $cpu if $cpu > 1;
-	$samtools_sort_CPU = ($MemAvailable * 0.8 / 768 / 1024) if $samtools_sort_CPU > ($MemAvailable * 0.8 / 768 / 1024);
-	$samtools_sort_CPU = 1 if $samtools_sort_CPU < 1;
+    # samtools sort 命令最多消耗80%可用内存，并尽可能使用较多的CPU线程。
+    $MemAvailable = &get_MemAvailable();
+    my $samtools_sort_CPU = 1;
+    $samtools_sort_CPU = $cpu if $cpu > 1;
+    $samtools_sort_CPU = ($MemAvailable * 0.8 / 768 / 1024) if $samtools_sort_CPU > ($MemAvailable * 0.8 / 768 / 1024);
+    $samtools_sort_CPU = 1 if $samtools_sort_CPU < 1;
 
     $cmdString = "samtools sort -\@ $samtools_sort_CPU -o hisat2.sorted.bam -O BAM hisat2.sam";
     print STDERR (localtime) . ": CMD: $cmdString\n";
@@ -1788,14 +1788,14 @@ sub detecting_dependent_softwares {
 
 # 检测服务器剩余可用内存容量，结果单位是 kB。
 sub get_MemAvailable {
-	open IN, "/proc/meminfo" or die "Can not open file /proc/meminfo, $!";
-	my $MemAvailable,
-	while (<IN>) {
-		if (m/MemAvailable:\s*(\d+)\s*kB/) {
-			$MemAvailable = $1;
-			next;
-		}
-	}
-	close IN;
-	return $MemAvailable;
+    open IN, "/proc/meminfo" or die "Can not open file /proc/meminfo, $!";
+    my $MemAvailable,
+    while (<IN>) {
+        if (m/MemAvailable:\s*(\d+)\s*kB/) {
+            $MemAvailable = $1;
+            next;
+        }
+    }
+    close IN;
+    return $MemAvailable;
 }

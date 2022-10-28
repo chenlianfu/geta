@@ -15,7 +15,7 @@ For example:
     1. 首先得到基因组上各个匹配区域对应着一个个的homolog蛋白序列(一条homolog蛋白序列能匹配到基因组多个位置，甚至同一条参考序列上多个位置-相距大于20000bp)；
     2. 将有重叠的区域合并成一个区域，代表着一个基因；
     3. 一个基因若有多个homolog蛋白序列，则仅选择其中最优的一个homolog蛋白序列；
-    4. 选择最优的原则是，coverage_ratio超过指定阈值，同时blast evalue优于指定阈值，再选择blast得分最高的。
+    4. 选择最优的原则是，coverage_ratio超过指定阈值，同时blast evalue优于指定阈值，再选择blast得分最高的，evalue值最低的，覆盖度比例最大的。
     5. 此外，分别对正义链和负义链的比对结果进行分析。以免分别位于正负链上有重叠的基因合并成一个区域，仅得到一个基因结果，甚至基因稠密时，原本的多个基因也仅得到一个基因结果。
 
 USAGE
@@ -123,12 +123,14 @@ foreach my $subject (sort keys %intergration1) {
                 foreach (keys %{$intergration1{$subject}{$strand}{$region}}) { $aligments{$_} = 1; }
             }
             else {
-                my %sort;
+                my (%sort1, %sort2, %sort3);
                 foreach (keys %aligments) {
-                    m/(\S+)$/;
-                    $sort{$_} = $1;
+                    @_ = split /\t/;
+                    $sort1{$_} = $_[-1];
+                    $sort2{$_} = $_[-2];
+                    $sort3{$_} = $_[-3];
                 }
-                my @aligments =  sort {$sort{$b} <=> $sort{$a}} keys %aligments;
+                my @aligments =  sort {$sort1{$b} <=> $sort1{$a} or $sort2{$a} <=> $sort2{$b} or $sort3{$b} <=> $sort3{$a} or $a cmp $b} keys %aligments;
                 $intergration{$subject}{$strand}{"$start\t$end"} = $aligments[0];
                 #print "$subject\t$start\t$end\t$aligments[0]\n";
                 %aligments = ();
@@ -137,9 +139,14 @@ foreach my $subject (sort keys %intergration1) {
             }
         }
 
-        my %sort;
-        foreach (keys %aligments) { m/(\S+)$/; $sort{$_} = $1; }
-        my @aligments =  sort {$sort{$b} <=> $sort{$a}} keys %aligments;
+        my (%sort1, %sort2, %sort3);
+        foreach (keys %aligments) {
+            @_ = split /\t/;
+            $sort1{$_} = $_[-1];
+            $sort2{$_} = $_[-2];
+            $sort3{$_} = $_[-3];
+        }
+        my @aligments =  sort {$sort1{$b} <=> $sort1{$a} or $sort2{$a} <=> $sort2{$b} or $sort3{$b} <=> $sort3{$a} or $a cmp $b} keys %aligments;
         $intergration{$subject}{$strand}{"$start\t$end"} = $aligments[0];
         #print "$subject\t$start\t$end\t$aligments[0]\n";
     }

@@ -48,8 +48,8 @@ while (<FASTA>) {
 
 my %repeat_region;
 while (<GFF>) {
-	next if m/^#/;
-	next if m/^\s*$/;
+    next if m/^#/;
+    next if m/^\s*$/;
     @_ = split /\t/;
     $repeat_region{$_[0]}{"$_[3]\t$_[4]"} = 1;
 

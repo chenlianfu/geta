@@ -132,8 +132,13 @@ if ($type eq "xml") {
 
                     my $query_start = $1 if $_ =~ m#<Hsp_query-from>(\d+?)</Hsp_query-from>#;
                     my $query_end = $1 if $_ =~ m#<Hsp_query-to>(\d+?)</Hsp_query-to>#;
-                    my $subject_start = $1 if $_ =~ m#<Hsp_hit-from>(\d+?)</Hsp_hit-from>#;
-                    my $subject_end = $1 if $_ =~ m#<Hsp_hit-to>(\d+?)</Hsp_hit-to>#;
+                    my $subject_start_from = $1 if $_ =~ m#<Hsp_hit-from>(\d+?)</Hsp_hit-from>#;
+                    my $subject_end_from = $1 if $_ =~ m#<Hsp_hit-to>(\d+?)</Hsp_hit-to>#;
+                    my ($subject_start, $subject_end) = ($subject_start_from, $subject_end_from);
+                    if ( m#<Hsp_hit-frame>(\S+)</Hsp_hit-frame># && $1 < 0 ) {
+                        $subject_start = $subject_end_from;
+                        $subject_end = $subject_start_from;
+                    }
                     my $hsp_score = $1 if $_ =~ m#<Hsp_bit-score>(\S+?)</Hsp_bit-score>#;
                     push @score, $hsp_score;
 
