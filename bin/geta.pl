@@ -81,7 +81,7 @@ This script was tested on CentOS 8.4 with such softwares can be run directly in 
 10. augustus/etraining (version: 3.4.0)
 11. diamond (version 2.0.2.140)
 
-Version: 2.5.3
+Version: 2.5.4
 
 USAGE
 if (@ARGV==0){die $usage}
