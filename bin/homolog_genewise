@@ -29,8 +29,8 @@ Usage:
     --evalue <float>    default: 1e-9
     进行tblastn分析时，要求对同源蛋白的evalue值不大于该值。
 
-	--tblastn_thread <int>    default: 8
-	设置tblastn命令使用的CPU线程数。最终tblastn并行化运行数为 --cpu / --tblastn_thread的值。
+    --tblastn_thread <int>    default: 8
+    设置tblastn命令使用的CPU线程数。最终tblastn并行化运行数为 --cpu / --tblastn_thread的值。
 
     --max_gene_length <int>    default: 20000
     程序调用homolog_blast2geneRegion进行分析时，需要设置该参数。一个蛋白序列与某条基因组序列若存在多个BLAST匹配区域，若相邻匹配区之间的距离低于此参数值，则认为这两个匹配区隶属于一个基因。
@@ -46,7 +46,7 @@ GetOptions(
     "max_gene_length:i" => \$max_gene_length,
     "segmentSize:i" => \$segmentSize,
     "overlapSize:i" => \$overlapSize,
-	"tblastn_thread:i" => \$tblastn_thread,
+    "tblastn_thread:i" => \$tblastn_thread,
 );
 $cpu ||= 8;
 $coverage_ratio ||= 0.4;
