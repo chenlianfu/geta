@@ -806,12 +806,12 @@ unless (-e "5.augustus.ok") {
     # 第一次 Augustus HMM Training
     unless (-e "training") {
         mkdir "training";
-        my $species_config_dir = `echo \$AUGUSTUS_CONFIG_PATH`;
-        chomp($species_config_dir);
-        $species_config_dir = "$species_config_dir/species/$augustus_species";
-        $cmdString = "rm -rf $species_config_dir";
-        print STDERR "CMD: $cmdString\n";
-        (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+        #my $species_config_dir = `echo \$AUGUSTUS_CONFIG_PATH`;
+        #chomp($species_config_dir);
+        #$species_config_dir = "$species_config_dir/species/$augustus_species";
+        #$cmdString = "rm -rf $species_config_dir";
+        #print STDERR "CMD: $cmdString\n";
+        #(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
         unlink "training.ok" if (-e "training.ok");
     }
     unless (-e "training.ok") {

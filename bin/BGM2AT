@@ -92,7 +92,7 @@ if (-e $for_bad_genes_removing) {
     print STDERR "CMD: $cmdString\n";
     (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 }
-$cmdString = "new_species.pl --species=for_bad_genes_removing_$$ &> new_species.1.log";
+$cmdString = "new_species.pl --species=for_bad_genes_removing_$$ --ignore &> new_species.1.log";
 print STDERR "CMD: $cmdString\n";
 (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 $cmdString = "etraining --species=for_bad_genes_removing_$$ --stopCodonExcludedFromCDS=false genes.raw.gb 1>etraining.out0 2> etraining.err0";
@@ -158,7 +158,7 @@ $species_config_dir = "$species_config_dir/species/$ARGV[2]";
 #print STDERR "CMD: $cmdString\n";
 #(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 unless (-e $species_config_dir) {
-    $cmdString = "new_species.pl --species=$ARGV[2] &> new_species.2.log";
+    $cmdString = "new_species.pl --species=$ARGV[2] --ignore &> new_species.2.log";
     print STDERR "CMD: $cmdString\n";
     (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 }
