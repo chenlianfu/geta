@@ -531,6 +531,19 @@ sub get_mRNA_GFF3_info {
 }
 
 # 子程序，计算各种intron剪接类型及其比例：（1）将有重叠的introns分成多套没有重叠的introns，根据各套introns的平均测序深度来分配其比例；（2）每套没有重叠的introns可能存在IR剪接类型，根据intron测序深度和内部碱基测序深度分配比例；（3）再进一步算出所有，并得到各个intron_splicing的比例。
+# 有重叠的 introns 示例：
+# ======                         1
+# ==========                     2
+#    ===                         3
+#         =======                4
+#                =====           5
+# 分成没有重叠的多套introns：
+# ======++======
+# ======+++++++++=====
+# ==========+++++=====
+# ===++++======
+# ===++++++++++++=====
+# 分析时，对introns按首尾坐标从小到大排序，得到4个introns(注意两个introns之间间距0个碱基的特殊情况)。可以看到1、2和3互斥，2和4互斥，3和4互斥(特殊情况，两introns间距0个碱基)。于是得到5组introns: 1+4, 1+5, 2+5, 3+4, 3+5。
 sub intron_splcing {
     my @intron = @{$_[0]};
     #foreach ( @intron ) { print STDERR "TEST01: $_\n"; }
@@ -540,7 +553,7 @@ sub intron_splcing {
     foreach (@intron) { @_ = split /\t/, $_; $sort_intron{$_} = $_[1]; }
     @intron = sort { $a <=> $b or $sort_intron{$a} <=> $sort_intron{$b} } @intron;
 
-    # (1) 将有重叠的introns分成多套没有重叠的introns
+    # (1) 将有重叠的introns分成多套没有重叠的introns。有些introns是互斥的，需要分成多套。比如两个introns具有不同的起始和结束位置。
     # 根据intron尾部坐标得到多套introns
     my %group_intron_end;
     foreach my $intron (@intron) {
@@ -548,7 +561,8 @@ sub intron_splcing {
 
         my $group_add_ok = 0;
         foreach ( keys %group_intron_end ) {
-            if ($_[0] > $group_intron_end{$_}) {
+			# 当intron的起始位点比该套introns的结束位点要大，就将该intron加入到该套introns中。注意两introns间距要>=1bp，所以有个数字1。
+            if ($_[0] > ($group_intron_end{$_} + 1)) {
                 $group_intron_end{"$_;$intron"} = $_[1];
                 delete $group_intron_end{$_};
                 $group_add_ok = 1;
@@ -660,7 +674,7 @@ sub intron_splcing {
     return %intron_splicing;
 }
 
-# 子程序，将intron根据重叠聚类
+# 子程序，将intron根据重叠聚类。若两个introns间距的碱基数是0时，虽然两个introns不重叠，也要当成重叠来进行处理。
 sub cluster_intron {
     my @intron = @{$_[0]};
     @intron = sort {$a <=> $b} @intron;
@@ -670,7 +684,7 @@ sub cluster_intron {
     my ($last_start, $last_end) = split /\t/, $intron;
     foreach (@intron) {
         my ($start, $end) = split /\t/, $_;
-        if ($start > $last_end) {
+        if ($start > ($last_end + 1)) {
             $out{$intron} = "$last_start\t$last_end";
             $intron = $_;
             ($last_start, $last_end) = ($start, $end);
