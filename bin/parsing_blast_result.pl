@@ -78,8 +78,8 @@ $maxHitNum ||= 20;
 $evalue ||= 1e-5;
 $identity ||= 0.05;
 $CIP ||= 0.2;
-$subjectCoverage ||= 0.2;
-$queryCoverage ||= 0.2;
+$subjectCoverage = 0.2 unless defined($subjectCoverage);
+$queryCoverage = 0.2 unless defined($queryCoverage);
 $percentageOfTopBitscore ||= 100;
 
 my $header = "#QueryID\tSubjectID\tIdentity\tMatchLength\tMismatchLength\tGaps\tQueryStart\tQueryEnd\tSubjectStart\tSubjectEnd\tEvalue\tBitScore";
