@@ -1385,8 +1385,13 @@ geneModels.i.coding.gff3\t对geneModels.h.coding.gff3中的基因模型进行了
     # 6.7 对蛋白序列进行HMM和BLASTP验证。
     my ($cmdString1, $cmdString2, $cmdString3);
     if ( $HMM_db ) {
+		my $hmmscan_cpu = 0;
+		$hmmscan_cpu = $1 if $config{'para_hmmscan'} =~ m/--hmmscan_cpu\s+(\d+)/;
+		my $para_hmmscan_cpu = $cpu;
+		$para_hmmscan_cpu = int($cpu / $hmmscan_cpu + 0.5) if $hmmscan_cpu;
+		$para_hmmscan_cpu = 1 if $para_hmmscan_cpu < 1;
         foreach ( sort keys %HMM_db ) {
-            $cmdString1 .= "$dirname/bin/para_hmmscan $config{'para_hmmscan'} --outformat --cpu $cpu --no_cut_ga --hmm_db $_ --tmp_prefix $HMM_db{$_} proteins_for_filtering.fasta >> validation_hmmscan.tab 2>> para_hmmscan.1.log; $dirname/bin/para_hmmscan $config{'para_hmmscan'} --chunk 1 --outformat --cpu $cpu --no_cut_ga --hmm_db $_ --tmp_prefix $HMM_db{$_} proteins_for_filtering.fasta >> validation_hmmscan.tab 2>> para_hmmscan.2.log; ";
+            $cmdString1 .= "$dirname/bin/para_hmmscan $config{'para_hmmscan'} --outformat --cpu $para_hmmscan_cpu --no_cut_ga --hmm_db $_ --tmp_prefix $HMM_db{$_} proteins_for_filtering.fasta >> validation_hmmscan.tab 2>> para_hmmscan.1.log; $dirname/bin/para_hmmscan $config{'para_hmmscan'} --chunk 1 --outformat --cpu $para_hmmscan_cpu --no_cut_ga --hmm_db $_ --tmp_prefix $HMM_db{$_} proteins_for_filtering.fasta >> validation_hmmscan.tab 2>> para_hmmscan.2.log; ";
         }
     }
     if ( $BLASTP_db ) {
