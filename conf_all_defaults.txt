@@ -35,7 +35,7 @@ TruSeq3-PE-2.fa:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:50 TOPHRE
 
 [homolog_genewise]
 --coverage_ratio 0.4 --evalue 1e-9
-# During the step of homolog_genewise: --cpu was passed by --CPU; --max_gene_length, --segmentSize and --overlapSize were automatically calculated.
+# During the step of homolog_genewise: --cpu was passed by --CPU; --max_intron_length, --segmentSize and --overlapSize were automatically calculated.
 
 [homolog_genewiseGFF2GFF3]
 --min_score 15 --gene_prefix genewise --filterMiddleStopCodon

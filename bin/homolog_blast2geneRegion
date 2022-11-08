@@ -3,7 +3,7 @@ use strict;
 
 my $usage = <<USAGE;
 Usage:
-    perl $0 tblastn.format6.tab homolog_proteins.fasta coverage_ratio E_value max_gene_length > homolog_gene_region.tab
+    perl $0 tblastn.format6.tab homolog_proteins.fasta coverage_ratio E_value max_single_intron_length > homolog_gene_region.tab
 
 For example:
     perl $0 blast.tab homolog.fasta 0.4 1e-9 20000 > homolog_gene_region.tab
@@ -12,7 +12,7 @@ For example:
     本程序通过分析比对结果找到基因组序列上的基因区域及其对应的最优homolog蛋白序列ID。
 
     计算原理：
-    1. 首先得到基因组上各个匹配区域对应着一个个的homolog蛋白序列(一条homolog蛋白序列能匹配到基因组多个位置，甚至同一条参考序列上多个位置-相距大于20000bp)；
+    1. 首先得到基因组上各个匹配区域对应着的homolog蛋白序列(注意一条homolog蛋白序列可能能匹配到基因组多个位置时，特别是同一个homolog蛋白序列匹配到同一条参考序列上多个位置时，不能将很远的多个匹配位置作为一个匹配区域，一个同源蛋白的两个相邻匹配区域的间距距大于20000bp或在同源蛋白的匹配区域有重叠比例不低于30%);
     2. 将有重叠的区域合并成一个区域，代表着一个基因；
     3. 一个基因若有多个homolog蛋白序列，则仅选择其中最优的一个homolog蛋白序列；
     4. 选择最优的原则是，coverage_ratio超过指定阈值，同时blast evalue优于指定阈值，再选择blast得分最高的，evalue值最低的，覆盖度比例最大的。
@@ -51,15 +51,31 @@ foreach my $query (keys %stats) {
         my @blast_subject_regions = sort {$a <=> $b} keys %{$stats{$query}{$subject}};
         my @split;
         my $firt_subject_regions = shift @blast_subject_regions;
+        my @query_region = ($stats{$query}{$subject}{$firt_subject_regions}{"region"});
         push @{$split[0]}, $firt_subject_regions;
         my $number = 0;
-        my $end = $1 if $firt_subject_regions =~ m/(\d+)/;
+        my $end = $1 if $firt_subject_regions =~ m/(\d+)$/;
         foreach (@blast_subject_regions) {
-            if (m/(\d+)/) {
-                $number ++ if (abs($1 - $end) >= $ARGV[4]);
-                $end = $1;
+            my $query_region = $stats{$query}{$subject}{$_}{"region"};
+
+            # 当同一homolog蛋白有多个位置的比对结果时：若两个位置相距较远，则认为是两个不同的匹配区域；若两个位置在homolog上的匹配区域有30%以上重叠，也认为是两个不同的匹配区域。
+            #     =====----=====---=====                                              =====--====---====
+            #                           |**************  > 20000 bp *****************|
+            #  or |#####################|    overlap ratio of exons > 30%             |####|
+            my $num_add = 0;
+            if (m/(\d+)\t(\d+)/) {
+                $num_add = 1 if (abs($1 - $end) > $ARGV[4]);
+                $num_add = 1 if &if_overlap(\@query_region, $query_region);
+
+                $end = $2 if $end < $2;
+                if ( $num_add == 0 ) {
+                    push @query_region, $query_region;
+                }
+                else {
+                    @query_region = ($query_region);
+                }
             }
-            #if (m/(\d+)/ && (abs($1 - $end)) >= $ARGV[4]) { $number ++; $end = $1; }
+            $number ++ if $num_add == 1;
             push @{$split[$number]}, $_;
         }
 
@@ -196,4 +212,41 @@ sub cover_length {
     }
     $total_length += $end - $start + 1;
     return $total_length;
+}
+
+sub if_overlap {
+    # 当同一homolog蛋白有多个位置的比对结果时：若两个位置相距较远，则认为是两个不同的匹配区域；若两个位置在homolog上的匹配区域有30%以上重叠，也认为是两个不同的匹配区域。
+    #     =====----=====---=====                                              =====--====---====
+    #                           |**************  > 20000 bp *****************|
+    #  or |#####################|    overlap ratio of exons > 30%             |####|
+    my @regions = @{$_[0]}; 
+    my $region2 = $_[1];
+    my ($regions_length, $region2_length, $overlap_length) = (0, 0, 0);
+
+    my @region2_pos = split /\t/, $region2;
+    $region2_length = abs($region2_pos[1] - $region2_pos[0]) + 1;
+
+    foreach ( sort {$a <=> $b} @regions ) {
+        @_ = split /\t/;
+        $regions_length += (abs($_[1] - $_[0]) + 1);
+        if ( $_[0] <= $region2_pos[1] && $_[1] >= $region2_pos[0] ) {
+            my $overlap_length1 = abs($_[1] - $region2_pos[0]) + 1;
+            my $overlap_length2 = abs($region2_pos[1] - $_[0]) + 1;
+            my $overlap_length_add = 0;
+            $overlap_length_add = $overlap_length1;
+            $overlap_length_add = $overlap_length2 if $overlap_length_add > $overlap_length2;
+            $overlap_length += $overlap_length_add;
+        }
+    }
+
+    my ($ratio, $ratio1, $ratio2) = (0,0,0);
+    my $ratio1 = $overlap_length / $regions_length if $regions_length;
+    my $ratio2 = $overlap_length / $region2_length if $overlap_length;
+    $ratio = $ratio1 if $ratio1;
+    $ratio = $ratio2 if $ratio < $ratio2;
+
+    my $return = 0;
+    $return = 1 if $ratio > 0.3;
+
+    return $return;
 }

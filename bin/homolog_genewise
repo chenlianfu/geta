@@ -32,18 +32,18 @@ Usage:
     --tblastn_thread <int>    default: 8
     设置tblastn命令使用的CPU线程数。最终tblastn并行化运行数为 --cpu / --tblastn_thread的值。
 
-    --max_gene_length <int>    default: 20000
-    程序调用homolog_blast2geneRegion进行分析时，需要设置该参数。一个蛋白序列与某条基因组序列若存在多个BLAST匹配区域，若相邻匹配区之间的距离低于此参数值，则认为这两个匹配区隶属于一个基因。
+    --max_intron_length <int>    default: 20000
+    程序调用homolog_blast2geneRegion进行分析时，需要设置该参数。一个蛋白序列与某条基因组序列若存在多个BLAST匹配区域，若相邻匹配区之间的距离超过此参数设置的阈值，则认为是不同的匹配区。
 
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($cpu, $coverage_ratio, $evalue, $max_gene_length, $segmentSize, $overlapSize, $tblastn_thread);
+my ($cpu, $coverage_ratio, $evalue, $max_intron_length, $segmentSize, $overlapSize, $tblastn_thread);
 GetOptions(
     "cpu:i" => \$cpu,
     "coverage_ratio:f" => \$coverage_ratio,
     "evalue:f" => \$evalue,
-    "max_gene_length:i" => \$max_gene_length,
+    "max_intron_length:i" => \$max_intron_length,
     "segmentSize:i" => \$segmentSize,
     "overlapSize:i" => \$overlapSize,
     "tblastn_thread:i" => \$tblastn_thread,
@@ -51,7 +51,7 @@ GetOptions(
 $cpu ||= 8;
 $coverage_ratio ||= 0.4;
 $evalue ||= 1e-9;
-$max_gene_length ||= 20000;
+$max_intron_length ||= 20000;
 $segmentSize ||= 1000000;
 $overlapSize ||= 100000;
 $tblastn_thread ||= 8;
@@ -161,7 +161,7 @@ else {
     print "2. Skip CMD 2/4: for file blast.ok exists\n\n";
 }
 
-$cmdString = "$path/homolog_blast2geneRegion out.correct.tab $homologProteinFastaFile $coverage_ratio $evalue $max_gene_length > homolog_gene_region.tab";
+$cmdString = "$path/homolog_blast2geneRegion out.correct.tab $homologProteinFastaFile $coverage_ratio $evalue $max_intron_length > homolog_gene_region.tab";
 print "CMD 3/4: $cmdString\n";
 unless (-e "3.blast2geneRegion.ok") {
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
