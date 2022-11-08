@@ -182,7 +182,9 @@ while (<IN>) {
 $gene_avg_length = int($gene_total_length / $gene_number) if $gene_number != 0;
 print "    $gene_number gene regions, with average gene length $gene_avg_length\n";
 
-$cmdString = "$path/homolog_geneRegion2genewise $genomeFastaFile $homologProteinFastaFile homolog_gene_region.tab $gene_avg_length $cpu > genewise.gff 2> genewise.start_info.txt";
+my $flanking_length = int($gene_avg_length * 2 + 0.5);
+
+$cmdString = "$path/homolog_geneRegion2genewise $genomeFastaFile $homologProteinFastaFile homolog_gene_region.tab $flanking_length $cpu > genewise.gff 2> genewise.start_info.txt";
 print "CMD 4/4: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 print "4. Successfully run genewise parally\n\n";
