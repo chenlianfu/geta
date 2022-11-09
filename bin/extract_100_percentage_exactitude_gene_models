@@ -1,0 +1,121 @@
+#!/usr/bin/env perl
+
+use strict;
+use Getopt::Long;
+use Cwd qw/abs_path getcwd cwd/;
+use File::Basename;
+
+my $usage = <<USAGE;
+Usage:
+    $0 [options] GETA.GeneModels.gff3 > GETA.100_percentage_exactitude_geneModels.gff3
+
+    本程序根据GETA的结果文件，提取出100%准确性的基因模型。
+
+    程序运行原理：
+    （1）对每个基因模型，首先，去除包含Filling2Complete=True | Filling2Uncomplete=True | Filtered_for_Filling2Uncomplete=True | Filtered_for_NotEnoughEvidence=True等信息的转录本，再去除mRNA以外的其它转录本，再去除不含有Integrity=complete信息的转录本。
+    （2）若Gene Feature中包含标签信息Source=transfrag的基因模型，其来源于转录本预测结果：保留。
+    （3）若Gene Feature中包含标签信息Source=genewise的基因模型，其来源于同源蛋白预测结果：若添加了参数--keep_homolog，则保留；否则舍弃。
+    （4）若Gene Feature中包含标签信息Source=augustus的基因模型，其来源于Augustus基因预测结果，若在Gene Feature中Augustus_transcriptSupport_percentage值为100，在mRNA feature中IntronSupport值中的两个数据相等，表示转录本和证据一致，则保留基因极其转录本。
+    （5）若一个基因保留了多个转录本，则选择Transcript_Ratio值最大且不小于0的转录本。
+
+    --keep_homolog    default: None
+    添加该参数则保留同源蛋白的基因预测结果。
+
+    --help    default: None
+    display this help and exit.
+
+USAGE
+if (@ARGV==0){die $usage}
+
+my ($help_flag, $keep_homolog);
+GetOptions(
+    "help" => \$help_flag,
+    "keep_homolog" => \$keep_homolog,
+);
+
+if ( $help_flag ) { die $usage }
+
+# 读取输入的GETA基因模型文件
+my %gene_info = &get_geneModels_from_GFF3($ARGV[0]);
+#print STDERR "Read over $ARGV[0]\n";
+
+my %ok;
+foreach my $geneID ( sort keys %gene_info ) {
+    my $gene_header = $gene_info{$geneID}{"header"};
+    foreach my $mRNAID ( @{$gene_info{$geneID}{"mRNA_ID"}} ) {
+        # 对每个基因模型，首先，去除包含Filling2Complete=True | Filling2Uncomplete=True | Filtered_for_Filling2Uncomplete=True | Filtered_for_NotEnoughEvidence=True等信息的转录本，再去除mRNA以外的其它转录本，再去除不含有Integrity=complete信息的转录本。
+        my $mRNA_header = $gene_info{$geneID}{"mRNA_header"}{$mRNAID};
+        next if $mRNA_header =~ m/Filling2Complete=True/;
+        next if $mRNA_header =~ m/Filling2Uncomplete=True/;
+        next if $mRNA_header =~ m/Filtered_for_.*=True/;
+        next unless $mRNA_header =~ m/Integrity=complete/;
+        my @mRNA_header = split /\t/, $mRNA_header;
+        next unless $mRNA_header[2] eq "mRNA";
+
+        #若Gene Feature中包含标签信息Source=genewise的基因模型，其来源于同源蛋白预测结果：若添加了参数--keep_homolog，则保留；否则舍弃。
+        if ( $mRNA_header =~ m/Source=genewise/ ) {
+            next unless $keep_homolog;
+        }
+        #若Gene Feature中包含标签信息Source=augustus的基因模型，其来源于Augustus基因预测结果，若在Gene Feature中Augustus_transcriptSupport_percentage值为100，在mRNA feature中IntronSupport值中的两个数据相等，表示转录本和证据一致，则保留基因及其转录本。
+        elsif ( $mRNA_header =~ m/Source=augustus/ ) {
+            next unless $gene_header =~ m/Augustus_transcriptSupport_percentage=100/;
+            next unless ( $mRNA_header =~ m#IntronSupport=(\d+)/(\d+)# && $1 == $2 )
+        }
+
+        if ( $mRNA_header =~ m/Transcript_Ratio=([\d\.]+)/ ) {
+            $ok{$geneID}{$mRNAID} = $1;
+        }
+    }
+}
+
+foreach my $geneID ( sort keys %ok ) {
+    my $gene_header = $gene_info{$geneID}{"header"};
+    my @mRNAID = sort { $ok{$geneID}{$b} <=> $ok{$geneID}{$a} or $a cmp $b } keys %{$ok{$geneID}};
+    if ( $ok{$geneID}{$mRNAID[0]} > 0 ) {
+        print "$gene_header$gene_info{$geneID}{'mRNA_header'}{$mRNAID[0]}$gene_info{$geneID}{'mRNA_info'}{$mRNAID[0]}\n";
+    }
+}
+
+# 子程序，返回基因的GFF3哈希信息：
+# gene_ID => "header" => gene_header
+# gene_ID => "mRNA_ID" => 数组
+# gene_ID => "mRNA_header" => mRNA_ID => mRNA_header
+# gene_ID => "mRNA_info" => mRNA_ID => mRNA_Info
+sub get_geneModels_from_GFF3 {
+    my %gene_info;
+    # 第一轮，找gene信息
+    open IN, $_[0] or die "Can not open file $_[0], $!";
+    while (<IN>) {
+        if ( m/\tgene\t.*ID=([^;\s]+)/ ) {
+            $gene_info{$1}{"header"} = $_;
+        }
+    }
+    close IN;
+    # 第二轮，找Parent值是geneID的信息，包含但不限于 mRNA 信息
+    my %mRNA_ID2gene_ID;
+    open IN, $_[0] or die "Can not open file $_[0], $!";
+    while (<IN>) {
+        if ( m/Parent=([^;\s]+)/ ) {
+            my $parent = $1;
+            if ( exists $gene_info{$parent} ) {
+                if ( m/ID=([^;\s]+)/ ) {
+                    push @{$gene_info{$parent}{"mRNA_ID"}}, $1;
+                    $gene_info{$parent}{"mRNA_header"}{$1} = $_;
+                    $mRNA_ID2gene_ID{$1} = $parent;
+                }
+            }
+        }
+    }
+    close IN;
+    # 第三轮，找Parent值不是geneID的信息
+    open IN, $_[0] or die "Can not open file $_[0], $!";
+    while (<IN>) {
+        if ( m/Parent=([^;\s]+)/ && exists $mRNA_ID2gene_ID{$1} ) {
+            my $parent = $1;
+            $gene_info{$mRNA_ID2gene_ID{$1}}{"mRNA_info"}{$parent} .= $_;
+        }
+    }
+    close IN;
+
+    return %gene_info;
+}
