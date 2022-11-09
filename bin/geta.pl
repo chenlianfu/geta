@@ -221,7 +221,7 @@ mkdir "$out_prefix.tmp" unless -e "$out_prefix.tmp";
 chdir "$out_prefix.tmp";
 my $pwd = `pwd`; print STDERR "PWD: $pwd";
 
-# 准备基因组序列：读取FASTA序列以>开始的头部时，去除第一个空及之后的字符；去除基因组序列中尾部的换行符。
+# 准备基因组序列：读取FASTA序列以>开始的头部时，去除第一个空及之后的字符；去除基因组序列中尾部的换行符，将所有小写字符变换为大写字符。
 unless (-e "genome.fasta") {
     open OUT, ">", "genome.fasta" or die "Can not create file genome.fasta, $!\n";
     open IN, $genome or die "Can not open file $genome, $!\n";
@@ -235,6 +235,7 @@ unless (-e "genome.fasta") {
         }
         else {
             s/\s+?$//g;
+	    $_ = uc($_);
             print OUT;
         }
     }
@@ -244,7 +245,7 @@ unless (-e "genome.fasta") {
 $pwd = `pwd`; chomp($pwd);
 $genome = "$pwd/genome.fasta";
 
-# 准备直系同源基因蛋白序列：读取FASTA序列以>开始的头部时，去除第一个空及之后的字符，将所有怪异字符变为下划线字符；去除序列中尾部的换行符。
+# 准备直系同源基因蛋白序列：读取FASTA序列以>开始的头部时，去除第一个空及之后的字符，将所有怪异字符变为下划线字符；去除序列中尾部的换行符, 将所有小写字符变换为大写字符。
 unless (-e "homolog.fasta") {
     open OUT, ">", "homolog.fasta" or die "Can not create file homolog.fasta, $!\n";
     open IN, $protein or die "Can not open file $protein, $!\n";
@@ -258,6 +259,7 @@ unless (-e "homolog.fasta") {
         }
         else {
             s/\s+?$//g;
+	    $_ = uc($_);
             print OUT;
         }
     }
