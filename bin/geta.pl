@@ -730,19 +730,19 @@ unless (-e "4.homolog.ok") {
         if (m/\tintron\t(\d+)\t(\d+)\t/) {
             push @intron_length, $2 - $1 + 1;
         }
-		if (m/\tgene\t(\d+)\t(\d+)\t/) {
-		    push @gene_length, $2 - $1 + 1;
-		}
+        if (m/\tgene\t(\d+)\t(\d+)\t/) {
+            push @gene_length, $2 - $1 + 1;
+        }
     }
-	close IN;
+    close IN;
     @intron_length = sort {$a <=> $b} @intron_length;
     $max_intron_length = $intron_length[@intron_length * 0.995] if $intron_length[@intron_length * 0.995];
 
     @gene_length = sort {$a <=> $b} @gene_length;
-	my $max_gene_length = 20000;
+    my $max_gene_length = 20000;
     $max_gene_length = $gene_length[@gene_length * 0.995] if $gene_length[@gene_length * 0.995];
     my ($segmentSize, $overlapSize) = (1000000, 100000);
-	if ($max_gene_length * 4 > $overlapSize) {
+    if ($max_gene_length * 4 > $overlapSize) {
         $overlapSize = $max_gene_length * 4;
         my $overlapSize_length = length($overlapSize);
         $overlapSize_length --;
@@ -751,7 +751,7 @@ unless (-e "4.homolog.ok") {
         $segmentSize = $overlapSize * 10;
     }
 
-	$max_intron_length = $max_intron_length * 2;
+    $max_intron_length = $max_intron_length * 2;
     $cmdString = "$dirname/bin/homolog_genewise --cpu $cpu --max_intron_length $max_intron_length --segmentSize $segmentSize --overlapSize $overlapSize $config{'homolog_genewise'} $protein ../0.RepeatMasker/genome.masked.fasta &> homolog_genewise.log";
     unless (-e "homolog_genewise.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
@@ -1395,11 +1395,11 @@ geneModels.i.coding.gff3\t对geneModels.h.coding.gff3中的基因模型进行了
     # 6.7 对蛋白序列进行HMM和BLASTP验证。
     my ($cmdString1, $cmdString2, $cmdString3);
     if ( $HMM_db ) {
-		my $hmmscan_cpu = 0;
-		$hmmscan_cpu = $1 if $config{'para_hmmscan'} =~ m/--hmmscan_cpu\s+(\d+)/;
-		my $para_hmmscan_cpu = $cpu;
-		$para_hmmscan_cpu = int($cpu / $hmmscan_cpu + 0.5) if $hmmscan_cpu;
-		$para_hmmscan_cpu = 1 if $para_hmmscan_cpu < 1;
+        my $hmmscan_cpu = 0;
+        $hmmscan_cpu = $1 if $config{'para_hmmscan'} =~ m/--hmmscan_cpu\s+(\d+)/;
+        my $para_hmmscan_cpu = $cpu;
+        $para_hmmscan_cpu = int($cpu / $hmmscan_cpu + 0.5) if $hmmscan_cpu;
+        $para_hmmscan_cpu = 1 if $para_hmmscan_cpu < 1;
         foreach ( sort keys %HMM_db ) {
             $cmdString1 .= "$dirname/bin/para_hmmscan $config{'para_hmmscan'} --outformat --cpu $para_hmmscan_cpu --no_cut_ga --hmm_db $_ --tmp_prefix $HMM_db{$_} proteins_for_filtering.fasta >> validation_hmmscan.tab 2>> para_hmmscan.1.log; $dirname/bin/para_hmmscan $config{'para_hmmscan'} --chunk 1 --outformat --cpu $para_hmmscan_cpu --no_cut_ga --hmm_db $_ --tmp_prefix $HMM_db{$_} proteins_for_filtering.fasta >> validation_hmmscan.tab 2>> para_hmmscan.2.log; ";
         }
