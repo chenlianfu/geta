@@ -154,9 +154,10 @@ sub cds2pep {
         "GGG" => "G",
     );
     my $seq = shift @_;
+    $seq = uc($seq);
     my $fram = shift @_;
     my $gene = shift @_;
-    $seq =~ s/\w{$fram}//;
+    $seq =~ s/\w{$fram}// if $fram > 0;
     my $pep;
     while ((length $seq) >= 3) {
         $seq =~ s/(\w{3})//;
