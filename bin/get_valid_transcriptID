@@ -15,7 +15,9 @@ Usage:
     --blast_evalue <float>    default: 1e-10
     --blast_CIP <float>    default: 0.5
     --blast_coverage <float>    default: 0.5
-    当转录本ID仅在一种算法中通过时，采用如上更严格的颜值。
+    --blast_CIP_for_genewise <float>    default: 0.5
+    --blast_coverage_for_genewise <float>    default: 0.8
+    当转录本ID仅在一种算法中通过时，采用如上更严格的颜值。注意，对genwise预测且仅具有BLAST比对结果的蛋白序列采用了更加严格的阈值。这是因为默认设置下，直接以输入的同源蛋白序列作为BLAST数据库，来自于同源蛋白预测得到的基因组蛋白序列很容易比对到同源蛋白序列上，容易导致预测得到的基因数量偏大，这些多出来的基因模型几乎都是来自同源蛋白预测且经过了基因模型补齐。因此，在以输入的同源蛋白作为数据库时，需要设置更严格的 --blast_coverage_for_genewise 参数值。
 
     --both_required    default: None
     当添加本参数时，仅输出两种算法中同时有效的转录本ID。
@@ -26,7 +28,7 @@ Usage:
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($help_flag, $hmm_evalue, $hmm_coverage, $blast_evalue, $blast_CIP, $blast_coverage, $both_required);
+my ($help_flag, $hmm_evalue, $hmm_coverage, $blast_evalue, $blast_CIP, $blast_coverage, $both_required, $blast_CIP_for_genewise, $blast_coverage_for_genewise);
 GetOptions(
     "help" => \$help_flag,
     "hmm_evalue:f" => \$hmm_evalue,
@@ -35,12 +37,16 @@ GetOptions(
     "blast_CIP:f" => \$blast_CIP,
     "blast_coverage:f" => \$blast_coverage,
     "both_required" => \$both_required,
+    "blast_CIP_for_genewise:f" => \$blast_CIP_for_genewise,
+    "blast_coverage_for_genewise:f" => \$blast_coverage_for_genewise,
 );
 $hmm_evalue ||= 1e-7;
 $hmm_coverage ||= 0.4;
 $blast_evalue ||= 1e-10;
 $blast_CIP ||= 0.5;
 $blast_coverage ||= 0.5;
+$blast_CIP_for_genewise ||= 0.5;
+$blast_coverage_for_genewise ||= 0.8;
 
 if ( $help_flag ) { die $usage }
 
@@ -85,6 +91,11 @@ open IN, $ARGV[1] or die "Can not open file $ARGV[0], $!";
 while (<IN>) {
     chomp;
     @_ = split /\t/;
+    my ($blast_CIP_threshold, $blast_coverage_threshold) = ($blast_CIP, $blast_coverage);
+    if ( $_[0] =~ m/genewise/ ) {
+        $blast_CIP_threshold = $blast_CIP_for_genewise;
+        $blast_coverage_threshold = $blast_coverage_for_genewise;
+    }
     $_[-3] = &percentage2value($_[-3]);
     $_[-2] = &percentage2value($_[-2]);
     $_[-1] = &percentage2value($_[-1]);
