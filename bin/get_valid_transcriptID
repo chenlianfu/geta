@@ -102,7 +102,7 @@ while (<IN>) {
     if ( exists $hmm_transcriptID{$_[0]} ) {
         $out_transcriptID{$_[0]} = 1;
     }
-    elsif ( $_[-5] <= $blast_evalue && $_[-3] >= $blast_CIP && $_[-2] >= $blast_coverage && $_[-1] >= $blast_coverage ) {
+    elsif ( $_[-5] <= $blast_evalue && $_[-3] >= $blast_CIP_threshold && $_[-2] >= $blast_coverage && $_[-1] >= $blast_coverage_threshold ) {
         $out_transcriptID{$_[0]} = 1;
     }
 }
