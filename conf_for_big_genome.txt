@@ -17,7 +17,7 @@
 --evalue 1e-10 --identity 0.1 --CIP 0.5 --subject-coverage 0.5 --query-coverage 0.5
 
 [get_valid_transcriptID]
---hmm_evalue 1e-20 --hmm_coverage 0.8 --blast_evalue 1e-20 --blast_CIP 0.8 --blast_coverage 0.8
+--hmm_evalue 1e-20 --hmm_coverage 0.8 --blast_evalue 1e-20 --blast_CIP 0.8 --blast_coverage 0.8 --blast_evalue_for_genesie 1e-10 --blast_CIP_for_genewise 0.8 --blast_coverage_for_genewise 0.9
 # add --both_required for more strcit.
 
 [get_valid_geneModels]

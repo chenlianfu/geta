@@ -15,9 +15,6 @@ Usage:
     --blast_evalue <float>    default: 1e-10
     --blast_CIP <float>    default: 0.5
     --blast_coverage <float>    default: 0.5
-    --blast_evalue_for_genesie <float>    default: 1e-10
-    --blast_CIP_for_genewise <float>    default: 0.5
-    --blast_coverage_for_genewise <float>    default: 0.8
     当转录本ID仅在一种算法中通过时，采用如上更严格的阈值。
 
     --blast_evalue_for_genesie <float>    default: 1e-10
