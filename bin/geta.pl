@@ -96,7 +96,7 @@ GetOptions(
     "2:s" => \$pe2,
     "S:s" => \$single_end,
     "protein:s" => \$protein,
-    "cpu:s" => \$cpu,
+    "cpu:i" => \$cpu,
     "strand_specific!" => \$strand_specific,
     "augustus_species:s" => \$augustus_species,
     "use_existed_augustus_species:s" => \$use_existed_augustus_species,
@@ -235,7 +235,7 @@ unless (-e "genome.fasta") {
         }
         else {
             s/\s+?$//g;
-	    $_ = uc($_);
+        $_ = uc($_);
             print OUT;
         }
     }
@@ -259,7 +259,7 @@ unless (-e "homolog.fasta") {
         }
         else {
             s/\s+?$//g;
-	    $_ = uc($_);
+        $_ = uc($_);
             print OUT;
         }
     }
@@ -278,9 +278,8 @@ unless (-e "0.RepeatMasker.ok") {
     
     # 进行RepeatMasker分析
     mkdir "repeatMasker" unless -e "repeatMasker";
-    my $cpu_RepeatMasker = int($cpu / 4);
     if ( $RM_species ) {
-        $cmdString = "RepeatMasker $config{'RepeatMasker'} -pa $cpu_RepeatMasker -species $RM_species -dir repeatMasker/ $genome &> repeatmasker.log";
+        $cmdString = "para_RepeatMasker --species $RM_species --cpu $cpu --tmp_dir para_RepeatMasker.tmp $genome &> para_RepeatMasker.log";
     }
     else {
         $cmdString = "touch repeatMasker/genome.fasta.out";
@@ -318,10 +317,10 @@ unless (-e "0.RepeatMasker.ok") {
         else {
             print STDERR "CMD(Skipped): $cmdString\n";
         }
-        $cmdString = "RepeatMasker $config{'RepeatMasker'} -pa $cpu -lib RM_\*/\*.classified -dir ./ $genome &> repeatmasker.log";
+        $cmdString = "para_RepeatMasker --out_prefix RepeatModeler_out --lib RM_\*/\*.classified --cpu $cpu --tmp_dir para_RepeatMasker.tmp $genome &> para_RepeatMasker.log";
     }
     else {
-        $cmdString = "RepeatMasker $config{'RepeatMasker'} -pa $cpu -lib $RM_lib -dir ./ $genome &> repeatmasker.log";
+        $cmdString = "para_RepeatMasker --out_prefix RepeatModeler_out --lib $RM_lib --cpu $cpu --tmp_dir para_RepeatMasker.tmp $genome &> para_RepeatMasker.log";
     }
     unless (-e "RepeatMasker.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
@@ -335,7 +334,7 @@ unless (-e "0.RepeatMasker.ok") {
     $pwd = `pwd`; print STDERR "PWD: $pwd";
 
     # 合并RepeatMasker和RepeatModeler的结果
-    $cmdString = "$dirname/bin/merge_repeatMasker_out.pl $genome repeatMasker/genome.fasta.out repeatModeler/genome.fasta.out > genome.repeat.stats";
+    $cmdString = "$dirname/bin/merge_repeatMasker_out.pl $genome repeatMasker/RepeatMasker_out.out repeatModeler/RepeatModeler_out.out > genome.repeat.stats";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
     $cmdString = "$dirname/bin/maskedByGff.pl genome.repeat.gff3 $genome > genome.masked.fasta";

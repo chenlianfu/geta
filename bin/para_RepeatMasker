@@ -1,0 +1,145 @@
+#!/usr/bin/env perl
+
+use strict;
+use Getopt::Long;
+use Cwd qw/abs_path getcwd cwd/;
+use File::Basename;
+
+my $usage = <<USAGE;
+Usage:
+    $0 [options] genome.fasta
+
+    本程序用于并行化运行RepeatMasker。程序将基因组序列按染色体进行分割，并将结果进行合并。
+
+    --out_prefix <string>    default: RepeatMasker_out
+    设置程序输出文件前缀。本程序输出如下文件：
+    （1）RepeatMasker_out.out     RepeatMasker的原始输出结果；
+    （2）RepeatMasker_out.gff3    重复序列的GFF3格式结果，由merge_repeatMasker_out.pl分析.out文件得到；
+    （3）RepeatMasker_out.stats   对重复序列的统计信息，由merge_repeatMasker_out.pl分析.out文件得到；
+
+    --species <string>    default: None
+    设置RepeatMasker使用Repbase数据库进行重复序列分析时采用的物种名。推荐真菌物种使用Fungi；植物Viridiplantae；动物Metazoa。
+
+    --lib <string>    default: None
+    输入一个FASTA文件作为重复序列数据库。和--species参数只能二选一；若两个参数同时进行了设置，则仅 --lib 参数生效。
+
+    --cpu <int>    default: 8
+    设置CPU线程数消耗。程序会查看 RepeatMasker/NCBIBlastSearchEngine.pm 文件中 -num_threads 参数设置单个任务运行rmblastn的线程数值，然后，设置 RepeatMasker 的并行数 =  --cpu 参数值 * 1.5 / rmblastn的线程数，且最终 RepeatMasker 的并行数至少为 1 。其中，乘以 1.5 是为了防止单个 rmblasn 程序运行效率不高，无法使用所有设定的CPU线程，从而降低整体CPU利用率。
+
+    --tmp_dir <string>    default: tmp_\$date_\$pid
+    程序运行时临时文件夹名称。
+
+    --min_coverge_ratio <float>    default: 0.25
+    设置最小覆盖率阈值。若匹配区域对目标重复序列的覆盖率低于此阈值，则过滤掉此结果。该参数会传递给merge_repeatMasker_out.pl命令。
+
+    --help    default: None
+    display this help and exit.
+
+USAGE
+if (@ARGV==0){die $usage}
+
+my ($help_flag, $cpu, $tmp_dir, $species, $lib, $out_prefix, $min_coverge_ratio);
+GetOptions(
+    "help" => \$help_flag,
+    "cpu:i" => \$cpu,
+    "tmp_dir:s" => \$tmp_dir,
+    "species:s" => \$species,
+    "lib:s" => \$lib,
+    "out_prefix:s" => \$out_prefix,
+    "min_coverge_ratio:f" => \$min_coverge_ratio,
+);
+if ( $help_flag ) { die $usage }
+
+$out_prefix ||= "RepeatMasker_out";
+$min_coverge_ratio ||= 0.25;
+
+unless ( $species or $lib ) {
+    die "At least one of the --species and --lib parameters should be set !\n";
+}
+
+# 设置并行数
+$cpu ||= 8;
+print STDERR "本程序设置使用的CPU线程数为 $cpu，";
+my $RepeatMasker_path = `which RepeatMasker`;
+$RepeatMasker_path = dirname($RepeatMasker_path);
+my $rmblastn_cpu = 0;
+open IN, "$RepeatMasker_path/NCBIBlastSearchEngine.pm" or die "Can not open file $RepeatMasker_path/NCBIBlastSearchEngine.pm, $!";
+while (<IN>) {
+    if ( m/-num_threads\s+(\d+)/ ) {
+        $rmblastn_cpu = $1;
+        $cpu = int($cpu * 1.5 / $rmblastn_cpu + 0.5);
+        $cpu = 1 if $cpu < 1;
+    }
+}
+print STDERR "将并行化运行 $cpu 个RepeatMasker任务，每个任务将调用rmblastn命令以 $rmblastn_cpu 线程运行。\n";
+
+# 设置临时运行文件夹
+my $date = `date +%Y%m%d%H%M%S`; chomp($date);
+$tmp_dir ||= "tmp_${date}_$$";
+$tmp_dir = abs_path($tmp_dir);
+
+mkdir $tmp_dir unless -e $tmp_dir;
+print STDERR "程序运行时使用了临时文件夹 $tmp_dir 。\n\n";
+
+# 将基因组 fasta 文件进行分割
+open IN, $ARGV[0] or die "Can not open file $ARGV[0], $!";
+open CMD, ">", "$tmp_dir/command.RepeatMasker.list" or die "Can not create file $tmp_dir/command.RepeatMasker.list, $!";
+my $num = 0;
+my $seq = <IN>;
+my @split_file_name;
+while (<IN>) {
+    if ( m/^>(\S+)/ ) {
+        $num ++;
+        push @split_file_name , "seq_$num";
+        mkdir "$tmp_dir/seq_$num" unless -e "$tmp_dir/seq_$num";
+        if ( $lib ) {
+            print CMD "RepeatMasker -pa 1 -e ncbi -lib $lib -dir $tmp_dir/seq_$num $tmp_dir/seq_$num.fasta &> $tmp_dir/seq_$num.log\n";
+        }
+        else {
+            print CMD "RepeatMasker -pa 1 -e ncbi -species $species -dir $tmp_dir/seq_$num $tmp_dir/seq_$num.fasta &> $tmp_dir/seq_$num.log\n";
+
+        }
+        open OUT, ">", "$tmp_dir/seq_$num.fasta" or die "Can not create file $tmp_dir/seq_$num.fasta, $!";
+        print OUT $seq;
+        close OUT;
+        $seq = $_;
+    }
+    else {
+        $seq .= $_;
+    }
+}
+close IN;
+$num ++;
+push @split_file_name , "seq_$num";
+mkdir "$tmp_dir/seq_$num" unless -e "$tmp_dir/seq_$num";
+if ( $lib ) {
+    print CMD "RepeatMasker -pa 1 -e ncbi -lib $lib -dir $tmp_dir/seq_$num $tmp_dir/seq_$num.fasta &> $tmp_dir/seq_$num.log\n";
+}
+else {
+    print CMD "RepeatMasker -pa 1 -e ncbi -species $species -dir $tmp_dir/seq_$num $tmp_dir/seq_$num.fasta &> $tmp_dir/seq_$num.log\n";
+}
+open OUT, ">", "$tmp_dir/seq_$num.fasta" or die "Can not create file $tmp_dir/seq_$num.fasta, $!";
+print OUT $seq;
+close OUT;
+close CMD;
+
+# 运行RepeatMasker程序
+my $cmdString = "ParaFly -c $tmp_dir/command.RepeatMasker.list -CPU $cpu 2> /dev/null";
+print STDERR "CMD: $cmdString\n";
+(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+
+# 合并结果
+open OUT, ">", "$tmp_dir/merged.out" or die "Can not create file $out_prefix.out, $!";
+print OUT "   SW   perc perc perc  query         position in query           matching          repeat                position in repeat
+score   div. del. ins.  sequence      begin   end        (left)   repeat            class/family      begin   end    (left)    ID\n\n";
+foreach ( @split_file_name ) {
+    open IN, "$tmp_dir/$_/$_.fasta.out" or die "Can not open file $tmp_dir/$_/$_.fasta.out, $!";
+    <IN>; <IN>; <IN>;
+    print OUT <IN>;
+}
+close OUT;
+
+# 输出GFF3和统计结果
+my $cmdString = "merge_repeatMasker_out.pl --min_coverge_ratio $min_coverge_ratio --out_prefix $out_prefix $ARGV[0] $tmp_dir/merged.out > $out_prefix.stats 2> /dev/null";
+print STDERR "CMD: $cmdString\n";
+(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
