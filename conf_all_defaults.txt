@@ -3,10 +3,6 @@
 # the template conf_for_small_genome.txt in GETA software was the default values.
 # the anotated lines start with # will be ingnored. the blank lines will be ignored.
 
-[RepeatMasker]
--e ncbi -gff
-# During the step of RepeatMasker: -species was passed by --RM_species; -pa was passed by --CPU.
-
 [trimmomatic]
 TruSeq3-PE-2.fa:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:50 TOPHRED33
 # note: must start with the adapter file name.

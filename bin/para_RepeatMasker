@@ -124,7 +124,7 @@ close OUT;
 close CMD;
 
 # 运行RepeatMasker程序
-my $cmdString = "ParaFly -c $tmp_dir/command.RepeatMasker.list -CPU $cpu 2> /dev/null";
+my $cmdString = "ParaFly -c $tmp_dir/command.RepeatMasker.list -CPU $cpu &> $tmp_dir/ParaFly.log";
 print STDERR "CMD: $cmdString\n";
 (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 
@@ -140,6 +140,6 @@ foreach ( @split_file_name ) {
 close OUT;
 
 # 输出GFF3和统计结果
-my $cmdString = "merge_repeatMasker_out.pl --min_coverge_ratio $min_coverge_ratio --out_prefix $out_prefix $ARGV[0] $tmp_dir/merged.out > $out_prefix.stats 2> /dev/null";
+my $cmdString = "merge_repeatMasker_out.pl --min_coverge_ratio $min_coverge_ratio --out_prefix $out_prefix $ARGV[0] $tmp_dir/merged.out > $out_prefix.stats";
 print STDERR "CMD: $cmdString\n";
 (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";

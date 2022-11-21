@@ -81,7 +81,7 @@ This script was tested on CentOS 8.4 with such softwares can be run directly in 
 10. augustus/etraining (version: 3.4.0)
 11. diamond (version 2.0.2.140)
 
-Version: 2.5.5
+Version: 2.5.6
 
 USAGE
 if (@ARGV==0){die $usage}
@@ -274,10 +274,11 @@ print STDERR "Step 0: RepeatMasker and RepeatModeler " . "(" . (localtime) . ")"
 mkdir "0.RepeatMasker" unless -e "0.RepeatMasker";
 unless (-e "0.RepeatMasker.ok") {
     chdir "0.RepeatMasker";
+	mkdir "repeatMasker" unless -e "repeatMasker";
+	chdir "repeatMasker";
     $pwd = `pwd`; print STDERR "PWD: $pwd";
     
     # 进行RepeatMasker分析
-    mkdir "repeatMasker" unless -e "repeatMasker";
     if ( $RM_species ) {
         $cmdString = "para_RepeatMasker --species $RM_species --cpu $cpu --tmp_dir para_RepeatMasker.tmp $genome &> para_RepeatMasker.log";
     }
@@ -292,6 +293,7 @@ unless (-e "0.RepeatMasker.ok") {
     else {
         print STDERR "CMD(Skipped): $cmdString\n";
     }
+	chdir "../";
 
     # 进行RepeatModeler分析
     mkdir "repeatModeler" unless -e "repeatModeler";
