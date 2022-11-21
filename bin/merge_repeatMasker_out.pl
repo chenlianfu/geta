@@ -9,13 +9,18 @@ Usage:
     --min_coverge_ratio <float>    default: 0.25
     设置最小覆盖率阈值。若匹配区域对目标重复序列的覆盖率低于此阈值，则过滤掉此结果。
 
+    --out_prefix <string>    default: genome.repeat
+    设置输出文件前缀。程序默认生成genome.repeat.out和genome.repeat.gff3两个结果文件。
+
 USAGE
 if (@ARGV==0){die $usage}
-my $min_coverge_ratio;
+my ($min_coverge_ratio, $out_prefix);
 GetOptions(
     "min_coverge_ratio:f" => \$min_coverge_ratio,
+    "out_prefix:s" => \$out_prefix,
 );
 $min_coverge_ratio ||= 0.25;
+$out_prefix ||= "genome.repeat";
 
 my $genome_file = shift @ARGV;
 my $genome_size;
@@ -27,8 +32,8 @@ while (<IN>) {
 close IN;
 
 my (%locus, %scaffold, @scaffold);
-open OUT, '>', "genome.repeat.out" or die $!;
-open GFF3, '>', "genome.repeat.gff3" or die $!;
+open OUT, '>', "$out_prefix.out" or die $!;
+open GFF3, '>', "$out_prefix.gff3" or die $!;
 print GFF3 "##gff-version 3\n";
 
 foreach (@ARGV) {
@@ -118,7 +123,7 @@ foreach my $scaffold (@scaffold) {
 my @repeatRegion = keys %{$total_repeat{"regions"}};
 my $total_repeat_num = $total_repeat{"num"};
 my $total_repeat_size = &collect_length(@repeatRegion);
-print STDERR "Result files:\n\tgenome.repeat.out, genome.repeat.gff3.\n";
+print STDERR "Result files:\n\t$out_prefix.out, $out_prefix.gff3.\n";
 my $total_repeat_ratio = int($total_repeat_size / $genome_size * 10000) / 100;
 print "=======================================================\n";
 printf "Genome Size: $genome_size bp\nRepeat Size: $total_repeat_size bp\nRepeat Ratio: %.2f\%\n", $total_repeat_ratio;
