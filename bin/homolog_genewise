@@ -174,13 +174,23 @@ else {
 
 open IN, "homolog_gene_region.tab";
 my ($gene_total_length, $gene_number, $gene_avg_length) = (0, 0, 0);
+my @gene_length;
 while (<IN>) {
     @_ = split /\t/;
     $gene_total_length += ($_[2] - $_[1] + 1);
+    push @gene_length, ($_[2] - $_[1] + 1);
     $gene_number ++;
 }
 $gene_avg_length = int($gene_total_length / $gene_number) if $gene_number != 0;
 print "    $gene_number gene regions, with average gene length $gene_avg_length\n";
+
+@gene_length = sort {$a <=> $b} @gene_length;
+if ( $gene_length[@gene_length*9/10] < $max_intron_length ) {
+    $cmdString = "$path/homolog_blast2geneRegion out.correct.tab $homologProteinFastaFile $coverage_ratio $evalue $gene_length[@gene_length*9/10] > homolog_gene_region.tab";
+    print "\nBecause the 90% quantile of gene length ($gene_length[@gene_length*9/10]) < input max_intron_length value ($max_intron_length), so do the homolog_blast2geneRegion command again:\nCMD 3/4 again: $cmdString\n";
+    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+    print "3. Successfully get homolog gene region information again\n\n";
+}
 
 my $flanking_length = int($gene_avg_length * 2 + 0.5);
 
