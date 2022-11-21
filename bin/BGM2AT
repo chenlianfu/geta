@@ -8,6 +8,9 @@ Usage:
 
     程序输入best_candidates.lowIdentity.gff3文件中包含完整且准确的基因模型（来源于转录本或同源蛋白的比对结果），且这些基因模型满足一些要求，例如：多CDS、CDS总长度较长、CDS长度占转录本序列比例较高、intron长度较短。这些基因模型适合用来做HMM准确性检测。
 
+    --augustus_species_start_from <string>    default: None
+    若设置该参数，程序进行Augustus Training时，会将设置物种的parameters.cfg文件中的参数信息拷贝到新生成的文件中。若设置的物种比较临近，能加快optimization步骤的运行，也有利于Augustus Training结果的准确性。
+
     --flanking_length <int>    default: auto_calculated_value
     该参数用于转换得到genebank格式基因模型时，在gene两端添加的侧翼序列长度。若不添加该参数，则程序根据best_candidates.lowIdentity.gff3文件得到gene长度，取其median值作为该参数的值。若添加该参数，则使用该参素指定的值。
     注意：对基因组基因比较稠密的物种，一定要手动设置该值。例如对真菌物种，推荐设置该值为100。
@@ -42,7 +45,7 @@ Usage:
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($flanking_length, $min_gene_number_for_augustus_training, $gene_number_for_accuracy_detection, $min_gene_number_of_optimize_augustus_chunk, $max_gene_number_of_optimize_augustus_chunk, $onlytrain_GFF3, $CPU, $allowStartCodonBesidesATG, $stopAfterFirstEtraining, $optimize_augustus_rounds);
+my ($flanking_length, $min_gene_number_for_augustus_training, $gene_number_for_accuracy_detection, $min_gene_number_of_optimize_augustus_chunk, $max_gene_number_of_optimize_augustus_chunk, $onlytrain_GFF3, $CPU, $allowStartCodonBesidesATG, $stopAfterFirstEtraining, $optimize_augustus_rounds, $augustus_species_start_from);
 GetOptions(
     "flanking_length:i" => \$flanking_length,
     "min_gene_number_for_augustus_training:i" => \$min_gene_number_for_augustus_training,
@@ -54,6 +57,7 @@ GetOptions(
     "allowStartCodonBesidesATG!" => \$allowStartCodonBesidesATG,
     "stopAfterFirstEtraining!" => \$stopAfterFirstEtraining,
     "optimize_augustus_rounds:i" => \$optimize_augustus_rounds,
+    "augustus_species_start_from:s" => \$augustus_species_start_from,
 );
 $min_gene_number_for_augustus_training ||= 500;
 $gene_number_for_accuracy_detection ||= 200;
@@ -151,9 +155,9 @@ else {
 }
 
 # 进行第一次augustus training
-my $species_config_dir = `echo \$AUGUSTUS_CONFIG_PATH`;
-chomp($species_config_dir);
-$species_config_dir = "$species_config_dir/species/$ARGV[2]";
+my $species_config_path = `echo \$AUGUSTUS_CONFIG_PATH`;
+chomp($species_config_path);
+my $species_config_dir = "$species_config_path/species/$ARGV[2]";
 #$cmdString = "rm -rf $species_config_dir";
 #print STDERR "CMD: $cmdString\n";
 #(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
@@ -161,6 +165,22 @@ unless (-e $species_config_dir) {
     $cmdString = "new_species.pl --species=$ARGV[2] --ignore &> new_species.2.log";
     print STDERR "CMD: $cmdString\n";
     (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+
+    if ( $augustus_species_start_from ) {
+        if ( open IN, "$species_config_path/species/$augustus_species_start_from/${augustus_species_start_from}_parameters.cfg" ) {
+            open OUT, ">", "$species_config_path/species/$ARGV[2]/$ARGV[2]_parameters.cfg" or die "Can not create file $species_config_path/species/$ARGV[2]/$ARGV[2]_parameters.cfg, \n";
+            while (<IN>) {
+                s/$augustus_species_start_from/$ARGV[2]/;
+                print OUT;
+            }
+            close OUT;
+            close IN;
+            print STDERR "Augustus Training was started from $augustus_species_start_from.\n";
+        }
+        else {
+            warn "Can not open the parameters file specified by --augustus_species_start_from : $species_config_path/species/$augustus_species_start_from/${augustus_species_start_from}_parameters.cfg\n";
+        } 
+    }
 }
 $cmdString = "cat genes.only_train.gb genes.gb.train > genes.gb.etraining";
 print STDERR "CMD: $cmdString\n";

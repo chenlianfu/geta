@@ -49,6 +49,9 @@ Parameters:
     --RM_lib <string>    default: None
     A fasta file of repeat sequences. Generally to be the result of RepeatModeler. If not set, RepeatModeler will be used to product this file automaticly, which shall time-consuming.
 
+    --augustus_species_start_from <string>    default: None
+    species identifier for Augustus. The optimization step of Augustus training will start from the parameter file of this species, so it may save much time when setting a close species.
+
     --cpu <int>    default: 4
     the number of threads.
 
@@ -86,7 +89,7 @@ Version: 2.5.6
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($RM_species, $RM_lib, $genome, $out_prefix, $pe1, $pe2, $single_end, $protein, $cpu, $trimmomatic, $strand_specific, $sam2transfrag, $ORF2bestGeneModels, $augustus_species, $HMM_db, $BLASTP_db, $gene_prefix, $cmdString, $enable_augustus_training_iteration, $config, $use_existed_augustus_species);
+my ($RM_species, $RM_lib, $genome, $out_prefix, $pe1, $pe2, $single_end, $protein, $cpu, $trimmomatic, $strand_specific, $sam2transfrag, $ORF2bestGeneModels, $augustus_species, $HMM_db, $BLASTP_db, $gene_prefix, $cmdString, $enable_augustus_training_iteration, $config, $use_existed_augustus_species, $augustus_species_start_from);
 GetOptions(
     "RM_species:s" => \$RM_species,
     "RM_lib:s" => \$RM_lib,
@@ -105,6 +108,7 @@ GetOptions(
     "gene_prefix:s" => \$gene_prefix,
     "enable_augustus_training_iteration!" => \$enable_augustus_training_iteration,
     "config:s" => \$config,
+    "augustus_species_start_from:s" => \$augustus_species_start_from,
 );
 
 # 检测依赖的软件是否满足。
@@ -896,7 +900,7 @@ unless (-e "5.augustus.ok") {
         @flanking_length = sort {$a <=> $b} @flanking_length;
         $flanking_length = int($flanking_length[@flanking_length/2] / 8);
         $flanking_length = $gene_length[@gene_length/2] if $flanking_length >= $gene_length[@gene_length/2];
-        $cmdString = "$dirname/bin/BGM2AT $config{'BGM2AT'} --flanking_length $flanking_length --CPU $cpu --onlytrain_GFF3 ati.filter1.gff3 ati.filter2.gff3 $genome $augustus_species &> BGM2AT.log";
+        $cmdString = "$dirname/bin/BGM2AT $config{'BGM2AT'} --augustus_species_start_from $augustus_species_start_from --flanking_length $flanking_length --CPU $cpu --onlytrain_GFF3 ati.filter1.gff3 ati.filter2.gff3 $genome $augustus_species &> BGM2AT.log";
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
