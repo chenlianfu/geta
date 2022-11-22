@@ -5,6 +5,8 @@ use Getopt::Long;
 use Cwd qw/abs_path getcwd cwd/;
 use File::Basename;
 
+my $bin_path = dirname($0);
+
 my $usage = <<USAGE;
 Usage:
     $0 [options] genome.fasta
@@ -124,7 +126,7 @@ close OUT;
 close CMD;
 
 # 运行RepeatMasker程序
-my $cmdString = "ParaFly -c $tmp_dir/command.RepeatMasker.list -CPU $cpu &> $tmp_dir/ParaFly.log";
+my $cmdString = "$bin_path/ParaFly -c $tmp_dir/command.RepeatMasker.list -CPU $cpu &> $tmp_dir/ParaFly.log";
 print STDERR "CMD: $cmdString\n";
 (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 
@@ -140,6 +142,6 @@ foreach ( @split_file_name ) {
 close OUT;
 
 # 输出GFF3和统计结果
-my $cmdString = "merge_repeatMasker_out.pl --min_coverge_ratio $min_coverge_ratio --out_prefix $out_prefix $ARGV[0] $tmp_dir/merged.out > $out_prefix.stats";
+my $cmdString = "$bin_path/merge_repeatMasker_out.pl --min_coverge_ratio $min_coverge_ratio --out_prefix $out_prefix $ARGV[0] $tmp_dir/merged.out > $out_prefix.stats";
 print STDERR "CMD: $cmdString\n";
 (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
