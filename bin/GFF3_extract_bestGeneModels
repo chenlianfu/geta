@@ -53,7 +53,7 @@ close IN;
 # 对每个基因进行最优基因模型分析
 my %stats;
 foreach my $gene_ID ( @geneID ) {
-    print $gene_info{$gene_ID}{"header"};
+    my $output = $gene_info{$gene_ID}{"header"};
 
     # 分析 mRNA 的CDS长度、完整性和转录本比例信息。
     my (%mRNA_info, @CDS_length);
@@ -79,9 +79,11 @@ foreach my $gene_ID ( @geneID ) {
     }
 
     # 统计编码转录本个数
-    my $as_num = %mRNA_info;
-    $stats{$as_num}{"number"} ++;
-    push @{$stats{$as_num}{"gene_ID"}}, $gene_ID;
+    if ( %mRNA_info >= 1 ) {
+        my $as_num = %mRNA_info;
+        $stats{$as_num}{"number"} ++;
+        push @{$stats{$as_num}{"gene_ID"}}, $gene_ID;
+    }
 
     # 仅保留较长CDS长度的mRNA
     @CDS_length = sort {$b <=> $a} @CDS_length;
@@ -97,9 +99,11 @@ foreach my $gene_ID ( @geneID ) {
             or $a cmp $b } keys %mRNA_info;
 
     # 输出最优基因模型
-    print $gene_info{$gene_ID}{"mRNA_header"}{$sort_mRNA_ID[0]};
-    print $gene_info{$gene_ID}{"mRNA_info"}{$sort_mRNA_ID[0]};
-    print "\n";
+    $output .= $gene_info{$gene_ID}{"mRNA_header"}{$sort_mRNA_ID[0]};
+    $output .= $gene_info{$gene_ID}{"mRNA_info"}{$sort_mRNA_ID[0]};
+    $output .= "\n";
+    print $output if %mRNA_info >= 1;
+
     #print STDERR "Best: $sort_mRNA_ID[0]\t$mRNA_info{$sort_mRNA_ID[0]}{'intergrity'}\t$mRNA_info{$sort_mRNA_ID[0]}{'transcript_ratio'}\t$mRNA_info{$sort_mRNA_ID[0]}{'CDS_length'}\n\n";
 }
 
