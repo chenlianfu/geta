@@ -9,6 +9,7 @@ Usage:
     程序调用hmmscan将protein.fasta文件中的蛋白序列比对到hmm数据库中，并将hmmscan的domtbl结果进行过滤并输出到标准输出。
     调用hmmscan进行比对时，使用--cut_ga参数，即根据hmm文件中自带的GA类型的bit scores阈值进行过滤。在hmmscan文档中提示为：GA thresholds are generally considered to be the reliable curated thresholds defining family membership。使用--cut_ga方法能对不同的hmm模型使用不同的阈值进行过滤，但此时hmmscan不能使用evalue方法进行过滤。
     在得到hmmscan结果后，进一步使用evalue和coverage进行过滤。若一个蛋白序列和一个hmm模型有多个匹配区域，则计算多个匹配区域去冗余后的长度对hmm模型的覆盖率。
+    此外，当程序运行中断，或对新的输入文件重新进行分析时，若未删除中间文件，本程序能解析已有的结果，仅对未分析的序列进行hmmscan分析，能节约程序运行时间。最终，程序仅输出输入文件中序列的hmmscan分析结果。
 
     --outformat
     当添加该参数时，输出简单的7列表格结果：（1）GeneID；（2）HMM accession，例如Pfam编号；（3）HMM Name；（4）E-value；（5）Score；（6）Coverage；（7）Description。默认情况下，输出的表格格式和hmmscan的domtbl一致且含有大量注释行信息。

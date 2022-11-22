@@ -1,0 +1,194 @@
+#!/usr/bin/env perl
+use strict;
+use Getopt::Long;
+use Cwd qw/abs_path getcwd cwd/;
+use File::Basename;
+
+my $usage = <<USAGE;
+Usage:
+    $0 [options] input.gff3 > bestGeneModels.gff3 2> AS_num_of_codingTranscripts.stats
+
+    本程序用于对输入的GFF3文件进行分析，若一个基因对应多个转录本，则输出最优的基因模型。
+    程序的运行原理：
+    （1）当一个基因有多个转录本时，首先剔除非编码转录本，仅保留mRNA类型转录本；
+    （2）对多个mRNA类型转录本，对其CDS长度进行分析，找到最长的CDS长度，保留CDS长度达到指定阈值(最长CDS长度 * 80%)的mRNA转录本；
+    （3）在mRNA信息第九列中寻找Integrity参数值（若未找到，统一设置为 complete）和Transcript_Ratio参数值（若未找到，则统一设置为 1），首先根据Integrity信息，按complete，5prime_partial，3prime_partial，internal排序；再根据Transcript_Ratio数值，按从大到小排序；再按CDS长度从长到短排序，最后按mRNA ID的ASCII码排序，选择排在第一位的mRNA作为最优的基因模型。
+    （4）程序在标准错误输出中给出（可变剪接的）编码转录本数量及其对应的基因数量和ID信息。
+    （4）此外，程序输出的基因顺序和输入文件的基因顺序一致。
+
+    --ratio_to_maximum_CDS_length <float>    default: 0.8
+    选择最优基因模型时，先保留CDS长度较长的多个转录本，要求这些转录本的长度至少达到最长CDS长度的一定比例。
+
+    --help    default: None
+    display this help and exit.
+
+USAGE
+if (@ARGV==0) {die $usage}
+
+my ($help_flag, $ratio_to_maximum_CDS_length);
+GetOptions(
+    "help" => \$help_flag,
+    "ratio_to_maximum_CDS_length:f" => \$ratio_to_maximum_CDS_length,
+);
+$ratio_to_maximum_CDS_length ||= 0.8;
+
+if ( $help_flag ) { die $usage }
+
+# 解析GFF3文件内容
+my %gene_info = &get_geneModels_from_GFF3($ARGV[0]);
+
+# 获得GFF3文件中基因ID的顺序
+my (@geneID, %geneID);
+open IN, $ARGV[0] or die "Can not open file $ARGV[0], $!";
+while (<IN>) {
+    next if /^\s*$/;
+    next if /^#/;
+    if (/\tgene\t.*ID=([^;]+)/) {
+        push @geneID, $1 unless exists $geneID{$1};
+        $geneID{$1} = 1;
+    }
+}
+close IN;
+
+# 对每个基因进行最优基因模型分析
+my %stats;
+foreach my $gene_ID ( @geneID ) {
+    print $gene_info{$gene_ID}{"header"};
+
+    # 分析 mRNA 的CDS长度、完整性和转录本比例信息。
+    my (%mRNA_info, @CDS_length);
+    foreach my $mRNA_ID ( @{$gene_info{$gene_ID}{"mRNA_ID"}} ) {
+        my $mRNA_header = $gene_info{$gene_ID}{"mRNA_header"}{$mRNA_ID};
+        my @mRNA_header = split /\t/, $mRNA_header;
+        next if $mRNA_header[2] ne "mRNA";
+        my $mRNA_info = $gene_info{$gene_ID}{"mRNA_info"}{$mRNA_ID};
+
+        # 计算转录本的CDS信息
+        my @CDS = &get_feature($mRNA_info, "CDS");
+        my $CDS_length = &cal_length(\@CDS);
+        push @CDS_length, $CDS_length;
+        $mRNA_info{$mRNA_ID}{"CDS_length"} = $CDS_length;
+
+        # 分析mRNA的Integrity参数值（若未找到，统一设置为 complete）和Transcript_Ratio参数值（若未找到，则统一设置为 1）
+        my ($intergrity, $transcript_ratio) = ("complete", 100);
+        $intergrity = $1 if $mRNA_header[-1] =~ m/Integrity=(\w+)/;
+        $transcript_ratio = $1 if $mRNA_header[-1] =~ m/Transcript_Ratio=([^;%]+)/;
+        #print STDERR "$mRNA_ID\t$intergrity\t$transcript_ratio\t$CDS_length\n";
+        $mRNA_info{$mRNA_ID}{"intergrity"} = $intergrity;
+        $mRNA_info{$mRNA_ID}{"transcript_ratio"} = $transcript_ratio;
+    }
+
+    # 统计编码转录本个数
+    my $as_num = %mRNA_info;
+    $stats{$as_num}{"number"} ++;
+    push @{$stats{$as_num}{"gene_ID"}}, $gene_ID;
+
+    # 仅保留较长CDS长度的mRNA
+    @CDS_length = sort {$b <=> $a} @CDS_length;
+    foreach ( keys %mRNA_info ) {
+        delete $mRNA_info{$_} if $mRNA_info{$_}{"CDS_length"} < $CDS_length[0] * $ratio_to_maximum_CDS_length;
+    }
+
+    # 对转录本进行排序
+    my %intergrity = ("complete", 1, "5prime_partial", 2, "3prime_partial", 3, "internal", 4);
+    my @sort_mRNA_ID = sort { $intergrity{$mRNA_info{$a}{"intergrity"}} <=> $intergrity{$mRNA_info{$b}{"intergrity"}}
+            or $mRNA_info{$b}{"transcript_ratio"} <=> $mRNA_info{$a}{"transcript_ratio"}
+            or $mRNA_info{$b}{"CDS_length"} <=> $mRNA_info{$a}{"CDS_length"}
+            or $a cmp $b } keys %mRNA_info;
+
+    # 输出最优基因模型
+    print $gene_info{$gene_ID}{"mRNA_header"}{$sort_mRNA_ID[0]};
+    print $gene_info{$gene_ID}{"mRNA_info"}{$sort_mRNA_ID[0]};
+    print "\n";
+    #print STDERR "Best: $sort_mRNA_ID[0]\t$mRNA_info{$sort_mRNA_ID[0]}{'intergrity'}\t$mRNA_info{$sort_mRNA_ID[0]}{'transcript_ratio'}\t$mRNA_info{$sort_mRNA_ID[0]}{'CDS_length'}\n\n";
+}
+
+# 编码转录本的可变剪接数量统计
+my ($all_gene_num, $as_gene_num, $noAS_gene_num) = (0, 0, 0);
+my $out;
+foreach ( sort {$a <=> $b} keys %stats ) {
+    $out .= "$_\t$stats{$_}{'number'}\t";
+    $out .= join(",", @{$stats{$_}{"gene_ID"}});
+    $out .= "\n";
+
+    $all_gene_num += $stats{$_}{'number'};
+    if ( $_ == 1 ) {
+        $noAS_gene_num += $stats{$_}{'number'};
+    }
+    elsif ( $_ > 1 ) {
+        $as_gene_num += $stats{$_}{'number'};
+    }
+}
+print STDERR "Total Genes Num is                  : $all_gene_num\n";
+print STDERR "No Alternative Spliced Genes Num is : $noAS_gene_num\n";
+print STDERR "Alternative Spliced Genes Num is    : $as_gene_num\n";
+print STDERR "coding_transcript_num\tgene_num\tgene_ID\n";
+print STDERR $out;
+
+
+# 子程序，返回基因的GFF3哈希信息：
+# gene_ID => "header" => gene_header
+# gene_ID => "mRNA_ID" => 数组
+# gene_ID => "mRNA_header" => mRNA_ID => mRNA_header
+# gene_ID => "mRNA_info" => mRNA_ID => mRNA_Info
+sub get_geneModels_from_GFF3 {
+    my %gene_info;
+    # 第一轮，找gene信息
+    open IN, $_[0] or die "Can not open file $_[0], $!";
+    while (<IN>) {
+        if ( m/\tgene\t.*ID=([^;\s]+)/ ) {
+            $gene_info{$1}{"header"} = $_;
+        }
+    }
+    close IN;
+    # 第二轮，找Parent值是geneID的信息，包含但不限于 mRNA 信息
+    my %mRNA_ID2gene_ID;
+    open IN, $_[0] or die "Can not open file $_[0], $!";
+    while (<IN>) {
+        if ( m/Parent=([^;\s]+)/ ) {
+            my $parent = $1;
+            if ( exists $gene_info{$parent} ) {
+                if ( m/ID=([^;\s]+)/ ) {
+                    push @{$gene_info{$parent}{"mRNA_ID"}}, $1;
+                    $gene_info{$parent}{"mRNA_header"}{$1} = $_;
+                    $mRNA_ID2gene_ID{$1} = $parent;
+                }
+            }
+        }
+    }
+    close IN;
+    # 第三轮，找Parent值不是geneID的信息
+    open IN, $_[0] or die "Can not open file $_[0], $!";
+    while (<IN>) {
+        if ( m/Parent=([^;\s]+)/ && exists $mRNA_ID2gene_ID{$1} ) {
+            my $parent = $1;
+            $gene_info{$mRNA_ID2gene_ID{$1}}{"mRNA_info"}{$parent} .= $_;
+        }
+    }
+    close IN;
+
+    return %gene_info;
+}
+
+sub get_feature {
+    my ($info, $feature_name) = @_;
+    my @out;
+    foreach ( split /\n/, $info ) {
+        @_ = split /\t/;
+        if ( $_[2] eq $feature_name ) {
+            push @out, "$_[3]\t$_[4]";
+        }
+    }
+    return @out;
+}
+
+sub cal_length {
+    my @region = @{$_[0]};
+    my $out;
+    foreach (@region) {
+        @_ = split /\t/;
+        $out += abs($_[1] - $_[0]) + 1;
+    }
+    return $out;
+}
+

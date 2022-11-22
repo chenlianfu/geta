@@ -278,8 +278,8 @@ print STDERR "Step 0: RepeatMasker and RepeatModeler " . "(" . (localtime) . ")"
 mkdir "0.RepeatMasker" unless -e "0.RepeatMasker";
 unless (-e "0.RepeatMasker.ok") {
     chdir "0.RepeatMasker";
-	mkdir "repeatMasker" unless -e "repeatMasker";
-	chdir "repeatMasker";
+    mkdir "repeatMasker" unless -e "repeatMasker";
+    chdir "repeatMasker";
     $pwd = `pwd`; print STDERR "PWD: $pwd";
     
     # 进行RepeatMasker分析
@@ -297,7 +297,7 @@ unless (-e "0.RepeatMasker.ok") {
     else {
         print STDERR "CMD(Skipped): $cmdString\n";
     }
-	chdir "../";
+    chdir "../";
 
     # 进行RepeatModeler分析
     mkdir "repeatModeler" unless -e "repeatModeler";
@@ -1494,6 +1494,10 @@ $cmdString = "$dirname/bin/GFF3Clear --GFF3_source GETA --gene_prefix $gene_pref
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
+$cmdString = "$dirname/bin/GFF3_extract_bestGeneModels $out_prefix.GeneModels.gff3 > $out_prefix.bestGeneModels.gff3 2> $out_prefix.AS_num_of_codingTranscripts.stats";
+print STDERR (localtime) . ": CMD: $cmdString\n";
+system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+
 $cmdString = "$dirname/bin/GFF3Clear --GFF3_source GETA --gene_prefix ${out_prefix}ncGene  --gene_code_length 6 --genome $genome --no_attr_add $out_prefix.tmp/6.combineGeneModels/geneModels.h.lncRNA.gff3 > $out_prefix.GeneModels_lncRNA.gff3 2> /dev/null";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -1508,7 +1512,11 @@ $cmdString = "$dirname/bin/gff3ToGtf.pl $genome $out_prefix.GeneModels.gff3 > $o
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
-$cmdString = "$dirname/bin/eukaryotic_gene_model_statistics.pl $out_prefix.GeneModels.gtf $genome $out_prefix &> $out_prefix.GeneModels.stats";
+$cmdString = "$dirname/bin/gff3ToGtf.pl $genome $out_prefix.bestGeneModels.gff3 > $out_prefix.bestGeneModels.gtf 2> /dev/null";
+print STDERR (localtime) . ": CMD: $cmdString\n";
+system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+
+$cmdString = "$dirname/bin/eukaryotic_gene_model_statistics.pl $out_prefix.bestGeneModels.gtf $genome $out_prefix &> $out_prefix.GeneModels.stats";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
