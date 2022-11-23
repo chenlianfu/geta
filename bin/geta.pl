@@ -1489,26 +1489,33 @@ print STDERR "Step 7: OutPut " . "(" . (localtime) . ")" . "\n";
 chdir "../";
 $pwd = `pwd`; print STDERR "PWD: $pwd";
 
+# 7.0 输出基因组序列
+$cmdString = "ln -s $genome $out_prefix.genome.fasta";
+unless ( -e "$out_prefix.genome.fasta" ) {
+    print STDERR (localtime) . ": CMD: $cmdString\n";
+    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+}
+
 # 7.1 输出GFF3格式文件基因结构注释信息
-$cmdString = "$dirname/bin/GFF3Clear --GFF3_source GETA --gene_prefix $gene_prefix --gene_code_length 6 --genome $genome $out_prefix.tmp/6.combineGeneModels/geneModels.i.coding.gff3 > $out_prefix.GeneModels.gff3 2> /dev/null";
+$cmdString = "$dirname/bin/GFF3Clear --GFF3_source GETA --gene_prefix $gene_prefix --gene_code_length 6 --genome $genome $out_prefix.tmp/6.combineGeneModels/geneModels.i.coding.gff3 > $out_prefix.geneModels.gff3 2> /dev/null";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
-$cmdString = "$dirname/bin/GFF3_extract_bestGeneModels $out_prefix.GeneModels.gff3 > $out_prefix.bestGeneModels.gff3 2> $out_prefix.AS_num_of_codingTranscripts.stats";
+$cmdString = "$dirname/bin/GFF3_extract_bestGeneModels $out_prefix.geneModels.gff3 > $out_prefix.bestGeneModels.gff3 2> $out_prefix.AS_num_of_codingTranscripts.stats";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
-$cmdString = "$dirname/bin/GFF3Clear --GFF3_source GETA --gene_prefix ${out_prefix}ncGene  --gene_code_length 6 --genome $genome --no_attr_add $out_prefix.tmp/6.combineGeneModels/geneModels.h.lncRNA.gff3 > $out_prefix.GeneModels_lncRNA.gff3 2> /dev/null";
+$cmdString = "$dirname/bin/GFF3Clear --GFF3_source GETA --gene_prefix ${out_prefix}ncGene  --gene_code_length 6 --genome $genome --no_attr_add $out_prefix.tmp/6.combineGeneModels/geneModels.h.lncRNA.gff3 > $out_prefix.geneModels_lncRNA.gff3 2> /dev/null";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
-$cmdString = "$dirname/bin/GFF3Clear --GFF3_source GETA --gene_prefix ${out_prefix}lqGene --gene_code_length 6 --genome $genome --no_attr_add --coverage 0.6 $out_prefix.tmp/6.combineGeneModels/geneModels.h.lowQuality.gff3 > $out_prefix.GeneModels_lowQuality.gff3 2> /dev/null";
+$cmdString = "$dirname/bin/GFF3Clear --GFF3_source GETA --gene_prefix ${out_prefix}lqGene --gene_code_length 6 --genome $genome --no_attr_add --coverage 0.6 $out_prefix.tmp/6.combineGeneModels/geneModels.h.lowQuality.gff3 > $out_prefix.geneModels_lowQuality.gff3 2> /dev/null";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
 
 # 7.2 输出GTF文件和基因的序列信息
-$cmdString = "$dirname/bin/gff3ToGtf.pl $genome $out_prefix.GeneModels.gff3 > $out_prefix.GeneModels.gtf 2> /dev/null";
+$cmdString = "$dirname/bin/gff3ToGtf.pl $genome $out_prefix.geneModels.gff3 > $out_prefix.geneModels.gtf 2> /dev/null";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
@@ -1516,7 +1523,7 @@ $cmdString = "$dirname/bin/gff3ToGtf.pl $genome $out_prefix.bestGeneModels.gff3 
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
-$cmdString = "$dirname/bin/eukaryotic_gene_model_statistics.pl $out_prefix.bestGeneModels.gtf $genome $out_prefix &> $out_prefix.GeneModels.stats";
+$cmdString = "$dirname/bin/eukaryotic_gene_model_statistics.pl $out_prefix.bestGeneModels.gtf $genome $out_prefix &> $out_prefix.geneModels.stats";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
@@ -1694,7 +1701,7 @@ close IN;
 my @number = m/(\d+)/g;
 print OUT "(4) HMM and BLASTP validation were performed to $number[2] protein sequences of $number[1] genes, and $number[5] protein sequences of $number[4] genes had valid alignment results. There are $number[3] accurate gene models which did not need validation.\n";
 
-open IN, "$out_prefix.GeneModels.gff3" or die "Can not open file $out_prefix.GeneModels.gff3, $!";
+open IN, "$out_prefix.geneModels.gff3" or die "Can not open file $out_prefix.geneModels.gff3, $!";
 my (%gene_ID, %gene2transcript, $num_augustus, $num_transfrag, $num_genewise);
 while (<IN>) {
     if (m/\tgene\t.*ID=([^;]+)/) {
@@ -1719,14 +1726,14 @@ my $num_of_gene_ID = 0; $num_of_gene_ID = %gene_ID;
 print OUT "(5) Finally, $num_of_gene_ID coding gene models were obtained, $as_gene_num of which had alternative splicing, $num_augustus gene models were come from AUGUSTUS prediction, $num_transfrag gene models were come from transcript, $num_genewise gene models were come from homolog.\n";
 
 my ($num_of_gene1, $num_of_gene2, $num_of_gene3) = (0, 0, 0);
-open IN, "$out_prefix.GeneModels_lncRNA.gff3" or die "Can not open file $out_prefix.GeneModels_lncRNA.gff3, $!";
+open IN, "$out_prefix.geneModels_lncRNA.gff3" or die "Can not open file $out_prefix.geneModels_lncRNA.gff3, $!";
 while (<IN>) {
     if (m/\tgene\t.*ID=([^;]+)/) {
         $num_of_gene1 ++;
     }
 }
 close IN;
-open IN, "$out_prefix.GeneModels_lowQuality.gff3" or die "Can not open file $out_prefix.GeneModels_lowQuality.gff3, $!";
+open IN, "$out_prefix.geneModels_lowQuality.gff3" or die "Can not open file $out_prefix.geneModels_lowQuality.gff3, $!";
 while (<IN>) {
     if (m/\tgene\t.*ID=([^;]+)/) {
         $num_of_gene2 ++;
