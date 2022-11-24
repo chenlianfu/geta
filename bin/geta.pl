@@ -1550,7 +1550,7 @@ else {
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 }
 
-# 7.4 输出转录本和同源蛋白的基因预测结果
+# 7.4 输出转录本、同源蛋白和Augustus的基因预测结果
 if (($pe1 && $pe2) or $single_end) {
     open IN, "$out_prefix.tmp/3.transcript/transfrag.alignment.gff3" or die "Can not open file $out_prefix.tmp/3.transcript/transfrag.alignment.gff3, $!";
     open OUT, ">", "$out_prefix.transfrag_alignment.gff3" or die "Can not create file $out_prefix.transfrag_alignment.gff3, $!";
@@ -1569,6 +1569,11 @@ if ($protein) {
     print OUT <IN>;
     close IN; close OUT;
 }
+
+open IN, "$out_prefix.tmp/5.augustus/augustus.gff3" or die "Can not open file $out_prefix.tmp/5.augustus/augustus.gff3, $!";
+open OUT, ">", "$out_prefix.augustus_prediction.gff3" or die "Can not create file $out_prefix.augustus_prediction.gff3, $!";
+print OUT <IN>;
+close IN; close OUT;
 
 # 7.5 输出GETA流程信息，用于追踪基因预测结果的可靠性
 # (1) 获取基因组重复序列统计信息
