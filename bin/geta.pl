@@ -1538,16 +1538,21 @@ open OUT, ">", "$out_prefix.repeat.gff3" or die "Can not create file $out_prefix
 print OUT <IN>;
 close IN; close OUT;
 
-unless ( $RM_lib ) {
+if ( $RM_lib ) {
+    $cmdString = "ln -sf $RM_lib $out_prefix.repeat.lib";
+    unless ( -s "$out_prefix.repeat.lib" ) {
+        print STDERR (localtime) . ": CMD: $cmdString\n";
+        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+    }
+    else {
+        print STDERR "Skipped CMD: $cmdString\n";
+    }
+}
+else {
     open IN, "$out_prefix.tmp/0.RepeatMasker/repeatModeler/species-families.fa" or die "Can not open file $out_prefix.tmp/0.RepeatMasker/repeatModeler/species-families.fa, $!";
     open OUT, ">", "$out_prefix.repeat.lib" or die "Can not create file $out_prefix.repeat.lib, $!";
     print OUT <IN>;
     close IN; close OUT;
-}
-else {
-    $cmdString = "ln -sf $RM_lib $out_prefix.repeat.lib";
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 }
 
 # 7.4 输出转录本、同源蛋白和Augustus的基因预测结果
