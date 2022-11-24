@@ -1575,10 +1575,9 @@ if ($protein) {
     close IN; close OUT;
 }
 
-open IN, "$out_prefix.tmp/5.augustus/augustus.gff3" or die "Can not open file $out_prefix.tmp/5.augustus/augustus.gff3, $!";
-open OUT, ">", "$out_prefix.augustus_prediction.gff3" or die "Can not create file $out_prefix.augustus_prediction.gff3, $!";
-print OUT <IN>;
-close IN; close OUT;
+$cmdString = "$dirname/bin/GFF3Clear --genome $genome --no_attr_add $out_prefix.tmp/5.augustus/augustus.gff3 > $out_prefix.augustus_prediction.gff3";
+print STDERR (localtime) . ": CMD: $cmdString\n";
+system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
 # 7.5 输出GETA流程信息，用于追踪基因预测结果的可靠性
 # (1) 获取基因组重复序列统计信息
