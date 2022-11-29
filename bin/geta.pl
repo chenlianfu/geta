@@ -287,7 +287,7 @@ unless (-e "0.RepeatMasker.ok") {
         $cmdString = "para_RepeatMasker --species $RM_species --cpu $cpu --tmp_dir para_RepeatMasker.tmp $genome &> para_RepeatMasker.log";
     }
     else {
-        $cmdString = "touch repeatMasker/genome.fasta.out";
+        $cmdString = "touch RepeatMasker_out.out";
     }
     unless (-e "RepeatMasker.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
