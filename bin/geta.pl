@@ -70,8 +70,8 @@ Parameters:
     --enable_augustus_training_iteration    default: False
     开启augustus_training_iteration，运行在第一次Augustus training后，根据基因预测的结果，选择有证据支持的基因模型，再一次进行Augustus training（迭代）。此举会消耗较多计算时间，且可能对基因预测没有改进，或产生不好的影响。
 
-	--no_alternative_splicing_analysis    default: None
-	添加该参数后，程序不会进行可变剪接分析。
+    --no_alternative_splicing_analysis    default: None
+    添加该参数后，程序不会进行可变剪接分析。
 
 
 This script was tested on CentOS 8.4 with such softwares can be run directly in terminal:
@@ -112,7 +112,7 @@ GetOptions(
     "enable_augustus_training_iteration!" => \$enable_augustus_training_iteration,
     "config:s" => \$config,
     "augustus_species_start_from:s" => \$augustus_species_start_from,
-	"no_alternative_splicing_analysis!" => \$no_alternative_splicing_analysis,
+    "no_alternative_splicing_analysis!" => \$no_alternative_splicing_analysis,
 );
 
 # 检测依赖的软件是否满足。
@@ -1330,44 +1330,44 @@ geneModels.i.coding.gff3\t对geneModels.h.coding.gff3中的基因模型进行了
     }
 
     # 6.4 分别对对基因模型 geneModels.b.gff3, geneModels.e.gff3 and geneModels.f.gff3 进行可变剪接分析
-	unless ( $no_alternative_splicing_analysis ) {
-		$cmdString1 = "$dirname/bin/paraAlternative_splicing_analysis $config{'alternative_splicing_analysis'} --tmp_dir paraAlternative_splicing_analysis.gb.tmp --cpu $cpu geneModels.b.gff3 ../3.transcript/intron.txt ../3.transcript/base_depth.txt > geneModels.gb_AS.gff3 2> alternative_splicing.gb.stats && $dirname/bin/GFF3_add_CDS_for_transcript $genome geneModels.gb_AS.gff3 > geneModels.gb.gff3";
-		$cmdString2 = "$dirname/bin/paraAlternative_splicing_analysis $config{'alternative_splicing_analysis'} --tmp_dir paraAlternative_splicing_analysis.ge.tmp --cpu $cpu geneModels.e.gff3 ../3.transcript/intron.txt ../3.transcript/base_depth.txt > geneModels.ge_AS.gff3 2> alternative_splicing.ge.stats && $dirname/bin/GFF3_add_CDS_for_transcript $genome geneModels.ge_AS.gff3 > geneModels.ge.gff3";
-		$cmdString3 = "$dirname/bin/paraAlternative_splicing_analysis $config{'alternative_splicing_analysis'} --tmp_dir paraAlternative_splicing_analysis.gf.tmp --cpu $cpu geneModels.f.gff3 ../3.transcript/intron.txt ../3.transcript/base_depth.txt > geneModels.gf_AS.gff3 2> alternative_splicing.gf.stats && $dirname/bin/GFF3_add_CDS_for_transcript $genome geneModels.gf_AS.gff3 > geneModels.gf.gff3";
-		unless ( -e "04.alternative_splicing_analysis.ok" ) {
-		    print STDERR (localtime) . ": CMD: $cmdString1\n";
-		    system("$cmdString1") == 0 or die "failed to execute: $cmdString1\n";
-		    print STDERR (localtime) . ": CMD: $cmdString2\n";
-		    system("$cmdString2") == 0 or die "failed to execute: $cmdString2\n";
-		    print STDERR (localtime) . ": CMD: $cmdString3\n";
-		    system("$cmdString3") == 0 or die "failed to execute: $cmdString3\n";
-		    open OUT, ">", "04.alternative_splicing_analysis.ok" or die $!; close OUT;
-		}
-		else {
-		    print STDERR "CMD(Skipped): $cmdString1\n";
-		    print STDERR "CMD(Skipped): $cmdString2\n";
-		    print STDERR "CMD(Skipped): $cmdString3\n";
-		}
-	}
-	else {
-		$cmdString1 = "$dirname/bin/GFF3_add_CDS_for_transcript $genome geneModels.b.gff3 > geneModels.gb.gff3";
-		$cmdString2 = "$dirname/bin/GFF3_add_CDS_for_transcript $genome geneModels.e.gff3 > geneModels.ge.gff3";
-		$cmdString3 = "$dirname/bin/GFF3_add_CDS_for_transcript $genome geneModels.f.gff3 > geneModels.gf.gff3";
-		unless ( -e "04.alternative_splicing_analysis.ok" ) {
-		    print STDERR (localtime) . ": CMD: $cmdString1\n";
-		    system("$cmdString1") == 0 or die "failed to execute: $cmdString1\n";
-		    print STDERR (localtime) . ": CMD: $cmdString2\n";
-		    system("$cmdString2") == 0 or die "failed to execute: $cmdString2\n";
-		    print STDERR (localtime) . ": CMD: $cmdString3\n";
-		    system("$cmdString3") == 0 or die "failed to execute: $cmdString3\n";
-		    open OUT, ">", "04.alternative_splicing_analysis.ok" or die $!; close OUT;
-		}
-		else {
-		    print STDERR "CMD(Skipped): $cmdString1\n";
-		    print STDERR "CMD(Skipped): $cmdString2\n";
-		    print STDERR "CMD(Skipped): $cmdString3\n";
-		}
-	}
+    unless ( $no_alternative_splicing_analysis ) {
+        $cmdString1 = "$dirname/bin/paraAlternative_splicing_analysis $config{'alternative_splicing_analysis'} --tmp_dir paraAlternative_splicing_analysis.gb.tmp --cpu $cpu geneModels.b.gff3 ../3.transcript/intron.txt ../3.transcript/base_depth.txt > geneModels.gb_AS.gff3 2> alternative_splicing.gb.stats && $dirname/bin/GFF3_add_CDS_for_transcript $genome geneModels.gb_AS.gff3 > geneModels.gb.gff3";
+        $cmdString2 = "$dirname/bin/paraAlternative_splicing_analysis $config{'alternative_splicing_analysis'} --tmp_dir paraAlternative_splicing_analysis.ge.tmp --cpu $cpu geneModels.e.gff3 ../3.transcript/intron.txt ../3.transcript/base_depth.txt > geneModels.ge_AS.gff3 2> alternative_splicing.ge.stats && $dirname/bin/GFF3_add_CDS_for_transcript $genome geneModels.ge_AS.gff3 > geneModels.ge.gff3";
+        $cmdString3 = "$dirname/bin/paraAlternative_splicing_analysis $config{'alternative_splicing_analysis'} --tmp_dir paraAlternative_splicing_analysis.gf.tmp --cpu $cpu geneModels.f.gff3 ../3.transcript/intron.txt ../3.transcript/base_depth.txt > geneModels.gf_AS.gff3 2> alternative_splicing.gf.stats && $dirname/bin/GFF3_add_CDS_for_transcript $genome geneModels.gf_AS.gff3 > geneModels.gf.gff3";
+        unless ( -e "04.alternative_splicing_analysis.ok" ) {
+            print STDERR (localtime) . ": CMD: $cmdString1\n";
+            system("$cmdString1") == 0 or die "failed to execute: $cmdString1\n";
+            print STDERR (localtime) . ": CMD: $cmdString2\n";
+            system("$cmdString2") == 0 or die "failed to execute: $cmdString2\n";
+            print STDERR (localtime) . ": CMD: $cmdString3\n";
+            system("$cmdString3") == 0 or die "failed to execute: $cmdString3\n";
+            open OUT, ">", "04.alternative_splicing_analysis.ok" or die $!; close OUT;
+        }
+        else {
+            print STDERR "CMD(Skipped): $cmdString1\n";
+            print STDERR "CMD(Skipped): $cmdString2\n";
+            print STDERR "CMD(Skipped): $cmdString3\n";
+        }
+    }
+    else {
+        $cmdString1 = "$dirname/bin/GFF3_add_CDS_for_transcript $genome geneModels.b.gff3 > geneModels.gb.gff3";
+        $cmdString2 = "$dirname/bin/GFF3_add_CDS_for_transcript $genome geneModels.e.gff3 > geneModels.ge.gff3";
+        $cmdString3 = "$dirname/bin/GFF3_add_CDS_for_transcript $genome geneModels.f.gff3 > geneModels.gf.gff3";
+        unless ( -e "04.alternative_splicing_analysis.ok" ) {
+            print STDERR (localtime) . ": CMD: $cmdString1\n";
+            system("$cmdString1") == 0 or die "failed to execute: $cmdString1\n";
+            print STDERR (localtime) . ": CMD: $cmdString2\n";
+            system("$cmdString2") == 0 or die "failed to execute: $cmdString2\n";
+            print STDERR (localtime) . ": CMD: $cmdString3\n";
+            system("$cmdString3") == 0 or die "failed to execute: $cmdString3\n";
+            open OUT, ">", "04.alternative_splicing_analysis.ok" or die $!; close OUT;
+        }
+        else {
+            print STDERR "CMD(Skipped): $cmdString1\n";
+            print STDERR "CMD(Skipped): $cmdString2\n";
+            print STDERR "CMD(Skipped): $cmdString3\n";
+        }
+    }
 
     # 6.5 提取待过滤的转录本ID，对 geneModels.b.gff3, geneModels.e.gff3 and geneModels.f.gff3 中的基因模型进行过滤。
     #########################################################################
