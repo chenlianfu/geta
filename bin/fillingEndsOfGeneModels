@@ -648,7 +648,7 @@ sub locating_start_codon {
     while ( $seq_CDS =~ s/^(\w\w\w)// && ( ! exists $start_codon{$1} ) ) {
         $codon_num ++;
     }
-    if ( $seq_CDS ) {
+    if ( length($seq_CDS) >= 3 ) {
         $fill_ok = 1;
         #print STDERR "TEST(子程序locating_start_codon)：位于 $strand 链上的$mRNA_ID在上游终止密码子后第 $codon_num 个密码子处找到了起始密码子。\n";
 
