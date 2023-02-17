@@ -243,10 +243,11 @@ unless (-e "genome.fasta") {
         }
         else {
             s/\s+?$//g;
-        $_ = uc($_);
+            $_ = uc($_);
             print OUT;
         }
     }
+    print "\n";
     close IN;
     close OUT;
 }
@@ -387,9 +388,11 @@ unless (-e "1.trimmomatic.ok") {
         foreach (@pe_reads) {
             $number ++;
             my $code = "0" x ( length($pe_reads_num) - length($number) ) . $number;
-            push @paired_end_reads_prefix, "reads$code";
             @_ = split /\t/;
-            print OUT "java -jar $dirname/Trimmomatic-0.38/trimmomatic-0.38.jar PE -threads 16 $_[0] $_[1] reads$code.1.fastq reads$code.1.unpaired.fastq reads$code.2.fastq reads$code.2.unpaired.fastq ILLUMINACLIP:$dirname/Trimmomatic-0.38/adapters/$config{'trimmomatic'} &> reads$code.trimmomatic.log\n";
+            if ( -s $_[0] && -s $_[1] ) {
+                push @paired_end_reads_prefix, "reads$code";
+                print OUT "java -jar $dirname/Trimmomatic-0.38/trimmomatic-0.38.jar PE -threads 16 $_[0] $_[1] reads$code.1.fastq reads$code.1.unpaired.fastq reads$code.2.fastq reads$code.2.unpaired.fastq ILLUMINACLIP:$dirname/Trimmomatic-0.38/adapters/$config{'trimmomatic'} &> reads$code.trimmomatic.log\n";
+            }
         }
         close OUT;
         $cmdString = "ParaFly -c command.trimmomatic_pe.list -CPU $paraFly_CPU &> /dev/null";
@@ -445,7 +448,10 @@ else {
         foreach (@pe_reads) {
             $number ++;
             my $code = "0" x ( length($pe_reads_num) - length($number) ) . $number;
-            push @paired_end_reads_prefix, "reads$code";
+            @_ = split /\t/;
+            if ( -s $_[0] && -s $_[1] ) {
+                push @paired_end_reads_prefix, "reads$code";
+            }
         }
     }
     if ($single_end) {
@@ -524,6 +530,10 @@ unless (-e "2.hisat2.ok") {
     $samtools_sort_CPU = ($MemAvailable * 0.8 / 768 / 1024) if $samtools_sort_CPU > ($MemAvailable * 0.8 / 768 / 1024);
     $samtools_sort_CPU = 1 if $samtools_sort_CPU < 1;
 
+    # 若之前在samtools sort步骤失败了，可能生成了很多临时文件，需要先删除
+    $cmdString = "rm -rf hisat2.sorted.bam.tmp*";
+    print STDERR (localtime) . ": CMD: $cmdString\n";
+    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
     $cmdString = "samtools sort -\@ $samtools_sort_CPU -o hisat2.sorted.bam -O BAM hisat2.sam";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";

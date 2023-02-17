@@ -23,11 +23,12 @@ $min_coverge_ratio ||= 0.25;
 $out_prefix ||= "genome.repeat";
 
 my $genome_file = shift @ARGV;
-my $genome_size;
+my $genome_size = 0;
 open IN, $genome_file or die "Can not open file $genome_file, $!";
 while (<IN>) {
     next if m/^>/;
-    $genome_size += (length($_) - 1);
+	chomp;
+    $genome_size += length($_);
 }
 close IN;
 
