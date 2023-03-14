@@ -26,7 +26,10 @@ Usage:
     输入基因组fasta文件。该参数是必须的，用于修正尾部的CDS和基因完整性检测。
 
     --discard_lncRNA    default: None
-    添加该参数后，程序会忽略lncRNA转录本信息。
+    添加该参数后，程序会忽略lncRNA转录本信息。添加该参数后，若某行有一列的字符信息信息为lncRNA，则忽略改行。
+
+    --discard_mRNA_without_CDS   default:None
+    添加该参数后，程序会忽略没有CDS信息的转录本信息，若整个基因都没有CDS信息，则忽略整个基因。
 
     --min_intron <int>    default: 1
     设置一个最短intron长度阈值。当检测到相邻两CDSs之间相距的碱基距离 < 该阈值时，程序会标准错误输出中给出警告信息。当使用默认参数 1 时，出现警告表示基因模型有错误。
@@ -49,10 +52,11 @@ Usage:
 USAGE
 if(@ARGV==0){die $usage}
 
-my ($genome, $discard_lncRNA, $min_intron, $coverage, $gene_prefix, $gene_code_length,  $no_attr_add, $GFF3_source);
+my ($genome, $discard_lncRNA, $discard_mRNA_without_CDS, $min_intron, $coverage, $gene_prefix, $gene_code_length,  $no_attr_add, $GFF3_source);
 GetOptions(
     "genome:s" => \$genome,
     "discard_lncRNA" => \$discard_lncRNA,
+    "discard_mRNA_without_CDS" => \$discard_mRNA_without_CDS,
     "min_intron:i" => \$min_intron,
     "coverage:f" => \$coverage,
     "gene_prefix:s" => \$gene_prefix,
@@ -348,6 +352,12 @@ foreach my $gene_ID (keys %gff) {
         $source = $gff{$gene_ID}{$mRNA_ID}{"source"};
         my @exon = @{$gff{$gene_ID}{$mRNA_ID}{"exon"}};
         my @CDS = @{$gff{$gene_ID}{$mRNA_ID}{"CDS"}};
+        if ( $discard_mRNA_without_CDS ) {
+            if ( @CDS == 0 ) {
+                delete $gff{$gene_ID}{$mRNA_ID};
+                next;
+            }
+        }
 
         my %pos;
         foreach (@exon) {
@@ -365,6 +375,10 @@ foreach my $gene_ID (keys %gff) {
             $CDS_pos{$_[0]} = 1;
             $CDS_pos{$_[1]} = 1;
         }
+    }
+    if ( $discard_mRNA_without_CDS ) {
+        my @mRNA_ID = keys %{$gff{$gene_ID}};
+        delete $gff{$gene_ID} if @mRNA_ID == 0;
     }
     my @exon_pos = sort {$a <=> $b} keys %exon_pos;
     $gene_border{$gene_ID} = "$exon_pos[0]\t$exon_pos[-1]";
@@ -408,7 +422,7 @@ foreach my $gene_ID (@gene_ID) {
         my $source = $gff{$gene_ID}{$mRNA_ID}{"source"};
         my $strand = $gff{$gene_ID}{$mRNA_ID}{"strand"};
         my @CDS = @{$gff{$gene_ID}{$mRNA_ID}{"CDS"}};
-		@CDS = &add_frame_to_CDS(\@CDS, $strand);
+        @CDS = &add_frame_to_CDS(\@CDS, $strand);
         my @exon = @{$gff{$gene_ID}{$mRNA_ID}{"exon"}};
         my @intron = @{$gff{$gene_ID}{$mRNA_ID}{"intron"}};
         my @UTR = @{$gff{$gene_ID}{$mRNA_ID}{"UTR"}};
@@ -1005,32 +1019,32 @@ sub cds2pep {
 
 # 若CDS信息中没有Frame信息，则添加上。添加时，若5'端第一个CDS的Frame信息不是0、1或2，则使之为0，并对所有CDS的Frame进行计算和设置。
 sub add_frame_to_CDS {
-	my @input_CDS = @{$_[0]};
-	my $input_strand = $_[1];
-	my @out;
+    my @input_CDS = @{$_[0]};
+    my $input_strand = $_[1];
+    my @out;
 
-	if ( $input_strand eq '-' ) {
-		@input_CDS = sort { $b <=> $a } @input_CDS;
-	}
-	else {
-		@input_CDS = sort { $a <=> $b } @input_CDS;
-	}
+    if ( $input_strand eq '-' ) {
+        @input_CDS = sort { $b <=> $a } @input_CDS;
+    }
+    else {
+        @input_CDS = sort { $a <=> $b } @input_CDS;
+    }
 
-	if ( $input_CDS[0] =~ m/[012]$/ ) {
-		@out = @input_CDS;
-	}
-	else {
-		my ($frame, $length) = (0, 0);
-		foreach ( @input_CDS ) {
-			s/\t[^\t]*$/\t$frame/;
-			push @out, $_;
-			@_ = split /\t/, $_;
-			$length += (abs($_[1] - $_[0]) + 1);
-			$frame = 0;
-			$frame = 1 if $length % 3 == 2;
-			$frame = 2 if $length % 3 == 1;
-		}
-	}
+    if ( $input_CDS[0] =~ m/[012]$/ ) {
+        @out = @input_CDS;
+    }
+    else {
+        my ($frame, $length) = (0, 0);
+        foreach ( @input_CDS ) {
+            s/\t[^\t]*$/\t$frame/;
+            push @out, $_;
+            @_ = split /\t/, $_;
+            $length += (abs($_[1] - $_[0]) + 1);
+            $frame = 0;
+            $frame = 1 if $length % 3 == 2;
+            $frame = 2 if $length % 3 == 1;
+        }
+    }
 
-	return @out;
+    return @out;
 }
