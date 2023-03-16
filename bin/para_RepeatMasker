@@ -125,6 +125,13 @@ print OUT $seq;
 close OUT;
 close CMD;
 
+# 先试运行，生成对应物种的数据库
+unless ( $lib ) {
+    my $cmdString = "RepeatMasker -pa 1 -e ncbi -species $species -dir $tmp_dir/seq_0 $tmp_dir/seq_0.fasta &> $tmp_dir/seq_0.log\n";
+    print STDERR "CMD: $cmdString\n";
+    system $cmdString;
+}
+
 # 运行RepeatMasker程序
 my $cmdString = "$bin_path/ParaFly -c $tmp_dir/command.RepeatMasker.list -CPU $cpu &> $tmp_dir/ParaFly.log";
 print STDERR "CMD: $cmdString\n";
