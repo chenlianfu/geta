@@ -319,7 +319,13 @@ unless (-e "0.RepeatMasker.ok") {
             print STDERR "CMD(Skipped): $cmdString\n";
         }
         my $cpu_RepeatModeler = int($cpu / 4);
-        $cmdString = "RepeatModeler -pa $cpu_RepeatModeler -database species -LTRStruct &> RepeatModeler.log";
+        $cmdString = "RepeatModeler -threads $cpu_RepeatModeler -database species -LTRStruct &> RepeatModeler.log";
+        # 若RepeatModeler版本为2.0.3或更低，则需要将-threads参数换为-pa参数。
+        my $RepeatModeler_info = `RepeatModeler`;
+        my $RepeatModeler_version = $1 if $RepeatModeler_info =~ m/RepeatModeler - ([\d\.]+)/;
+        if ( $RepeatModeler_version =~ m/(\d+)\.(\d+)\.(\d+)/ && ($1 < 2 or ( $1 == 2 && $1 == 0 && $3 <= 3)) )  {
+            $cmdString = "RepeatModeler -pa $cpu_RepeatModeler -database species -LTRStruct &> RepeatModeler.log";
+        }
         unless (-e "RepeatModeler.ok") {
             print STDERR (localtime) . ": CMD: $cmdString\n";
             system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
