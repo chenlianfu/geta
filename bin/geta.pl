@@ -73,6 +73,15 @@ Parameters:
     --no_alternative_splicing_analysis    default: None
     添加该参数后，程序不会进行可变剪接分析。
 
+    --delete_unimportant_intermediate_files    defaults: None
+    添加该参数后，若程序运行成功，会删除不重要的中间文件，仅保留最少的、较小的、重要的中间结果文件。删除这些中间文件后，若程序重新运行后，能继续运行GETA的第六个步骤，即合并三种预测结果并对基因模型进行过滤。
+
+    --keep_all_files_of_6thStep_combineGeneModels    defaults: None
+    若使用--delete_unimportant_intermediate_files参数后，默认会删除GETA流程第6步生成的文件夹，再次运行程序会完整运行第6步流程。若再额外添加本参数，则会保留第6步所有数据，再次运行程序，则会根据第6步结果数据直接生成最终结果文件，可以用于修改基因ID前缀。
+
+    --delete_input_RNASeq_data    default: None
+    添加该参数后，若程序运行成功，则会删除输入的RNA-Seq数据文件。
+
 
 This script was tested on CentOS 8.4 with such softwares can be run directly in terminal:
 01. ParaFly
@@ -87,12 +96,12 @@ This script was tested on CentOS 8.4 with such softwares can be run directly in 
 10. augustus/etraining (version: 3.4.0)
 11. diamond (version 2.0.2.140)
 
-Version: 2.5.6
+Version: 2.5.7
 
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($RM_species, $RM_lib, $genome, $out_prefix, $pe1, $pe2, $single_end, $protein, $cpu, $trimmomatic, $strand_specific, $sam2transfrag, $ORF2bestGeneModels, $augustus_species, $HMM_db, $BLASTP_db, $gene_prefix, $cmdString, $enable_augustus_training_iteration, $config, $use_existed_augustus_species, $augustus_species_start_from, $no_alternative_splicing_analysis);
+my ($RM_species, $RM_lib, $genome, $out_prefix, $pe1, $pe2, $single_end, $protein, $cpu, $trimmomatic, $strand_specific, $sam2transfrag, $ORF2bestGeneModels, $augustus_species, $HMM_db, $BLASTP_db, $gene_prefix, $cmdString, $enable_augustus_training_iteration, $config, $use_existed_augustus_species, $augustus_species_start_from, $no_alternative_splicing_analysis, $delete_unimportant_intermediate_files, $delete_input_RNASeq_data, $keep_all_files_of_6thStep_combineGeneModels);
 GetOptions(
     "RM_species:s" => \$RM_species,
     "RM_lib:s" => \$RM_lib,
@@ -113,6 +122,9 @@ GetOptions(
     "config:s" => \$config,
     "augustus_species_start_from:s" => \$augustus_species_start_from,
     "no_alternative_splicing_analysis!" => \$no_alternative_splicing_analysis,
+    "delete_unimportant_intermediate_files!" => \$delete_unimportant_intermediate_files,
+    "delete_input_RNASeq_data!" => \$delete_input_RNASeq_data,
+    "keep_all_files_of_6thStep_combineGeneModels!" => \$keep_all_files_of_6thStep_combineGeneModels,
 );
 
 # 检测依赖的软件是否满足。
@@ -1530,13 +1542,6 @@ print STDERR "Step 7: OutPut " . "(" . (localtime) . ")" . "\n";
 chdir "../";
 $pwd = `pwd`; print STDERR "PWD: $pwd";
 
-# 7.0 输出基因组序列
-$cmdString = "ln -s $genome $out_prefix.genome.fasta";
-unless ( -e "$out_prefix.genome.fasta" ) {
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-}
-
 # 7.1 输出GFF3格式文件基因结构注释信息
 $cmdString = "$dirname/bin/GFF3Clear --GFF3_source GETA --gene_prefix $gene_prefix --gene_code_length 6 --genome $genome $out_prefix.tmp/6.combineGeneModels/geneModels.i.coding.gff3 > $out_prefix.geneModels.gff3 2> /dev/null";
 print STDERR (localtime) . ": CMD: $cmdString\n";
@@ -1554,7 +1559,6 @@ $cmdString = "$dirname/bin/GFF3Clear --GFF3_source GETA --gene_prefix ${out_pref
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
-
 # 7.2 输出GTF文件和基因的序列信息
 $cmdString = "$dirname/bin/gff3ToGtf.pl $genome $out_prefix.geneModels.gff3 > $out_prefix.geneModels.gtf 2> /dev/null";
 print STDERR (localtime) . ": CMD: $cmdString\n";
@@ -1568,7 +1572,12 @@ $cmdString = "$dirname/bin/eukaryotic_gene_model_statistics.pl $out_prefix.bestG
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
-# 7.3 输出重复序列信息及其统计结果、RepeatModeler软件构建的重复序列数据库
+# 7.3 输出重复序列信息及其统计结果、RepeatModeler软件构建的重复序列数据库和masked genome sequence
+open IN, "$out_prefix.tmp/0.RepeatMasker/genome.masked.fasta" or die "Can not open file $out_prefix.tmp/0.RepeatMasker/genome.masked.fasta, $!";
+open OUT, ">", "$out_prefix.maskedGenome.fasta" or die "Can not create file $out_prefix.maskedGenome.fasta, $!";
+print OUT <IN>;
+close IN; close OUT;
+
 open IN, "$out_prefix.tmp/0.RepeatMasker/genome.repeat.stats" or die "Can not open file $out_prefix.tmp/0.RepeatMasker/genome.repeat.stats, $!";
 open OUT, ">", "$out_prefix.repeat.stats" or die "Can not create file $out_prefix.repeat.stats, $!";
 print OUT <IN>;
@@ -1798,6 +1807,63 @@ close IN;
 $num_of_gene3 = $num_of_gene1 + $num_of_gene2;
 print OUT "(6) $num_of_gene3 gene models were filtered, and $num_of_gene1 of which had lncRNA transcripts.\n";
 
+if ( $delete_unimportant_intermediate_files ) {
+    print STDERR "Due to the --delete_unimportant_intermediate_files was set, so the unimportant and large intermediate files are being deleted...\n";
+    # 删除 0.RepeatMasker 文件夹下的数据
+    $cmdString = "rm -rf $out_prefix.tmp/0.RepeatMasker/repeatMasker $out_prefix.tmp/0.RepeatMasker/repeatModeler";
+    print STDERR (localtime) . ": CMD: $cmdString\n";
+    system("$cmdString") == 0 or warn "failed to execute: $cmdString\n";
+    # 删除 1.trimmomatic 文件夹下的数据
+    $cmdString = "rm -rf $out_prefix.tmp/1.trimmomatic/*.fastq $out_prefix.tmp/1.trimmomatic/command*";
+    # 删除 2.hisat2 文件夹下的数据
+       $cmdString = "rm -rf $out_prefix.tmp/2.hisat2/genome* $out_prefix.tmp/2.hisat2/*.sam $out_prefix.tmp/2.hisat2/*.bam $out_prefix.tmp/2.hisat2/*.ok $out_prefix.tmp/2.hisat2/hisat2-build.log";
+    print STDERR (localtime) . ": CMD: $cmdString\n";
+    system("$cmdString") == 0 or warn "failed to execute: $cmdString\n";
+    # 删除 3.transcript 文件夹下的数据
+    $cmdString = "rm -rf $out_prefix.tmp/3.transcript/command* $out_prefix.tmp/3.transcript/*.ok $out_prefix.tmp/3.transcript/pipeliner* $out_prefix.tmp/3.transcript/proteins.fasta $out_prefix.tmp/3.transcript/split* $out_prefix.tmp/3.transcript/transdecoder2ORF.gff3 $out_prefix.tmp/3.transcript/transfrag.gff3 $out_prefix.tmp/3.transcript/transfrag.gtf $out_prefix.tmp/3.transcript/transfrag.noStrand.* $out_prefix.tmp/3.transcript/transfrag.strand.* $out_prefix.tmp/3.transcript/transfrag.stats $out_prefix.tmp/3.transcript/transfrag.transdecoder.gff3";
+    print STDERR (localtime) . ": CMD: $cmdString\n";
+    system("$cmdString") == 0 or warn "failed to execute: $cmdString\n";
+    # 删除 4.homolog 文件夹下的数据
+    $cmdString = "rm -rf $out_prefix.tmp/4.homolog/*.ok $out_prefix.tmp/4.homolog/blast* $out_prefix.tmp/4.homolog/command* $out_prefix.tmp/4.homolog/geneRegion_genewise.tmp $out_prefix.tmp/4.homolog/genewise.gff $out_prefix.tmp/4.homolog/genome* $out_prefix.tmp/4.homolog/homolog_gene_region.tab $out_prefix.tmp/4.homolog/makeblastdb.log $out_prefix.tmp/4.homolog/out* $out_prefix.tmp/4.homolog/tmp_for_genome_splitting_and_joining $out_prefix.tmp/4.homolog/para_blast.log";
+    print STDERR (localtime) . ": CMD: $cmdString\n";
+    system("$cmdString") == 0 or warn "failed to execute: $cmdString\n";
+    # 删除 5.augustus 文件夹下的数据
+    $cmdString = "rm -rf $out_prefix.tmp/5.augustus/training/ati* $out_prefix.tmp/5.augustus/training/badgenes.lst $out_prefix.tmp/5.augustus/training/blank* $out_prefix.tmp/5.augustus/training/com* $out_prefix.tmp/5.augustus/training/etraining* $out_prefix.tmp/5.augustus/training/genes.* $out_prefix.tmp/5.augustus/training/gff* $out_prefix.tmp/5.augustus/training/GFF3Clear.log $out_prefix.tmp/5.augustus/training/hmm* $out_prefix.tmp/5.augustus/training/new* $out_prefix.tmp/5.augustus/training/tmp* $out_prefix.tmp/5.augustus/training/training.gb.onlytrain $out_prefix.tmp/5.augustus/training/*.ok $out_prefix.tmp/5.augustus/aug_* $out_prefix.tmp/5.augustus/augustus.?.gff3 $out_prefix.tmp/5.augustus/hints.gff $out_prefix.tmp/5.augustus/*.ok $out_prefix.tmp/5.augustus/extrinsic.cfg";
+    print STDERR (localtime) . ": CMD: $cmdString\n";
+    system("$cmdString") == 0 or warn "failed to execute: $cmdString\n";
+    # 删除 6.combineGeneModels 文件夹下的数据
+    if ( $keep_all_files_of_6thStep_combineGeneModels ) {
+        print STDERR "Due to the --keep_all_files_of_6thStep_combineGeneModels was set, the $out_prefix.tmp/FEN00I06.tmp/6.combineGeneModels Directory was keeped.\n";
+    }
+    else {
+        $cmdString = "rm -rf $out_prefix.tmp/FEN00I06.tmp/6.combineGeneModels*";
+        print STDERR (localtime) . ": CMD: $cmdString\n";
+        system("$cmdString") == 0 or warn "failed to execute: $cmdString\n";
+    }
+}
+
+if ( $delete_input_RNASeq_data ) {
+    if ( $pe1 && $pe2 ) {
+        my @pe_reads = sort keys %pe_reads;
+        $cmdString = "rm -rf ";
+        foreach ( @pe_reads ) {
+            @_ = split /\t/;
+            $cmdString .= join " ", @_;
+            $cmdString .= " ";
+        }
+        print STDERR (localtime) . ": CMD: $cmdString\n";
+        system("$cmdString") == 0 or warn "failed to execute: $cmdString\n";
+    }
+    if ( $single_end ) {
+        my @se_reads = sort keys %se_reads;
+        $cmdString = "rm -rf ";
+        foreach ( @se_reads ) {
+            $cmdString .= "$_ ";
+        }
+        print STDERR (localtime) . ": CMD: $cmdString\n";
+        system("$cmdString") == 0 or warn "failed to execute: $cmdString\n";
+    }
+}
 
 print STDERR "\n============================================\n";
 print STDERR "GETA complete successfully! " . "(" . (localtime) . ")" . "\n\n";
