@@ -69,7 +69,8 @@ foreach (sort {$command{$b} <=> $command{$a}} keys %command) {
 }
 close COMMAND;
 
-system("ParaFly -c command.genewise.list -CPU $ARGV[4] &> command.genewise.log") == 0 or die "failed to execute: $!\n";
+my $cmdString = "ParaFly -c command.genewise.list -CPU $ARGV[4] &> command.genewise.log";
+system($cmdString) == 0 or die "Failed to execute: $cmdString, $!\n";
 
 unless (-e "FailedCommands") {
     foreach (@out) {
