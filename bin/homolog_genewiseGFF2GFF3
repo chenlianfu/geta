@@ -161,7 +161,7 @@ foreach my $gene_id (sort keys %gff) {
                 print STDERR "Gene end with stop codon:$gene_id\t$strand\n";
                 if ($output_start_and_stop_hints_of_augustus) {
                     open OUT, ">>", $output_start_and_stop_hints_of_augustus;
-					$end --;
+					$end ++;
                     print OUT "$seqID\t\.\tstop\t$end\t$end3\t\.\t$strand\t0\tgrp=$gene_id;pri=4;src=P\n";
                     close OUT;
                 }
