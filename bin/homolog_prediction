@@ -1,0 +1,104 @@
+#!/usr/bin/env perl
+
+use strict;
+use Getopt::Long;
+use Cwd qw/abs_path getcwd cwd/;
+use File::Basename;
+
+my $binPath = dirname($0);
+
+my $usage = <<USAGE;
+Usage:
+    $0 [options] homolog_proteins.fasta genome_seq.fasta > out.gff
+
+	--out_prefix <string>    default: out
+	设置输出文件前缀。程序默认输出如下文件：（1）out.diamond.tab，将基因组序列和同源蛋白进行dimond blastx比对的结果文件；（2）out.
+
+    --segmentSize <int>    default: 1000000
+    --overlapSize <int>    default: 100000
+    程序将基因组较长的序列进行分割，以加快diamond blastx的并行化比对速度；若单条序列长度超过1Mb， 则将单条序列进行切割，两条相邻的序列间重叠的长度为100kb。
+
+    --cpu <int>    default: 8
+    设置diamond程序使用线程数，genewise或gth命令运行的并行数。
+
+	--identity <float>    default: 0.2
+    --evalue <float>    default: 1e-9
+    设置diamond blastx分析时的Identity和E-value阈值。由于diamond blastx进行分析，每个Hit仅给出一个最优的HSP（而NCBI Blast+会给出所有HSPs），因此不需要根据覆盖率来对BLASTX结果进行过滤。
+
+    --method <string>    default: gth
+    设置使用同源蛋白进行基因预测的方法，可设置值为gth或genewise。一般情况下，genewise进行基因预测的耗时是gth的五倍。
+
+    --tmp_dir <string>    default: tmp_\$date\$pid
+    程序运行时临时文件夹名称。
+
+    --help    default: None
+    display this help and exit.
+
+USAGE
+if (@ARGV==0){die $usage}
+
+my ($out_prefix, $segmentSize, $overlapSize, $cpu, $identity, $evalue, $method, $tmp_dir, $help_flag);
+GetOptions(
+	"out_prefix:s" => \$out_prefix,
+    "segmentSize:i" => \$segmentSize,
+    "overlapSize:i" => \$overlapSize,
+    "cpu:i" => \$cpu,
+	"identity:f" => \$identity,
+    "evalue:f" => \$evalue,
+    "method:s" => \$method,
+    "tmp_dir:s" => \$tmp_dir,
+    "help" => \$help_flag,
+);
+$out_prefix ||= "out";
+$segmentSize ||= 1000000;
+$overlapSize ||= 100000;
+$cpu ||= 8;
+$identity ||= 0.2;
+$evalue ||= 1e-9;
+$method ||= "gth";
+unless ($method eq "gth" or $method eq "genewise") {
+    die "--method was set wrong, it should be set to gth or genewise. \n";
+}
+my $date = `date +%Y%m%d%H%M%S`; chomp($date);
+$tmp_dir ||= "tmp_$date$$";
+$tmp_dir = abs_path($tmp_dir);
+mkdir $tmp_dir unless -e $tmp_dir;
+
+if ( $help_flag ) { die $usage }
+
+my $input_protein = abs_path($ARGV[0]);
+my $input_genome = abs_path($ARGV[1]);
+
+my $pwd = `pwd`; print STDERR "##########\nPWD (Current Directory): $pwd";
+print STDERR (localtime) . "CMD (Main Program): $0 " . join(" ", @ARGV) . "\n##########\n\n";
+
+
+# 1. 运行diamond分析，寻找蛋白序列和参考基因组的匹配位点。
+print STDERR "1. align genome sequences against homolog proteins through diamond software.\n";
+chdir $tmp_dir;
+my $pwd = `pwd`; print STDERR "PWD: $pwd";
+my $cmdString = "$binPath/homolog_prediction.01paraDiamond --segmentSize $segmentSize --overlapSize $overlapSize --cpu $cpu --identity $identity --evalue $evalue --tmp_dir a.para_diamond $input_protein $input_genome > $out_prefix.diamond.tab 2> a.para_diamond.log";
+unless (-e "1.paraDiamond.ok") {
+    print STDERR (localtime) . ": CMD: $cmdString\n";
+    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+    open OUT, ">", "1.paraDiamond.ok" or die $!; close OUT;
+}
+else {
+	print STDERR "CMD(Skipped): $cmdString\n";
+}
+
+# 2. 过滤被包含匹配区域中得分过低的比对结果。
+print STDERR "2. filtering the low quality alignments when contained in another match region.\n";
+my $cmdString = "$binPath/homolog_prediction.02filtringLowQualityHits ";
+unless (-e "2.filtringLowQualityHits.ok") {
+    print STDERR (localtime) . ": CMD: $cmdString\n";
+    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+    open OUT, ">", "2.filtringLowQualityHits.ok" or die $!; close OUT;
+}
+else {
+	print STDERR "CMD(Skipped): $cmdString\n";
+}
+
+# 3. 调用genewise(wise)进行基因预测。
+# 4. 调用gth(genomethreader)进行基因预测。
+# 5. 合并所有的基因预测结果，若一个区域有多个蛋白预测的结果，取其一致性结果。

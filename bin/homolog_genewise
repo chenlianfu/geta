@@ -149,7 +149,7 @@ unless (-e "2.blast.ok") {
         if (($segmentSize - $_[9] + 1) < 1000) { $keep = 0; }
 
         $_[8] += $pos;
-        $_[9] += + $pos;
+        $_[9] += $pos;
         print OUT (join "\t", @_);
     }
     close OUT;
