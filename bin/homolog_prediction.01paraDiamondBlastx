@@ -5,11 +5,13 @@ use Getopt::Long;
 use Cwd qw/abs_path getcwd cwd/;
 use File::Basename;
 
+my $binPath = dirname($0);
+
 my $usage = <<USAGE;
 Usage:
     $0 [options] homolog_proteins.fasta genome_seq.fasta > out.tab
 
-    本程序用于将全基因组序列和临近物种的同源蛋白使用diamond blastx进行比对，得到表格结果。若使用dianmond命令直接对单个全基因组Fasta文件进行分析，单个diamond命令并不能一直占用单台服务器全部CPU线程，有很长时间的单线程运行阶段，从而导致程序运行速度较慢。因此，推荐使用本程序将基因组序列进行分割后并行化计算，再合并结果，从而加快计算速度。
+    本程序用于将全基因组序列和临近物种的同源蛋白使用diamond blastx进行比对，得到表格结果。若使用dianmond命令直接对单个全基因组Fasta文件进行分析，单个diamond命令并不能一直占用单台服务器全部CPU线程，有很长时间的单线程运行阶段，从而导致程序运行速度较慢。因此，推荐使用本程序将基因组序列进行分割后并行化计算，并进一步调用homolog_prediction.02filtringBlastxHits对blastx结果进行过滤，然后合并结果，从而加快计算速度。
 
     --segmentSize <int>    default: 1000000
     --overlapSize <int>    default: 100000
@@ -94,7 +96,8 @@ unless ( -e "2.split_genome_seqs_and_get_cmds.ok" ) {
     }
     close IN;
     mkdir "split_genome_seqs" unless -e "split_genome_seqs";
-    open CMD, ">", "split_genome_seqs/command.diamond_blastx.list" or die "Can not create file split_genome_seq/command.diamond_blastx.list, $!";
+    open CMD1, ">", "split_genome_seqs/command.diamond_blastx.list" or die "Can not create file split_genome_seq/command.diamond_blastx.list, $!";
+    open CMD2, ">", "split_genome_seqs/command.homolog_prediction.02filtringBlastxHits.list" or die "Can not create file split_genome_seq/command.homolog_prediction.02filtringBlastxHits.list, $!";
     my @seq_ID;
     foreach my $seq_id ( sort keys %seq ) {
         my $seq = $seq{$seq_id};
@@ -119,9 +122,10 @@ unless ( -e "2.split_genome_seqs_and_get_cmds.ok" ) {
         }
     }
     foreach ( @seq_ID ) {
-        print CMD "diamond blastx --threads $cpu --db homolog --query split_genome_seqs/$_.fa --out split_genome_seqs/$_.out --outfmt 6 --sensitive --max-target-seqs $protein_number --evalue $evalue --id $identity 2> split_genome_seqs/$_.log\n";
+        print CMD1 "diamond blastx --threads $cpu --db homolog --query split_genome_seqs/$_.fa --out split_genome_seqs/$_.out --outfmt 6 --sensitive --max-target-seqs $protein_number --evalue $evalue --id $identity 2> split_genome_seqs/$_.diamond_blastx.log\n";
+        print CMD2 "$binPath/homolog_prediction.02filtringBlastxHits --threshold_num 10 --threshold_ratio 0.4 split_genome_seqs/$_.out > split_genome_seqs/$_.tab 2>> split_genome_seqs/$_.filtringBlastxHits.log\n";
     }
-    close CMD;
+    close CMD1; close CMD2;
     open OUT, ">", "2.split_genome_seqs_and_get_cmds.ok" or die $!; close OUT;
     my $sequence_number = @seq_ID;
     print STDERR "The genome was split to $sequence_number sequences.\n";
@@ -140,7 +144,7 @@ $paraFly_CPU = $MemAvailable / 10000000 if $paraFly_CPU > ($MemAvailable / 10000
 $paraFly_CPU = 1 if $paraFly_CPU < 1;
 $paraFly_CPU = int($paraFly_CPU + 0.5);
 my $cmdString = "ParaFly -c split_genome_seqs/command.diamond_blastx.list -CPU $paraFly_CPU &> 3.ParaFly_diamond_blastx.log";
-unless ( -e "1.3.ParaFly_diamond_blastx.ok" ) {
+unless ( -e "3.ParaFly_diamond_blastx.ok" ) {
     print STDERR (localtime) . ": CMD: $cmdString\n";
     if ( system("$cmdString") != 0 ) {
         $cmdString = "ParaFly -c split_genome_seqs/command.diamond_blastx.list -CPU 1 &>> 3.ParaFly_diamond_blastx.log";
@@ -153,9 +157,20 @@ else {
     print STDERR "CMD(Skipped): $cmdString\n";
 }
 
-# 4 汇总dimond的比对结果，并修正匹配的位置信息(之前打断基因组序列后，比对的位置需要进行修正)。
+# 4. 对diamond blastx的结果进行过滤
+$cmdString = "ParaFly -c split_genome_seqs/command.homolog_prediction.02filtringBlastxHits.list -CPU $cpu &> 4.ParaFly_filtringBlastxHits.log";
+unless ( -e "4.ParaFly_filtringBlastxHit.ok" ) {
+    print STDERR (localtime) . ": CMD: $cmdString\n";
+    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+    open OUT, ">", "4.ParaFly_filtringBlastxHit.ok" or die $!; close OUT;
+}
+else {
+    print STDERR "CMD(Skipped): $cmdString\n";
+}
+
+# 5 汇总dimond的比对结果，并修正匹配的位置信息(之前打断基因组序列后，比对的位置需要进行修正)。
 print STDERR "4. output the alignment results.\n";
-foreach (<"split_genome_seqs/*.out">) {
+foreach (<"split_genome_seqs/*.tab">) {
     open IN, $_ or die "Can not open file $_, $!";
     while (<IN>) {
         @_ = split /\t/;

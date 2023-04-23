@@ -1,0 +1,25 @@
+#!/usr/bin/env perl
+
+use strict;
+use Getopt::Long;
+use Cwd qw/abs_path getcwd cwd/;
+
+my $usage = <<USAGE;
+Usage:
+    $0 [options] homolog_proteins.fasta out.diamond.tab > out.gff
+
+
+
+    --help    default: None
+    display this help and exit.
+
+USAGE
+if (@ARGV==0){die $usage}
+
+my ($help_flag);
+GetOptions(
+    "help" => \$help_flag,
+);
+
+if ( $help_flag ) { die $usage }
+

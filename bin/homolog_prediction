@@ -77,7 +77,7 @@ print STDERR (localtime) . "CMD (Main Program): $0 " . join(" ", @ARGV) . "\n###
 print STDERR "1. align genome sequences against homolog proteins through diamond software.\n";
 chdir $tmp_dir;
 my $pwd = `pwd`; print STDERR "PWD: $pwd";
-my $cmdString = "$binPath/homolog_prediction.01paraDiamond --segmentSize $segmentSize --overlapSize $overlapSize --cpu $cpu --identity $identity --evalue $evalue --tmp_dir a.para_diamond $input_protein $input_genome > $out_prefix.diamond.tab 2> a.para_diamond.log";
+my $cmdString = "$binPath/homolog_prediction.01paraDiamondBlastx --segmentSize $segmentSize --overlapSize $overlapSize --cpu $cpu --identity $identity --evalue $evalue --tmp_dir a.para_diamond $input_protein $input_genome > $out_prefix.diamond.tab 2> a.para_diamond.log";
 unless (-e "1.paraDiamond.ok" && -e "$out_prefix.diamond.tab") {
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -86,19 +86,6 @@ unless (-e "1.paraDiamond.ok" && -e "$out_prefix.diamond.tab") {
 else {
     print STDERR "CMD(Skipped): $cmdString\n";
 }
-
-# 2. 过滤被包含匹配区域中得分过低的比对结果。
-print STDERR "2. filtering the low quality alignments when contained in another match region.\n";
-my $cmdString = "$binPath/homolog_prediction.02filtringLowQualityHits ";
-unless (-e "2.filtringLowQualityHits.ok") {
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-    open OUT, ">", "2.filtringLowQualityHits.ok" or die $!; close OUT;
-}
-else {
-    print STDERR "CMD(Skipped): $cmdString\n";
-}
-
 # 3. 调用genewise(wise)进行基因预测。
 # 4. 调用gth(genomethreader)进行基因预测。
 # 5. 合并所有的基因预测结果，若一个区域有多个蛋白预测的结果，取其一致性结果。
