@@ -1,0 +1,139 @@
+#!/usr/bin/env perl
+
+use strict;
+use Getopt::Long;
+use Cwd qw/abs_path getcwd cwd/;
+
+my $usage = <<USAGE;
+Usage:
+    $0 [options] blast.tab > filtered.tab
+
+    对diamond blastx的结果进行过滤。先后采用两种方法进行过滤：（1）若一个主要Hit包含多个次要Hits时，仅保留指定数量（默认为10个）的较好Hits；（2）当两个Hits属于包含和被包含关系时，若其中一个得分较低（默认低于另一个得分的50%时），去除较低得分的比对结果。
+
+    --threshold_num <int>    default: 10
+    设置数量阈值。当某个BLAST Hit(主要Hit)区域包含多个其它BLAST Hits(次要Hit)时，则对次要Hits进行去除，直至主要Hit和次要Hits的总数量达到本阈值数量。对次要Hits按Evalue从小到大和Score值从大到小进行排序，保留靠前指定数量的Hits，其余的Hits若其Evalue>=主要Hit的Evalue，且其Score<=主要Hit的Score值，则去除。有时某个基因区域有数千上万的比对结果，其得分接近或一致，这时需要仅选择较好的结果来减少后续基因预测的计算量。
+
+    --threshold_ratio <float>    default: 0.5
+    设置比例阈值。当两个BLAST Hits的匹配区域有包含关系时，若得分比值低于阈值，则去除较低得分的比对结果。
+
+    --help    default: None
+    display this help and exit.
+
+USAGE
+if (@ARGV==0){die $usage}
+
+my ($threshold_ratio, $threshold_num, $help_flag);
+GetOptions(
+    "threshold_ratio:f" => \$threshold_ratio,
+    "threshold_num:i" => \$threshold_num,
+    "help" => \$help_flag,
+);
+$threshold_ratio ||= 0.5;
+$threshold_num ||= 10;
+
+if ( $help_flag ) { die $usage }
+
+# 读取所有的BLAST比对信息，并每1kb进行索引。
+my $input_file = abs_path($ARGV[0]);
+open IN, $input_file or die "Can not open file , $!";
+my (%index, %score, %evalue, %alignment_length, %hits_all, %query, %query_start, %query_end);
+while (my $line = <IN>) {
+    $hits_all{$line} = 1;
+    @_ = split /\t/, $line;
+    my ($start, $end) = ($_[6], $_[7]);
+    ($start, $end) = ($end, $start) if $start > $end;
+    $start = int($start / 1000);
+    $end = int($end / 1000) + 1;
+    foreach ( $start .. $end ) {
+        $index{$_[0]}{$_}{$line} = 1;
+        $score{$line} = $_[-1];
+        $evalue{$line} = $_[-2];
+        $alignment_length{$line} = abs($_[6] - $_[7]) + 1;
+        $query{$line} = $_[0];
+        $query_start{$line} = $_[6];
+        $query_end{$line} = $_[7];
+    }
+}
+close IN;
+
+my %hits_filtered;
+#print STDERR "Seq_ID\tIndex_Num\tHit_Num\tRetained_Hit_num_after_--threshold_num\tRetained_Hit_num_after_--threshold_ratio\n";
+foreach my $seq_ID ( sort keys %index ) {
+    foreach my $index ( sort {$a <=> $b} keys %{$index{$seq_ID}} ) {
+        my %hit = %{$index{$seq_ID}{$index}};
+        my $num1 = %hit;
+        next unless %hit;
+        my @hit = sort { $alignment_length{$b} <=> $alignment_length{$a} } keys %hit;
+
+        # 根据 --threshold_num 阈值过滤BLAST Hits
+        foreach my $hit (@hit) {
+            if ( exists $hit{$hit} ) {
+                # 找被包含的Hits，包含主要Hit本身
+                my %be_contained_hit;
+                @_ = split /\t/, $hit;
+                my ($start, $end) = ($_[6], $_[7]);
+                ($start, $end) = ($end, $start) if $start > $end;
+                foreach ( keys %hit ) {
+                    @_ = split /\t/;
+                    my ($start1, $end1) = ($_[6], $_[7]);
+                    ($start1, $end1) = ($end1, $start1) if $start1 > $end1;
+                    if ( $start1 >= $start && $end1 <= $end ) {
+                        $be_contained_hit{$_} = 1;
+                    }
+                }
+                # 若被包含的Hits数量超过阈值，则去除Evalue和比对得分较低的BLAST Hits，直至其数量减少到本阈值。
+                if ( %be_contained_hit > $threshold_num ) {
+                    my $aaa = %be_contained_hit;
+                    #print STDERR "$seq_ID\t$index\t$aaa\t$threshold_num\n";
+                    my @be_contained_hit = sort { $evalue{$a} <=> $evalue{$b} or $score{$b} <=> $score{$a} } keys %be_contained_hit;
+                    foreach ( 1 .. $threshold_num ) {
+                        shift @be_contained_hit;
+                    }
+                    foreach ( @be_contained_hit ) {
+                        if ( $evalue{$_} >= $evalue{$hit} && $score{$_} <= $score{$hit} ) {
+                            #print STDERR "Primary: ${hit}Delete: $_\n";
+                            delete $index{$seq_ID}{$index}{$_};
+                            delete $score{$_};
+                            delete $evalue{$_};
+                            delete $alignment_length{$_};
+                            delete $hit{$_};
+                            $hits_filtered{$_} = 1;
+                        }
+                    }
+                }
+            }
+        }
+        
+        # 根据 --threshold_ratio 阈值过滤BLAST Hits
+        next unless %hit;
+        my $num2 = %hit;
+        my @hit = keys %hit;
+        FF1: foreach my $hit ( @hit ) {
+            @_ = split /\t/, $hit;
+            my ($start, $end) = ($_[6], $_[7]);
+            ($start, $end) = ($end, $start) if $start > $end;
+            my $score = $score{$hit};
+            foreach ( keys %hit ) {
+                @_ = split /\t/;
+                my ($start1, $end1) = ($_[6], $_[7]);
+                ($start1, $end1) = ($end1, $start1) if $start1 > $end1;
+                my $score1 = $score{$_};
+                if ( $start >= $start1 && $end <= $end1 && $score < $score1 * $threshold_ratio ) {
+                    delete $hit{$hit};
+                    $hits_filtered{$hit} = 1;
+                    next FF1;
+                }
+            }
+        }
+        my $num3 = %hit;
+        #print STDERR "$seq_ID\t$index\t$num1\t$num2\t$num3\n";
+    }
+}
+
+foreach ( sort { $query{$a} cmp $query{$b} or $query_start{$a} <=> $query_start{$b} or $query_end{$a} <=> $query_end{$b} } keys %hits_all ) {
+    print unless exists $hits_filtered{$_};
+}
+my $hits_all_num = %hits_all;
+my $hits_filtered_num = %hits_filtered;
+my $remain_num = $hits_all_num - $hits_filtered_num;
+print STDERR "Total Hits Number: $hits_all_num\nFiltered Hits Number: $hits_filtered_num\nRemained Hits Numer: $remain_num\n";

@@ -11,8 +11,8 @@ my $usage = <<USAGE;
 Usage:
     $0 [options] homolog_proteins.fasta genome_seq.fasta > out.gff
 
-	--out_prefix <string>    default: out
-	设置输出文件前缀。程序默认输出如下文件：（1）out.diamond.tab，将基因组序列和同源蛋白进行dimond blastx比对的结果文件；（2）out.
+    --out_prefix <string>    default: out
+    设置输出文件前缀。程序默认输出如下文件：（1）out.diamond.tab，将基因组序列和同源蛋白进行dimond blastx比对的结果文件；（2）out.
 
     --segmentSize <int>    default: 1000000
     --overlapSize <int>    default: 100000
@@ -21,7 +21,7 @@ Usage:
     --cpu <int>    default: 8
     设置diamond程序使用线程数，genewise或gth命令运行的并行数。
 
-	--identity <float>    default: 0.2
+    --identity <float>    default: 0.2
     --evalue <float>    default: 1e-9
     设置diamond blastx分析时的Identity和E-value阈值。由于diamond blastx进行分析，每个Hit仅给出一个最优的HSP（而NCBI Blast+会给出所有HSPs），因此不需要根据覆盖率来对BLASTX结果进行过滤。
 
@@ -39,11 +39,11 @@ if (@ARGV==0){die $usage}
 
 my ($out_prefix, $segmentSize, $overlapSize, $cpu, $identity, $evalue, $method, $tmp_dir, $help_flag);
 GetOptions(
-	"out_prefix:s" => \$out_prefix,
+    "out_prefix:s" => \$out_prefix,
     "segmentSize:i" => \$segmentSize,
     "overlapSize:i" => \$overlapSize,
     "cpu:i" => \$cpu,
-	"identity:f" => \$identity,
+    "identity:f" => \$identity,
     "evalue:f" => \$evalue,
     "method:s" => \$method,
     "tmp_dir:s" => \$tmp_dir,
@@ -78,13 +78,13 @@ print STDERR "1. align genome sequences against homolog proteins through diamond
 chdir $tmp_dir;
 my $pwd = `pwd`; print STDERR "PWD: $pwd";
 my $cmdString = "$binPath/homolog_prediction.01paraDiamond --segmentSize $segmentSize --overlapSize $overlapSize --cpu $cpu --identity $identity --evalue $evalue --tmp_dir a.para_diamond $input_protein $input_genome > $out_prefix.diamond.tab 2> a.para_diamond.log";
-unless (-e "1.paraDiamond.ok") {
+unless (-e "1.paraDiamond.ok" && -e "$out_prefix.diamond.tab") {
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
     open OUT, ">", "1.paraDiamond.ok" or die $!; close OUT;
 }
 else {
-	print STDERR "CMD(Skipped): $cmdString\n";
+    print STDERR "CMD(Skipped): $cmdString\n";
 }
 
 # 2. 过滤被包含匹配区域中得分过低的比对结果。
@@ -96,7 +96,7 @@ unless (-e "2.filtringLowQualityHits.ok") {
     open OUT, ">", "2.filtringLowQualityHits.ok" or die $!; close OUT;
 }
 else {
-	print STDERR "CMD(Skipped): $cmdString\n";
+    print STDERR "CMD(Skipped): $cmdString\n";
 }
 
 # 3. 调用genewise(wise)进行基因预测。
