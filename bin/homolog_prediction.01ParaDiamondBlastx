@@ -11,7 +11,7 @@ my $usage = <<USAGE;
 Usage:
     $0 [options] homolog_proteins.fasta genome_seq.fasta > out.tab
 
-    本程序用于将全基因组序列和临近物种的同源蛋白使用diamond blastx进行比对，得到表格结果。若使用dianmond命令直接对单个全基因组Fasta文件进行分析，单个diamond命令并不能一直占用单台服务器全部CPU线程，有很长时间的单线程运行阶段，从而导致程序运行速度较慢。因此，推荐使用本程序将基因组序列进行分割后并行化计算，并进一步调用homolog_prediction.02filtringBlastxHits对blastx结果进行过滤，然后合并结果，从而加快计算速度。
+    本程序用于将全基因组序列和临近物种的同源蛋白使用diamond blastx进行比对，得到制表符分割的比对结果。若使用dianmond命令直接对单个全基因组Fasta文件进行分析，单个diamond命令并不能一直占用单台服务器全部CPU线程，有很长时间的单线程运行阶段，从而导致程序运行速度较慢。因此，推荐使用本程序将基因组序列进行分割后并行化计算，从而加快计算速度。此外，本程序会调用parsing_blast_result.pl命令根据evalue、identity和subject coverage对BLASTX结果进行过滤，再进一步调用homolog_prediction.02RemoveRedundancyOfBlastxHits对BLASTX结果去冗余。
 
     --segmentSize <int>    default: 1000000
     --overlapSize <int>    default: 100000
@@ -22,10 +22,10 @@ Usage:
 
     --identity <float>    default: 0.2
     --evalue <float>    default: 1e-9
-	--subject_cover <float>    default: 0.3
+    --subject_coverage <float>    default: 0.3
     设置diamond blastx分析时的Identity、E-value和subject coverage阈值。
 
-	--genetic_code <int>    default: 1
+    --genetic_code <int>    default: 1
     设置遗传密码。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。
 
     --tmp_dir <string>    default: tmp_\$date\$pid
@@ -37,15 +37,15 @@ Usage:
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($segmentSize, $overlapSize, $cpu, $identity, $evalue, $subject_cover, $genetic_code, $tmp_dir, $help_flag);
+my ($segmentSize, $overlapSize, $cpu, $identity, $evalue, $subject_coverage, $genetic_code, $tmp_dir, $help_flag);
 GetOptions(
     "segmentSize:i" => \$segmentSize,
     "overlapSize:i" => \$overlapSize,
     "cpu:i" => \$cpu,
     "identity:f" => \$identity,
     "evalue:f" => \$evalue,
-	"subject_cover:f" => \$subject_cover,
-	"genetic_code:i" => \$genetic_code,
+    "subject_coverage:f" => \$subject_coverage,
+    "genetic_code:i" => \$genetic_code,
     "tmp_dir:s" => \$tmp_dir,
     "help" => \$help_flag,
 );
@@ -54,7 +54,8 @@ $overlapSize ||= 100000;
 $cpu ||= 8;
 $identity ||= 0.2;
 $evalue ||= 1e-9;
-$subject_cover ||= 0.3;
+$subject_coverage ||= 0.3;
+$genetic_code ||= 1;
 my $date = `date +%Y%m%d%H%M%S`; chomp($date);
 $tmp_dir ||= "tmp_$date$$";
 $tmp_dir = abs_path($tmp_dir);
@@ -104,7 +105,7 @@ unless ( -e "2.split_genome_seqs_and_get_cmds.ok" ) {
     close IN;
     mkdir "split_genome_seqs" unless -e "split_genome_seqs";
     open CMD1, ">", "split_genome_seqs/command.diamond_blastx.list" or die "Can not create file split_genome_seq/command.diamond_blastx.list, $!";
-    open CMD2, ">", "split_genome_seqs/command.homolog_prediction.02filtringBlastxHits.list" or die "Can not create file split_genome_seq/command.homolog_prediction.02filtringBlastxHits.list, $!";
+    open CMD2, ">", "split_genome_seqs/command.RemoveRedundancyOfBlastxHits.list" or die "Can not create file split_genome_seq/command.RemoveRedundancyOfBlastxHits.list, $!";
     my @seq_ID;
     foreach my $seq_id ( sort keys %seq ) {
         my $seq = $seq{$seq_id};
@@ -129,8 +130,8 @@ unless ( -e "2.split_genome_seqs_and_get_cmds.ok" ) {
         }
     }
     foreach ( @seq_ID ) {
-        print CMD1 "diamond blastx --threads $cpu --db homolog --query split_genome_seqs/$_.fa --out split_genome_seqs/$_.xml --outfmt 5 --sensitive --max-target-seqs $protein_number --evalue $evalue --id 20 --query-gencode $genetic_code --max-hsps 50 2> split_genome_seqs/$_.diamond_blastx.log; $binPath/parsing_blast_result.pl --type xml --no-header --max-hit-num $protein_number --evalue $evalue --CIP $identity --subject-coverage $subject_cover --query-coverage 0 --HSP-num 1 --out-hit-confidence split_genome_seqs/$_.xml > split_genome_seqs/$_.tab\n";
-        print CMD2 "$binPath/homolog_prediction.02filtringBlastxHits --threshold_num 10 --threshold_ratio 0.4 split_genome_seqs/$_.tab > split_genome_seqs/$_.out 2>> split_genome_seqs/$_.filtringBlastxHits.log\n";
+        print CMD1 "diamond blastx --threads $cpu --db homolog --query split_genome_seqs/$_.fa --out split_genome_seqs/$_.xml --outfmt 5 --sensitive --max-target-seqs $protein_number --evalue $evalue --id 20 --query-gencode $genetic_code --max-hsps 50 2> split_genome_seqs/$_.diamond_blastx.log; $binPath/parsing_blast_result.pl --type xml --no-header --max-hit-num $protein_number --evalue $evalue --CIP $identity --subject-coverage $subject_coverage --query-coverage 0 --HSP-num 50 --out-hit-confidence split_genome_seqs/$_.xml > split_genome_seqs/$_.tab\n";
+        print CMD2 "$binPath/homolog_prediction.02RemoveRedundancyOfBlastxHits --threshold_HSP_distance 5000 --threshold_num 10 --threshold_ratio 0.4 split_genome_seqs/$_.tab > split_genome_seqs/$_.out 2>> split_genome_seqs/$_.RemoveRedundancyOfBlastxHits.log\n";
     }
     close CMD1; close CMD2;
     open OUT, ">", "2.split_genome_seqs_and_get_cmds.ok" or die $!; close OUT;
@@ -164,13 +165,13 @@ else {
     print STDERR "CMD(Skipped): $cmdString\n";
 }
 
-# 4. 对diamond blastx的结果进行过滤
-print STDERR "4. Filtering blastx results.\n";
-$cmdString = "ParaFly -c split_genome_seqs/command.homolog_prediction.02filtringBlastxHits.list -CPU $cpu &> 4.ParaFly_filtringBlastxHits.log";
-unless ( -e "4.ParaFly_filtringBlastxHit.ok" ) {
+# 4. 对diamond blastx的结果去冗余
+print STDERR "4. Remove redundancy of blastx results.\n";
+$cmdString = "ParaFly -c split_genome_seqs/command.RemoveRedundancyOfBlastxHits.list -CPU $cpu &> 4.ParaFly_RemoveRedundancyOfBlastxHits.log";
+unless ( -e "4.ParaFly_RemoveRedundancyOfBlastxHits.ok" ) {
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-    open OUT, ">", "4.ParaFly_filtringBlastxHit.ok" or die $!; close OUT;
+    open OUT, ">", "4.ParaFly_RemoveRedundancyOfBlastxHits.ok" or die $!; close OUT;
 }
 else {
     print STDERR "CMD(Skipped): $cmdString\n";
@@ -178,7 +179,7 @@ else {
 
 # 5 汇总dimond的比对结果，并修正匹配的位置信息(之前打断基因组序列后，比对的位置需要进行修正)。
 print STDERR "5. output the alignment results.\n";
-foreach (<"split_genome_seqs/*.tab">) {
+foreach (<"split_genome_seqs/*.out">) {
     open IN, $_ or die "Can not open file $_, $!";
     while (<IN>) {
         @_ = split /\t/;
