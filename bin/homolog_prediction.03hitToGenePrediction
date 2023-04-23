@@ -6,9 +6,22 @@ use Cwd qw/abs_path getcwd cwd/;
 
 my $usage = <<USAGE;
 Usage:
-    $0 [options] homolog_proteins.fasta out.diamond.tab > out.gff
+    $0 [options] homolog_proteins.fasta genome.fasta out.diamond.tab > out.gff
 
+	--flanking_length <int>    default: 5000
+	设置侧翼序列长度。程序根据BLASTX比对结果，选取基因组序列匹配区域及其两侧翼--flanking_length参数指定长度的序列，作为核酸序列，输入给genewise或gth命令，用于基因预测。
 
+	--cpu <int>    default: 8
+	设置运行genewise或gth命令的并行化数。
+
+	--method <int>    default: 1
+	设置进行基因预测的方法，其值可以设定为1、2或3。设置为1，表示仅使用gth方法；设置为2，表示仅使用genewise方法；设置为3，表示同时使用两种方法。
+
+    --genetic_code <int>    default: 1
+    设置遗传密码。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。
+
+	--tmp_dir <string>    default: tmp_$date$pid
+	程序运行时临时文件夹名称。
 
     --help    default: None
     display this help and exit.
@@ -16,10 +29,19 @@ Usage:
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($help_flag);
+my ($method, $genetic_code, $flanking_length, $cpu, $tmp_dir, $help_flag);
 GetOptions(
+	"method:i" => \$method,
+	"genetic_code:i" => \$genetic_code,
+	"flanking_length:i" => \$flanking_length,
+	"cpu:i" => \$cpu,
+	"tmp_dir:s" => \$tmp_dir,
     "help" => \$help_flag,
 );
+$method ||= 1;
+$genetic_code ||= 1;
+$flanking_length ||= 5000;
+$cpu ||= 8;
 
 if ( $help_flag ) { die $usage }
 

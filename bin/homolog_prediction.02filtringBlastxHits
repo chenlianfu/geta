@@ -132,7 +132,7 @@ foreach my $seq_ID ( sort keys %index ) {
             }
         }
         my $num3 = %hit;
-        print STDERR "$seq_ID\t$index\t$num1\t$num2\t$num3\n";
+		#print STDERR "$seq_ID\t$index\t$num1\t$num2\t$num3\n";
     }
 }
 

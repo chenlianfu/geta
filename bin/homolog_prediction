@@ -28,6 +28,9 @@ Usage:
     --method <string>    default: gth
     设置使用同源蛋白进行基因预测的方法，可设置值为gth或genewise。一般情况下，genewise进行基因预测的耗时是gth的五倍。
 
+    --genetic_code <int>    default: 1
+    设置遗传密码。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。
+
     --tmp_dir <string>    default: tmp_\$date\$pid
     程序运行时临时文件夹名称。
 
@@ -37,7 +40,7 @@ Usage:
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($out_prefix, $segmentSize, $overlapSize, $cpu, $identity, $evalue, $method, $tmp_dir, $help_flag);
+my ($out_prefix, $segmentSize, $overlapSize, $cpu, $identity, $evalue, $method, $genetic_code, $tmp_dir, $help_flag);
 GetOptions(
     "out_prefix:s" => \$out_prefix,
     "segmentSize:i" => \$segmentSize,
@@ -46,6 +49,7 @@ GetOptions(
     "identity:f" => \$identity,
     "evalue:f" => \$evalue,
     "method:s" => \$method,
+    "genetic_code:i" => \$genetic_code,
     "tmp_dir:s" => \$tmp_dir,
     "help" => \$help_flag,
 );
@@ -59,6 +63,7 @@ $method ||= "gth";
 unless ($method eq "gth" or $method eq "genewise") {
     die "--method was set wrong, it should be set to gth or genewise. \n";
 }
+$genetic_code ||= 1;
 my $date = `date +%Y%m%d%H%M%S`; chomp($date);
 $tmp_dir ||= "tmp_$date$$";
 $tmp_dir = abs_path($tmp_dir);

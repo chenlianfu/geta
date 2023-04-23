@@ -22,7 +22,11 @@ Usage:
 
     --identity <float>    default: 0.2
     --evalue <float>    default: 1e-9
-    设置diamond blastx分析时的Identity和E-value阈值。由于diamond blastx进行分析，每个Hit仅给出一个最优的HSP（而NCBI Blast+会给出所有HSPs），因此不需要根据覆盖率来对BLASTX结果进行过滤。
+	--subject_cover <float>    default: 0.3
+    设置diamond blastx分析时的Identity、E-value和subject coverage阈值。
+
+	--genetic_code <int>    default: 1
+    设置遗传密码。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。
 
     --tmp_dir <string>    default: tmp_\$date\$pid
     程序运行时临时文件夹名称。
@@ -33,13 +37,15 @@ Usage:
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($segmentSize, $overlapSize, $cpu, $identity, $evalue, $tmp_dir, $help_flag);
+my ($segmentSize, $overlapSize, $cpu, $identity, $evalue, $subject_cover, $genetic_code, $tmp_dir, $help_flag);
 GetOptions(
     "segmentSize:i" => \$segmentSize,
     "overlapSize:i" => \$overlapSize,
     "cpu:i" => \$cpu,
     "identity:f" => \$identity,
     "evalue:f" => \$evalue,
+	"subject_cover:f" => \$subject_cover,
+	"genetic_code:i" => \$genetic_code,
     "tmp_dir:s" => \$tmp_dir,
     "help" => \$help_flag,
 );
@@ -48,6 +54,7 @@ $overlapSize ||= 100000;
 $cpu ||= 8;
 $identity ||= 0.2;
 $evalue ||= 1e-9;
+$subject_cover ||= 0.3;
 my $date = `date +%Y%m%d%H%M%S`; chomp($date);
 $tmp_dir ||= "tmp_$date$$";
 $tmp_dir = abs_path($tmp_dir);
@@ -122,7 +129,7 @@ unless ( -e "2.split_genome_seqs_and_get_cmds.ok" ) {
         }
     }
     foreach ( @seq_ID ) {
-        print CMD1 "diamond blastx --threads $cpu --db homolog --query split_genome_seqs/$_.fa --out split_genome_seqs/$_.out --outfmt 6 --sensitive --max-target-seqs $protein_number --evalue $evalue --id $identity 2> split_genome_seqs/$_.diamond_blastx.log\n";
+        print CMD1 "diamond blastx --threads $cpu --db homolog --query split_genome_seqs/$_.fa --out split_genome_seqs/$_.out --outfmt 6 --sensitive --max-target-seqs $protein_number --evalue $evalue --id $identity --query-gencode $genetic_code 2> split_genome_seqs/$_.diamond_blastx.log\n";
         print CMD2 "$binPath/homolog_prediction.02filtringBlastxHits --threshold_num 10 --threshold_ratio 0.4 split_genome_seqs/$_.out > split_genome_seqs/$_.tab 2>> split_genome_seqs/$_.filtringBlastxHits.log\n";
     }
     close CMD1; close CMD2;
@@ -158,6 +165,7 @@ else {
 }
 
 # 4. 对diamond blastx的结果进行过滤
+print STDERR "4. Filtering blastx results.\n";
 $cmdString = "ParaFly -c split_genome_seqs/command.homolog_prediction.02filtringBlastxHits.list -CPU $cpu &> 4.ParaFly_filtringBlastxHits.log";
 unless ( -e "4.ParaFly_filtringBlastxHit.ok" ) {
     print STDERR (localtime) . ": CMD: $cmdString\n";
@@ -169,7 +177,7 @@ else {
 }
 
 # 5 汇总dimond的比对结果，并修正匹配的位置信息(之前打断基因组序列后，比对的位置需要进行修正)。
-print STDERR "4. output the alignment results.\n";
+print STDERR "5. output the alignment results.\n";
 foreach (<"split_genome_seqs/*.tab">) {
     open IN, $_ or die "Can not open file $_, $!";
     while (<IN>) {
