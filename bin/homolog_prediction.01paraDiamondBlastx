@@ -129,8 +129,8 @@ unless ( -e "2.split_genome_seqs_and_get_cmds.ok" ) {
         }
     }
     foreach ( @seq_ID ) {
-        print CMD1 "diamond blastx --threads $cpu --db homolog --query split_genome_seqs/$_.fa --out split_genome_seqs/$_.out --outfmt 6 --sensitive --max-target-seqs $protein_number --evalue $evalue --id $identity --query-gencode $genetic_code 2> split_genome_seqs/$_.diamond_blastx.log\n";
-        print CMD2 "$binPath/homolog_prediction.02filtringBlastxHits --threshold_num 10 --threshold_ratio 0.4 split_genome_seqs/$_.out > split_genome_seqs/$_.tab 2>> split_genome_seqs/$_.filtringBlastxHits.log\n";
+        print CMD1 "diamond blastx --threads $cpu --db homolog --query split_genome_seqs/$_.fa --out split_genome_seqs/$_.xml --outfmt 5 --sensitive --max-target-seqs $protein_number --evalue $evalue --id 20 --query-gencode $genetic_code --max-hsps 50 2> split_genome_seqs/$_.diamond_blastx.log; $binPath/parsing_blast_result.pl --type xml --no-header --max-hit-num $protein_number --evalue $evalue --CIP $identity --subject-coverage $subject_cover --query-coverage 0 --HSP-num 1 --out-hit-confidence split_genome_seqs/$_.xml > split_genome_seqs/$_.tab\n";
+        print CMD2 "$binPath/homolog_prediction.02filtringBlastxHits --threshold_num 10 --threshold_ratio 0.4 split_genome_seqs/$_.tab > split_genome_seqs/$_.out 2>> split_genome_seqs/$_.filtringBlastxHits.log\n";
     }
     close CMD1; close CMD2;
     open OUT, ">", "2.split_genome_seqs_and_get_cmds.ok" or die $!; close OUT;
