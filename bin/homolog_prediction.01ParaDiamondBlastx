@@ -17,8 +17,11 @@ Usage:
     --overlapSize <int>    default: 100000
     程序将基因组较长的序列进行分割，以加快diamond blastx的并行化比对速度；若单条序列长度超过1Mb， 则将单条序列进行切割，两条相邻的序列间重叠的长度为100kb。
 
-    --max_hits_num <int>    default: 5
-    设置基因组上一个同源匹配区域（一个基因区域）的最大同源蛋白的匹配数量。该参数的值会传递给调用的homolog_prediction.02RemoveRedundancyOfBlastxHits命令的--threshold_num参数。
+    --max_hits_num_per_match_region <int>    default: 10
+    设置基因组上一个同源匹配区域（一个基因区域）的最大同源蛋白的匹配数量。该参数的值会传递给调用的homolog_prediction.02RemoveRedundancyOfBlastxHits命令的--threshold_Hit_num参数。
+
+    --max_hit_num_per_single_species <int>    default: 2
+    设置基因组上一个同源匹配区域（一个基因区域）和单个物种的最大同源蛋白的匹配数量。让一个基因区域尽量和多个物种的同源蛋白都有比对结果，利于后续的一致性预测结果分析，并根据一致性结果的数量判断结果的可靠性。该参数生效需要输入的同源蛋白FASTA文件头部中包含物种名称信息。程序识别蛋白序列名称中的关键词species（大小写均可以识别）及其后的字符[a-zA-Z0-9]作为物种名称。例如XP_002436309_2_SpeciesSorghumBicolor，程序识别其物种名称为SpeciesSorghumBicolor。该参数的值会传递给调用的的homolog_prediction.02RemoveRedundancyOfBlastxHits命令的--threshold_species_num参数。
 
     --cpu <int>    default: 8
     设置CPU线程数。本程序将本参数的值传递给diamond命令的--threads参数，表明单个diamond所使用的CPU线程；但diamond程序后半部分往往对CPU线程利用较少，往往只能使用1~4个CPU线程，因此本程序并行化运行diamond的数量为--cpu参数设置的值除以4；此外，考虑到diamond比较消耗内存，单个diamond程序消耗内存峰值10G，并行化运行diamond的数量最高为剩余内存量除以10G；当调用ParaFly并行化运行失败后，程序会使用1个并行数来运行diamond命令。
@@ -40,11 +43,12 @@ Usage:
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($segmentSize, $overlapSize, $max_hits_num, $cpu, $identity, $evalue, $subject_coverage, $genetic_code, $tmp_dir, $help_flag);
+my ($segmentSize, $overlapSize, $max_hits_num_per_match_region, $max_hit_num_per_single_species, $cpu, $identity, $evalue, $subject_coverage, $genetic_code, $tmp_dir, $help_flag);
 GetOptions(
     "segmentSize:i" => \$segmentSize,
     "overlapSize:i" => \$overlapSize,
-    "max_hits_num:i" => \$max_hits_num,
+    "max_hits_num_per_match_region:i" => \$max_hits_num_per_match_region,
+    "max_hit_num_per_single_species:i" => \$max_hit_num_per_single_species,
     "cpu:i" => \$cpu,
     "identity:f" => \$identity,
     "evalue:f" => \$evalue,
@@ -55,7 +59,8 @@ GetOptions(
 );
 $segmentSize ||= 1000000;
 $overlapSize ||= 100000;
-$max_hits_num ||= 5;
+$max_hits_num_per_match_region ||= 10;
+$max_hit_num_per_single_species ||= 2;
 $cpu ||= 8;
 $identity ||= 0.2;
 $evalue ||= 1e-9;
@@ -136,7 +141,7 @@ unless ( -e "2.split_genome_seqs_and_get_cmds.ok" ) {
     }
     foreach ( @seq_ID ) {
         print CMD1 "diamond blastx --threads $cpu --db homolog --query split_genome_seqs/$_.fa --out split_genome_seqs/$_.xml --outfmt 5 --sensitive --max-target-seqs $protein_number --evalue $evalue --id 20 --query-gencode $genetic_code --max-hsps 50 2> split_genome_seqs/$_.diamond_blastx.log; $binPath/parsing_blast_result.pl --type xml --no-header --max-hit-num $protein_number --evalue $evalue --CIP $identity --subject-coverage $subject_coverage --query-coverage 0 --HSP-num 50 --out-hit-confidence split_genome_seqs/$_.xml > split_genome_seqs/$_.tab\n";
-        print CMD2 "$binPath/homolog_prediction.02RemoveRedundancyOfBlastxHits --threshold_HSP_distance 5000 --threshold_num $max_hits_num --threshold_ratio 0.4 split_genome_seqs/$_.tab > split_genome_seqs/$_.out 2> split_genome_seqs/$_.RemoveRedundancyOfBlastxHits.log\n";
+        print CMD2 "$binPath/homolog_prediction.02RemoveRedundancyOfBlastxHits --threshold_HSP_distance 5000 --threshold_Hit_num $max_hits_num_per_match_region --threshold_species_num $max_hit_num_per_single_species --threshold_score_ratio 0.4 split_genome_seqs/$_.tab > split_genome_seqs/$_.out 2> split_genome_seqs/$_.RemoveRedundancyOfBlastxHits.log\n";
     }
     close CMD1; close CMD2;
     open OUT, ">", "2.split_genome_seqs_and_get_cmds.ok" or die $!; close OUT;

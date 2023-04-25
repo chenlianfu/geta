@@ -18,8 +18,11 @@ Usage:
     --overlapSize <int>    default: 100000
     程序将基因组较长的序列进行分割，以加快diamond blastx的并行化比对速度；若单条序列长度超过1Mb， 则将单条序列进行切割，两条相邻的序列间重叠的长度为100kb。
 
-	--max_hits_num <int>    default: 5
-	设置基因组上一个同源匹配区域（一个基因区域）的最大同源蛋白的匹配数量。该参数的值会传递给调用的homolog_prediction.01ParaDiamondBlastx命令的--max_hits_num参数。
+    --max_hits_num_per_match_region <int>    default: 10
+    设置基因组上一个同源匹配区域（一个基因区域）的最大同源蛋白的匹配数量。该参数的值会传递给调用的homolog_prediction.01ParaDiamondBlastx命令的--max_hits_num_per_match_region参数。
+
+    --max_hit_num_per_single_species <int>    default: 2
+    设置基因组上一个同源匹配区域（一个基因区域）和单个物种的最大同源蛋白的匹配数量。让一个基因区域尽量和多个物种的同源蛋白都有比对结果，利于后续的一致性预测结果分析，并根据一致性结果的数量判断结果的可靠性。该参数生效需要输入的同源蛋白FASTA文件头部中包含物种名称信息。程序识别蛋白序列名称中的关键词species（大小写均可以识别）及其后的字符[a-zA-Z0-9]作为物种名称。例如XP_002436309_2_SpeciesSorghumBicolor，程序识别其物种名称为SpeciesSorghumBicolor。该参数的值会传递给调用的homolog_prediction.01ParaDiamondBlastx命令的--max_hit_num_per_single_species参数。
 
     --cpu <int>    default: 8
     设置diamond程序使用线程数，genewise或gth命令运行的并行数。
@@ -43,12 +46,13 @@ Usage:
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($out_prefix, $segmentSize, $overlapSize, $max_hits_num, $cpu, $identity, $evalue, $method, $genetic_code, $tmp_dir, $help_flag);
+my ($out_prefix, $segmentSize, $overlapSize, $max_hits_num_per_match_region, $max_hit_num_per_single_species, $cpu, $identity, $evalue, $method, $genetic_code, $tmp_dir, $help_flag);
 GetOptions(
     "out_prefix:s" => \$out_prefix,
     "segmentSize:i" => \$segmentSize,
     "overlapSize:i" => \$overlapSize,
-	"max_hits_num:i" => \$max_hits_num,
+    "max_hits_num_per_match_region:i" => \$max_hits_num_per_match_region,
+    "max_hit_num_per_single_species:i" => \$max_hit_num_per_single_species,
     "cpu:i" => \$cpu,
     "identity:f" => \$identity,
     "evalue:f" => \$evalue,
@@ -60,7 +64,8 @@ GetOptions(
 $out_prefix ||= "out";
 $segmentSize ||= 1000000;
 $overlapSize ||= 100000;
-$max_hits_num ||= 5;
+$max_hits_num_per_match_region ||= 10;
+$max_hit_num_per_single_species ||= 2;
 $cpu ||= 8;
 $identity ||= 0.2;
 $evalue ||= 1e-9;
@@ -87,7 +92,7 @@ print STDERR (localtime) . "CMD (Main Program): $0 " . join(" ", @ARGV) . "\n###
 print STDERR "1. align genome sequences against homolog proteins through diamond software.\n";
 chdir $tmp_dir;
 my $pwd = `pwd`; print STDERR "PWD: $pwd";
-my $cmdString = "$binPath/homolog_prediction.01ParaDiamondBlastx --segmentSize $segmentSize --overlapSize $overlapSize --max_hits_num $max_hits_num --cpu $cpu --identity $identity --evalue $evalue --genetic_code $genetic_code --tmp_dir a.para_diamond $input_protein $input_genome > $out_prefix.diamond.tab 2> a.para_diamond.log";
+my $cmdString = "$binPath/homolog_prediction.01ParaDiamondBlastx --segmentSize $segmentSize --overlapSize $overlapSize --max_hits_num_per_match_region $max_hits_num_per_match_region --cpu $cpu --identity $identity --evalue $evalue --genetic_code $genetic_code --tmp_dir a.para_diamond $input_protein $input_genome > $out_prefix.diamond.tab 2> a.para_diamond.log";
 unless (-e "1.paraDiamond.ok" && -e "$out_prefix.diamond.tab") {
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -99,12 +104,12 @@ else {
 # 2. 调用genewise(wise)进行基因预测。
 $cmdString = "$binPath/homolog_prediction.03hitToGenePrediction --cpu $cpu --method 1 --genetic_code 1 --tmp_dir b.hitToGenewise $input_protein $input_genome out.diamond.tab > genewise.gff";
 unless (-e "2.hitToGenewise.ok" && -e "genewise.gff") {
-	print STDERR (localtime) . ": CMD: $cmdString\n";
-	system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-	open OUT, ">", "1.paraDiamond.ok" or die $!; close OUT;
+    print STDERR (localtime) . ": CMD: $cmdString\n";
+    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+    open OUT, ">", "1.paraDiamond.ok" or die $!; close OUT;
 }
 else {
-	print STDERR "CMD(Skipped): $cmdString\n";
+    print STDERR "CMD(Skipped): $cmdString\n";
 }
 # 4. 调用gth(genomethreader)进行基因预测。
 # 5. 合并所有的基因预测结果，若一个区域有多个蛋白预测的结果，取其一致性结果。
