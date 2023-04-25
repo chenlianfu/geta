@@ -8,19 +8,23 @@ my $usage = <<USAGE;
 Usage:
     $0 [options] homolog_proteins.fasta genome.fasta out.diamond.tab > out.gff
 
-    --flanking_length <int>    default: 5000
-    设置侧翼序列长度。程序根据BLASTX比对结果，选取基因组序列匹配区域及其两侧翼--flanking_length参数指定长度的序列，作为核酸序列，输入给genewise或gth命令，用于基因预测。
+    --flanking_length <int>    default: None
+    设置侧翼序列长度。程序根据BLASTX比对结果，选取基因组序列匹配区域及其两侧翼--flanking_length参数指定长度的序列，作为核酸序列，输入给genewise或gth命令，用于基因预测。若不设置此参数，程序会根据diamond blastx的结果自动进行计算，侧翼长度刚好超过90%以上的query匹配长度。若使用本参数直接指定侧翼长度，推荐设置为5000。
 
     --cpu <int>    default: 8
     设置运行genewise或gth命令的并行化数。
 
-    --method <int>    default: 1
-    设置进行基因预测的方法，其值可以设定为1、2或3。设置为1，表示仅使用gth方法；设置为2，表示仅使用genewise方法；设置为3，表示同时使用两种方法。
+    --method <int>    default: exonerate
+    设置进行基因预测的方法，其值可以设定为exonerate、genewise、gth或all。若需要同时使用多种方法，则输入使用逗号分割的多个值；若使用所有三种方法进行分析，可以设置--method参数值为all，但最消耗计算时间。
 
     --genetic_code <int>    default: 1
     设置遗传密码。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。
 
-    --tmp_dir <string>    default: tmp_$date$pid
+	--min_intron_length <int>    default: 30
+	--max_intron_length <int>    default: 200000
+	设置最小和最大intron长度。这两个参数仅在使用exonerate软件进行基因预测时生效，作为exonerate命令的--minintron和--maxintron参数的值。
+
+    --tmp_dir <string>    default: tmp_\$date\$pid
     程序运行时临时文件夹名称。
 
     --help    default: None
@@ -38,10 +42,98 @@ GetOptions(
     "tmp_dir:s" => \$tmp_dir,
     "help" => \$help_flag,
 );
+$cpu ||= 8;
 $method ||= 1;
 $genetic_code ||= 1;
-$flanking_length ||= 5000;
-$cpu ||= 8;
+my $date = `date +%Y%m%d%H%M%S`; chomp($date);
+$tmp_dir ||= "tmp_$date$$";
+$tmp_dir = abs_path($tmp_dir);
+mkdir $tmp_dir unless -e $tmp_dir;
 
 if ( $help_flag ) { die $usage }
+
+my $input_file1 = abs_path($ARGV[0]);
+my $input_file2 = abs_path($ARGV[1]);
+my $input_file3 = abs_path($ARGV[2]);
+
+# 读取同源蛋白序列信息
+open IN, $input_file1 or die "Can not open file $input_file1, $!";
+my (%homolog_seq, $id);
+while (<IN>) {
+    chomp;
+    if (/>(\S+)/) { $id = $1; }
+    else { $homolog_seq{$id} .= $_; }
+}
+close IN;
+
+# 读取基因组序列信息
+open IN, $input_file2 or die "Can not open file $input_file2, $!";
+my %genome_seq;
+while (<IN>) {
+    chomp;
+    if (/>(\S+)/) { $id = $1; }
+    else { $genome_seq{$id} .= $_; }
+}
+close IN;
+
+# 读取BLASTX比对结果信息，获取基因长度。
+open IN, $input_file3 or die "Can not open file $input_file3, $!";
+my @gene_length;
+while (<IN>) {
+	@_ = split /\t/;
+	push @gene_length, abs($_[6] - $_[7]) + 1;
+}
+close IN;
+# 获取基因长度信息，并设置侧翼序列长度。
+@gene_length = sort {$a <=> $b} @gene_length;
+$flanking_length = $gene_length[@gene_length * 0.9] unless defined($flanking_length);
+print STDERR "Through the BLASTX hits, 90% of the query length are greater than $gene_length[@gene_length * 0.9] bp, and the Flanking length was set to $flanking_length bp.\n";
+
+# 根据每个BLASTX Hit结果，输出基因预测的文件和命令行。
+open IN, $input_file3 or die "Can not open file $input_file3, $!";
+open CMD1, ">", "$tmp_dir/command.genewise.list" or die "Can not create file $tmp_dir/command.genewise.list, $!";
+open CMD2, ">", "$tmp_dir/command.gth.list" or die "Can not create file $tmp_dir/command.gth.list, $!";
+open CMD3, ">", "$tmp_dir/command.exonerate.list" or die "Can not create file $tmp_dir/command.exonerate.list, $!";
+mkdir "$tmp_dir/genewise" unless -e "$tmp_dir/genewise";
+mkdir "$tmp_dir/gth" unless -e "$tmp_dir/gth";
+mkdir "$tmp_dir/exonerate" unless -e "$tmp_dir/exonerate";
+while (<IN>) {
+	@_ = split /\t/;
+	# 检测基因在正义链还是负义链
+	my $strand = "plus";
+	if ( $_[6] > $_[7] ) {
+		$strand = "minus";
+		($_[6], $_[7]) = ($_[7], $_[6]);
+	}
+	# 分析得到匹配区域及其两侧翼的序列信息
+	my $length = $_[7] - $_[6] + 1 + $flanking_length + $flanking_length;
+	my $start = $_[6] - 1 - $flanking_length;
+	$start = 0 if $start < 0;
+	my $seq = substr($genome_seq{$_[0]}, $start, $length);
+	my $out_prefix = "$_[0].$_[6]\_$_[7].start$start.$_[1]";
+	# 输出基因组上的序列
+	open OUT, ">", "$tmp_dir/$out_prefix.genome.fasta" or die "Can not create file $tmp_dir/$out_prefix.genome.fasta, $!";
+	print OUT ">$_[0].$_[6]\_$_[7]\n$seq\n";
+	close OUT; 
+	# 输出同源蛋白序列
+	my $homolog_seq = $homolog_seq{$_[1]};
+	$homolog_seq =~ s/\**$/\*/;
+	open OUT, ">", "$tmp_dir/$out_prefix.homolog.fasta" or die "Can not create file $tmp_dir/$out_prefix.homolog.fasta, $!";
+	print OUT ">$_[1]\n$homolog_seq\n";
+	close OUT;
+	# 输出并行化命令行
+	if ($strand eq "plus") {
+		print CMD1 "genewise $tmp_dir/$out_prefix.homolog.fasta $tmp_dir/$out_prefix.genome.fasta -tfor -gff -quiet -silent -sum > $tmp_dir/genewise/$out_prefix.gff\n";
+		print CMD2 "gth -protein $tmp_dir/$out_prefix.homolog.fasta -genomic $tmp_dir/$out_prefix.genome.fasta -translationtable $genetic_code -f -gff3out -intermediate > $tmp_dir/gth/$out_prefix.gff\n";
+	}
+	else {
+		print CMD1 "genewise $tmp_dir/$out_prefix.homolog.fasta $tmp_dir/$out_prefix.genome.fasta -trev -gff -quiet -silent -sum > $tmp_dir/genewise/$out_prefix.gff\n";
+		print CMD2 "gth -protein $tmp_dir/$out_prefix.homolog.fasta -genomic $tmp_dir/$out_prefix.genome.fasta -translationtable $genetic_code -r -gff3out -intermediate > $tmp_dir/gth/$out_prefix.gff\n";
+	}
+	print CMD3 "exonerate --model protein2genome --geneticcode $genetic_code --forcegtag true --minintron 30 --maxintron 200000 --showtargetgff true --showalignment false --showvulgar false $tmp_dir/$out_prefix.homolog.fasta $tmp_dir/$out_prefix.genome.fasta > $tmp_dir/exonerate/$out_prefix.gff\n";
+}
+close CMD1; close CMD2; close CMD3;
+
+# 并行化运行基因预测命令genewise/gth/exonerate
+my $cmdString = "ParaFly -c $tmp_dir/command.genewise.list -CPU $cpu 2> /dev/null";
 
