@@ -19,17 +19,18 @@ Usage:
     程序将基因组较长的序列进行分割，以加快diamond blastx的并行化比对速度；若单条序列长度超过1Mb， 则将单条序列进行切割，两条相邻的序列间重叠的长度为100kb。
 
     --max_hits_num_per_match_region <int>    default: 10
-    设置基因组上一个同源匹配区域（一个基因区域）的最大同源蛋白的匹配数量。该参数的值会传递给调用的homolog_prediction.01ParaDiamondBlastx命令的--max_hits_num_per_match_region参数。
+    设置基因组上一个同源匹配区域（一个基因区域）的最大同源蛋白的匹配数量。
 
     --max_hit_num_per_single_species <int>    default: 2
-    设置基因组上一个同源匹配区域（一个基因区域）和单个物种的最大同源蛋白的匹配数量。让一个基因区域尽量和多个物种的同源蛋白都有比对结果，利于后续的一致性预测结果分析，并根据一致性结果的数量判断结果的可靠性。该参数生效需要输入的同源蛋白FASTA文件头部中包含物种名称信息。程序识别蛋白序列名称中的关键词species（大小写均可以识别）及其后的字符[a-zA-Z0-9]作为物种名称。例如XP_002436309_2_SpeciesSorghumBicolor，程序识别其物种名称为SpeciesSorghumBicolor。该参数的值会传递给调用的homolog_prediction.01ParaDiamondBlastx命令的--max_hit_num_per_single_species参数。
+    设置基因组上一个同源匹配区域（一个基因区域）和单个物种的最大同源蛋白的匹配数量。让一个基因区域尽量和多个物种的同源蛋白都有比对结果，利于后续的一致性预测结果分析，并根据一致性结果的数量判断结果的可靠性。该参数生效需要输入的同源蛋白FASTA文件头部中包含物种名称信息。程序识别蛋白序列名称中的关键词species（大小写均可以识别）及其后的字符[a-zA-Z0-9]作为物种名称。例如XP_002436309_2_SpeciesSorghumBicolor，程序识别其物种名称为SpeciesSorghumBicolor。
 
     --cpu <int>    default: 8
     设置diamond程序使用线程数，genewise或gth命令运行的并行数。
 
     --identity <float>    default: 0.2
     --evalue <float>    default: 1e-9
-    设置diamond blastx分析时的Identity和E-value阈值。由于diamond blastx进行分析，每个Hit仅给出一个最优的HSP（而NCBI Blast+会给出所有HSPs），因此不需要根据覆盖率来对BLASTX结果进行过滤。
+	--subject_coverage <float>    default: 0.3
+    设置对diamond blastx比对结果进行过滤的Identity、E-value和subject_coverage阈值。
 
     --method <string>    default: gth
     设置使用同源蛋白进行基因预测的方法，可设置值为gth或genewise。一般情况下，genewise进行基因预测的耗时是gth的五倍。
@@ -46,7 +47,7 @@ Usage:
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($out_prefix, $segmentSize, $overlapSize, $max_hits_num_per_match_region, $max_hit_num_per_single_species, $cpu, $identity, $evalue, $method, $genetic_code, $tmp_dir, $help_flag);
+my ($out_prefix, $segmentSize, $overlapSize, $max_hits_num_per_match_region, $max_hit_num_per_single_species, $cpu, $identity, $evalue, $subject_coverage, $method, $genetic_code, $tmp_dir, $help_flag);
 GetOptions(
     "out_prefix:s" => \$out_prefix,
     "segmentSize:i" => \$segmentSize,
@@ -56,6 +57,7 @@ GetOptions(
     "cpu:i" => \$cpu,
     "identity:f" => \$identity,
     "evalue:f" => \$evalue,
+	"subject_coverage:f" => \$subject_coverage,
     "method:s" => \$method,
     "genetic_code:i" => \$genetic_code,
     "tmp_dir:s" => \$tmp_dir,
@@ -69,6 +71,7 @@ $max_hit_num_per_single_species ||= 2;
 $cpu ||= 8;
 $identity ||= 0.2;
 $evalue ||= 1e-9;
+$subject_coverage ||= 0.3;
 $method ||= "gth";
 unless ($method eq "gth" or $method eq "genewise") {
     die "--method was set wrong, it should be set to gth or genewise. \n";
@@ -92,7 +95,7 @@ print STDERR (localtime) . "CMD (Main Program): $0 " . join(" ", @ARGV) . "\n###
 print STDERR "1. align genome sequences against homolog proteins through diamond software.\n";
 chdir $tmp_dir;
 my $pwd = `pwd`; print STDERR "PWD: $pwd";
-my $cmdString = "$binPath/homolog_prediction.01ParaDiamondBlastx --segmentSize $segmentSize --overlapSize $overlapSize --max_hits_num_per_match_region $max_hits_num_per_match_region --cpu $cpu --identity $identity --evalue $evalue --genetic_code $genetic_code --tmp_dir a.para_diamond $input_protein $input_genome > $out_prefix.diamond.tab 2> a.para_diamond.log";
+my $cmdString = "$binPath/homolog_prediction.01ParaDiamondBlastx --segmentSize $segmentSize --overlapSize $overlapSize --max_hits_num_per_match_region $max_hits_num_per_match_region --cpu $cpu --identity $identity --evalue $evalue --subject_coverage $subject_coverage --genetic_code $genetic_code --tmp_dir a.para_diamond $input_protein $input_genome > $out_prefix.diamond.tab 2> a.para_diamond.log";
 unless (-e "1.paraDiamond.ok" && -e "$out_prefix.diamond.tab") {
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";

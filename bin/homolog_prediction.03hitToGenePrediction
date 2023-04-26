@@ -27,19 +27,23 @@ Usage:
     --tmp_dir <string>    default: tmp_\$date\$pid
     程序运行时临时文件夹名称。
 
+	--chunk_num <int>    default: 1000
+	将同源蛋白放于不同的文件夹下存放，每个文件夹存放指定数量（默认1000个）的同源蛋白用于基因预测的输入输出文件。由于用于基因预测的命令经常高达数十万甚至上百万个，需要读取或生成的文件数据非常大。若时将这些文件存放于一个文件夹，会导致一个文件夹下包含大量的小文件，对其小文件的读取和生成效率极低，导致程序运行也极其缓慢。因此，将文件分批存放，从而提高读写效率和程序运行效率。
+
     --help    default: None
     display this help and exit.
 
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($method, $genetic_code, $flanking_length, $cpu, $tmp_dir, $help_flag);
+my ($method, $genetic_code, $flanking_length, $cpu, $tmp_dir, $chunk_num, $help_flag);
 GetOptions(
     "method:i" => \$method,
     "genetic_code:i" => \$genetic_code,
     "flanking_length:i" => \$flanking_length,
     "cpu:i" => \$cpu,
     "tmp_dir:s" => \$tmp_dir,
+	"chunk_num:i" => \$chunk_num,
     "help" => \$help_flag,
 );
 $cpu ||= 8;
@@ -49,6 +53,7 @@ my $date = `date +%Y%m%d%H%M%S`; chomp($date);
 $tmp_dir ||= "tmp_$date$$";
 $tmp_dir = abs_path($tmp_dir);
 mkdir $tmp_dir unless -e $tmp_dir;
+$chunk_num ||= 1000;
 
 if ( $help_flag ) { die $usage }
 
@@ -79,6 +84,7 @@ close IN;
 # 读取BLASTX比对结果信息，获取基因长度。
 open IN, $input_file3 or die "Can not open file $input_file3, $!";
 my @gene_length;
+<IN>;
 while (<IN>) {
 	@_ = split /\t/;
 	push @gene_length, abs($_[6] - $_[7]) + 1;
@@ -94,10 +100,17 @@ open IN, $input_file3 or die "Can not open file $input_file3, $!";
 open CMD1, ">", "$tmp_dir/command.genewise.list" or die "Can not create file $tmp_dir/command.genewise.list, $!";
 open CMD2, ">", "$tmp_dir/command.gth.list" or die "Can not create file $tmp_dir/command.gth.list, $!";
 open CMD3, ">", "$tmp_dir/command.exonerate.list" or die "Can not create file $tmp_dir/command.exonerate.list, $!";
-mkdir "$tmp_dir/genewise" unless -e "$tmp_dir/genewise";
-mkdir "$tmp_dir/gth" unless -e "$tmp_dir/gth";
-mkdir "$tmp_dir/exonerate" unless -e "$tmp_dir/exonerate";
+<IN>;
+my $hit_number = 0;
 while (<IN>) {
+	# 选择chunk文件夹。
+	my $chunk_code = int($hit_number / $chunk_num);
+	$hit_number ++;
+	mkdir "$tmp_dir/chunk$chunk_code" unless -e "$tmp_dir/chunk$chunk_code";
+	mkdir "$tmp_dir/chunk$chunk_code/genewise" unless -e "$tmp_dir/chunk$chunk_code/genewise";
+	mkdir "$tmp_dir/chunk$chunk_code/gth" unless -e "$tmp_dir/chunk$chunk_code/gth";
+	mkdir "$tmp_dir/chunk$chunk_code/exonerate" unless -e "$tmp_dir/chunk$chunk_code/exonerate";
+
 	@_ = split /\t/;
 	# 检测基因在正义链还是负义链
 	my $strand = "plus";
@@ -105,35 +118,293 @@ while (<IN>) {
 		$strand = "minus";
 		($_[6], $_[7]) = ($_[7], $_[6]);
 	}
+
 	# 分析得到匹配区域及其两侧翼的序列信息
 	my $length = $_[7] - $_[6] + 1 + $flanking_length + $flanking_length;
 	my $start = $_[6] - 1 - $flanking_length;
 	$start = 0 if $start < 0;
 	my $seq = substr($genome_seq{$_[0]}, $start, $length);
 	my $out_prefix = "$_[0].$_[6]\_$_[7].start$start.$_[1]";
+
 	# 输出基因组上的序列
-	open OUT, ">", "$tmp_dir/$out_prefix.genome.fasta" or die "Can not create file $tmp_dir/$out_prefix.genome.fasta, $!";
+	open OUT, ">", "$tmp_dir/chunk$chunk_code/$out_prefix.genome.fasta" or die "Can not create file $tmp_dir/chunk$chunk_code/$out_prefix.genome.fasta, $!";
 	print OUT ">$_[0].$_[6]\_$_[7]\n$seq\n";
 	close OUT; 
+
 	# 输出同源蛋白序列
 	my $homolog_seq = $homolog_seq{$_[1]};
 	$homolog_seq =~ s/\**$/\*/;
-	open OUT, ">", "$tmp_dir/$out_prefix.homolog.fasta" or die "Can not create file $tmp_dir/$out_prefix.homolog.fasta, $!";
+	open OUT, ">", "$tmp_dir/chunk$chunk_code/$out_prefix.homolog.fasta" or die "Can not create file $tmp_dir/chunk$chunk_code/$out_prefix.homolog.fasta, $!";
 	print OUT ">$_[1]\n$homolog_seq\n";
 	close OUT;
+
+	# 输出genewise软件的condon.table文件
+	&create_genewise_codon_table("$tmp_dir/codon.table");
+
 	# 输出并行化命令行
 	if ($strand eq "plus") {
-		print CMD1 "genewise $tmp_dir/$out_prefix.homolog.fasta $tmp_dir/$out_prefix.genome.fasta -tfor -gff -quiet -silent -sum > $tmp_dir/genewise/$out_prefix.gff\n";
-		print CMD2 "gth -protein $tmp_dir/$out_prefix.homolog.fasta -genomic $tmp_dir/$out_prefix.genome.fasta -translationtable $genetic_code -f -gff3out -intermediate > $tmp_dir/gth/$out_prefix.gff\n";
+		print CMD1 "genewise $tmp_dir/chunk$chunk_code/$out_prefix.homolog.fasta $tmp_dir/chunk$chunk_code/$out_prefix.genome.fasta -tfor -gff -quiet -silent -sum -codon $tmp_dir/codon.table > $tmp_dir/chunk$chunk_code/genewise/$out_prefix.gff\n";
+		print CMD2 "gth -protein $tmp_dir/chunk$chunk_code/$out_prefix.homolog.fasta -genomic $tmp_dir/chunk$chunk_code/$out_prefix.genome.fasta -translationtable $genetic_code -f -gff3out -intermediate > $tmp_dir/chunk$chunk_code/gth/$out_prefix.gff\n";
 	}
 	else {
-		print CMD1 "genewise $tmp_dir/$out_prefix.homolog.fasta $tmp_dir/$out_prefix.genome.fasta -trev -gff -quiet -silent -sum > $tmp_dir/genewise/$out_prefix.gff\n";
-		print CMD2 "gth -protein $tmp_dir/$out_prefix.homolog.fasta -genomic $tmp_dir/$out_prefix.genome.fasta -translationtable $genetic_code -r -gff3out -intermediate > $tmp_dir/gth/$out_prefix.gff\n";
+		print CMD1 "genewise $tmp_dir/chunk$chunk_code/$out_prefix.homolog.fasta $tmp_dir/chunk$chunk_code/$out_prefix.genome.fasta -trev -gff -quiet -silent -sum -codon $tmp_dir/codon.table > $tmp_dir/chunk$chunk_code/genewise/$out_prefix.gff\n";
+		print CMD2 "gth -protein $tmp_dir/chunk$chunk_code/$out_prefix.homolog.fasta -genomic $tmp_dir/chunk$chunk_code/$out_prefix.genome.fasta -translationtable $genetic_code -r -gff3out -intermediate > $tmp_dir/chunk$chunk_code/gth/$out_prefix.gff\n";
 	}
-	print CMD3 "exonerate --model protein2genome --geneticcode $genetic_code --forcegtag true --minintron 30 --maxintron 200000 --showtargetgff true --showalignment false --showvulgar false $tmp_dir/$out_prefix.homolog.fasta $tmp_dir/$out_prefix.genome.fasta > $tmp_dir/exonerate/$out_prefix.gff\n";
+	print CMD3 "exonerate --model protein2genome --geneticcode $genetic_code --forcegtag true --minintron 30 --maxintron 200000 --showtargetgff true --showalignment false --showvulgar false $tmp_dir/chunk$chunk_code/$out_prefix.homolog.fasta $tmp_dir/chunk$chunk_code/$out_prefix.genome.fasta > $tmp_dir/chunk$chunk_code/exonerate/$out_prefix.gff\n";
 }
 close CMD1; close CMD2; close CMD3;
 
 # 并行化运行基因预测命令genewise/gth/exonerate
 my $cmdString = "ParaFly -c $tmp_dir/command.genewise.list -CPU $cpu 2> /dev/null";
 
+
+sub create_genewise_codon_table {
+	my %code = (
+		"TTT" => "F",
+        "TTC" => "F",
+        "TTA" => "L",
+        "TTG" => "L",
+        "TCT" => "S",
+        "TCC" => "S",
+        "TCA" => "S",
+        "TCG" => "S",
+        "TAT" => "Y",
+        "TAC" => "Y",
+        "TAA" => "X",
+        "TAG" => "X",
+        "TGT" => "C",
+        "TGC" => "C",
+        "TGA" => "X",
+        "TGG" => "W",
+        "CTT" => "L",
+        "CTC" => "L",
+        "CTA" => "L",
+        "CTG" => "L",
+        "CCT" => "P",
+        "CCC" => "P",
+        "CCA" => "P",
+        "CCG" => "P",
+        "CAT" => "H",
+        "CAC" => "H",
+        "CAA" => "Q",
+        "CAG" => "Q",
+        "CGT" => "R",
+        "CGC" => "R",
+        "CGA" => "R",
+        "CGG" => "R",
+        "ATT" => "I",
+        "ATC" => "I",
+        "ATA" => "I",
+        "ATG" => "M",
+        "ACT" => "T",
+        "ACC" => "T",
+        "ACA" => "T",
+        "ACG" => "T",
+        "AAT" => "N",
+        "AAC" => "N",
+        "AAA" => "K",
+        "AAG" => "K",
+        "AGT" => "S",
+        "AGC" => "S",
+        "AGA" => "R",
+        "AGG" => "R",
+        "GTT" => "V",
+        "GTC" => "V",
+        "GTA" => "V",
+        "GTG" => "V",
+        "GCT" => "A",
+        "GCC" => "A",
+        "GCA" => "A",
+        "GCG" => "A",
+        "GAT" => "D",
+        "GAC" => "D",
+        "GAA" => "E",
+        "GAG" => "E",
+        "GGT" => "G",
+        "GGC" => "G",
+        "GGA" => "G",
+        "GGG" => "G",
+    );
+	my %start_codon;
+	$start_codon{"ATG"} = 1;
+	if ( $genetic_code == 1 ) {
+		# The Standard Code
+		$start_codon{"TTG"} = 1;
+		$start_codon{"CTG"} = 1;
+	}
+	elsif ( $genetic_code == 2 ) {
+		# The Vertebrate Mitochondrial Code
+		$code{"AGA"} = "X";
+		$code{"AGG"} = "X";
+		$code{"ATA"} = "M";
+		$code{"TGA"} = "W";
+		$start_codon{"ATA"} = 1;
+		$start_codon{"ATT"} = 1;
+		$start_codon{"ATC"} = 1;
+		$start_codon{"GTG"} = 1;
+	}
+	elsif ( $genetic_code == 3 ) {
+		# The Yeast Mitochondrial Code
+		$code{"ATA"} = "M";
+		$code{"CTT"} = "T";
+		$code{"CTC"} = "T";
+		$code{"CTA"} = "T";
+		$code{"CTG"} = "T";
+		$code{"TGA"} = "W";
+		$start_codon{"ATA"} = 1;
+		$start_codon{"GTG"} = 1;
+	}
+	elsif ( $genetic_code == 4 ) {
+		# The Mold, Protozoan, and Coelenterate Mitochondrial Code and the Mycoplasma/Spiroplasma Code
+		$code{"TGA"} = "W";
+		$start_codon{"ATA"} = 1;
+		$start_codon{"ATT"} = 1;
+		$start_codon{"ATC"} = 1;
+		$start_codon{"GTG"} = 1;
+		$start_codon{"CTG"} = 1;
+		$start_codon{"TTA"} = 1;
+		$start_codon{"TTG"} = 1;
+	}
+	elsif ( $genetic_code == 5 ) {
+		# The Invertebrate Mitochondrial Code
+		$code{"AGA"} = "S";
+		$code{"AGG"} = "S";
+		$code{"ATA"} = "M";
+		$code{"TGA"} = "W";
+		$start_codon{"ATA"} = 1;
+		$start_codon{"ATT"} = 1;
+		$start_codon{"ATC"} = 1;
+		$start_codon{"GTG"} = 1;
+		$start_codon{"TTG"} = 1;
+	}
+	elsif ( $genetic_code == 6 ) {
+		# The Ciliate, Dasycladacean and Hexamita Nuclear Code
+		$code{"TAA"} = "Q";
+		$code{"TAG"} = "Q";
+	}
+	elsif ( $genetic_code == 9 ) {
+		# The Echinoderm and Flatworm Mitochondrial Code
+		$code{"AAA"} = "N";
+		$code{"AGA"} = "S";
+		$code{"AGG"} = "S";
+		$code{"TGA"} = "W";
+		$start_codon{"GTG"} = 1;
+	}
+	elsif ( $genetic_code == 10 ) {
+		# The Euplotid Nuclear Code
+		$code{"TGA"} = "C";
+	}
+	elsif ( $genetic_code == 11 ) {
+		# The Bacterial, Archaeal and Plant Plastid Code
+		$start_codon{"ATA"} = 1;
+		$start_codon{"ATT"} = 1;
+		$start_codon{"ATC"} = 1;
+		$start_codon{"GTG"} = 1;
+		$start_codon{"CTG"} = 1;
+		$start_codon{"TTG"} = 1;
+	}
+	elsif ( $genetic_code == 12 ) {
+		# The Alternative Yeast Nuclear Code
+		$code{"CTG"} = "S";
+		$start_codon{"CTG"} = 1;
+	}
+	elsif ( $genetic_code == 13 ) {
+		# The Ascidian Mitochondrial Code
+		$code{"AGA"} = "G";
+		$code{"AGG"} = "G";
+		$code{"ATA"} = "M";
+		$code{"TGA"} = "W";
+		$start_codon{"ATA"} = 1;
+		$start_codon{"GTG"} = 1;
+		$start_codon{"TTG"} = 1;
+	}
+	elsif ( $genetic_code == 14 ) {
+		# The Alternative Flatworm Mitochondrial Code
+		$code{"AAA"} = "N";
+		$code{"AGA"} = "S";
+		$code{"AGG"} = "S";
+		$code{"TAA"} = "Y";
+		$code{"TGA"} = "W";
+	}
+	elsif ( $genetic_code == 16 ) {
+		# Chlorophycean Mitochondrial Code
+		$code{"TAG"} = "L";
+	}
+	elsif ( $genetic_code == 21 ) {
+		# Trematode Mitochondrial Code
+		$code{"TGA"} = "W";
+		$code{"ATA"} = "M";
+		$code{"AGA"} = "S";
+		$code{"AGG"} = "S";
+		$code{"AAA"} = "N";
+		$start_codon{"GTG"} = 1;
+	}
+	elsif ( $genetic_code == 22 ) {
+		# Scenedesmus obliquus Mitochondrial Code
+		$code{"TCA"} = "X";
+		$code{"TAG"} = "L";
+	}
+	elsif ( $genetic_code == 23 ) {
+		# Thraustochytrium Mitochondrial Code
+		$code{"TTA"} = "X";
+		$start_codon{"ATT"} = 1;
+		$start_codon{"GTG"} = 1;
+	}
+	elsif ( $genetic_code == 24 ) {
+		# Rhabdopleuridae Mitochondrial Code
+		$code{"AGA"} = "S";
+		$code{"AGG"} = "K";
+		$code{"TGA"} = "W";
+		$start_codon{"GTG"} = 1;
+		$start_codon{"CTG"} = 1;
+		$start_codon{"TTG"} = 1;
+	}
+	elsif ( $genetic_code == 25 ) {
+		# Candidate Division SR1 and Gracilibacteria Code
+		$code{"TGA"} = "G";
+		$start_codon{"GTG"} = 1;
+		$start_codon{"TTG"} = 1;
+	}
+	elsif ( $genetic_code == 26 ) {
+		# Pachysolen tannophilus Nuclear Code
+		# warning: The descritpions of initiation codons by 2 methods are confict according to the NCBI web site.
+		$code{"CTG"} = "A";
+		$start_codon{"GTG"} = 1;
+		$start_codon{"TTG"} = 1;
+	}
+	elsif ( $genetic_code == 27 ) {
+		# Karyorelict Nuclear Code
+		$code{"TAG"} = "Q";
+		$code{"TAA"} = "Q";
+	}
+	elsif ( $genetic_code == 29 ) {
+		# Mesodinium Nuclear Code
+		$code{"TAA"} = "Y";
+		$code{"TAG"} = "Y";
+	}
+	elsif ( $genetic_code == 30 ) {
+		# Peritrich Nuclear Code
+		$code{"TAA"} = "E";
+		$code{"TAG"} = "E";
+	}
+	elsif ( $genetic_code == 31 ) {
+		# Blastocrithidia Nuclear Code
+		$code{"TGA"} = "W";
+	}
+	elsif ( $genetic_code == 33 ) {
+		# Cephalodiscidae Mitochondrial UAA-Tyr Code
+		$code{"TAA"} = "Y";
+		$code{"TGA"} = "Y";
+		$code{"AGA"} = "S";
+		$code{"AGG"} = "K";
+	}
+
+	open OUT, ">", "$_[0]" or die "Can not create file $_[0], $!";
+	my @code = ("TTT","TTC","TTA","TTG","TCT","TCC","TCA","TCG","TAT","TAC","TAA","TAG","TGT","TGC","TGA","TGG","CTT","CTC","CTA","CTG","CCT","CCC","CCA","CCG","CAT","CAC","CAA","CAG","CGT","CGC","CGA","CGG","ATT","ATC","ATA","ATG","ACT","ACC","ACA","ACG","AAT","AAC","AAA","AAG","AGT","AGC","AGA","AGG","GTT","GTC","GTA","GTG","GCT","GCC","GCA","GCG","GAT","GAC","GAA","GAG","GGT","GGC","GGA","GGG");
+	foreach ( @code ) {
+		print OUT "$_ $code{$_}\n";
+	}
+	close OUT;
+
+	return 1;
+}

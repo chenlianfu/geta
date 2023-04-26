@@ -29,10 +29,10 @@ Usage:
     --identity <float>    default: 0.2
     --evalue <float>    default: 1e-9
     --subject_coverage <float>    default: 0.3
-    设置diamond blastx分析时的Identity、E-value和subject coverage阈值。
+    设置diamond blastx分析时的Identity、E-value和subject coverage阈值。程序将--identity和--evalue参数的值传递给diamond blastx命令的--id和--evalue参数；将--identity、--evalue和--subject_coverage参数的值传递给parsing_blast_result.pl命令的--CIP、--evalue和--subject-coverage参数。
 
     --genetic_code <int>    default: 1
-    设置遗传密码。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。
+    设置遗传密码。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。程序将--genetic_code参数值传递给diamond blastx命令的--query-gencode参数。
 
     --tmp_dir <string>    default: tmp_\$date\$pid
     程序运行时临时文件夹名称。
@@ -189,7 +189,7 @@ else {
 
 # 5 汇总dimond的比对结果，并修正匹配的位置信息(之前打断基因组序列后，比对的位置需要进行修正)。
 print STDERR "5. output the alignment results.\n";
-my (%output_sort1, %output_sort2, %output_sort3);
+my (%output_sort1, %output_sort2, %output_sort3, %output);
 foreach (<"split_genome_seqs/*.out">) {
     open IN, $_ or die "Can not open file $_, $!";
     while (<IN>) {
@@ -207,15 +207,17 @@ foreach (<"split_genome_seqs/*.out">) {
         $last_field_out .= $last_field if $last_field;
         push @_, $last_field_out;
         my $line = (join "\t", @_);
-        $output_sort1{$line} = $_[0];
-        $output_sort2{$line} = $_[6];
-        $output_sort3{$line} = $_[7];
+        $output_sort1{"$_[0]\t$_[1]\t$_[6]\t$_[7]"} = $_[0];
+        $output_sort2{"$_[0]\t$_[1]\t$_[6]\t$_[7]"} = $_[6];
+        $output_sort3{"$_[0]\t$_[1]\t$_[6]\t$_[7]"} = $_[7];
+		$output{"$_[0]\t$_[1]\t$_[6]\t$_[7]"}{$line} = $_[10];
     }
     close IN;
 }
 print "#QueryID\tSubjectID\tIdentity\tMatchLength\tMismatchLength\tGaps\tQueryStart\tQueryEnd\tSubjectStart\tSubjectEnd\tEvalue\tBitScore\tCIP\tCALP_query\tCALP_subject\tQuery_matchRegion\n";
-foreach ( sort { $output_sort1{$a} cmp $output_sort1{$b} or $output_sort2{$a} <=> $output_sort2{$b} or $output_sort3{$a} <=> $output_sort3{$b} or $a cmp $b } keys %output_sort1 ) {
-    print;
+foreach ( sort { $output_sort1{$a} cmp $output_sort1{$b} or $output_sort2{$a} <=> $output_sort2{$b} or $output_sort3{$a} <=> $output_sort3{$b} or $a cmp $b } keys %output ) {
+	my @output = sort {$output{$_}{$a} <=> $output{$_}{$b}} keys %{$output{$_}};
+    print $output[0];
 }
 
 sub get_MemAvailable {

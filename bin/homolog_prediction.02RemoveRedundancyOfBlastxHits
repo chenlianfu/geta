@@ -8,7 +8,7 @@ my $usage = <<USAGE;
 Usage:
     $0 [options] blast.tab > filtered.tab
 
-    程序先对diamond blastx的HSP比对结果进行处理。若一个Hit对应多个HSPs，则将多个HSPs合并和分割。在多个HSPs中找最优HSP，将和最优HSP方向一直和距离较近的HSPs合并为一组；在剩下的HSPs继续找最优HSP及其分组；于是将多个HSPs分割成不同的组，每个HSPs组对应一个拷贝的基因区域。每个HSPs组输出一行匹配结果，使用组内的HSPs的起始结束坐标作为Query/Subject起始结束，使用最优HSP的evalue作为输出evalue值，使用组内的HSPs的Score之和作为输出Score值。程序在最后一列中输出组内HSPs的坐标信息，多个HSPs之间使用逗号分割。
+    程序先对diamond blastx的HSP比对结果进行处理。若一个Hit对应多个HSPs，则将多个HSPs合并和分割。在多个HSPs中找最优HSP，将和最优HSP方向一直和距离较近的HSPs合并为一组；在剩下的HSPs继续找最优HSP及其分组；于是将多个HSPs分割成不同的组，每个HSPs组对应一个拷贝的基因区域。每个HSPs组输出一行匹配结果，使用组内的HSPs的起始结束坐标作为Query/Subject起始结束，使用最优HSP的evalue作为输出evalue值，使用组内的HSPs的Score之和作为输出Score值。程序在最后一列中输出组内HSPs的坐标信息，多个HSPs之间使用逗号分割并按Evalue从小到大排序输出。
     程序进一步对diamond blastx的结果去冗余。采用三种方法进行过滤：（0）若Hit A和其它多个Hits之间重叠，且覆盖每个其它Hits区域的 >= 90% 时（此处认为Hit A包含了其它Hits），且Hit A的Evalue、Score得分都优于其它Hits，则对Hit A和其它Hits按Evalue和Score进行排序，挑选较好的Hits；（1）当其它Hit的Score得分低于Hit A Score的一定比例（默认40%）时，对该Hit进去去除；（2）同一个物种最多保留指定数量（默认2个）的Hits；（3）最多保留指定数量（默认为10个）的较好Hits。
 
     --threshold_HSP_distance <int>    default: 5000
