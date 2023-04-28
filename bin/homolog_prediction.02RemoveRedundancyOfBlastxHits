@@ -8,7 +8,7 @@ my $usage = <<USAGE;
 Usage:
     $0 [options] blast.tab > filtered.tab
 
-    程序先对diamond blastx的HSP比对结果进行处理。若一个Hit对应多个HSPs，则将多个HSPs合并和分割。在多个HSPs中找最优HSP，将和最优HSP方向一直和距离较近的HSPs合并为一组；在剩下的HSPs继续找最优HSP及其分组；于是将多个HSPs分割成不同的组，每个HSPs组对应一个拷贝的基因区域。每个HSPs组输出一行匹配结果，使用组内的HSPs的起始结束坐标作为Query/Subject起始结束，使用最优HSP的evalue作为输出evalue值，使用组内的HSPs的Score之和作为输出Score值。程序在最后一列中输出组内HSPs的坐标信息，多个HSPs之间使用逗号分割并按Evalue从小到大排序输出。
+    程序先对diamond blastx的HSP比对结果进行处理。若一个Hit对应多个HSPs，则将多个HSPs合并和分割。在多个HSPs中找最优HSP，将和最优HSP方向一直和距离较近的HSPs合并为一组；在剩下的HSPs继续找最优HSP及其分组；于是将多个HSPs分割成不同的组，每个HSPs组对应一个拷贝的基因区域。每个HSPs组输出一行匹配结果，使用组内的HSPs的起始结束坐标作为Query/Subject起始结束，使用最优HSP的evalue作为输出evalue值，使用组内的HSPs的Score之和作为输出Score值。程序在倒数第二列中输出组内HSPs的坐标信息，多个HSPs之间使用逗号分割并按Evalue从小到大排序输出；程序在最后一列中输出Group Region，以表示多行不同的Hits来自同一组，代表基因组上一个基因区域。
     程序进一步对diamond blastx的结果去冗余。采用三种方法进行过滤：（0）若Hit A和其它多个Hits之间重叠，且覆盖每个其它Hits区域的 >= 90% 时（此处认为Hit A包含了其它Hits），且Hit A的Evalue、Score得分都优于其它Hits，则对Hit A和其它Hits按Evalue和Score进行排序，挑选较好的Hits；（1）当其它Hit的Score得分低于Hit A Score的一定比例（默认40%）时，对该Hit进去去除；（2）同一个物种最多保留指定数量（默认2个）的Hits；（3）最多保留指定数量（默认为10个）的较好Hits。
 
     --threshold_HSP_distance <int>    default: 5000
@@ -18,7 +18,7 @@ Usage:
     设置Hit A包含另外一个Hit B时，要求两个Hits重叠区域对Hit B匹配区域的覆盖比例阈值。当Hit A的Evalue和Score值都优于Hit B，且Hit B >=90%以上的区域和Hit A重叠时，则认为该Hit A包含Hit B，进而考虑对Hit B其进行去除。计算覆盖比例时，根据Hit A和Hit B的HSPs信息进行overlap比例计算，分子为Overlap部分的碱基数量，分母为Hit B的HSPs的总碱基数量。
 
     --threshold_Hit_num <int>    default: 10
-    设置数量阈值。若Hits之间有包含关系时，最多保留指定数量（默认为10个）的较好Hits。分析过程分多步：（1）对和基因组3Kb窗口范围有重叠的所有Hits按Evalue从小到大、Score值从大到校、匹配范围从大到小进行排序，然后按顺序对Hits进行后续分析；（2）根据排序对Evalue值最小的最优Hit进行分析，在所有Hits中检索Score值更低并被最优Hit包含（根据--threshold_Hit_cover_ratio参数分析结果）的Hits，对这些Hits按Evalue和Score进行排序，保留较好的指定数量（--threshold_Hit_num参数设置值）的Hits，删除其余较差的Hits；（3）对剩下未保留也未删除的Hits，延用第二步的策略，进一步的进行保留和删除操作，进行多轮直至分析完毕所有的Hit数据；（4）对整条基因组序列往后滑动，每次往后滑动1Kb距离，分析3Kb窗口，鉴定需要删除的的Hits信息。
+    设置数量阈值。若Hits之间有包含关系时，最多保留指定数量（默认为10个）的较好Hits。分析过程分多步：（1）对和基因组3Kb窗口范围有重叠的所有Hits按Evalue从小到大、Score值从大到校、匹配范围从大到小进行排序，然后按顺序对Hits进行后续分析；（2）根据排序对Evalue值最小的最优Hit进行分析，在所有Hits中检索Score值更低并被最优Hit包含（根据--threshold_Hit_cover_ratio参数分析结果）的Hits，对这些Hits按Evalue和Score进行排序，去除Score值过低的Hits，再最多保留较好的指定数量（--threshold_Hit_num参数设置值）的Hits，删除其余较差的Hits；（3）对剩下未保留也未删除的Hits，延用第二步的策略，进一步的进行保留和删除操作，进行多轮直至分析完毕所有的Hit数据；（4）对整条基因组序列往后滑动，每次往后滑动1Kb距离，分析3Kb窗口，鉴定需要删除的的Hits信息。
 
     --threshold_species_num <int>    default: 2
     设置物种数量阈值。若Hit A和包含了多个其它Hits，对这些Hits进行去冗余时，来自同一物种的Hits最多保留--threshold_species_num阈值指定的个数。该参数生效需要subject name中包含物种名称信息。程序识别subject name中的关键词species（大小写均可以识别）及其后的字符[a-zA-Z0-9]作为物种名称。例如XP_002436309_2_SpeciesSorghumBicolor，程序识别其物种名称为SpeciesSorghumBicolor。若subject name中不包含关键词species及其后紧跟的物种名称，程序则以整个subject name为物种名称，从而使本参数不生效。
@@ -64,7 +64,7 @@ close IN;
 my %combine_HSP_to_Hit;
 foreach ( keys %input_info ) {
     my $output = &parsingHSP($input_info{$_});
-    # 将一条基因组序列和一个同源蛋白的Hit信息，分割成多个不同的基因区域。
+    # 将一条基因组序列和一个同源蛋白的Hit信息，分割成多个不同的基因区域。在Blastx表格结果尾部增加一列Query_HSPs信息
     foreach ( split /\n/, $output ) {
         $combine_HSP_to_Hit{$_} = 1;
     }
@@ -108,8 +108,8 @@ foreach my $seq_ID ( sort keys %index ) {
             # 对一个目标Hit A进行分析，找到所有被目标Hit包含且匹配效果更差的Hits：evalue值 >= Hit A && score值 <= Hit A。由于经过了排序，Hit A就是evalue值最低(优)的。
             my $hit = shift @hit;
             #print STDERR "BEST HSP: $hit\n";
-            my %be_contained_hit;
-            $be_contained_hit{$hit} = 1;
+            my (%be_contained_hit, @hit_A_group_pos, %hit_A_group_hit);
+            $be_contained_hit{$hit} = 1; 
             @_ = split /\t/, $hit;
             my $score = $_[11];
             foreach ( @hit ) {
@@ -153,9 +153,17 @@ foreach my $seq_ID ( sort keys %index ) {
                 else {
                     #print STDERR "Remain: $_\n";
                     $remain{$_} = 1;
+                    push @hit_A_group_pos, ($_[6], $_[7]);
+                    $hit_A_group_hit{$_} = 1;
                 }
                 delete $hit{$_};
             }
+            # 得到Hit A group的区域，再于Blastx结果尾部增加一列Hit Group Region信息
+            @hit_A_group_pos = sort {$a <=> $b} @hit_A_group_pos;
+            foreach ( keys %hit_A_group_hit ) {
+                $hits_all{$_} = "$_\t$hit_A_group_pos[0]-$hit_A_group_pos[-1]";
+            }
+
             # 下一轮的Hits，则去除了所有被保留和被删除的Hits。
             @hit = sort { $evalue{$a} <=> $evalue{$b} or $score{$b} <=> $score{$a} or $alignment_length{$b} <=> $alignment_length{$a} or $a cmp $b } keys %hit;
             #my $hit_num = @hit; my $remain_num = %remain; print STDERR "RoundNext: $seq_ID\t$index\t$hit_num\t$remain_num\n";
@@ -164,7 +172,7 @@ foreach my $seq_ID ( sort keys %index ) {
 }
 
 foreach ( sort { $query{$a} cmp $query{$b} or $query_start{$a} <=> $query_start{$b} or $query_end{$a} <=> $query_end{$b} or $a cmp $b } keys %hits_all ) {
-    print "$_\n" unless exists $hits_filtered{$_};
+    print "$hits_all{$_}\n" unless exists $hits_filtered{$_};
 }
 my $hits_all_num = %hits_all;
 my $hits_filtered_num = %hits_filtered;

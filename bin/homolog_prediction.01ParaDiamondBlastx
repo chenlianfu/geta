@@ -193,31 +193,41 @@ my (%output_sort1, %output_sort2, %output_sort3, %output);
 foreach (<"split_genome_seqs/*.out">) {
     open IN, $_ or die "Can not open file $_, $!";
     while (<IN>) {
+        chomp;
         @_ = split /\t/;
         my $pos = 0;
         $pos = $1 if $_[0] =~ s/_start_(\d+)//;
+        # 对query的起始和结束位点进行修正
         $_[6] += $pos;
         $_[7] += $pos;
-        my $last_field = pop @_;
-        my $last_field_out;
-        while ( $last_field =~ s/(.*?)(\d+)// ) {
+        # 对倒数两列的坐标进行修正
+        my $last_field1 = pop @_;
+        my $last_field2 = pop @_;
+        my ($last_field1_out, $last_field2_out);
+        while ( $last_field1 =~ s/(.*?)(\d+)// ) {
             my $result_value = $2 + $pos;
-            $last_field_out .= "$1$result_value";
+            $last_field1_out .= "$1$result_value";
         }
-        $last_field_out .= $last_field if $last_field;
-        push @_, $last_field_out;
+        $last_field1_out .= $last_field1 if $last_field1;
+        while ( $last_field2 =~ s/(.*?)(\d+)// ) {
+            my $result_value = $2 + $pos;
+            $last_field2_out .= "$1$result_value";
+        }
+        $last_field2_out .= $last_field2 if $last_field2;
+
+        push @_, ($last_field2_out, $last_field1_out);
         my $line = (join "\t", @_);
         $output_sort1{"$_[0]\t$_[1]\t$_[6]\t$_[7]"} = $_[0];
         $output_sort2{"$_[0]\t$_[1]\t$_[6]\t$_[7]"} = $_[6];
         $output_sort3{"$_[0]\t$_[1]\t$_[6]\t$_[7]"} = $_[7];
-		$output{"$_[0]\t$_[1]\t$_[6]\t$_[7]"}{$line} = $_[10];
+        $output{"$_[0]\t$_[1]\t$_[6]\t$_[7]"}{$line} = $_[10];
     }
     close IN;
 }
-print "#QueryID\tSubjectID\tIdentity\tMatchLength\tMismatchLength\tGaps\tQueryStart\tQueryEnd\tSubjectStart\tSubjectEnd\tEvalue\tBitScore\tCIP\tCALP_query\tCALP_subject\tQuery_matchRegion\n";
+print "#QueryID\tSubjectID\tIdentity\tMatchLength\tMismatchLength\tGaps\tQueryStart\tQueryEnd\tSubjectStart\tSubjectEnd\tEvalue\tBitScore\tCIP\tCALP_query\tCALP_subject\tQuery_HSPs\tGroup_Region\n";
 foreach ( sort { $output_sort1{$a} cmp $output_sort1{$b} or $output_sort2{$a} <=> $output_sort2{$b} or $output_sort3{$a} <=> $output_sort3{$b} or $a cmp $b } keys %output ) {
-	my @output = sort {$output{$_}{$a} <=> $output{$_}{$b}} keys %{$output{$_}};
-    print $output[0];
+    my @output = sort {$output{$_}{$a} <=> $output{$_}{$b}} keys %{$output{$_}};
+    print "$output[0]\n";
 }
 
 sub get_MemAvailable {

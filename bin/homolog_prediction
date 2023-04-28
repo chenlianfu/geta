@@ -29,11 +29,11 @@ Usage:
 
     --identity <float>    default: 0.2
     --evalue <float>    default: 1e-9
-	--subject_coverage <float>    default: 0.3
+    --subject_coverage <float>    default: 0.3
     设置对diamond blastx比对结果进行过滤的Identity、E-value和subject_coverage阈值。
 
-    --method <string>    default: gth
-    设置使用同源蛋白进行基因预测的方法，可设置值为gth或genewise。一般情况下，genewise进行基因预测的耗时是gth的五倍。
+    --method <string>    default: exonerate
+    设置进行基因预测的方法，其值可以设定为exonerate、genewise、gth或all。若需要同时使用多种方法，则输入使用逗号分割的多个值；若使用所有三种方法进行分析，可以设置--method参数值为all，但最消耗计算时间。
 
     --genetic_code <int>    default: 1
     设置遗传密码。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。
@@ -57,7 +57,7 @@ GetOptions(
     "cpu:i" => \$cpu,
     "identity:f" => \$identity,
     "evalue:f" => \$evalue,
-	"subject_coverage:f" => \$subject_coverage,
+    "subject_coverage:f" => \$subject_coverage,
     "method:s" => \$method,
     "genetic_code:i" => \$genetic_code,
     "tmp_dir:s" => \$tmp_dir,
@@ -72,9 +72,10 @@ $cpu ||= 8;
 $identity ||= 0.2;
 $evalue ||= 1e-9;
 $subject_coverage ||= 0.3;
-$method ||= "gth";
-unless ($method eq "gth" or $method eq "genewise") {
-    die "--method was set wrong, it should be set to gth or genewise. \n";
+my %method;
+$method = "exonerate,gth,genewise" if $method eq "all";
+foreach ( split /,/, $method ) {
+    warn "Warning: The method $_ is not correct.\n" unless ( $_ eq "exonerate" or $_ eq "genewise" or $_ eq "gth" );
 }
 $genetic_code ||= 1;
 my $date = `date +%Y%m%d%H%M%S`; chomp($date);
@@ -105,11 +106,11 @@ else {
     print STDERR "CMD(Skipped): $cmdString\n";
 }
 # 2. 调用genewise(wise)进行基因预测。
-$cmdString = "$binPath/homolog_prediction.03hitToGenePrediction --cpu $cpu --method 1 --genetic_code 1 --tmp_dir b.hitToGenewise $input_protein $input_genome out.diamond.tab > genewise.gff";
-unless (-e "2.hitToGenewise.ok" && -e "genewise.gff") {
+$cmdString = "$binPath/homolog_prediction.03hitToGenePrediction --cpu $cpu --method $method --genetic_code $genetic_code --tmp_dir b.hitToGenePrediction $input_protein $input_genome out.diamond.tab > out.gff";
+unless (-e "2.hitToGenePrediction.ok" && -s "out.gff") {
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-    open OUT, ">", "1.paraDiamond.ok" or die $!; close OUT;
+    open OUT, ">", "2.hitToGenePrediction.ok" or die $!; close OUT;
 }
 else {
     print STDERR "CMD(Skipped): $cmdString\n";
