@@ -1,0 +1,77 @@
+#!/usr/bin/env perl
+
+use strict;
+use Getopt::Long;
+use Cwd qw/abs_path getcwd cwd/;
+
+my $usage = <<USAGE;
+Usage:
+    $0 [options] genome.fasta out.geneModels.tab > out.geneModels.gff3
+
+    本程序根据同源蛋白的基因模型预测结果，对一个基因区域，选择最优的基因模型。
+    若最优基因模型对同源蛋白的覆盖比例超过阈值(默认80%)：
+        则认为该基因模型是一个真基因，再对基因模型进行完整性分析：
+            若基因模型和同源蛋白100%的区域匹配；
+                若基因模型的CDS包含正确的起始密码子和终止密码子，则该基因模型是完美的基因模型（第一类）；
+                否则，对基因模型进行首尾强制补齐，得到完整的基因模型（第二类）。
+        否则认为是一个假基因（第三类）。
+    最后对三类基因模型进行整合，去冗余。
+
+    输入文件out.geneModels.tab包含15列数据：(1) 目标基因组序列名称；(2) 预测软件名称；(3) 基因起始位点；(4) 基因结束位点；(5) introns信息，多个introns之间使用分号分割，每个intron前后坐标使用中划线分割；(6) 基因所在的正负链；(7) 同源蛋白名称；(8) 同源蛋白其长度；(9) 同源蛋白匹配的起始位点；(10) 同源蛋白匹配的结束位点；(11) CDS总长度；(12) CDS内部的终止密码子数量；(13) Diamond BLASTX比对的Evalue值；(14) Diamond BLASTX比对的Score值；(15) Diamond BLASTX比对的Identity。
+
+    --threshold_homolog_coverage <float>    default: 0.8
+    设置对同源蛋白覆盖度阈值。若基因模型对同源蛋白的覆盖率超过次阈值，则认为是真基因，否则认为是假基因。
+
+    --help    default: None
+    display this help and exit.
+
+USAGE
+if (@ARGV==0){die $usage}
+
+my ($help_flag, $threshold_homolog_coverage);
+GetOptions(
+    "help" => \$help_flag,
+    "threshold_homolog_coverage:f" => \$threshold_homolog_coverage,
+);
+$threshold_homolog_coverage ||= 0.8;
+
+if ( $help_flag ) { die $usage }
+
+my $input_file1 = abs_path($ARGV[0]);
+my $input_file2 = abs_path($ARGV[1]);
+
+# 读取基因组序列信息
+open IN, $input_file1 or die "Can not open file $input_file1, $!";
+my (%genome_seq, $id);
+while (<IN>) {
+    chomp;
+    if (/>(\S+)/) { $id = $1; }
+    else { $genome_seq{$id} .= uc($_); }
+}
+close IN;
+
+# 分析基因模型数据
+open IN, $input_file2 or die "Can not open file $input_file2, $!";
+<IN>;
+# 每个基因区域以两个换行符分割
+$/ = "\n\n";
+while (<IN>) {
+    my $gene_region = $1 if s/(.*):\n//;
+    s/\n*$//;
+    my @geneModels = split /\n/, $_;
+    if ( @geneModels ) {
+        my $best_geneModels = shift @geneModels;
+        @_ = split /\t/, $best_geneModels;
+        if ( (abs($_[9] - $_[8]) + 1) / $_[7] >= $threshold_homolog_coverage ) {
+            if ( $_[8] == 1 && $_[9] == $_[7] ) {
+                print "1: $best_geneModels\n";
+            }
+            else {
+                print "2: $best_geneModels\n";
+            }
+        }
+        else {
+            print "3: $best_geneModels\n";
+        }
+    }
+}

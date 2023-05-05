@@ -105,8 +105,8 @@ unless (-e "1.paraDiamond.ok" && -e "$out_prefix.diamond.tab") {
 else {
     print STDERR "CMD(Skipped): $cmdString\n";
 }
-# 2. 调用genewise(wise)进行基因预测。
-$cmdString = "$binPath/homolog_prediction.03hitToGenePrediction --cpu $cpu --method $method --genetic_code $genetic_code --tmp_dir b.hitToGenePrediction $input_protein $input_genome out.diamond.tab > out.gff";
+# 2. 进行基因预测。
+$cmdString = "$binPath/homolog_prediction.03hitToGenePrediction --cpu $cpu --method $method --genetic_code $genetic_code --tmp_dir b.hitToGenePrediction $input_protein $input_genome out.diamond.tab > out.geneModels.tab";
 unless (-e "2.hitToGenePrediction.ok" && -s "out.gff") {
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
