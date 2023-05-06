@@ -22,9 +22,9 @@ Usage:
     添加该参数后，程序将需要进行填补的转录本ID输出到指定的文件中。
 
     --start_codon <string>    default: ATG
-    设置起始密码子。
+    设置起始密码子。若有多个起始密码子，则使用逗号分割。
 
-    --stop_codon <string>    default: TAG,TGA,TAA
+    --stop_codon <string>    default: TAA,TAG,TGA
     设置终止密码子。若有多个终止密码子，则使用逗号分割。
 
     --help    default: None
@@ -44,7 +44,7 @@ GetOptions(
 
 if ( $help_flag ) { die $usage }
 $start_codon ||= "ATG";
-$stop_codon ||= "TAG,TGA,TAA";
+$stop_codon ||= "TAA,TAG,TGA";
 if ($nonCompletedGeneModels) {
     open OUT, ">", $nonCompletedGeneModels or die "Can not create file $nonCompletedGeneModels, $!";
 }

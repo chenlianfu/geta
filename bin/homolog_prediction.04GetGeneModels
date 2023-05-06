@@ -3,24 +3,31 @@
 use strict;
 use Getopt::Long;
 use Cwd qw/abs_path getcwd cwd/;
+use File::Basename;
+
+my $binPath = dirname($0);
 
 my $usage = <<USAGE;
 Usage:
     $0 [options] genome.fasta out.geneModels.tab > out.geneModels.gff3
 
-    本程序根据同源蛋白的基因模型预测结果，对一个基因区域，选择最优的基因模型。
-    若最优基因模型对同源蛋白的覆盖比例超过阈值(默认80%)：
-        则认为该基因模型是一个真基因，再对基因模型进行完整性分析：
-            若基因模型和同源蛋白100%的区域匹配；
-                若基因模型的CDS包含正确的起始密码子和终止密码子，则该基因模型是完美的基因模型（第一类）；
-                否则，对基因模型进行首尾强制补齐，得到完整的基因模型（第二类）。
-        否则认为是一个假基因（第三类）。
-    最后对三类基因模型进行整合，去冗余。
+    本程序根据同源蛋白的基因模型预测结果，对一个基因区域，选择最优的基因模型，输出GFF3信息，并将基因模型分为四类：
+        （A）对同源蛋白覆盖100%，起始密码子和终止密码子和同源蛋白匹配一致，且没有内部终止密码子的完整基因模型；excellent gene models
+        （B）对同源蛋白覆盖不小于80%且能强制补齐的完整基因模型；good gene models
+		（C）对同源蛋白覆盖不小于40%且能强制补齐的完整基因模型；fair gene models
+		（D）对同源蛋白覆盖小于40%或不能强制补齐的基因模型。poor gene models
 
     输入文件out.geneModels.tab包含15列数据：(1) 目标基因组序列名称；(2) 预测软件名称；(3) 基因起始位点；(4) 基因结束位点；(5) introns信息，多个introns之间使用分号分割，每个intron前后坐标使用中划线分割；(6) 基因所在的正负链；(7) 同源蛋白名称；(8) 同源蛋白其长度；(9) 同源蛋白匹配的起始位点；(10) 同源蛋白匹配的结束位点；(11) CDS总长度；(12) CDS内部的终止密码子数量；(13) Diamond BLASTX比对的Evalue值；(14) Diamond BLASTX比对的Score值；(15) Diamond BLASTX比对的Identity。
 
-    --threshold_homolog_coverage <float>    default: 0.8
-    设置对同源蛋白覆盖度阈值。若基因模型对同源蛋白的覆盖率超过次阈值，则认为是真基因，否则认为是假基因。
+    --threshold_homolog_coverage_good <float>    default: 0.8
+	--threshold_homolog_coverage_fair <float>    default: 0.4
+    设置对同源蛋白覆盖度阈值。若基因模型对同源蛋白的覆盖率不低于--threshold_homolog_coverage_good，用于评估good gene models；若基因模型对同源蛋白的覆盖率不低于--threshold_homolog_coverage_fair，用于评估fair gene models。
+
+	--genetic_code <int>    default: 1
+    设置遗传密码。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。用于设置对基因模型强制补齐时的起始密码子和终止密码子。
+
+	--tmp_dir <string>    default: tmp_\$date\$pid
+	程序运行时临时文件夹名称。
 
     --help    default: None
     display this help and exit.
@@ -28,12 +35,21 @@ Usage:
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($help_flag, $threshold_homolog_coverage);
+my ($help_flag, $threshold_homolog_coverage_good, $threshold_homolog_coverage_fair, $tmp_dir, $genetic_code);
 GetOptions(
     "help" => \$help_flag,
-    "threshold_homolog_coverage:f" => \$threshold_homolog_coverage,
+    "threshold_homolog_coverage_good:f" => \$threshold_homolog_coverage_good,
+	"threshold_homolog_coverage_fair:f" => \$threshold_homolog_coverage_fair,
+	"tmp_dir:s" => \$tmp_dir,
+	"genetic_code:i" => \$genetic_code,
 );
-$threshold_homolog_coverage ||= 0.8;
+$threshold_homolog_coverage_good ||= 0.8;
+$threshold_homolog_coverage_fair ||= 0.4;
+$genetic_code ||= 1;
+my $date = `date +%Y%m%d%H%M%S`; chomp($date);
+$tmp_dir ||= "tmp_$date$$";
+$tmp_dir = abs_path($tmp_dir);
+mkdir $tmp_dir unless -e $tmp_dir;
 
 if ( $help_flag ) { die $usage }
 
@@ -52,26 +68,406 @@ close IN;
 
 # 分析基因模型数据
 open IN, $input_file2 or die "Can not open file $input_file2, $!";
+open OUTA, ">", "$tmp_dir/A.gff3" or die "Can not create file $tmp_dir/a.gff3, $!";
+open OUTB, ">", "$tmp_dir/B.gff3" or die "Can not create file $tmp_dir/a.gff3, $!";
+open OUTC, ">", "$tmp_dir/C.gff3" or die "Can not create file $tmp_dir/a.gff3, $!";
+open OUTD, ">", "$tmp_dir/D.gff3" or die "Can not create file $tmp_dir/a.gff3, $!";
 <IN>;
 # 每个基因区域以两个换行符分割
 $/ = "\n\n";
+my $gene_num = 0;
 while (<IN>) {
     my $gene_region = $1 if s/(.*):\n//;
     s/\n*$//;
     my @geneModels = split /\n/, $_;
     if ( @geneModels ) {
+		$gene_num ++;
+		# 得到目标基因区域最优的基因模型
         my $best_geneModels = shift @geneModels;
+		# 分析其它基因模型中的intron信息，用于标记最终GFF3文件中intron的证据数量。
+		my %intron_support_num;
+		foreach ( @geneModels ) {
+			@_ = split /\t/, $_;
+			foreach ( split /;/, $_[4] ) {
+				if ( m/(\d+)-(\d+)/ ) {
+					if ( $1 > $2 ) {
+						$intron_support_num{"$2\t$1"} ++;
+					}
+					else {
+						$intron_support_num{"$1\t$2"} ++;
+					}
+				}
+			}
+		}
         @_ = split /\t/, $best_geneModels;
-        if ( (abs($_[9] - $_[8]) + 1) / $_[7] >= $threshold_homolog_coverage ) {
-            if ( $_[8] == 1 && $_[9] == $_[7] ) {
-                print "1: $best_geneModels\n";
-            }
-            else {
-                print "2: $best_geneModels\n";
-            }
+		my $coverage = 0;
+		$coverage = (abs($_[9] - $_[8]) + 1) / $_[7] if $_[7];
+		# 根据对homolog的覆盖率对基因模型进行分类
+        if ( $coverage == 1 && $_[11] == 0 ) {
+			my $gff3_out = &get_gff3(\@_, "excellent_gene_models_predicted_by_homolog", "gene$gene_num", \%intron_support_num);
+			print OUTA "$gff3_out\n";
+		}
+		elsif ( $coverage >= $threshold_homolog_coverage_good ) {
+			my $gff3_out = &get_gff3(\@_, "good_gene_models_predicted_by_homolog", "gene$gene_num", \%intron_support_num);
+			print OUTB "$gff3_out\n";
         }
+		elsif ( $coverage >= $threshold_homolog_coverage_fair ) {
+			my $gff3_out = &get_gff3(\@_, "fair_gene_models_predicted_by_homolog", "gene$gene_num", \%intron_support_num);
+			print OUTC "$gff3_out\n";
+		}
         else {
-            print "3: $best_geneModels\n";
+			my $gff3_out = &get_gff3(\@_, "poor_gene_models_predicted_by_homolog", "gene$gene_num", \%intron_support_num);
+			print OUTD "$gff3_out\n";
         }
     }
+}
+close IN;
+close OUTA; close OUTB; close OUTC; close OUTD;
+
+@_ = &codon_table("$tmp_dir/codon.table");
+my (%start_codon, %stop_codon, $start_codon, $stop_codon);
+%start_codon = %{$_[1]};
+%stop_codon = %{$_[2]};
+$start_codon = join ",", sort keys %start_codon;
+$stop_codon = join ",", sort keys %stop_codon;
+
+# 调用fillingEndsOfGeneModels命令对基因模型进行强行补充完整。
+my $cmdString = "$binPath/fillingEndsOfGeneModels --nonCompletedGeneModels $tmp_dir/A_NF.gff3 --start_codon $start_codon --stop_codon $stop_codon $input_file1 $tmp_dir/A.gff3 > $tmp_dir/A_FE.gff3 2> $tmp_dir/fillingEndsOfGeneModels.A.log";
+print STDERR (localtime) . ": CMD: $cmdString\n";
+system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+my $cmdString = "$binPath/fillingEndsOfGeneModels --nonCompletedGeneModels $tmp_dir/B_NF.gff3 --start_codon $start_codon --stop_codon $stop_codon $input_file1 $tmp_dir/B.gff3 > $tmp_dir/B_FE.gff3 2> $tmp_dir/fillingEndsOfGeneModels.B.log";
+print STDERR (localtime) . ": CMD: $cmdString\n";
+system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+my $cmdString = "$binPath/fillingEndsOfGeneModels --nonCompletedGeneModels $tmp_dir/C_NF.gff3 --start_codon $start_codon --stop_codon $stop_codon $input_file1 $tmp_dir/C.gff3 > $tmp_dir/C_FE.gff3 2> $tmp_dir/fillingEndsOfGeneModels.C.log";
+print STDERR (localtime) . ": CMD: $cmdString\n";
+system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+my $cmdString = "$binPath/fillingEndsOfGeneModels --nonCompletedGeneModels $tmp_dir/D_NF.gff3 --start_codon $start_codon --stop_codon $stop_codon $input_file1 $tmp_dir/D.gff3 > $tmp_dir/D_FE.gff3 2> $tmp_dir/fillingEndsOfGeneModels.D.log";
+print STDERR (localtime) . ": CMD: $cmdString\n";
+system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+
+# 根据强行补齐情况修正基因模型类别
+
+
+# 根据表格形式内容获得GFF3格式
+sub get_gff3 {
+	my @geneModels_Tab = @{$_[0]};
+	my $type = $_[1];
+	my $geneID = $_[2];
+	my %intron_support_num = %{$_[3]};
+
+	my ($genome_seq_name, $source, $start, $end, $intron, $strand, $homolog_name) = @geneModels_Tab;
+	my $blastx_homolog_coverage = int(( (abs($geneModels_Tab[9] - $geneModels_Tab[8]) + 1) / $geneModels_Tab[7] ) * 10000 + 0.5) / 100;
+	my ($blastx_evalue, $blastx_identity) = ($geneModels_Tab[12], $geneModels_Tab[14]);
+
+	my (@CDS, @intron);
+	# 获得intron信息
+	if ( $intron ne "NULL" ) {
+		foreach ( split /;/, $intron ) {
+			if ( m/(\d+)-(\d+)/ ) {
+				if ( $2 > $1 ) {
+					push @intron, "$1\t$2";
+				}
+				else {
+					push @intron, "$2\t$1";
+				}
+			}
+		}
+		@intron = sort {$a <=> $b} @intron;
+	}
+	# 获得基因起始和结束位点
+	($start, $end) = ($end, $start) if $start > $end;
+	my ($gene_start, $gene_end) = ($start, $end);
+	# 获得CDS信息
+	foreach (@intron) {
+		@_ = split /\t/, $_;
+		my $CDS_end = $_[0] - 1;
+		my $CDS_start = $_[1] + 1;
+		push @CDS, "$start\t$CDS_end";
+		$start = $CDS_start;
+	}
+	push @CDS, "$start\t$end";
+
+	# 获得GFF3
+	my ($gff3_out, %gff3_out);
+	$gff3_out .= "$genome_seq_name\t$source\tgene\t$gene_start\t$gene_end\t\.\t$strand\t\.\tID=$geneID;Name=$geneID;Type=$type;Homolog=$homolog_name;Blastx_homolog_coverage=$blastx_homolog_coverage\%;Blastx_evalue=$blastx_evalue;Blastx_identity=$blastx_identity;Source=$source;\n";
+	$gff3_out .= "$genome_seq_name\t$source\tmRNA\t$gene_start\t$gene_end\t\.\t$strand\t\.\tID=$geneID.mRNA;Name=$geneID.mRNA;Parent=$geneID;Type=$type;Homolog=$homolog_name;Blastx_homolog_coverage=$blastx_homolog_coverage\%;Blastx_evalue=$blastx_evalue;Blastx_identity=$blastx_identity;Source=$source;\n";
+	my ($frame, $length, $num) = (0, 0, 0);
+	@CDS = sort{$b <=> $a} @CDS if $strand eq "-";
+	foreach ( @CDS ) {
+		$num ++;
+		@_ = split /\t/, $_;
+		$length += ($_[1] - $_[0] + 1);
+		$gff3_out{"$genome_seq_name\t$source\tCDS\t$_[0]\t$_[1]\t\.\t$strand\t$frame\tID=$geneID.mRNA.CDS$num;Parent=$geneID.mRNA;\n"} = $_[0];
+		$gff3_out{"$genome_seq_name\t$source\texon\t$_[0]\t$_[1]\t\.\t$strand\t\.\tID=$geneID.mRNA.exon$num;Parent=$geneID.mRNA;\n"} = $_[0];
+		$frame = $length % 3;
+		if ( $frame == 1 ) {
+			$frame = 2;
+		}
+		elsif ( $frame == 2 ) {
+			$frame = 1;
+		}
+	}
+	my $num = 0;
+	@intron = sort{$b <=> $a} @intron if $strand eq "-";
+	foreach ( @intron ) {
+		$num ++;
+		@_ = split /\t/, $_;
+		my $intron_support_num = 1;
+		$intron_support_num += $intron_support_num{$_} if exists $intron_support_num{$_};
+		$gff3_out{"$genome_seq_name\t$source\tintron\t$_[0]\t$_[1]\t\.\t$strand\t\.\tID=$geneID.mRNA.intron$num;Parent=$geneID.mRNA;Supported_times=$intron_support_num;\n"} = $_[0];
+	}
+	foreach ( sort {$gff3_out{$a} <=> $gff3_out{$b} or $b cmp $a} keys %gff3_out ) {
+		$gff3_out .= $_;
+	}
+
+	return $gff3_out;
+}
+
+sub codon_table {
+	my %code = (
+        "TTT" => "F",
+        "TTC" => "F",
+        "TTA" => "L",
+        "TTG" => "L",
+        "TCT" => "S",
+        "TCC" => "S",
+        "TCA" => "S",
+        "TCG" => "S",
+        "TAT" => "Y",
+        "TAC" => "Y",
+        "TAA" => "X",
+        "TAG" => "X",
+        "TGT" => "C",
+        "TGC" => "C",
+        "TGA" => "X",
+        "TGG" => "W",
+        "CTT" => "L",
+        "CTC" => "L",
+        "CTA" => "L",
+        "CTG" => "L",
+        "CCT" => "P",
+        "CCC" => "P",
+        "CCA" => "P",
+        "CCG" => "P",
+        "CAT" => "H",
+        "CAC" => "H",
+        "CAA" => "Q",
+        "CAG" => "Q",
+        "CGT" => "R",
+        "CGC" => "R",
+        "CGA" => "R",
+        "CGG" => "R",
+        "ATT" => "I",
+        "ATC" => "I",
+        "ATA" => "I",
+        "ATG" => "M",
+        "ACT" => "T",
+        "ACC" => "T",
+        "ACA" => "T",
+        "ACG" => "T",
+        "AAT" => "N",
+        "AAC" => "N",
+        "AAA" => "K",
+        "AAG" => "K",
+        "AGT" => "S",
+        "AGC" => "S",
+        "AGA" => "R",
+        "AGG" => "R",
+        "GTT" => "V",
+        "GTC" => "V",
+        "GTA" => "V",
+        "GTG" => "V",
+        "GCT" => "A",
+        "GCC" => "A",
+        "GCA" => "A",
+        "GCG" => "A",
+        "GAT" => "D",
+        "GAC" => "D",
+        "GAA" => "E",
+        "GAG" => "E",
+        "GGT" => "G",
+        "GGC" => "G",
+        "GGA" => "G",
+        "GGG" => "G",
+    );
+    my %start_codon;
+    $start_codon{"ATG"} = 1;
+    if ( $genetic_code == 1 ) {
+        # The Standard Code
+		#$start_codon{"TTG"} = 1;
+		#$start_codon{"CTG"} = 1;
+    }
+    elsif ( $genetic_code == 2 ) {
+        # The Vertebrate Mitochondrial Code
+        $code{"AGA"} = "X";
+        $code{"AGG"} = "X";
+        $code{"ATA"} = "M";
+        $code{"TGA"} = "W";
+        $start_codon{"ATA"} = 1;
+        $start_codon{"ATT"} = 1;
+        $start_codon{"ATC"} = 1;
+        $start_codon{"GTG"} = 1;
+    }
+    elsif ( $genetic_code == 3 ) {
+        # The Yeast Mitochondrial Code
+        $code{"ATA"} = "M";
+        $code{"CTT"} = "T";
+        $code{"CTC"} = "T";
+        $code{"CTA"} = "T";
+        $code{"CTG"} = "T";
+        $code{"TGA"} = "W";
+        $start_codon{"ATA"} = 1;
+        $start_codon{"GTG"} = 1;
+    }
+    elsif ( $genetic_code == 4 ) {
+        # The Mold, Protozoan, and Coelenterate Mitochondrial Code and the Mycoplasma/Spiroplasma Code
+        $code{"TGA"} = "W";
+        $start_codon{"ATA"} = 1;
+        $start_codon{"ATT"} = 1;
+        $start_codon{"ATC"} = 1;
+        $start_codon{"GTG"} = 1;
+        $start_codon{"CTG"} = 1;
+        $start_codon{"TTA"} = 1;
+        $start_codon{"TTG"} = 1;
+    }
+    elsif ( $genetic_code == 5 ) {
+        # The Invertebrate Mitochondrial Code
+        $code{"AGA"} = "S";
+        $code{"AGG"} = "S";
+        $code{"ATA"} = "M";
+        $code{"TGA"} = "W";
+        $start_codon{"ATA"} = 1;
+        $start_codon{"ATT"} = 1;
+        $start_codon{"ATC"} = 1;
+        $start_codon{"GTG"} = 1;
+        $start_codon{"TTG"} = 1;
+    }
+    elsif ( $genetic_code == 6 ) {
+        # The Ciliate, Dasycladacean and Hexamita Nuclear Code
+        $code{"TAA"} = "Q";
+        $code{"TAG"} = "Q";
+    }
+    elsif ( $genetic_code == 9 ) {
+        # The Echinoderm and Flatworm Mitochondrial Code
+        $code{"AAA"} = "N";
+        $code{"AGA"} = "S";
+        $code{"AGG"} = "S";
+        $code{"TGA"} = "W";
+        $start_codon{"GTG"} = 1;
+    }
+    elsif ( $genetic_code == 10 ) {
+        # The Euplotid Nuclear Code
+        $code{"TGA"} = "C";
+    }
+    elsif ( $genetic_code == 11 ) {
+        # The Bacterial, Archaeal and Plant Plastid Code
+        $start_codon{"ATA"} = 1;
+        $start_codon{"ATT"} = 1;
+        $start_codon{"ATC"} = 1;
+        $start_codon{"GTG"} = 1;
+        $start_codon{"CTG"} = 1;
+        $start_codon{"TTG"} = 1;
+    }
+    elsif ( $genetic_code == 12 ) {
+        # The Alternative Yeast Nuclear Code
+        $code{"CTG"} = "S";
+        $start_codon{"CTG"} = 1;
+    }
+    elsif ( $genetic_code == 13 ) {
+        # The Ascidian Mitochondrial Code
+        $code{"AGA"} = "G";
+        $code{"AGG"} = "G";
+        $code{"ATA"} = "M";
+        $code{"TGA"} = "W";
+        $start_codon{"ATA"} = 1;
+        $start_codon{"GTG"} = 1;
+        $start_codon{"TTG"} = 1;
+    }
+    elsif ( $genetic_code == 14 ) {
+        # The Alternative Flatworm Mitochondrial Code
+        $code{"AAA"} = "N";
+        $code{"AGA"} = "S";
+        $code{"AGG"} = "S";
+        $code{"TAA"} = "Y";
+        $code{"TGA"} = "W";
+    }
+    elsif ( $genetic_code == 16 ) {
+        # Chlorophycean Mitochondrial Code
+        $code{"TAG"} = "L";
+    }
+    elsif ( $genetic_code == 21 ) {
+        # Trematode Mitochondrial Code
+        $code{"TGA"} = "W";
+        $code{"ATA"} = "M";
+        $code{"AGA"} = "S";
+        $code{"AGG"} = "S";
+        $code{"AAA"} = "N";
+        $start_codon{"GTG"} = 1;
+    }
+    elsif ( $genetic_code == 22 ) {
+        # Scenedesmus obliquus Mitochondrial Code
+        $code{"TCA"} = "X";
+        $code{"TAG"} = "L";
+    }
+    elsif ( $genetic_code == 23 ) {
+        # Thraustochytrium Mitochondrial Code
+        $code{"TTA"} = "X";
+        $start_codon{"ATT"} = 1;
+        $start_codon{"GTG"} = 1;
+    }
+    elsif ( $genetic_code == 24 ) {
+        # Rhabdopleuridae Mitochondrial Code
+        $code{"AGA"} = "S";
+        $code{"AGG"} = "K";
+        $code{"TGA"} = "W";
+        $start_codon{"GTG"} = 1;
+        $start_codon{"CTG"} = 1;
+        $start_codon{"TTG"} = 1;
+    }
+    elsif ( $genetic_code == 25 ) {
+        # Candidate Division SR1 and Gracilibacteria Code
+        $code{"TGA"} = "G";
+        $start_codon{"GTG"} = 1;
+        $start_codon{"TTG"} = 1;
+    }
+    elsif ( $genetic_code == 26 ) {
+        # Pachysolen tannophilus Nuclear Code
+        # warning: The descritpions of initiation codons by 2 methods are confict according to the NCBI web site.
+        $code{"CTG"} = "A";
+        $start_codon{"GTG"} = 1;
+        $start_codon{"TTG"} = 1;
+    }
+    elsif ( $genetic_code == 27 ) {
+        # Karyorelict Nuclear Code
+        $code{"TAG"} = "Q";
+        $code{"TAA"} = "Q";
+    }
+    elsif ( $genetic_code == 29 ) {
+        # Mesodinium Nuclear Code
+        $code{"TAA"} = "Y";
+        $code{"TAG"} = "Y";
+    }
+    elsif ( $genetic_code == 30 ) {
+        # Peritrich Nuclear Code
+        $code{"TAA"} = "E";
+        $code{"TAG"} = "E";
+    }
+    elsif ( $genetic_code == 31 ) {
+        # Blastocrithidia Nuclear Code
+        $code{"TGA"} = "W";
+    }
+    elsif ( $genetic_code == 33 ) {
+        # Cephalodiscidae Mitochondrial UAA-Tyr Code
+        $code{"TAA"} = "Y";
+        $code{"TGA"} = "Y";
+        $code{"AGA"} = "S";
+        $code{"AGG"} = "K";
+    }
+
+    my %stop_codon;
+    foreach ( keys %code ) {
+        $stop_codon{$_} = 1 if $code{$_} eq "X";
+    }
+
+    return (\%code, \%start_codon, \%stop_codon);
 }

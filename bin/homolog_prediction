@@ -105,9 +105,10 @@ unless (-e "1.paraDiamond.ok" && -e "$out_prefix.diamond.tab") {
 else {
     print STDERR "CMD(Skipped): $cmdString\n";
 }
-# 2. 进行基因预测。
-$cmdString = "$binPath/homolog_prediction.03hitToGenePrediction --cpu $cpu --method $method --genetic_code $genetic_code --tmp_dir b.hitToGenePrediction $input_protein $input_genome out.diamond.tab > out.geneModels.tab";
-unless (-e "2.hitToGenePrediction.ok" && -s "out.gff") {
+
+# 2. 进行基因预测，得到表格格式的基因模型，并对同一基因区域的基因模型进行排序。
+$cmdString = "$binPath/homolog_prediction.03HitToGenePrediction --cpu $cpu --method $method --genetic_code $genetic_code --tmp_dir b.hitToGenePrediction $input_protein $input_genome out.diamond.tab > out.geneModels.tab";
+unless (-e "2.hitToGenePrediction.ok" && -s "out.geneModels.tab") {
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
     open OUT, ">", "2.hitToGenePrediction.ok" or die $!; close OUT;
@@ -115,5 +116,17 @@ unless (-e "2.hitToGenePrediction.ok" && -s "out.gff") {
 else {
     print STDERR "CMD(Skipped): $cmdString\n";
 }
+
+# 3. 同一基因区域仅取一个最优基因模型，得到GFF3文件，并对基因模型进行好坏分类。
+$cmdString = "$binPath/homolog_prediction.04GetGeneModels --tmp_dir c.GetGeneModels $input_genome out.geneModels.tab > out.geneModels.gff3";
+unless (-e "3.getGeneModels.ok" && -s "out.geneModels.gff3") {
+	print STDERR (localtime) . ": CMD: $cmdString\n";
+	system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+	open OUT, ">", "3.getGeneModels.ok" or die $!; close OUT;
+}
+else {
+	print STDERR "CMD(Skipped): $cmdString\n";
+}
+
 # 4. 调用gth(genomethreader)进行基因预测。
 # 5. 合并所有的基因预测结果，若一个区域有多个蛋白预测的结果，取其一致性结果。
