@@ -91,7 +91,7 @@ foreach my $gene_ID ( sort keys %gene_info ) {
         $gene_fill_ok = 1 if $fill_ok == 1;
         print OUT1 "$mRNA_ID\n" if $fill_need == 1;
 
-        my ($mRNA_start, $mRNA_end, $mRNA_content) = &get_mRNA_info($mRNA_CDSs, $mRNA_exons, $mRNA_ID, $mRNA_header[0], $strand, \%gff3_score_attr);
+        my ($mRNA_start, $mRNA_end, $mRNA_content) = &get_mRNA_info($mRNA_CDSs, $mRNA_exons, $mRNA_ID, $mRNA_header[0], $strand, $mRNA_header[1], \%gff3_score_attr);
         $mRNA_header[3] = $mRNA_start;
         $mRNA_header[4] = $mRNA_end;
         $mRNA_header = join "\t", @mRNA_header;
@@ -165,7 +165,7 @@ print STDERR "共有 $num_total 个基因模型进行了分析；其中有 $num_
 
 # 子程序，根据输入的CDSs和exons信息，返回mRNA起始结束位置和详细内容
 sub get_mRNA_info {
-    my ($mRNA_CDSs, $mRNA_exons, $mRNA_ID, $chr, $strand) = @_;
+    my ($mRNA_CDSs, $mRNA_exons, $mRNA_ID, $chr, $strand, $source) = @_;
     my %gff3_score_attr = %{$_[-1]};
     
     # 根据CDS边界对exon边界进行修正；得到mRNA边界；得到intron信息；得到UTR信息。
@@ -179,14 +179,14 @@ sub get_mRNA_info {
     $mRNA_UTR = &get_UTR(\@CDS, \@exon, $strand);
 
     # 对mRNA内容进行排序
-    my $mRNA_content = &sort_mRNA_info($chr, $strand, $mRNA_ID, $mRNA_start, $mRNA_end, $mRNA_CDSs, $mRNA_exons,$mRNA_introns, $mRNA_UTR, \%gff3_score_attr);
+    my $mRNA_content = &sort_mRNA_info($chr, $strand, $mRNA_ID, $mRNA_start, $mRNA_end, $mRNA_CDSs, $mRNA_exons,$mRNA_introns, $mRNA_UTR, $source, \%gff3_score_attr);
     
     #print "TEST: $mRNA_ID\t$mRNA_start\t$mRNA_end\n";
     return ($mRNA_start, $mRNA_end, $mRNA_content);
 }
 
 sub sort_mRNA_info {
-    my ($chr, $strand, $mRNA_ID, $mRNA_start, $mRNA_end, $mRNA_CDSs, $mRNA_exons, $mRNA_introns, $mRNA_UTR) = @_;
+    my ($chr, $strand, $mRNA_ID, $mRNA_start, $mRNA_end, $mRNA_CDSs, $mRNA_exons, $mRNA_introns, $mRNA_UTR, $source) = @_;
     my %gff3_score_attr = %{$_[-1]};
     #foreach (sort keys %gff3_score_attr) { print "$_:\t$gff3_score_attr{$_}{'attr'}\n"; }
     my ($mRNA_content, %sort1, %sort2);
@@ -195,22 +195,24 @@ sub sort_mRNA_info {
     if ( $strand eq "+" ) {
         my $num = 0;
         foreach ( split /\n/, $mRNA_exons ) {
-            $num ++; @_ = split /\t/, $_; my $feature_type = "exon"; my $feature_showname = $feature_type;
-            my $out_content = &get_content($chr, $feature_type, $_[0], $_[1], $strand, $mRNA_ID, $num, $feature_showname, \%gff3_score_attr);
+            $num ++; @_ = split /\t/, $_; my $feature_type = "exon"; my $feature_showname = $feature_type; my $frame = '.';
+            my $out_content = &get_content($chr, $source, $feature_type, $_[0], $_[1], $strand, $frame, $mRNA_ID, $num, $feature_showname, \%gff3_score_attr);
             $sort1{$out_content} = $_[0];
             $sort2{$out_content} = 2;
         }
-        my $num = 0;
+        my ($num, $CDS_length, $frame) = (0, 0, 0);
         foreach ( split /\n/, $mRNA_CDSs ) {
             $num ++; @_ = split /\t/, $_; my $feature_type = "CDS"; my $feature_showname = $feature_type;
-            my $out_content = &get_content($chr, $feature_type, $_[0], $_[1], $strand, $mRNA_ID, $num, $feature_showname, \%gff3_score_attr);
+			$CDS_length += (abs($_[1] - $_[0]) + 1);
+            my $out_content = &get_content($chr, $source, $feature_type, $_[0], $_[1], $strand, $frame, $mRNA_ID, $num, $feature_showname, \%gff3_score_attr);
             $sort1{$out_content} = $_[0];
             $sort2{$out_content} = 3;
+			$frame = $CDS_length % 3; if ($frame == 1) {$frame = 2;} elsif ($frame == 2) {$frame = 1;}
         }
         my $num = 0;
         foreach ( split /\n/, $mRNA_introns ) {
-            $num ++; @_ = split /\t/, $_; my $feature_type = "intron"; my $feature_showname = $feature_type;
-            my $out_content = &get_content($chr, $feature_type, $_[0], $_[1], $strand, $mRNA_ID, $num, $feature_showname, \%gff3_score_attr);
+            $num ++; @_ = split /\t/, $_; my $feature_type = "intron"; my $feature_showname = $feature_type; my $frame = '.';
+            my $out_content = &get_content($chr, $source, $feature_type, $_[0], $_[1], $strand, $frame, $mRNA_ID, $num, $feature_showname, \%gff3_score_attr);
             $sort1{$out_content} = $_[0];
             $sort2{$out_content} = 4;
         }
@@ -228,7 +230,8 @@ sub sort_mRNA_info {
                 $feature_showname = "utr3p";
                 $num3 ++; $num = $num3; $sort_num = 5;
             }
-            my $out_content = &get_content($chr, $feature_type, $_[1], $_[2], $strand, $mRNA_ID, $num, $feature_showname, \%gff3_score_attr);
+			my $frame = '.';
+            my $out_content = &get_content($chr, $source, $feature_type, $_[1], $_[2], $strand, $frame, $mRNA_ID, $num, $feature_showname, \%gff3_score_attr);
             $sort1{$out_content} = $_[1];
             $sort2{$out_content} = $sort_num;
         }
@@ -240,22 +243,24 @@ sub sort_mRNA_info {
     elsif ( $strand eq "-" ) {
         my $num = 0;
         foreach ( reverse split /\n/, $mRNA_exons ) {
-            $num ++; @_ = split /\t/, $_; my $feature_type = "exon"; my $feature_showname = $feature_type;
-            my $out_content = &get_content($chr, $feature_type, $_[0], $_[1], $strand, $mRNA_ID, $num, $feature_showname, \%gff3_score_attr);
+            $num ++; @_ = split /\t/, $_; my $feature_type = "exon"; my $feature_showname = $feature_type; my $frame = '.';
+            my $out_content = &get_content($chr, $source, $feature_type, $_[0], $_[1], $strand, $frame, $mRNA_ID, $num, $feature_showname, \%gff3_score_attr);
             $sort1{$out_content} = $_[0];
             $sort2{$out_content} = 2;
         }
-        my $num = 0;
+        my ($num, $CDS_length, $frame) = (0, 0, 0);
         foreach ( reverse split /\n/, $mRNA_CDSs ) {
             $num ++; @_ = split /\t/, $_; my $feature_type = "CDS"; my $feature_showname = $feature_type;
-            my $out_content = &get_content($chr, $feature_type, $_[0], $_[1], $strand, $mRNA_ID, $num, $feature_showname, \%gff3_score_attr);
+			$CDS_length += (abs($_[1] - $_[0]) + 1);
+            my $out_content = &get_content($chr, $source, $feature_type, $_[0], $_[1], $strand, $frame, $mRNA_ID, $num, $feature_showname, \%gff3_score_attr);
             $sort1{$out_content} = $_[0];
             $sort2{$out_content} = 3;
+			$frame = $CDS_length % 3; if ($frame == 1) {$frame = 2;} elsif ($frame == 2) {$frame = 1;}
         }
         my $num = 0;
         foreach ( reverse split /\n/, $mRNA_introns ) {
-            $num ++; @_ = split /\t/, $_; my $feature_type = "intron"; my $feature_showname = $feature_type;
-            my $out_content = &get_content($chr, $feature_type, $_[0], $_[1], $strand, $mRNA_ID, $num, $feature_showname, \%gff3_score_attr);
+            $num ++; @_ = split /\t/, $_; my $feature_type = "intron"; my $feature_showname = $feature_type; my $frame = '.';
+            my $out_content = &get_content($chr, $source, $feature_type, $_[0], $_[1], $strand, $frame, $mRNA_ID, $num, $feature_showname, \%gff3_score_attr);
             $sort1{$out_content} = $_[0];
             $sort2{$out_content} = 4;
         }
@@ -273,7 +278,8 @@ sub sort_mRNA_info {
                 $feature_showname = "utr3p";
                 $num3 ++; $num = $num3; $sort_num = 5;
             }
-            my $out_content = &get_content($chr, $feature_type, $_[1], $_[2], $strand, $mRNA_ID, $num, $feature_showname, \%gff3_score_attr);
+			my $frame = '.';
+            my $out_content = &get_content($chr, $source, $feature_type, $_[1], $_[2], $strand, $frame, $mRNA_ID, $num, $feature_showname, \%gff3_score_attr);
             $sort1{$out_content} = $_[1];
             $sort2{$out_content} = $sort_num;
         }
@@ -904,12 +910,12 @@ sub correct_ends_of_transcript_and_exon {
 }
 
 sub get_content {
-    my ($chr, $feature_type, $start, $end, $strand, $mRNA_ID, $num, $feature_showname) = @_;
+    my ($chr, $source, $feature_type, $start, $end, $strand, $frame, $mRNA_ID, $num, $feature_showname) = @_;
     my %gff3_score_attr = %{$_[-1]};
     my $score = '.';
     my $add_attr = "";
     $score = $gff3_score_attr{"$chr\t$strand\t$feature_type\t$start\t$end"}{"score"} if exists $gff3_score_attr{"$chr\t$strand\t$feature_type\t$start\t$end"};
     $add_attr = $gff3_score_attr{"$chr\t$strand\t$feature_type\t$start\t$end"}{"attr"} if exists $gff3_score_attr{"$chr\t$strand\t$feature_type\t$start\t$end"};
-    my $out_content = "$chr\t\.\t$feature_type\t$start\t$end\t$score\t$strand\t.\tID=$mRNA_ID.$feature_showname$num;Parent=$mRNA_ID;$add_attr\n";
+    my $out_content = "$chr\t$source\t$feature_type\t$start\t$end\t$score\t$strand\t$frame\tID=$mRNA_ID.$feature_showname$num;Parent=$mRNA_ID;$add_attr\n";
     return $out_content;
 }
