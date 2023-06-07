@@ -9,7 +9,13 @@ my $binPath = dirname($0);
 
 my $usage = <<USAGE;
 Usage:
-    $0 [options] homolog_proteins.fasta genome_seq.fasta > out.gff
+    $0 [options] homolog_proteins.fasta genome_seq.fasta > out.gff3
+
+    本程序能利用临近物种的全基因组蛋白序列对目标物种的全基因组序列进行基因预测，并将结果以GFF3格式输出到标准输出。
+    结果中的基因模型分为四类：A，excellent gene models，对同源蛋白序列覆盖100%，且起始密码子和终止密码子和同源蛋白匹配一致；B，good gene models，对同源蛋白覆盖不小于80%且强制补齐后完整基因模型长度不小于同源蛋白序列长度的80%；C，fair gene models，对同源蛋白覆盖不小于40%且强制补齐的完整基因模型长度不小于同源蛋白序列长度的40%；D，poor gene models，对同源蛋白覆盖小于40%、或强制补齐的完整基因模型长度小于同源蛋白序列长度的40%、或不能强制补齐的基因模型。前三类基因模型都是完整的基因模型，最后一个CDS是包含终止密码子的，最后一类基因模型有些是完整的，有些是不完整的，其尾部若是完整的，则最后一个CDS是包含终止密码子的。
+    程序输出的基因模型中，其intron信息中包含Supported_times标签，表示不同的基因预测方法或不同的同源蛋白支持的次数。例如，有10个同源蛋白在3种预测方法都支持一个intron，则该intron的Supported_times值是30。默认情况下，--threshod_ratio_of_intron_Supported_times 参数的值是 0.5，表示程序根据A和B类基因模型计算出所有introns的Supported_times中位数值，再用于对C和D类基因模型进行过滤。若C或D类基因模型中所有introns的Supported_times值都低于上一步计算出的中位数值，则过滤其基因模型；若设置 --threshod_ratio_of_intron_Supported_times 参数值为 0，则不进行过滤；该参数值越大，则要求越严格，过滤的基因模型数量越多。
+    程序运行原理简述：（1）先调用diamond命令，将同源蛋白做成数据库，再将基因组序列和同源蛋白进行比对。（2）挑选blastx结果满足阈值的同源蛋白，从exonerate、genewise或gth三种软件中选择至少一个软件进行基因预测，并对目标基因区域多个软件和多个同源蛋白的预测结果进行排序。（3）挑选最优的基因预测结果，再对基因模型进行补齐并分成四类。（4）对较差的C和D类基因模型进行过滤。
+    根据程序的计算原理，使用的同源蛋白数量越多，预测基因模型的准确性和完整性会越好，相应的计算消耗时间越长。因此，推荐使用5~10个物种的全基因组蛋白序列作为输入。
 
     --out_prefix <string>    default: out
     设置输出文件前缀。程序默认输出如下文件：（1）out.diamond.tab，将基因组序列和同源蛋白进行dimond blastx比对的结果文件；（2）out.
@@ -33,7 +39,13 @@ Usage:
     设置对diamond blastx比对结果进行过滤的Identity、E-value和subject_coverage阈值。
 
     --method <string>    default: exonerate
-    设置进行基因预测的方法，其值可以设定为exonerate、genewise、gth或all。若需要同时使用多种方法，则输入使用逗号分割的多个值；若使用所有三种方法进行分析，可以设置--method参数值为all，但最消耗计算时间。
+    设置进行基因预测的方法，其值可以设定为exonerate、genewise、gth或all。若需要同时使用多种方法，则输入使用逗号分割的多个值；若使用所有三种方法进行分析，可以设置--method参数值为all，但最消耗计算时间。三种方法中：exonerate和genewise的准确性结果比较一致，但gth方法预测基因模型的sensitivity下降很多，specificity提高很多。以三种方法对Oryza sativa基因组的预测为例，各种预测的准确性结果如下表所示。和NCBI上标准的共28736个基因模型的注释结果进行比较，评估四个准确性值：基因水平sensitivity、基因水平specificity、exon水平sensitivity、exon水平specificity。可以看出，使用多种方法整合预测后再过滤，得到的基因模型数量能接近真实的基因数量，且结果较准确。
+    方法       基因数量    gene_sensitivity    gene_specificity    exon_sensitivity    exon_specificity
+    exonerate  38537       47.05%              35.09%              58.90%              73.55%
+    genewise   40455       47.32%              33.61%              62.08%              71.27%
+    gth        8888        19.80%              64.02%              30.43%              90.54%
+    all        40539       48.47%              34.36%              63.82%              71.83%
+    filtered   28184       45.54%              46.43%              61.23%              79.56%
 
     --genetic_code <int>    default: 1
     设置遗传密码。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。
@@ -41,13 +53,18 @@ Usage:
     --tmp_dir <string>    default: tmp_\$date\$pid
     程序运行时临时文件夹名称。
 
+    --threshod_ratio_of_intron_Supported_times <float>    default: 0.5
+    程序根据A和B类基因模型计算出所有introns的Supported_times，对这些数值按从小到大进行排序，再计算出本参数所处位置的值threshold_value。该参数设置的范围为[0, 1]，默认情况下本参数的值为0.5，即表示使用中位数值作为threshold_value。使用计算出的threshold_value值，对C和D类基因模型进行过滤。若C或D类基因模型中所有introns的Supported_times值都低于上一步计算出的threshold_value值，则过滤其基因模型。当设置本参数值为0时，强制设置threshold_value值为0，则表示保留所有的基因模型。
+
     --help    default: None
     display this help and exit.
+
+    本程序的运行需要调用其同目录下的fillingEndsOfGeneModels和GFF3Clear指令。
 
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($out_prefix, $segmentSize, $overlapSize, $max_hits_num_per_match_region, $max_hit_num_per_single_species, $cpu, $identity, $evalue, $subject_coverage, $method, $genetic_code, $tmp_dir, $help_flag);
+my ($out_prefix, $segmentSize, $overlapSize, $max_hits_num_per_match_region, $max_hit_num_per_single_species, $cpu, $identity, $evalue, $subject_coverage, $method, $genetic_code, $tmp_dir, $threshod_ratio_of_intron_Supported_times, $help_flag);
 GetOptions(
     "out_prefix:s" => \$out_prefix,
     "segmentSize:i" => \$segmentSize,
@@ -61,6 +78,7 @@ GetOptions(
     "method:s" => \$method,
     "genetic_code:i" => \$genetic_code,
     "tmp_dir:s" => \$tmp_dir,
+    "threshod_ratio_of_intron_Supported_times:f" => \$threshod_ratio_of_intron_Supported_times,
     "help" => \$help_flag,
 );
 $out_prefix ||= "out";
@@ -82,6 +100,7 @@ my $date = `date +%Y%m%d%H%M%S`; chomp($date);
 $tmp_dir ||= "tmp_$date$$";
 $tmp_dir = abs_path($tmp_dir);
 mkdir $tmp_dir unless -e $tmp_dir;
+$threshod_ratio_of_intron_Supported_times = 0.5 unless defined($threshod_ratio_of_intron_Supported_times);
 
 if ( $help_flag ) { die $usage }
 
@@ -107,6 +126,7 @@ else {
 }
 
 # 2. 进行基因预测，得到表格格式的基因模型，并对同一基因区域的基因模型进行排序。
+print STDERR "2. predicting gene models according the Hits of diamond.\n";
 $cmdString = "$binPath/homolog_prediction.03HitToGenePrediction --cpu $cpu --method $method --genetic_code $genetic_code --tmp_dir b.hitToGenePrediction $input_protein $input_genome out.diamond.tab > out.geneModels.tab";
 unless (-e "2.hitToGenePrediction.ok" && -s "out.geneModels.tab") {
     print STDERR (localtime) . ": CMD: $cmdString\n";
@@ -118,15 +138,68 @@ else {
 }
 
 # 3. 同一基因区域仅取一个最优基因模型，得到GFF3文件，并对基因模型进行好坏分类。
-$cmdString = "$binPath/homolog_prediction.04GetGeneModels --tmp_dir c.GetGeneModels $input_genome out.geneModels.tab > out.geneModels.gff3";
+print STDERR "3. picking out the best geng model for classification.\n";
+$cmdString = "$binPath/homolog_prediction.04GetGeneModels --tmp_dir c.getGeneModels $input_genome out.geneModels.tab > out.geneModels.gff3 2> c.getGeneModels.log";
 unless (-e "3.getGeneModels.ok" && -s "out.geneModels.gff3") {
-	print STDERR (localtime) . ": CMD: $cmdString\n";
-	system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-	open OUT, ">", "3.getGeneModels.ok" or die $!; close OUT;
+    print STDERR (localtime) . ": CMD: $cmdString\n";
+    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+    open OUT, ">", "3.getGeneModels.ok" or die $!; close OUT;
 }
 else {
-	print STDERR "CMD(Skipped): $cmdString\n";
+    print STDERR "CMD(Skipped): $cmdString\n";
 }
 
-# 4. 调用gth(genomethreader)进行基因预测。
-# 5. 合并所有的基因预测结果，若一个区域有多个蛋白预测的结果，取其一致性结果。
+# 4. 对基因模型进行进行过滤。
+my $threshod_value = 0;
+#$threshod_ratio_of_intron_Supported_times
+open IN, "out.geneModels.gff3" or die "Can not open file out.geneModels.gff3, $!";
+my @intron_supported_times;
+$/ = "\n\n";
+while (<IN>) {
+    if (m/Type=excellent_gene_models_predicted_by_homolog/ or m/Type=good_gene_models_predicted_by_homolog/) {
+        foreach my $line ( split /\n/, $_ ) {
+            push @intron_supported_times, $1 if m/\tintron\t.*Supported_times=(\d+)/;
+        }
+    }
+}
+close IN;
+@intron_supported_times = sort {$a <=> $b} @intron_supported_times;
+if ( $threshod_ratio_of_intron_Supported_times <= 0 ) {
+    $threshod_value = 0;
+}
+else {
+    my $pos = @intron_supported_times * $threshod_ratio_of_intron_Supported_times;
+    $pos = @intron_supported_times - 1 if $pos >= @intron_supported_times;
+    $threshod_value = $intron_supported_times[$pos];
+}
+print STDERR "3. filtering gene models. according to class A and B gene models, the intron supported_times threshold value was set to $threshod_value, the class C or D gene models can not with a intron supported_times >= $threshod_value will be filtered.\n";
+
+open IN, "out.geneModels.gff3" or die "Can not open file out.geneModels.gff3, $!";
+my ($numA, $numB, $numC, $numD) = (0, 0, 0, 0);
+while (<IN>) {
+    if (m/Type=excellent_gene_models_predicted_by_homolog/) {
+        print; $numA ++;
+    }
+    elsif (m/Type=good_gene_models_predicted_by_homolog/) {
+        print; $numB ++;
+    }
+    else {
+        my @supported_times;
+        foreach my $line ( split /\n/, $_ ) {
+            push @supported_times, $1 if m/\tintron\t.*Supported_times=(\d+)/;
+        }
+        @supported_times = sort {$b <=> $a} @supported_times;
+        if ( $supported_times[0] >= $threshod_value ) {
+            print;
+            if ( m/Type=fair_gene_models_predicted_by_homolog/ ) {
+                $numC ++;
+            }
+            elsif ( m/Type=poor_gene_models_predicted_by_homolog/ ) {
+                $numD ++;
+            }
+        }
+    }
+}
+close IN;
+my $total = 0; $total = $numA + $numB + $numC + $numD;
+print STDERR "Finally, total $total gene models were divided into 4 classes : A, $numA; B, $numB; C, $numC; D, $numD\n";
