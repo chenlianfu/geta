@@ -39,13 +39,13 @@ Usage:
     设置对diamond blastx比对结果进行过滤的Identity、E-value和subject_coverage阈值。
 
     --method <string>    default: exonerate
-    设置进行基因预测的方法，其值可以设定为exonerate、genewise、gth或all。若需要同时使用多种方法，则输入使用逗号分割的多个值；若使用所有三种方法进行分析，可以设置--method参数值为all，但最消耗计算时间。三种方法中：exonerate和genewise的准确性结果比较一致，但gth方法预测基因模型的sensitivity下降很多，specificity提高很多。以三种方法对Oryza sativa基因组的预测为例，各种预测的准确性结果如下表所示。和NCBI上标准的共28736个基因模型的注释结果进行比较，评估四个准确性值：基因水平sensitivity、基因水平specificity、exon水平sensitivity、exon水平specificity。可以看出，使用多种方法整合预测后再过滤，得到的基因模型数量能接近真实的基因数量，且结果较准确。
+    设置进行基因预测的方法，其值可以设定为exonerate、genewise、gth或all。若需要同时使用多种方法，则输入使用逗号分割的多个值；若使用所有三种方法进行分析，可以设置--method参数值为all，但最消耗计算时间。三种方法中：exonerate和genewise的准确性结果比较一致，但gth方法预测基因模型的sensitivity下降很多，specificity提高很多。以三种方法对Oryza sativa基因组的预测为例，其预测结果的准确性如下表所示。和NCBI上标准的共28736个基因模型的注释结果进行比较，评估四个准确性值：基因水平sensitivity、基因水平specificity、exon水平sensitivity、exon水平specificity。可以看出，使用多种方法整合预测后再过滤，得到的基因模型数量能接近真实的基因数量，且结果较准确。
     方法       基因数量    gene_sensitivity    gene_specificity    exon_sensitivity    exon_specificity
     exonerate  38537       47.05%              35.09%              58.90%              73.55%
     genewise   40455       47.32%              33.61%              62.08%              71.27%
     gth        8888        19.80%              64.02%              30.43%              90.54%
-    all        40539       48.47%              34.36%              63.82%              71.83%
-    filtered   28184       45.54%              46.43%              61.23%              79.56%
+    all        40538       48.54%              34.41%              63.85%              71.86%
+    filtered   28184       45.62%              46.51%              61.26%              79.59%
 
     --genetic_code <int>    default: 1
     设置遗传密码。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。
@@ -59,7 +59,7 @@ Usage:
     --help    default: None
     display this help and exit.
 
-    本程序的运行需要调用其同目录下的fillingEndsOfGeneModels和GFF3Clear指令。
+    本程序的运行需要调用其同目录下的parsing_blast_result.pl、fillingEndsOfGeneModels和GFF3Clear指令；也依赖可以直接运行的指令diamond。
 
 USAGE
 if (@ARGV==0){die $usage}
@@ -175,13 +175,15 @@ else {
 print STDERR "3. filtering gene models. according to class A and B gene models, the intron supported_times threshold value was set to $threshod_value, the class C or D gene models can not with a intron supported_times >= $threshod_value will be filtered.\n";
 
 open IN, "out.geneModels.gff3" or die "Can not open file out.geneModels.gff3, $!";
-my ($numA, $numB, $numC, $numD) = (0, 0, 0, 0);
+my ($numA, $numB, $numC, $numD, $num_gth, $num_exonerate, $num_genewise) = (0, 0, 0, 0, 0, 0, 0);
 while (<IN>) {
     if (m/Type=excellent_gene_models_predicted_by_homolog/) {
         print; $numA ++;
+		$num_gth ++ if m/\tgth\t/; $num_exonerate ++ if m/\texonerate\t/; $num_genewise ++ if m/\tgenewise\t/;
     }
     elsif (m/Type=good_gene_models_predicted_by_homolog/) {
         print; $numB ++;
+		$num_gth ++ if m/\tgth\t/; $num_exonerate ++ if m/\texonerate\t/; $num_genewise ++ if m/\tgenewise\t/;
     }
     else {
         my @supported_times;
@@ -191,6 +193,7 @@ while (<IN>) {
         @supported_times = sort {$b <=> $a} @supported_times;
         if ( $supported_times[0] >= $threshod_value ) {
             print;
+			$num_gth ++ if m/\tgth\t/; $num_exonerate ++ if m/\texonerate\t/; $num_genewise ++ if m/\tgenewise\t/;
             if ( m/Type=fair_gene_models_predicted_by_homolog/ ) {
                 $numC ++;
             }
@@ -202,4 +205,4 @@ while (<IN>) {
 }
 close IN;
 my $total = 0; $total = $numA + $numB + $numC + $numD;
-print STDERR "Finally, total $total gene models were divided into 4 classes : A, $numA; B, $numB; C, $numC; D, $numD\n";
+print STDERR "\nFinally, total $total gene models were divided into 4 classes : A, $numA; B, $numB; C, $numC; D, $numD. \nPredicited by gth, $num_gth; predicted by exonerate, $num_exonerate, predicted by genewise, $num_genewise\n\n";
