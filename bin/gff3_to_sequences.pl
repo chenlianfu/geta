@@ -264,20 +264,27 @@ if ( -e "$out_prefix.CDS.fasta" ) {
 
     # 输出编码基因的统计结果。
     open OUT, ">", "$out_prefix.codingGeneModels.stats" or die "Can not create file $out_prefix.codingGeneModels.stats, $!";
-    printf OUT "%30s \t$stats{'coding_gene_num'}\n", "coding_gene number:";
-    printf OUT "%30s \t$stats{'AS_gene_num'}\n", "AS_gene number:";
+    $collected_output_file_name{"$out_prefix.codingGeneModels.stats"} = 1;
+    my ($coding_gene_num, $AS_gene_num) = (0, 0);
+    $coding_gene_num = $stats{"coding_gene_num"} if exists $stats{"coding_gene_num"};
+    $AS_gene_num = $stats{"AS_gene_num"} if exists $stats{"AS_gene_num"};
+    printf OUT "%30s \t$coding_gene_num\n", "coding_gene number:";
+    printf OUT "%30s \t$AS_gene_num\n", "AS_gene number:";
     printf OUT "%30s \t$intergenic_length1_num\n", "intergenic_length >= 0 number:"; 
     printf OUT "%30s \t$intergenic_length2_num\n\n", "intergenic_length < 0 number:"; 
     print OUT " " x 23 . "\tMedian  \tMean\n";
 
     my @item = ("isoform_num", "gene_length", "exon_length", "CDS_length", "intron_length", "CDS_num", "exon_num", "intron_num", "single_CDS_length", "single_exon_length", "single_intron_length", "intergenic_length >= 0", "intergenic_length < 0");
     foreach ( @item ) {
-        my @intput_data = @{$stats{$_}};
+        my @intput_data;
+        foreach ( @{$stats{$_}} ) { push @intput_data, $_; }
         @intput_data = sort {$a <=> $b} @intput_data;
-        my $median = $intput_data[@intput_data/2];
+        my $median = 0;
+        $median = $intput_data[@intput_data/2] if @intput_data;
         my $total = 0;
         foreach ( @intput_data ) { $total += $_; }
-        my $mean = 0; $mean = int($total / @intput_data * 100 + 0.5) / 100 if @intput_data > 0;
+        my $mean = 0;
+        $mean = int($total / @intput_data * 100 + 0.5) / 100 if @intput_data > 0;
         printf OUT "%22s \t%-7s \t$mean\n", $_, $median;
     }
     close OUT;
