@@ -31,7 +31,7 @@ Usage:
     添加该参数后，对基因模型的多个可变剪接的转录本进行排序后再输出序列。优先按CDS长度从长到短，然后按cDNA长度从长到短，最后按ID的ASCII编码从小到大进行排序。程序默认输出所有的可变剪接序列，按其在GFF3文件中出现的顺序输出序列。
     
     --genetic_code <int>    default: 1
-    设置遗传密码。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。
+    设置遗传密码。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。该参数在将CDS转换为Protein序列时生效。
 
 USAGE
 if (@ARGV==0){die $usage}

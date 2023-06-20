@@ -16,6 +16,7 @@ Usage:
         （B）对同源蛋白覆盖不小于80%且强制补齐后完整基因模型长度不小于同源蛋白序列长度的80%；good gene models
         （C）对同源蛋白覆盖不小于40%且强制补齐的完整基因模型长度不小于同源蛋白序列长度的40%；fair gene models
         （D）对同源蛋白覆盖小于40%、或强制补齐的完整基因模型长度小于同源蛋白序列长度的40%、或不能强制补齐的基因模型。poor gene models
+	本程序在临时文件夹下生成文件final_all.gff3，包含所有的基因模型。在标准输出中输出最终结果，可以选择不输出第三类或第四类基因模型。
 
     输入文件out.geneModels.tab包含15列数据：(1) 目标基因组序列名称；(2) 预测软件名称；(3) 基因起始位点；(4) 基因结束位点；(5) introns信息，多个introns之间使用分号分割，每个intron前后坐标使用中划线分割；(6) 基因所在的正负链；(7) 同源蛋白名称；(8) 同源蛋白其长度；(9) 同源蛋白匹配的起始位点；(10) 同源蛋白匹配的结束位点；(11) CDS总长度；(12) CDS内部的终止密码子数量；(13) Diamond BLASTX比对的Evalue值；(14) Diamond BLASTX比对的Score值；(15) Diamond BLASTX比对的Identity。
 
@@ -349,7 +350,7 @@ $numA = %classA; $numB = %classB; $numC = %classC; $numD = %classD;
 print STDERR "第二轮补齐基因模型后分类：A 类 $numA 个、B 类 $numB 个、C 类 $numC 个、D 类 $numD 个。\n";
 
 # 合并四类基因模型结果，并去冗余
-$cmdString = "$binPath/GFF3Clear --genome $input_file1 --gene_code_length 6 --no_attr_add $tmp_dir/A_out.gff3 $tmp_dir/B_out.gff3 $tmp_dir/C_out.gff3 $tmp_dir/D_out.gff3 > $tmp_dir/final_all.gff3 2> $tmp_dir/GFF3Clear.log";
+$cmdString = "$binPath/GFF3Clear --genome $input_file1 --no_attr_add $tmp_dir/A_out.gff3 $tmp_dir/B_out.gff3 $tmp_dir/C_out.gff3 $tmp_dir/D_out.gff3 > $tmp_dir/final_all.gff3 2> $tmp_dir/GFF3Clear.log";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 

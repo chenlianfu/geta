@@ -127,7 +127,7 @@ else {
 
 # 2. 进行基因预测，得到表格格式的基因模型，并对同一基因区域的基因模型进行排序。
 print STDERR "2. predicting gene models according the Hits of diamond.\n";
-$cmdString = "$binPath/homolog_prediction.03HitToGenePrediction --cpu $cpu --method $method --genetic_code $genetic_code --tmp_dir b.hitToGenePrediction $input_protein $input_genome out.diamond.tab > out.geneModels.tab";
+$cmdString = "$binPath/homolog_prediction.03HitToGenePrediction --cpu $cpu --method $method --genetic_code $genetic_code --tmp_dir b.hitToGenePrediction $input_protein $input_genome out.diamond.tab > out.geneModels.tab 2> b.hitToGenePrediction.log";
 unless (-e "2.hitToGenePrediction.ok" && -s "out.geneModels.tab") {
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -172,17 +172,18 @@ else {
     $pos = @intron_supported_times - 1 if $pos >= @intron_supported_times;
     $threshod_value = $intron_supported_times[$pos];
 }
-print STDERR "3. filtering gene models. according to class A and B gene models, the intron supported_times threshold value was set to $threshod_value, the class C or D gene models can not with a intron supported_times >= $threshod_value will be filtered.\n";
+print STDERR "4. filtering gene models. according to class A and B gene models, the intron supported_times threshold value was set to $threshod_value, the class C or D gene models can not with a intron supported_times >= $threshod_value will be filtered.\n";
 
 open IN, "out.geneModels.gff3" or die "Can not open file out.geneModels.gff3, $!";
+open OUT, ">", "out.geneModels.filter.gff3" or die "Can not create file out.geneModels.filter.gff3";
 my ($numA, $numB, $numC, $numD, $num_gth, $num_exonerate, $num_genewise) = (0, 0, 0, 0, 0, 0, 0);
 while (<IN>) {
     if (m/Type=excellent_gene_models_predicted_by_homolog/) {
-        print; $numA ++;
+        print OUT; $numA ++;
 		$num_gth ++ if m/\tgth\t/; $num_exonerate ++ if m/\texonerate\t/; $num_genewise ++ if m/\tgenewise\t/;
     }
     elsif (m/Type=good_gene_models_predicted_by_homolog/) {
-        print; $numB ++;
+        print OUT; $numB ++;
 		$num_gth ++ if m/\tgth\t/; $num_exonerate ++ if m/\texonerate\t/; $num_genewise ++ if m/\tgenewise\t/;
     }
     else {
@@ -192,7 +193,7 @@ while (<IN>) {
         }
         @supported_times = sort {$b <=> $a} @supported_times;
         if ( $supported_times[0] >= $threshod_value ) {
-            print;
+            print OUT;
 			$num_gth ++ if m/\tgth\t/; $num_exonerate ++ if m/\texonerate\t/; $num_genewise ++ if m/\tgenewise\t/;
             if ( m/Type=fair_gene_models_predicted_by_homolog/ ) {
                 $numC ++;
@@ -203,6 +204,11 @@ while (<IN>) {
         }
     }
 }
-close IN;
+close IN; close OUT;
 my $total = 0; $total = $numA + $numB + $numC + $numD;
+
+$cmdString = "$binPath/GFF3Clear --genome $input_genome --no_attr_add --gene_prefix homolog out.geneModels.filter.gff3 2> d.GFF3Clear.log";
+print STDERR (localtime) . ": CMD: $cmdString\n";
+system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+
 print STDERR "\nFinally, total $total gene models were divided into 4 classes : A, $numA; B, $numB; C, $numC; D, $numD. \nPredicited by gth, $num_gth; predicted by exonerate, $num_exonerate, predicted by genewise, $num_genewise\n\n";

@@ -198,8 +198,8 @@ my %config = (
     'sam2transfrag' => '--fraction 0.05 --min_expressed_base_depth 2 --max_expressed_base_depth 50 --min_junction_depth 2 --max_junction_depth 50 --min_fragment_count_per_transfrags 10 --min_intron_length 20',
     'TransDecoder.LongOrfs' => '-m 100 -G universal',
     'TransDecoder.Predict' => '--retain_long_orfs_mode dynamic',
-    'homolog_prediction' => '--identity 0.2 --evalue 1e-9 --subject_coverage 0.3 --max_hits_num_per_match_region 10 --max_hit_num_per_single_species 2 --method all --genetic_code 1 --threshod_ratio_of_intron_Supported_times 0.5',
-    'homolog_predictionGFF2GFF3' => '--min_score 15 --gene_prefix genewise --filterMiddleStopCodon',
+    'homolog_genewise' => '--coverage_ratio 0.4 --evalue 1e-9',
+    'homolog_genewiseGFF2GFF3' => '--min_score 15 --gene_prefix genewise --filterMiddleStopCodon',
     'geneModels2AugusutsTrainingInput' => '--min_evalue 1e-9 --min_identity 0.8 --min_coverage_ratio 0.8 --min_cds_num 2 --min_cds_length 450 --min_cds_exon_ratio 0.60',
     'BGM2AT' => '--min_gene_number_for_augustus_training 500 --gene_number_for_accuracy_detection 200 --min_gene_number_of_optimize_augustus_chunk 50 --max_gene_number_of_optimize_augustus_chunk 200',
     'prepareAugusutusHints' => '--margin 20',
@@ -764,14 +764,21 @@ unless (-e "4.homolog.ok") {
     chdir "4.homolog";
     $pwd = `pwd`; print STDERR "PWD: $pwd";
 
+    my $max_intron_length = 20000;
     open IN, "../3.transcript/transfrag.genome.gff3" or die "Can not open the file ../3.transcript/transfrag.genome.gff3, $!\n";
-    my @gene_length;
+    my (@intron_length, @gene_length);
     while (<IN>) {
+        if (m/\tintron\t(\d+)\t(\d+)\t/) {
+            push @intron_length, $2 - $1 + 1;
+        }
         if (m/\tgene\t(\d+)\t(\d+)\t/) {
             push @gene_length, $2 - $1 + 1;
         }
     }
     close IN;
+    @intron_length = sort {$a <=> $b} @intron_length;
+    $max_intron_length = $intron_length[@intron_length * 0.995] if $intron_length[@intron_length * 0.995];
+
     @gene_length = sort {$a <=> $b} @gene_length;
     my $max_gene_length = 20000;
     $max_gene_length = $gene_length[@gene_length * 0.995] if $gene_length[@gene_length * 0.995];
@@ -785,16 +792,20 @@ unless (-e "4.homolog.ok") {
         $segmentSize = $overlapSize * 10;
     }
 
-    $cmdString = "$dirname/bin/homolog_prediction --tmp_dir homolog_prediction.tmp --cpu $cpu --segmentSize $segmentSize --overlapSize $overlapSize $config{'homolog_prediction'} $protein ../0.RepeatMasker/genome.masked.fasta > homolog_prediction.gff3 2> homolog_prediction.log";
-    unless (-e "homolog_prediction.ok") {
+    $max_intron_length = $max_intron_length * 2;
+    $cmdString = "$dirname/bin/homolog_genewise --cpu $cpu --max_intron_length $max_intron_length --segmentSize $segmentSize --overlapSize $overlapSize $config{'homolog_genewise'} $protein ../0.RepeatMasker/genome.masked.fasta &> homolog_genewise.log";
+    unless (-e "homolog_genewise.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-        open OUT, ">", "homolog_prediction.ok" or die $!; close OUT;
+        open OUT, ">", "homolog_genewise.ok" or die $!; close OUT;
     }
     else {
         print STDERR "CMD(Skipped): $cmdString\n";
     }
-	die;
+
+    $cmdString = "$dirname/bin/homolog_genewiseGFF2GFF3 $config{'homolog_genewiseGFF2GFF3'} --input_genewise_start_info genewise.start_info.txt --output_start_and_stop_hints_of_augustus genewise.start_stop_hints.gff --genome $genome genewise.gff > genewise.gff3 2> genewise.gene_id_with_stop_codon.txt";
+    print STDERR (localtime) . ": CMD: $cmdString\n";
+    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
     $cmdString = "$dirname/bin/GFF3Clear --GFF3_source GETA --genome $genome --gene_prefix genewise --no_attr_add genewise.gff3 > out.gff3 2> /dev/null";
     print STDERR (localtime) . ": CMD: $cmdString\n";
