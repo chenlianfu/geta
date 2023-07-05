@@ -1,0 +1,477 @@
+#!/usr/bin/perl
+use strict;
+use Getopt::Long;
+
+my $usage = <<USAGE;
+Usage:
+    perl $0 transfrag.gtf transfrag.transdecoder.gff3 genome.fasta > transfrag.genome.gff3
+
+    --gene_prefix <string>    default: transfrag
+    设置输出文件中gene id的前缀。
+
+    --out_protein <string>    default: None
+    设置是否输出protein序列，若添加该参数，则指定输出的文件名路径；若不添加该参数，则不输出protein序列。
+
+    --out_cDNA <string>    default:None
+    设置是否输出cDNA序列，若添加该参数，则指定输出的文件名路径；若不添加该参数，则不输出cDNA序列。
+
+    本程序输入transcript对基因组序列的比对GTF文件，输入transcript序列的transdecoder的GFF3结果文件，输入基因组序列文件。从而得到基因预测结果。
+    若一个transcript序列中有多个ORF结果，则给出多个基因模型，且相邻基因模型之间共用exon，即在UTR区是有重叠的。如下图所示：
+
+基因组序列    ==========================================================================================
+转录本序列          ===========----==========---==========---===========----======---============>
+基因模型1           ======+++++----++++++++++---++=======>
+基因模型2                                       =======+++---+++++++====----=====>
+基因模型3                                                                   ======--- ==+++++++==>
+
+USAGE
+
+if (@ARGV == 0){die $usage}
+
+my ($gene_prefix, $out_protein, $out_cDNA);
+GetOptions(
+    "gene_prefix:s" => \$gene_prefix,
+    "out_protein:s" => \$out_protein,
+    "out_cDNA:s" => \$out_cDNA,
+);
+$gene_prefix ||= "transfrag";
+if ($out_protein) {
+    unlink $out_protein;
+}
+if ($out_cDNA) {
+    unlink $out_cDNA;
+}
+
+my (%cds, %transcript_length, $cds_total_number);
+open IN, $ARGV[1] or die $!;
+while (<IN>) {
+    if (m/\tCDS\t/) {
+        @_ = split /\t/;
+        $cds{$_[0]}{"$_[3]\t$_[4]\t$_[6]"} = 1;
+        $cds_total_number ++;
+    }
+    elsif (m/\tgene\t/) {
+        @_ = split /\t/;
+        $transcript_length{$_[0]} = $_[4];
+    }
+
+}
+close IN;
+
+open IN, $ARGV[0] or die $!;
+my (%transcript, %sort1, %sort2, %sort3, %sort4, %attribute);
+while (<IN>) {
+    if (m/transcript_id \"([^\";]+)/) {
+        my $id = $1;
+        #print "$id\n";
+        $transcript{$id} .= $_;
+        if (m/\ttranscript\t/) {
+            @_ = split /\t/;
+            $sort1{$id} = $_[0];
+            $sort2{$id} = $_[3];
+            $sort3{$id} = $_[4];
+            $sort4{$id} = $_[6];
+        }
+    }
+    if (m/\tgene\t/) {
+        s/.*gene_id \"([^\";]+)\";//;
+        my $id = "$1.mRNA1";
+        s/ \"/=/g;
+        s/\"//g;
+        s/\s+//g;
+        $attribute{$id} = $_;
+        #print "$id\t$_\n";
+    }
+}
+close IN;
+
+open IN, $ARGV[2] or die $!;
+my (%seq, $seq_id);
+while (<IN>) {
+    chomp;
+    if (m/^>(\S+)/) { $seq_id = $1; }
+    else { $seq{$seq_id} .= $_; }
+}
+close IN;
+
+my @transcript = sort { $sort1{$a} cmp $sort1{$b} or $sort2{$a} <=> $sort2{$b} or $sort3{$a} <=> $sort3{$b} or $sort4{$b} cmp $sort4{$a} } keys %transcript;
+my $gene_number = 0;
+foreach my $transcript_id (@transcript) {
+    my @cds = sort {$a <=> $b} keys %{$cds{$transcript_id}};
+    my $transcript_info = $transcript{$transcript_id};
+    my @transcript_info = split /\n/, $transcript_info;
+    @_ = split /\t/, $transcript_info[0];
+    my $align_strand = $_[6];
+    my @exon;
+    foreach (@transcript_info) {
+        if (m/\texon\t/) {
+            @_ = split /\t/;
+            push @exon, "$_[3]\t$_[4]";
+        }
+    }
+    @exon = sort {$a <=> $b} @exon;
+
+    if ($align_strand eq '-') {
+        my @cds_new;
+        foreach (@cds) {
+            @_ = split /\t/;
+            my $start_new = $transcript_length{$transcript_id} - $_[1] + 1;
+            my $end_new = $transcript_length{$transcript_id} - $_[0] + 1;
+            push @cds_new, "$start_new\t$end_new\t$_[2]";
+        }
+        @cds = sort {$a <=> $b}  @cds_new;
+    }
+
+    my (%exon_info, %cds_info);
+    my $num = 0;
+    foreach my $cds (@cds) {
+        $num ++;
+        my %exon_info_out = &get_cross_utr_exon($cds, $cds[$num], \@exon);
+        foreach my $cdscds (keys %exon_info_out) {
+            foreach (sort {$a <=> $b} keys %{$exon_info_out{$cdscds}}) {
+                $exon_info{$cdscds}{$_} = 1;
+            }
+        }
+        my ($start, $end) = split /\t/, $cds;
+        my @cds_info = &get_cds($start, $end, \@exon);
+        foreach (@cds_info) {
+            $cds_info{$cds}{$_} = 1;
+        }
+    }
+
+    my $cds_first = $cds[0];
+    my ($start, $end) = split /\t/, $cds_first;
+    my $total_length = 0;
+    foreach (@exon) {
+        @_ = split /\t/;
+        $total_length += $_[1] - $_[0] + 1;
+        $exon_info{$cds_first}{"$_[0]\t$_[1]"} = 1 if $total_length <= $start;
+    }
+    my $cds_last = $cds[-1];
+    ($start, $end) = split /\t/, $cds_last;
+    $total_length = 0;
+    foreach (@exon) {
+        @_ = split /\t/;
+        $total_length += $_[1] - $_[0] + 1;
+        $exon_info{$cds_last}{"$_[0]\t$_[1]"} = 1 if $total_length >= $end;
+    }
+
+    my $cds_number;
+    my $strand_type = $align_strand;
+    foreach my $cds (@cds) {
+        $cds_number ++;
+        my @exon_info = sort {$a <=> $b} keys %{$exon_info{$cds}};
+        my @cds_info = sort {$a <=> $b} keys %{$cds_info{$cds}};
+        @_ = split /\t/, $cds;
+        $align_strand = $_[2] if $strand_type eq '.';
+        my $integrity_type = &get_integrity(\@cds_info, $align_strand, $sort1{$transcript_id});
+
+
+        my @exon_boundary;
+        foreach (@exon_info) {
+            push @exon_boundary, split /\t/;
+        }
+        @exon_boundary = sort {$a <=> $b} @exon_boundary;
+        $gene_number ++;
+        my $gene_id = $gene_prefix . '0' x ((length $cds_total_number) - (length $gene_number)) . $gene_number;
+        my $cds_num = @cds;
+        my $form = "one_transcript_get_$cds_num\_gene_model";
+        print "$sort1{$transcript_id}\t\.\tgene\t$exon_boundary[0]\t$exon_boundary[-1]\t\.\t$align_strand\t\.\tID=$gene_id;Form=$form\_num$cds_number;Integrity=$integrity_type;$attribute{$transcript_id}\n";
+        print "$sort1{$transcript_id}\t\.\tmRNA\t$exon_boundary[0]\t$exon_boundary[-1]\t\.\t$align_strand\t\.\tID=$gene_id.mRNA;Parent=$gene_id;\n";
+
+        if ($out_protein) {
+            my $cds_sequence;
+            foreach (@cds_info) {
+                @_ = split /\t/;
+                $cds_sequence .= substr($seq{$sort1{$transcript_id}}, $_[0] - 1, $_[1] - $_[0] + 1);
+            }
+            if ($align_strand eq "-") {
+                $cds_sequence = reverse $cds_sequence;
+                $cds_sequence =~ tr/ATCGatcg/TAGCTAGC/;
+            }
+            my $protein_sequnce = &cds2pep($cds_sequence);
+            open OUT, ">>", $out_protein or die $!;
+            print OUT ">$gene_id\n$protein_sequnce\n";
+            close OUT;
+            warn "Warning: $transcript_id: middle stop codon was found!\talign_strand: $align_strand\t$cds\t@cds_info\n" if $protein_sequnce =~ m/\*\w/;
+        }
+        if ($out_cDNA) {
+            my $cDNA_sequence;
+            foreach (@exon_info) {
+                @_ = split /\t/;
+                $cDNA_sequence .= substr($seq{$sort1{$transcript_id}}, $_[0] - 1, $_[1] - $_[0] + 1);
+            }
+            if ($align_strand eq "-") {
+                $cDNA_sequence = reverse $cDNA_sequence;
+                $cDNA_sequence =~ tr/ATCGatcg/TAGCTAGC/;
+            }
+            open OUT, ">>", $out_cDNA or die $!;
+            print OUT ">$gene_id\n$cDNA_sequence\n";
+            close OUT;
+        }
+
+        my %out;
+        my $exon_num = 0;
+        @exon_info = reverse @exon_info if $align_strand eq "-";
+        foreach (@exon_info) {
+            $exon_num ++;
+            my $out = "$sort1{$transcript_id}\t\.\texon\t$_\t\.\t$align_strand\t\.\tID=$gene_id.mRNA.exon$exon_num;Parent=$gene_id.mRNA;\n";
+            $out{$out} = $_;
+        }
+        my $cds_num = 0;
+        @cds_info = reverse @cds_info if $align_strand eq "-";
+        my $frame = 0;
+        my $cds_bp_length = 0;
+        foreach (@cds_info) {
+            $cds_num ++;
+            my $out = "$sort1{$transcript_id}\t\.\tCDS\t$_\t\.\t$align_strand\t$frame\tID=$gene_id.mRNA.CDS$cds_num;Parent=$gene_id.mRNA;\n";
+            $out{$out} = $_;
+            @_ = split /\t/;
+            $cds_bp_length += $_[1] - $_[0] + 1;
+            $frame = $cds_bp_length % 3;
+            if ($frame != 0) {
+                $frame = 3 - $frame;
+            }
+        }
+        warn "Warning: $transcript_id: the cds length is not multiple of 3!\n" if $frame != 0;
+        #if ($align_strand eq "+") {
+            foreach (sort {$out{$a} <=> $out{$b} or $b cmp $a} keys %out) {
+                print;
+            }
+        #}
+        #elsif ($align_strand eq "-") {
+        #    foreach (sort {$out{$b} <=> $out{$a} or $b cmp $a} keys %out) {
+        #        print;
+        #    }
+        #}
+        print "\n";
+    }
+}
+
+sub get_integrity {
+    my $sequence_id = pop @_;
+    my $strand = pop @_;
+    my @cds_info = @{$_[0]};
+    my ($codon1_start) = split /\t/, $cds_info[0];
+    my ($codon2_null, $codon2_end) = split /\t/, $cds_info[-1];
+    my $codon1 = substr($seq{$sequence_id}, $codon1_start - 1, 3);
+    my $codon2 = substr($seq{$sequence_id}, $codon2_end - 3, 3);
+    my $start_codon = $codon1;
+    my $end_codon = $codon2;
+    if ($strand eq '-') {
+        $start_codon = reverse $codon2;
+        $end_codon = reverse $codon1;
+        $start_codon =~ tr/ATCGatcg/TAGCTAGC/;
+        $end_codon =~ tr/ATCGatcg/TAGCTAGC/;
+    }
+    #print "$sequence_id\t$codon1_start\t$start_codon\n$sequence_id\t$codon2_end\t$end_codon\n";
+
+    my ($start_complete, $end_complete) = (0, 0);
+    $start_complete = 1 if $start_codon eq 'ATG';
+    $end_complete = 1 if $end_codon eq 'TAG';
+    $end_complete = 1 if $end_codon eq 'TAA';
+    $end_complete = 1 if $end_codon eq 'TGA';
+
+    if ($start_complete == 1) {
+        if ($end_complete == 1) {
+            return "complete";
+        }
+        else {
+            return "3prime_partial";
+        }
+    }
+    else {
+        if ($end_complete == 1) {
+            return "5prime_partial";
+        }
+        else {
+            return "internal";
+        }
+    }
+}
+
+sub get_cds {
+    my $start = shift @_;
+    my $end = shift @_;
+    my @exon = @{$_[0]};
+    my @out;
+
+    my $total_length = 0;
+    my $start_ok = 0;
+    my $end_ok = 0;
+    my ($cds_start, $cds_end) = (0, 0);
+    foreach (@exon) {
+        @_ = split /\t/;
+        my $length = $_[1] - $_[0] + 1;
+        $total_length += $length;
+        if ($total_length >= $start && $start_ok == 0) {
+            $cds_start = $_[1] - ($total_length - $start);
+            $start_ok = 1;
+            $_[0] = $cds_start;
+        }
+        if ($total_length >= $end && $end_ok == 0) {
+            $cds_end = $_[1] - ($total_length - $end);
+            $end_ok = 1;
+            push @out, "$_[0]\t$cds_end";
+        }
+        if ($start_ok == 1 && $end_ok == 0) {
+            push @out, "$_[0]\t$_[1]";
+        }
+    }
+
+    return @out;
+}
+
+sub get_cross_utr_exon {
+    my @exon = @{$_[2]};
+    my $cds1 = shift @_;
+    my $cds2 = shift @_;
+    my %out;
+
+    my ($aa, $bb) = split /\t/, $cds1;
+    my $start = $bb;
+    my $total_length = 0;
+    my $start_ok = 0;
+    my $end_ok = 0;
+    foreach (@exon) {
+        @_ = split /\t/;
+        my $length = $_[1] - $_[0] + 1;
+        $total_length += $length;
+        if ($total_length >= $aa) {
+            $start_ok = 1;
+        }
+        if ($total_length >= $bb && $end_ok == 0) {
+            $end_ok = 1;
+            $out{$cds1}{"$_[0]\t$_[1]"} = 1;
+        }
+        if ($start_ok == 1 && $end_ok == 0) {
+            $out{$cds1}{"$_[0]\t$_[1]"} = 1;
+        }
+    }
+
+    if ($cds2) {
+        ($aa, $bb) = split /\t/, $cds2;
+        my $end = $aa;
+        $total_length = 0;
+        $start_ok = 0;
+        $end_ok = 0;
+        foreach (@exon) {
+            @_ = split /\t/;
+            my $length = $_[1] - $_[0] + 1;
+            $total_length += $length;
+            if ($total_length >= $aa) {
+                $start_ok = 1;
+            }
+            if ($total_length >= $bb && $end_ok == 0) {
+                $end_ok = 1;
+                $out{$cds2}{"$_[0]\t$_[1]"} = 1;
+            }
+            if ($start_ok == 1 && $end_ok == 0) {
+                $out{$cds2}{"$_[0]\t$_[1]"} = 1;
+            }
+        }
+    
+        $total_length = 0;
+        $start_ok = 0;
+        $end_ok = 0;
+        foreach (@exon) {
+            @_ = split /\t/;
+            my $length = $_[1] - $_[0] + 1;
+            $total_length += $length;
+            if ($total_length >= $end) {
+                $end_ok = 1;
+            }
+            if ($total_length >= $start && $start_ok == 0) {
+                $start_ok = 1;
+                next;
+            }
+            if ($start_ok == 1 && $end_ok == 0) {
+                $out{$cds1}{"$_[0]\t$_[1]"} = 1;
+                $out{$cds2}{"$_[0]\t$_[1]"} = 1;
+            }
+        }
+    }
+
+    return %out;
+}
+
+sub cds2pep {
+    my %cds2pep = (
+        "TTT" => "F",
+        "TTC" => "F",
+        "TTA" => "L",
+        "TTG" => "L",
+        "TCT" => "S",
+        "TCC" => "S",
+        "TCA" => "S",
+        "TCG" => "S",
+        "TAT" => "Y",
+        "TAC" => "Y",
+        "TAA" => "*",
+        "TAG" => "*",
+        "TGT" => "C",
+        "TGC" => "C",
+        "TGA" => "*",
+        "TGG" => "W",
+        "CTT" => "L",
+        "CTC" => "L",
+        "CTA" => "L",
+        "CTG" => "L",
+        "CCT" => "P",
+        "CCC" => "P",
+        "CCA" => "P",
+        "CCG" => "P",
+        "CAT" => "H",
+        "CAC" => "H",
+        "CAA" => "Q",
+        "CAG" => "Q",
+        "CGT" => "R",
+        "CGC" => "R",
+        "CGA" => "R",
+        "CGG" => "R",
+        "ATT" => "I",
+        "ATC" => "I",
+        "ATA" => "I",
+        "ATG" => "M",
+        "ACT" => "T",
+        "ACC" => "T",
+        "ACA" => "T",
+        "ACG" => "T",
+        "AAT" => "N",
+        "AAC" => "N",
+        "AAA" => "K",
+        "AAG" => "K",
+        "AGT" => "S",
+        "AGC" => "S",
+        "AGA" => "R",
+        "AGG" => "R",
+        "GTT" => "V",
+        "GTC" => "V",
+        "GTA" => "V",
+        "GTG" => "V",
+        "GCT" => "A",
+        "GCC" => "A",
+        "GCA" => "A",
+        "GCG" => "A",
+        "GAT" => "D",
+        "GAC" => "D",
+        "GAA" => "E",
+        "GAG" => "E",
+        "GGT" => "G",
+        "GGC" => "G",
+        "GGA" => "G",
+        "GGG" => "G",
+    );
+    my $seq = shift @_;
+    my $pep;
+    while ((length $seq) >= 3) {
+        $seq =~ s/(\w{3})//;
+        if (exists $cds2pep{$1}) {
+            $pep .= $cds2pep{$1};
+        }
+        else {
+            $pep .= 'X';
+        }
+    }
+    return $pep;
+}

@@ -1,0 +1,517 @@
+#!/usr/bin/perl
+use strict;
+use Getopt::Long;
+
+my $usage = <<USAGE;
+Usage:
+    perl $0 [options] transfrag.genome.gff3 homolog_prediction.gff3 > output.gff3
+
+    输入transfrag.genome.gff3是使用转录本信息进行基因预测的结果，标准的GFF3文件格式，不能包含可变剪接信息，主要利用其exon和CDS信息；
+    输入homolog_prediction.gff3是使用同源蛋白进行基因预测的结果，标准的GFF3文件格式，不能包含可变剪接信息，主要利用CDS Feature信息；
+    本程序输入的是一条序列单条链（正链或负链）的基因模型GFF3文件，利用同源蛋白预测的基因模型对其进行首尾填补。
+
+    算法：根据两种基因预测结果的重叠，得到一个个基因区域，再对每个基因区域进行分析。仅对transfrag的基因预测结果进行填补并输出结果到标准输出；仅当transfrag基因模型不完整时，利用homolog基因模型进行补齐；在标准错误输出中给出进行填补了的基因信息和统计结果。
+
+    --overlap <int>    default: 30
+    程序先整合两种基因预测结果的基因区域。若两个基因模型的区域重叠超过此指定长度（30bp），则认为是同一个基因区域。再对该基因区域上的转录不预测基因模型进行首尾填补。
+
+USAGE
+if (@ARGV==0){die $usage}
+
+my $overlap;
+GetOptions(
+    "overlap:i" => \$overlap,
+);
+$overlap ||= 30;
+
+# 读取 transfrag.genome.gff3 文件
+my (%transfrag, %homolog, $id, %geneRegion);
+open IN, $ARGV[0] or die "Can not open file $ARGV[0], $!";
+while (<IN>) {
+    next if m/^#/;
+    next if m/^\s*$/;
+    if (m/\tgene\t.*ID=([^;\s]+)/) {
+        $id = $1;
+        @_ = split /\t/;
+        $geneRegion{"$_[3]\t$_[4]"}{$id} = 1;
+    }
+    $transfrag{$id} .= $_;
+}
+close IN;
+
+# 读取 homolog_prediction.gff3 文件
+open IN, $ARGV[1] or die "Can not open file $ARGV[1], $!";
+while (<IN>) {
+    next if m/^#/;
+    next if m/^\s*$/;
+    if (m/\tgene\t.*ID=([^;\s]+)/) {
+        $id = $1;
+        @_ = split /\t/;
+        $geneRegion{"$_[3]\t$_[4]"}{$id} = 1;
+    }
+    $homolog{$id} .= $_;
+}
+close IN;
+
+# 根据2种基因预测结果，将重叠区域合并成一个基因区域。
+my @geneRegion = sort {$a <=> $b} keys %geneRegion;
+my $first_region = shift @geneRegion;
+my ($start, $end) = split /\t/, $first_region;
+my @id;
+foreach (keys %{$geneRegion{$first_region}}) {
+    push @id, $_;
+}
+
+my %region;
+while (@geneRegion) {
+    my $next_region = shift @geneRegion;
+    my ($next_start, $next_end) = split /\t/, $next_region;
+
+    if ($next_start < $end - $overlap) {
+        $end = $next_end if $next_end > $end;
+    }
+    else {
+        foreach (@id) {
+            $region{"$start\t$end"}{$_} = 1;
+        }
+        @id = ();
+        
+        ($start, $end) = ($next_start, $next_end);
+    }
+
+    foreach (keys %{$geneRegion{$next_region}}) {
+        push @id, $_;
+    }
+}
+
+foreach (@id) {
+    $region{"$start\t$end"}{$_} = 1;
+}
+
+# 对每个基因区域进行分析
+my %gene_out;
+foreach my $region (sort {$a <=> $b} keys %region) {
+    my @ID = keys %{$region{$region}};
+    my $ID = join ",", @ID;
+    
+    my ($status_transfrag, $status_homolog) = (0, 0, 0);
+    foreach (@ID) {
+        $status_transfrag = 1 if exists $transfrag{$_};
+        $status_homolog = 1 if exists $homolog{$_};
+    }
+    #print "OK1:\t$status_transfrag\t$status_homolog\t$region\t$ID\n";
+
+    if ($status_transfrag == 1) {
+        foreach my $gene_id (@ID) {
+            if (exists $transfrag{$gene_id}) {
+                # 核心步骤，利用同源蛋白预测结果对转录本进行补齐
+                my %gff3_out = &combine_transfrag_and_homolog($gene_id, @ID);
+                foreach (keys %{$gff3_out{$gene_id}{"CDS"}}) {
+                    $gene_out{$gene_id}{"CDS"}{$_} = 1;
+                }
+                foreach (keys %{$gff3_out{$gene_id}{"exon"}}) {
+                    $gene_out{$gene_id}{"exon"}{$_} = 1;
+                }
+                $gene_out{$gene_id}{"chr"} = $gff3_out{$gene_id}{"chr"};
+                $gene_out{$gene_id}{"source"} = $gff3_out{$gene_id}{"source"};
+                $gene_out{$gene_id}{"strand"} = $gff3_out{$gene_id}{"strand"};
+                $gene_out{$gene_id}{"attr"} = $gff3_out{$gene_id}{"attr"};
+                $gene_out{$gene_id}{"Fill_OK"} = $gff3_out{$gene_id}{"Fill_OK"};
+            }
+        }
+    }
+}
+
+my %Fill_OK;
+foreach my $gene_id (sort keys %gene_out) {
+    my %out;
+    my $chr = $gene_out{$gene_id}{'chr'};
+    my $source = $gene_out{$gene_id}{"source"};
+    my $strand = $gene_out{$gene_id}{'strand'};
+    $Fill_OK{$gene_id} = 1 if $gene_out{$gene_id}{"Fill_OK"} == 1;
+    my %position;
+
+    if ($strand eq "+") {
+        my $number = 0;
+        foreach (sort {$a <=> $b} keys %{$gene_out{$gene_id}{"CDS"}}) {
+            $number ++;
+            @_ = split /\t/; 
+            $position{$_[0]} = 1;
+            $position{$_[1]} = 1;
+            $out{"$chr\t$source\tCDS\t$_\tID=$gene_id.t1.CDS$number;Parent=$gene_id.t1;"} = $_[0];
+        }
+        $number = 0;
+        foreach (sort {$a <=> $b} keys %{$gene_out{$gene_id}{"exon"}}) {
+            $number ++;
+            @_ = split /\t/;
+            $position{$_[0]} = 1;
+            $position{$_[1]} = 1;
+            $out{"$chr\t$source\texon\t$_\t\.\t$strand\t\.\tID=$gene_id.t1.exon$number;Parent=$gene_id.t1;"} = $_[0];
+        }
+    }
+    elsif ($strand eq "-") {
+        my $number = 0;
+        foreach (sort {$b <=> $a} keys %{$gene_out{$gene_id}{"CDS"}}) {
+            $number ++;
+            @_ = split /\t/; 
+            $position{$_[0]} = 1;
+            $position{$_[1]} = 1;
+            $out{"$chr\t$source\tCDS\t$_\tID=$gene_id.t1.CDS$number;Parent=$gene_id.t1;"} = $_[0];
+        }
+        $number = 0;
+        foreach (sort {$b <=> $a} keys %{$gene_out{$gene_id}{"exon"}}) {
+            $number ++;
+            @_ = split /\t/;
+            $position{$_[0]} = 1;
+            $position{$_[1]} = 1;
+            $out{"$chr\t$source\texon\t$_\t\.\t$strand\t\.\tID=$gene_id.t1.exon$number;Parent=$gene_id.t1;"} = $_[0];
+        }
+    }
+
+    foreach (keys %position) { delete $position{$_} unless $_; }
+    my @position = sort {$a <=> $b} keys %position;
+    print "$chr\t$source\tgene\t$position[0]\t$position[-1]\t\.\t$strand\t\.\tID=$gene_id;$gene_out{$gene_id}{'attr'};\n";
+    print "$chr\t$source\tmRNA\t$position[0]\t$position[-1]\t\.\t$strand\t\.\tID=$gene_id.t1;Parent=$gene_id;\n";
+
+    my @out;
+    if ($strand eq "+") {
+        @out = sort {$out{$a} <=> $out{$b} or $b cmp $a} keys %out;
+    }
+    elsif ($strand eq "-") {
+        @out = sort {$out{$b} <=> $out{$a} or $b cmp $a} keys %out;
+    }
+    foreach (@out) {
+        print "$_\n";
+    }
+}
+
+my @Fill_OK = sort keys %Fill_OK;
+my $Fill_OK_num = 0;
+$Fill_OK_num = @Fill_OK if @Fill_OK > 0;
+print STDERR "Total $Fill_OK_num gene models were filled by homolog: " . join(",", @Fill_OK) . "\n";
+
+sub combine_transfrag_and_homolog {
+    # 输入的第一个参数是transfrag的基因ID
+    # 输入的第二个参数是数组：该基因区域的所有基因ID
+    my $gene_id = shift @_;
+    my $transfrag_info = $transfrag{$gene_id};
+    my @id = @_;
+
+    # 得到chr，source, strand和transfrag基因的完整性信息
+    my (%gff3_out, $chr, $source, $strand, $attr_info, $intergrity, @attr_info);
+    $gff3_out{$gene_id}{"Fill_OK"} = 0;
+    if ($transfrag_info =~ m/(\S+?)\t(\S+?)\tgene\t\d+?\t\d+?\t\S+?\t(\S+?)\t\S+?\t(.*?Integrity=([^;\s]+).*)/) {
+        ($chr, $source, $strand, $attr_info, $intergrity) = ($1, $2, $3, $4, $5);
+        $gff3_out{$gene_id}{"chr"} = $chr;
+        $gff3_out{$gene_id}{"source"} = $source;
+        $gff3_out{$gene_id}{"strand"} = $strand;
+        #print "OK2: $1\t$strand\t$intergrity\t$attr_info\n";
+        foreach ( split /;/, $attr_info ) {
+            next if m/ID=/;
+            next if m/Integrity=/;
+            push @attr_info, $_;
+        }
+    }
+
+    # 得到transfrag基因的CDS和exon信息
+    my (@CDS, %CDS, %exon);
+    foreach my $line (split /\n/, $transfrag_info) {
+        @_ = split /\t/, $line;
+        if ($_[2] eq "CDS") {
+            push @CDS, "$_[3]\t$_[4]\t$_[7]";
+            $CDS{"$_[3]\t$_[4]\t$_[7]"} = 1;
+        }
+        elsif ($_[2] eq "exon") {
+            $exon{"$_[3]\t$_[4]"} = 1;
+        }
+    }
+    @CDS = sort {$a <=> $b} @CDS;
+
+    # transfrag基因是5prime_partial,3prime_partial,internal,strand等情况下，分别使用homolog结果进行整合
+    # transfrag基因首尾CDS和homolog的CDS有重叠，且具有相同的frame，则进行整合。
+    # transfrag基因是complete则不整合
+    if ($intergrity == '5prime_partial' or $intergrity == 'internal') {
+        if ($strand eq "+") {
+            my @cds_first = split /\t/, $CDS[0];
+            foreach (@id) {
+                if (exists $homolog{$_}) {
+                    my $target_homolog_ID = $_;
+                    #print "OK3: $gene_id\t$target_homolog_ID\n";
+                    my $homolog_info = $homolog{$_};
+                    my @homolog_cds;
+                    foreach (split /\n/, $homolog_info) {
+                        @_ = split /\t/,
+                        push @homolog_cds, "$_[3]\t$_[4]\t$_[7]" if $_[2] eq 'CDS';
+                    }
+                    @homolog_cds = sort {$a <=> $b} @homolog_cds;
+
+                    my (@cds_ok, $merge);
+                    foreach (@homolog_cds) {
+                        @_ = split /\t/;
+                        if ($_[0] < $cds_first[0] && $_[1] >= $cds_first[0]) {
+                            #print "OK4: $gene_id\t$target_homolog_ID\n";
+                            my $frame = ($cds_first[0] - $_[0] - $_[2]) % 3;
+                            $frame = 1 if $frame == 2;
+                            $frame = 2 if $frame == 1;
+=cut
+       =================        cds_first
+   21021021
+   12345678
+     ^^^###
+   =================           homolog
+   2
+
+0  =>  0
+1  =>  2
+2  =>  1
+
+       ==================   cds_first
+   1021021
+   12345678
+    ^^^###
+   =================           homolog
+=cut
+
+                            if ($frame == $cds_first[2]) {
+                                push @cds_ok, "$_[0]\t$cds_first[1]\t$_[2]";
+                                $merge = 1;
+                                $gff3_out{$gene_id}{"Fill_OK"} = 1;
+                                last;
+                            }
+                        }
+                        else {
+                            push @cds_ok, $_;
+                        }
+                    }
+
+                    if ($merge == 1) {
+                        push @attr_info, "FilledByHomolog=$target_homolog_ID";
+                        delete $CDS{$CDS[1]};
+                        foreach (@cds_ok) {
+                            $CDS{$_} = 1;
+                        }
+                    }
+                }
+            }
+        }
+        elsif ($strand eq "-") {
+            my @cds_first = split /\t/, $CDS[-1];
+            foreach (@id) {
+                if (exists $homolog{$_}) {
+                    my $target_homolog_ID = $_;
+                    my $homolog_info = $homolog{$_};
+                    my @homolog_cds;
+                    foreach (split /\n/, $homolog_info) {
+                        @_ = split /\t/,
+                        push @homolog_cds, "$_[3]\t$_[4]\t$_[7]" if $_[2] eq 'CDS';
+                    }
+                    @homolog_cds = sort {$b <=> $a} @homolog_cds;
+                    my (@cds_ok, $merge);
+                    foreach (@homolog_cds) {
+                        @_ = split /\t/;
+                        if ($_[1] > $cds_first[1] && $_[0] <= $cds_first[1]) {
+                            #print "OK4: $gene_id\t$target_homolog_ID\n";
+                            my $frame = ($_[1] - $cds_first[1] - $_[2]) % 3;
+                            $frame = 2 if $frame == 1;
+                            $frame = 1 if $frame == 2;
+=cut
+          =================                  cds_fisrt
+                       12012012
+                       12345678
+                       ###^^^
+              =================              homolog
+                              2
+=cut
+
+                            if ($frame == $cds_first[2]) {
+                                push @cds_ok, "$cds_first[0]\t$_[1]\t$_[2]";
+                                $merge = 1;
+                                $gff3_out{$gene_id}{"Fill_OK"} = 1;
+                                last;
+                            }
+                        }
+                        else {
+                            push @cds_ok, $_;
+                        }
+                    }
+
+                    if ($merge == 1) {
+                        push @attr_info, "FilledByHomolog=$target_homolog_ID";
+                        delete $CDS{$CDS[-1]};
+                        foreach (@cds_ok) {
+                            $CDS{$_} = 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    if ($intergrity == '3prime_partial' or $intergrity == 'internal') {
+        if ($strand eq "+") {
+            my @cds_last = split /\t/, $CDS[-1];
+            foreach (@id) {
+                if (exists $homolog{$_}) {
+                    my $target_homolog_ID = $_;
+                    my $homolog_info = $homolog{$_};
+                    my @homolog_cds;
+                    foreach (split /\n/, $homolog_info) {
+                        @_ = split /\t/,
+                        push @homolog_cds, "$_[3]\t$_[4]\t$_[7]" if $_[2] eq 'CDS';
+                    }
+                    @homolog_cds = sort {$b <=> $a} @homolog_cds;
+                    my (@cds_ok, $merge);
+                    foreach (@homolog_cds) {
+                        @_ = split /\t/;
+                        if ($_[1] > $cds_last[1] && $_[0] <= $cds_last[1]) {
+                            #print "OK4: $gene_id\t$target_homolog_ID\n";
+                            if ($_[0] > $cds_last[0]) {
+                                my $frame = ($_[0] - $cds_last[0] - $cds_last[2]) % 3;
+                                $frame = 1 if $frame == 2;
+                                $frame = 2 if $frame == 1;
+=cut
+       2
+       ================>               cds_last
+       12345678
+       21021021
+         ^^^###
+           ==================>         homolog
+=cut
+                                if ($frame == $_[2]) {
+                                    push @cds_ok, "$cds_last[0]\t$_[1]\t$cds_last[2]";
+                                    $merge = 1;
+                                    $gff3_out{$gene_id}{"Fill_OK"} = 1;
+                                    last;
+                                }
+                            }
+                            else {
+                                my $frame = ($cds_last[0] - $_[0] - $_[2]) % 3;
+                                $frame = 1 if $frame == 2;
+                                $frame = 2 if $frame == 1;
+                                if ($frame == $cds_last[2]) {
+                                    push @cds_ok, "$cds_last[0]\t$_[1]\t$cds_last[2]";
+                                    $merge = 1;
+                                    $gff3_out{$gene_id}{"Fill_OK"} = 1;
+                                    last;
+                                }
+                            }
+                        }
+                        else {
+                            push @cds_ok, $_;
+                        }
+                    }
+
+                    if ($merge == 1) {
+                        push @attr_info, "FilledByHomolog=$target_homolog_ID";
+                        delete $CDS{$CDS[-1]};
+                        foreach (@cds_ok) {
+                            $CDS{$_} = 1;
+                        }
+                    }
+                }
+            }
+        }
+        elsif ($strand eq "-") {
+            my @cds_last = split /\t/, $CDS[0];
+            foreach (@id) {
+                if (exists $homolog{$_}) {
+                    my $target_homolog_ID = $_;
+                    my $homolog_info = $homolog{$_};
+                    my @homolog_cds;
+                    foreach (split /\n/, $homolog_info) {
+                        @_ = split /\t/,
+                        push @homolog_cds, "$_[3]\t$_[4]\t$_[7]" if $_[2] eq 'CDS';
+                    }
+                    @homolog_cds = sort {$a <=> $b} @homolog_cds;
+                    my (@cds_ok, $merge);
+                    foreach (@homolog_cds) {
+                        @_ = split /\t/;
+                        if ($_[0] < $cds_last[0] && $_[1] >= $cds_last[0]) {
+                            #print "OK4: $gene_id\t$target_homolog_ID\n";
+                            if ($_[1] > $cds_last[1]) {
+                                my $frame = ($_[1] - $cds_last[1] - $_[2]) % 3;
+                                $frame = 1 if $frame == 2;
+                                $frame = 2 if $frame == 1;
+=cut
+            <============             cds_last
+                     12012012
+                     12345678
+       <=====================              homolog
+                            2
+=cut
+                                if ($frame == $cds_last[2]) {
+                                    push @cds_ok, "$_[0]\t$cds_last[1]\t$cds_last[2]";
+                                    $merge = 1;
+                                    $gff3_out{$gene_id}{"Fill_OK"} = 1;
+                                    last;
+                                }
+                            }
+                            else {
+                                my $frame = ($cds_last[1] - $_[1] - $cds_last[2]) % 3;
+                                $frame = 1 if $frame == 2;
+                                $frame = 2 if $frame == 1;
+                                if ($frame == $_[2]) {
+                                    push @cds_ok, "$_[0]\t$cds_last[1]\t$cds_last[2]";
+                                    $merge = 1;
+                                    $gff3_out{$gene_id}{"Fill_OK"} = 1;
+                                    last;
+                                }
+                            }
+                        }
+                        else {
+                            push @cds_ok, $_;
+                        }
+                    }
+
+                    if ($merge == 1) {
+                        push @attr_info, "FilledByHomolog=$target_homolog_ID";
+                        delete $CDS{$CDS[0]};
+                        foreach (@cds_ok) {
+                            $CDS{$_} = 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if ($intergrity == 'complete') {
+        foreach (@CDS) {
+            @_ = split /\t/;
+            $gff3_out{$gene_id}{"CDS"}{"$_[0]\t$_[1]\t\.\t$strand\t$_[2]"} = 1;
+        }
+        foreach (keys %exon) {
+            $gff3_out{$gene_id}{"exon"}{$_} = 1;
+        }
+    }
+    else {
+        my %cds_exon;
+        foreach (@CDS) {
+            @_ = split /\t/;
+            $gff3_out{$gene_id}{"CDS"}{"$_[0]\t$_[1]\t\.\t$strand\t$_[2]"} = 1;
+            $cds_exon{"$_[0]\t$_[1]"} = 1;
+        }
+        foreach (keys %exon) {
+            my ($start, $end) = split /\t/;
+            my $keep = 1;
+            foreach (keys %cds_exon) {
+                @_ = split /\t/;
+                if ($_[0] <= $end && $_[1] >= $start) {
+                    $keep = 0;
+                    if ($_[0] >= $start && $_[1] <= $end) {
+                        delete $cds_exon{$_};
+                        $cds_exon{"$start\t$end"} = 1;
+                    }
+                }
+            } 
+            $cds_exon{"$start\t$end"} = 1 if $keep == 1;
+        }
+        foreach (keys %cds_exon) {
+            $gff3_out{$gene_id}{"exon"}{$_} = 1;
+        }
+    }
+
+    $gff3_out{$gene_id}{"attr"} = join ";", @attr_info;
+
+    return %gff3_out;
+}

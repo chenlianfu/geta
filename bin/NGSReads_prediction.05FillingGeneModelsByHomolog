@@ -1,0 +1,115 @@
+#!/usr/bin/perl
+use strict;
+use Getopt::Long;
+use Cwd qw/abs_path getcwd cwd/;
+use File::Basename;
+
+my $dirname = dirname($0);
+
+my $usage = <<USAGE;
+Usage:
+    perl $0 [options] transfrag.genome.gff3 homolog_prediction.gff3 > out.gff3
+
+    程序将数据按染色体和正负链进行分割，然后使用Paraly并行化调用NGSReads_prediction.05FillingGeneModelsByHomolog_Lite命令进行基因预测结果的整合。
+
+    --cpu <int>    default: 1
+    设置并行数
+
+    --tmp_dir <string>    default: tmp_\$date\$pid
+    程序运行时临时文件夹名称。
+
+    --overlap <string>    default: 30
+    程序先整合两种基因预测结果的基因区域。若两个基因模型的区域重叠超过此指定长度（30bp），则认为是同一个基因区域。再分别对基因区域上的基因模型进行整合。
+
+USAGE
+if (@ARGV==0){die $usage}
+
+my ($cpu, $tmp_dir, $overlap);
+GetOptions(
+    "cpu:i" => \$cpu,
+    "tmp_dir:s" => \$tmp_dir,
+    "overlap:i" => \$overlap,
+);
+
+$cpu ||= 1;
+$overlap ||= 30;
+
+my $date = `date +%Y%m%d%H%M%S`; chomp($date);
+$tmp_dir ||= "tmp_$date$$";
+$tmp_dir = abs_path($tmp_dir);
+mkdir $tmp_dir unless -e $tmp_dir;
+
+my $cmdString = "$dirname/NGSReads_prediction.05FillingGeneModelsByHomolog_Lite --overlap $overlap";
+my (%chr, %transfrag, %homolog);
+
+# 读取 transfrag.genome.gff3 文件内容
+open IN, $ARGV[0] or die "Can not open file $ARGV[0], $!";
+while (<IN>) {
+    next if m/^#/;
+    next if m/^\s*$/;
+    @_ = split /\t/;
+    $chr{$_[0]} = 1;
+    $transfrag{$_[0]}{$_[6]} .= $_;
+}
+close IN;
+
+# 读取 homolog_prediction.gff3 文件内容
+open IN, $ARGV[1] or die "Can not open file $ARGV[1], $!";
+while (<IN>) {
+    next if m/^#/;
+    next if m/^\s*$/;
+    @_ = split /\t/;
+    $chr{$_[0]} = 1;
+    $homolog{$_[0]}{$_[6]} .= $_;
+}
+close IN;
+
+open CMD, ">", "$tmp_dir/command.combineGeneModels.list" or die $!;
+my @out_name;
+foreach my $chr (sort keys %chr) {
+    open OUT, ">", "$tmp_dir/${chr}_plus_transfrag.gff3" or die $!;
+    print OUT $transfrag{$chr}{"+"};
+    close OUT;
+    open OUT, ">", "$tmp_dir/${chr}_minus_transfrag.gff3" or die $!;
+    print OUT $transfrag{$chr}{"-"};
+    close OUT;
+
+    open OUT, ">", "$tmp_dir/${chr}_plus_homolog.gff3" or die $!;
+    print OUT $homolog{$chr}{"+"};
+    close OUT;
+    open OUT, ">", "$tmp_dir/${chr}_minus_homolog.gff3" or die $!;
+    print OUT $homolog{$chr}{"-"};
+    close OUT;
+
+    print CMD "$cmdString $tmp_dir/${chr}_plus_transfrag.gff3 $tmp_dir/${chr}_plus_homolog.gff3 > $tmp_dir/${chr}_plus.gff3 2> $tmp_dir/${chr}_plus.txt\n";
+    print CMD "$cmdString $tmp_dir/${chr}_minus_transfrag.gff3 $tmp_dir/${chr}_minus_homolog.gff3 > $tmp_dir/${chr}_minus.gff3 2> $tmp_dir/${chr}_minus.txt\n";
+
+    push @out_name, "$tmp_dir/${chr}_plus";
+    push @out_name, "$tmp_dir/${chr}_minus";
+}
+close CMD;
+
+$cmdString = "ParaFly -c $tmp_dir/command.combineGeneModels.list -CPU $cpu > /dev/null";
+(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+
+foreach (@out_name) {
+    open IN, "$_.gff3" or die "Can not open file $_.txt, $!";
+    print <IN>;
+    close IN;
+}
+
+my %Fill_OK;
+foreach ( @out_name ) {
+    open IN, "$_.txt" or die "Can not open file $_.txt, $!";
+    while (<IN>) {
+        chomp;
+        s/.*?:\s*//;
+        foreach ( split /,/, $_ ) {
+            $Fill_OK{$_} = 1;
+        }
+    }
+}
+my @Fill_OK = sort keys %Fill_OK;
+my $Fill_OK_num = 0;
+$Fill_OK_num = @Fill_OK if @Fill_OK > 0;
+print STDERR "Total $Fill_OK_num gene models were filled by homolog: " . join(",", @Fill_OK) . "\n";
