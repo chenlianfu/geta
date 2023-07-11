@@ -210,7 +210,7 @@ while (<IN>) {
         open OUT, ">", "$tmp_dir/chunk$chunk_code/$out_prefix.genome.fasta" or die "Can not create file $tmp_dir/chunk$chunk_code/$out_prefix.genome.fasta, $!";
         print OUT ">$_[0].$region_start\_$region_end.start$start\n$seq\n";
         close OUT; 
-		#print STDERR "OKOK\n";
+        #print STDERR "OKOK\n";
     }
 
     # 输出同源蛋白序列

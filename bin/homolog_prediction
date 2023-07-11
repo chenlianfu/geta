@@ -180,11 +180,11 @@ my ($numA, $numB, $numC, $numD, $num_gth, $num_exonerate, $num_genewise) = (0, 0
 while (<IN>) {
     if (m/Type=excellent_gene_models_predicted_by_homolog/) {
         print OUT; $numA ++;
-		$num_gth ++ if m/\tgth\t/; $num_exonerate ++ if m/\texonerate\t/; $num_genewise ++ if m/\tgenewise\t/;
+        $num_gth ++ if m/\tgth\t/; $num_exonerate ++ if m/\texonerate\t/; $num_genewise ++ if m/\tgenewise\t/;
     }
     elsif (m/Type=good_gene_models_predicted_by_homolog/) {
         print OUT; $numB ++;
-		$num_gth ++ if m/\tgth\t/; $num_exonerate ++ if m/\texonerate\t/; $num_genewise ++ if m/\tgenewise\t/;
+        $num_gth ++ if m/\tgth\t/; $num_exonerate ++ if m/\texonerate\t/; $num_genewise ++ if m/\tgenewise\t/;
     }
     else {
         my @supported_times;
@@ -194,7 +194,7 @@ while (<IN>) {
         @supported_times = sort {$b <=> $a} @supported_times;
         if ( $supported_times[0] >= $threshod_value ) {
             print OUT;
-			$num_gth ++ if m/\tgth\t/; $num_exonerate ++ if m/\texonerate\t/; $num_genewise ++ if m/\tgenewise\t/;
+            $num_gth ++ if m/\tgth\t/; $num_exonerate ++ if m/\texonerate\t/; $num_genewise ++ if m/\tgenewise\t/;
             if ( m/Type=fair_gene_models_predicted_by_homolog/ ) {
                 $numC ++;
             }

@@ -141,7 +141,9 @@ foreach my $input_file ( @ARGV ) {
         else {
             @_ = split /\t/;
             $gff3_score_and_attr{"$_[0]\t$_[6]\t$_[2]\t$_[3]\t$_[4]"}{"score"} = $_[5];
-            $gff3_score_and_attr{"$_[0]\t$_[6]\t$_[2]\t$_[3]\t$_[4]"}{"attr"} = &get_attr($_[8]);
+            my $attr_now = &get_attr($_[8]);
+            $attr_now = "$attr_now;" . $gff3_score_and_attr{"$_[0]\t$_[6]\t$_[2]\t$_[3]\t$_[4]"}{"attr"} if $gff3_score_and_attr{"$_[0]\t$_[6]\t$_[2]\t$_[3]\t$_[4]"}{"attr"};
+            $gff3_score_and_attr{"$_[0]\t$_[6]\t$_[2]\t$_[3]\t$_[4]"}{"attr"} = &get_attr($attr_now);
         }
     }
     close IN;

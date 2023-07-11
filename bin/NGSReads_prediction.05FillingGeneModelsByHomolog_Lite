@@ -208,7 +208,7 @@ sub combine_transfrag_and_homolog {
         #print "OK2: $1\t$strand\t$intergrity\t$attr_info\n";
         foreach ( split /;/, $attr_info ) {
             next if m/ID=/;
-            next if m/Integrity=/;
+            #next if m/Integrity=/;
             push @attr_info, $_;
         }
     }

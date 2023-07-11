@@ -13,7 +13,7 @@ my $usage = <<USAGE;
 Usage:
     $0 [options] genome_seq.fasta > NGSReads_prediction.gff3
 
-	本程序能利用转录组二代测序数据（支持fastq/fq.gz/sam/bam格式）对目标物种的全基因组序列进行基因预测，并将结果以GFF3格式输出到标准输出。
+    本程序能利用转录组二代测序数据（支持fastq/fq.gz/sam/bam格式）对目标物种的全基因组序列进行基因预测，并将结果以GFF3格式输出到标准输出。
 
     --pe1 <string> --pe2 <string>    default: None, Not Required but Recommened
     fastq format files contain of paired-end RNA-seq data. if you have data come from multi librarys, input multi fastq files separated by comma. the compress file format .gz also can be accepted.
@@ -167,7 +167,7 @@ unless (-e "1.trimmomatic.ok") {
         my $pe_reads_num = @pe_reads;
         my $number = 0;
         open OUT, ">", "command.trimmomatic_pe.list" or die "Can not create file command.trimmomatic_pe.list, $!";
-		print STDERR (localtime) . ": create file command.trimmomatic_pe.list.\n";
+        print STDERR (localtime) . ": create file command.trimmomatic_pe.list.\n";
         foreach (@pe_reads) {
             $number ++;
             my $code = "0" x ( length($pe_reads_num) - length($number) ) . $number;
@@ -302,16 +302,16 @@ unless (-e "2.hisat2.ok") {
         else {
             print STDERR "CMD(Skipped): $cmdString\n";
         }
-		$SAM_files{"alignment.sam"} = 1;
+        $SAM_files{"alignment.sam"} = 1;
     }
 
-	# 对SAM文件进行排序，整合处理。
-	# samtools sort 命令最多消耗80%可用内存，并尽可能使用较多的CPU线程。
-	$MemAvailable = &get_MemAvailable();
-	my $samtools_sort_CPU = 1;
-	$samtools_sort_CPU = $cpu if $cpu > 1;
-	$samtools_sort_CPU = ($MemAvailable * 0.8 / 768 / 1024) if $samtools_sort_CPU > ($MemAvailable * 0.8 / 768 / 1024);
-	$samtools_sort_CPU = 1 if $samtools_sort_CPU < 1;
+    # 对SAM文件进行排序，整合处理。
+    # samtools sort 命令最多消耗80%可用内存，并尽可能使用较多的CPU线程。
+    $MemAvailable = &get_MemAvailable();
+    my $samtools_sort_CPU = 1;
+    $samtools_sort_CPU = $cpu if $cpu > 1;
+    $samtools_sort_CPU = ($MemAvailable * 0.8 / 768 / 1024) if $samtools_sort_CPU > ($MemAvailable * 0.8 / 768 / 1024);
+    $samtools_sort_CPU = 1 if $samtools_sort_CPU < 1;
     open OUT, ">", "command.samtools_sort.list" or die "Can not create file command.samtools_sort.list, $!";
     my (@sam_out, $sam_file_code);
     foreach ( sort keys %SAM_files ) {
@@ -322,7 +322,7 @@ unless (-e "2.hisat2.ok") {
     }
     close OUT;
 
-	$cmdString = "rm -rf *.bam.tmp* *.sorted.sam.tmp*";
+    $cmdString = "rm -rf *.bam.tmp* *.sorted.sam.tmp*";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
     $cmdString = "ParaFly -c command.samtools_sort.list -CPU 1";
@@ -567,7 +567,7 @@ if ( $homolog_gene_models ) {
     $cmdString = "$dirname/bin/NGSReads_prediction.05FillingGeneModelsByHomolog --tmp_dir FillingGeneModelsByHomolog_tmp transfrag.genome.gff3 $homolog_gene_models > transfrag.genome.fill1.gff3 2> FillingGeneModelsByHomolog.log";
 }
 else {
-	$cmdString = "/bin/cp -a transfrag.genome.gff3 transfrag.genome.fill1.gff3";
+    $cmdString = "/bin/cp -a transfrag.genome.gff3 transfrag.genome.fill1.gff3";
 }
 unless (-e "10.FillingGeneModelsByHomolog.ok") {
     print STDERR (localtime) . ": CMD: $cmdString\n";
@@ -597,13 +597,44 @@ else {
 }
 
 # 3.12 对基因模型进行分级。
-unless (-e "12.") {
-
+print STDERR "3.12 Diveding geng modelse into 4 classes.\n";
+$cmdString = "$dirname/bin/NGSReads_prediction.06ClassGeneModels transfrag.genome.fill2.gff3 transfrag.genome.nonFilled.gff3 > transfrag.genome.class.gff3 2> ClassGeneModels.log";
+unless (-e "12.classGeneModels.ok") {
+    print STDERR (localtime) . ": CMD: $cmdString\n";
+    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+    open OUT, ">", "12.classGeneModels.ok" or die $!; close OUT;
+}
+else {
+    print STDERR "CMD(Skipped): $cmdString\n";
 }
 
+# 3.13 再次去冗余。由于强制补齐后，相邻基因容易冗余
+print STDERR "3.13 remove the redundancy gene models and output final results.\n";
+$cmdString = "$dirname/bin/GFF3Clear --GFF3_source NGSReads --genome $input_genome --gene_prefix transfrag --no_attr_add transfrag.genome.class.gff3 > transfrag.genome.final.gff3 2> /dev/null";
+unless (-e "13.GFFClear.ok") {
+    print STDERR (localtime) . ": CMD: $cmdString\n";
+    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+    open OUT, ">", "09.remove_redundancy.ok" or die $!; close OUT;
+}
+else {
+    print STDERR "CMD(Skipped): $cmdString\n";
+}
 
-# 3.12 输出结果
-
+open IN, "transfrag.genome.final.gff3" or die "Can not open file transfrag.genome.final.gff3, $!";
+my ( $num0, $num1, $num2, $num3, $num4 ) = (0, 0, 0, 0, 0);
+while (<IN>) {
+    if (m/\tgene\t/) {
+        s/Integrity=/TransdecoderIntegrity=/;
+        $num0 ++;
+        if ( m/Type=excellent_gene_models_predicted_by_NGSReads/) { $num1 ++; }
+        elsif ( m/Type=good_gene_models_predicted_by_NGSReads/) { $num2 ++; }
+        elsif ( m/Type=fair_gene_models_predicted_by_NGSReads/) { $num3 ++; }
+        elsif ( m/Type=poor_gene_models_predicted_by_NGSReads/) { $num4 ++; }
+    }
+    print;
+}
+close IN;
+print STDERR "\nFinally, total $num0 gene models were divided into 4 classes : A, $num1; B, $num2; C, $num3; D, $num4.\n";
 
 
 # 检测服务器剩余可用内存容量，结果单位是 kB。

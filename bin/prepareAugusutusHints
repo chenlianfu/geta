@@ -156,12 +156,14 @@ while (<IN>) {
 }
 close IN;
 
+=cut
 open IN, $ARGV[3] or die "Can not open the file $ARGV[3], $!\n";
 while (<IN>) {
     chomp;
     $hints{$_} = 1;
 }
 close IN;
+=cut
 
 foreach my $gene (keys %genewise_CDSs_for_gene) {
     my @exon = sort {$a <=> $b} keys %{$genewise_CDSs_for_gene{$gene}};
