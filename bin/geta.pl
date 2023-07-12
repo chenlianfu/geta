@@ -18,13 +18,13 @@ For example:
 
 Parameters:
 [General]
-    --pe1 <string> -pe2 <string>    default: None, Not Required but Recommened.
+    --pe1 <string> --pe2 <string>    default: None, Not Required but Recommened.
     fastq format files contain of paired-end RNA-seq data. if you have data come from multi librarys, input multi fastq files separated by comma. the compress file format .gz also can be accepted.
 
     --se <string>    default: None, Not Required.
     fastq format file contains of single-end RNA-seq data. if you have data come from multi librarys, input multi fastq files separated by comma. the compress file format .gz also can be accepted.
 
-	--sam <string>    default: None, Not Required. --pe1/--pe2, --se, and --sam can be set together, all data will be used for analysis.
+    --sam <string>    default: None, Not Required. --pe1/--pe2, --se, and --sam can be set together, all data will be used for analysis.
     SAM format file contains alignments of RNA-seq data. if you have data come from multi librarys, input multi SAM files separated by comma. the compress file format .bam also can be accepted.
 
     --protein <string>    default: None, Not Required but Recommened.
@@ -43,7 +43,7 @@ Parameters:
     --config <string>    default: None
     Input a file containing the parameters of several main programs (such as trimmomatic, hisat2 and augustus) during the pipeline. If you do not input this file, the default parameters should be suitable for most situation.
 
-	--genetic_code <int>    default: 1
+    --genetic_code <int>    default: 1
     设置遗传密码。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。用于设置对基因模型强制补齐时的起始密码子和终止密码子。
     
     --RM_species <string>    default: None
@@ -95,7 +95,7 @@ This script was tested on CentOS 8.4 with such softwares can be run directly in 
 10. augustus/etraining (version: 3.4.0)
 11. diamond (version 2.0.2.140)
 
-Version: 2.5.7
+Version: 2.6.1
 
 USAGE
 if (@ARGV==0){die $usage}
@@ -109,7 +109,7 @@ GetOptions(
     "pe1:s" => \$pe1,
     "pe2:s" => \$pe2,
     "S:s" => \$single_end,
-	"sam:s" => \$sam,
+    "sam:s" => \$sam,
     "protein:s" => \$protein,
     "cpu:i" => \$cpu,
     "strand_specific!" => \$strand_specific,
@@ -124,7 +124,7 @@ GetOptions(
     "no_alternative_splicing_analysis!" => \$no_alternative_splicing_analysis,
     "delete_unimportant_intermediate_files!" => \$delete_unimportant_intermediate_files,
     "keep_all_files_of_6thStep_combineGeneModels!" => \$keep_all_files_of_6thStep_combineGeneModels,
-	"genetic_code:i" => \$genetic_code,
+    "genetic_code:i" => \$genetic_code,
 );
 
 # 检测依赖的软件是否满足。
@@ -137,14 +137,14 @@ $protein = abs_path($protein) if $protein;
 $RM_lib = abs_path($RM_lib) if $RM_lib;
 $config = abs_path($config) if $config;
 if ( $pe1 && $pe2 ) {
-	my @files; foreach ( split /,/, $pe1 ) { push @files, abs_path($_); } $pe1 = join ",", @files;
-	my @files; foreach ( split /,/, $pe2 ) { push @files, abs_path($_); } $pe2 = join ",", @files;
+    my @files; foreach ( split /,/, $pe1 ) { push @files, abs_path($_); } $pe1 = join ",", @files;
+    my @files; foreach ( split /,/, $pe2 ) { push @files, abs_path($_); } $pe2 = join ",", @files;
 }
 if ( $single_end ) {
-	my @files; foreach ( split /,/, $single_end ) { push @files, abs_path($_); } $single_end = join ",", @files;
+    my @files; foreach ( split /,/, $single_end ) { push @files, abs_path($_); } $single_end = join ",", @files;
 }
 if ( $sam ) {
-	my @files; foreach ( split /,/, $sam ) { push @files, abs_path($_); } $sam = join ",", @files;
+    my @files; foreach ( split /,/, $sam ) { push @files, abs_path($_); } $sam = join ",", @files;
 }
 if ($use_existed_augustus_species) {
     my $species_config_dir = `echo \$AUGUSTUS_CONFIG_PATH`;
@@ -325,8 +325,8 @@ unless (-e "0.RepeatMasker.ok") {
         my $RepeatModeler_info = `RepeatModeler`;
         my $RepeatModeler_version = $1 if $RepeatModeler_info =~ m/RepeatModeler - ([\d\.]+)/;
         if ( $RepeatModeler_version =~ m/(\d+)\.(\d+)\.(\d+)/ && ($1 < 2 or ( $1 == 2 && $1 == 0 && $3 <= 3)) )  {
-			$cpu_RepeatModeler = int($cpu / 4);
-			$cpu_RepeatModeler = 1 if $cpu_RepeatModeler < 1;
+            $cpu_RepeatModeler = int($cpu / 4);
+            $cpu_RepeatModeler = 1 if $cpu_RepeatModeler < 1;
             $cmdString = "RepeatModeler -pa $cpu_RepeatModeler -database species -LTRStruct &> RepeatModeler.log";
         }
         unless (-e "RepeatModeler.ok") {
@@ -378,23 +378,23 @@ my $pwd = `pwd`; print STDERR "PWD: $pwd";
 mkdir "1.NGSReads_prediction" unless -e "1.NGSReads_prediction";
 my $cmdString_Step1_paramter;
 if (($pe1 && $pe2) or $single_end or $sam) {
-	my @input_paramter;
-	push @input_paramter, "--pe1 $pe1 --pe2 $pe2" if ($pe1 && $pe2);
-	push @input_paramter, "--se $single_end" if $single_end;
-	push @input_paramter, "--sam $sam" if $sam;
-	push @input_paramter, "--config $config" if defined $config;
-	push @input_paramter, "--strand_specific" if defined $strand_specific;
-	push @input_paramter, "--genetic_code $genetic_code" if defined $genetic_code;
-	$cmdString_Step1_paramter = join " ", @input_paramter;
-	$cmdString = "$dirname/bin/NGSReads_prediction $cmdString_Step1_paramter --cpu $cpu --tmp_dir 1.NGSReads_prediction $genome > 1.NGSReads_prediction/NGSReads_prediction.gff3 2> 1.NGSReads_prediction/NGSReads_prediction.A.log";
-	unless ( -e "1.NGSReads_prediction.ok" ) {
-		print STDERR (localtime) . ": CMD: $cmdString\n";
-		system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-		open OUT, ">", "1.NGSReads_prediction.ok" or die $!; close OUT;
-	}
-	else {
-		 print STDERR "CMD(Skipped): $cmdString\n";
-	}
+    my @input_paramter;
+    push @input_paramter, "--pe1 $pe1 --pe2 $pe2" if ($pe1 && $pe2);
+    push @input_paramter, "--se $single_end" if $single_end;
+    push @input_paramter, "--sam $sam" if $sam;
+    push @input_paramter, "--config $config" if defined $config;
+    push @input_paramter, "--strand_specific" if defined $strand_specific;
+    push @input_paramter, "--genetic_code $genetic_code" if defined $genetic_code;
+    $cmdString_Step1_paramter = join " ", @input_paramter;
+    $cmdString = "$dirname/bin/NGSReads_prediction $cmdString_Step1_paramter --cpu $cpu --tmp_dir 1.NGSReads_prediction $genome > 1.NGSReads_prediction/NGSReads_prediction.gff3 2> 1.NGSReads_prediction/NGSReads_prediction.A.log";
+    unless ( -e "1.NGSReads_prediction.ok" ) {
+        print STDERR (localtime) . ": CMD: $cmdString\n";
+        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+        open OUT, ">", "1.NGSReads_prediction.ok" or die $!; close OUT;
+    }
+    else {
+         print STDERR "CMD(Skipped): $cmdString\n";
+    }
 }
 else {
     open OUT, ">", "1.NGSReads_prediction.ok" or die "Can not create file 1.NGSReads_prediction.ok, $!"; close OUT;
@@ -453,58 +453,58 @@ print STDERR "\n============================================\n";
 print STDERR "Step 3: Combine NGSReads and Homolog Predictions" . "(" . (localtime) . ")" . "\n";
 mkdir "3.evidence_gene_models" unless -e "3.evidence_gene_models";
 unless (-e "3.evidence_gene_models.ok") {
-	chdir "3.evidence_gene_models";
-	unlink "../1.NGSReads_prediction/c.transcript/10.FillingGeneModelsByHomolog.ok";
-	unlink "../1.NGSReads_prediction/c.transcript/11.fillingEndsOfGeneModels.ok";
-	unlink "../1.NGSReads_prediction/c.transcript/12.classGeneModels.ok";
-	unlink "../1.NGSReads_prediction/c.transcript/FillingGeneModelsByHomolog_tmp/command.combineGeneModels.list.completed";
-	$cmdString = "$dirname/bin/NGSReads_prediction $cmdString_Step1_paramter --cpu $cpu --tmp_dir ../1.NGSReads_prediction --homolog_gene_models ../2.homolog_prediction/homolog_prediction.gff3 $genome > NGSReads_prediction_FilledByHomolog.gff3 2> ../1.NGSReads_prediction/NGSReads_prediction.B.log";
-	print STDERR (localtime) . ": CMD: $cmdString\n";
-	system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+    chdir "3.evidence_gene_models";
+    unlink "../1.NGSReads_prediction/c.transcript/10.FillingGeneModelsByHomolog.ok";
+    unlink "../1.NGSReads_prediction/c.transcript/11.fillingEndsOfGeneModels.ok";
+    unlink "../1.NGSReads_prediction/c.transcript/12.classGeneModels.ok";
+    unlink "../1.NGSReads_prediction/c.transcript/FillingGeneModelsByHomolog_tmp/command.combineGeneModels.list.completed";
+    $cmdString = "$dirname/bin/NGSReads_prediction $cmdString_Step1_paramter --cpu $cpu --tmp_dir ../1.NGSReads_prediction --homolog_gene_models ../2.homolog_prediction/homolog_prediction.gff3 $genome > NGSReads_prediction_FilledByHomolog.gff3 2> ../1.NGSReads_prediction/NGSReads_prediction.B.log";
+    print STDERR (localtime) . ": CMD: $cmdString\n";
+    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
-	open IN, "NGSReads_prediction_FilledByHomolog.gff3" or die "Can not create file NGSReads_prediction_FilledByHomolog.gff3, $!";
-	open OUT1, ">", "NGSReads_prediction_FilledByHomolog.ABC.gff3" or die "Can not create file NGSReads_prediction_FilledByHomolog.ABC.gff3, $!";
-	open OUT2, ">", "NGSReads_prediction_FilledByHomolog.D.gff3" or die "Can not create file NGSReads_prediction_FilledByHomolog.D.gff3, $!";
-	$/ = "\n\n";
-	while (<IN>) {
-		if (m/Type=excellent/ or m/Type=good/ or m/Type=fair/) {
-			print OUT1;
-		}
-		else {
-			print OUT2;
-		}
-	}
-	close IN; close OUT1; close OUT2;
-	$/ = "\n";
+    open IN, "NGSReads_prediction_FilledByHomolog.gff3" or die "Can not create file NGSReads_prediction_FilledByHomolog.gff3, $!";
+    open OUT1, ">", "NGSReads_prediction_FilledByHomolog.ABC.gff3" or die "Can not create file NGSReads_prediction_FilledByHomolog.ABC.gff3, $!";
+    open OUT2, ">", "NGSReads_prediction_FilledByHomolog.D.gff3" or die "Can not create file NGSReads_prediction_FilledByHomolog.D.gff3, $!";
+    $/ = "\n\n";
+    while (<IN>) {
+        if (m/Type=excellent/ or m/Type=good/ or m/Type=fair/) {
+            print OUT1;
+        }
+        else {
+            print OUT2;
+        }
+    }
+    close IN; close OUT1; close OUT2;
+    $/ = "\n";
 
-	open IN, "../2.homolog_prediction/homolog_prediction.gff3" or die "Can not create file ../2.homolog_prediction/homolog_prediction.gff3, $!";
-	open OUT1, ">", "homolog_prediction.AB.gff3" or die "Can not create file, homolog_prediction.AB.gff3 $!";
-	open OUT2, ">", "homolog_prediction.CD.gff3" or die "Can not create file, homolog_prediction.CD.gff3 $!";
-	$/ = "\n\n";
-	while (<IN>) {
-		if (m/Type=excellent/ or m/Type=good/) {
-			print OUT1;
-		}
-		else {
-			print OUT2;
-		}
-	}
-	close IN; close OUT1; close OUT2;
-	$/ = "\n";
+    open IN, "../2.homolog_prediction/homolog_prediction.gff3" or die "Can not create file ../2.homolog_prediction/homolog_prediction.gff3, $!";
+    open OUT1, ">", "homolog_prediction.AB.gff3" or die "Can not create file, homolog_prediction.AB.gff3 $!";
+    open OUT2, ">", "homolog_prediction.CD.gff3" or die "Can not create file, homolog_prediction.CD.gff3 $!";
+    $/ = "\n\n";
+    while (<IN>) {
+        if (m/Type=excellent/ or m/Type=good/) {
+            print OUT1;
+        }
+        else {
+            print OUT2;
+        }
+    }
+    close IN; close OUT1; close OUT2;
+    $/ = "\n";
 
-	print STDERR (localtime) . ": Create files: NGSReads_prediction_FilledByHomolog.ABC.gff3, NGSReads_prediction_FilledByHomolog.D.gff3, homolog_prediction.AB.gff3, homolog_prediction.CD.gff3.\n";
+    print STDERR (localtime) . ": Create files: NGSReads_prediction_FilledByHomolog.ABC.gff3, NGSReads_prediction_FilledByHomolog.D.gff3, homolog_prediction.AB.gff3, homolog_prediction.CD.gff3.\n";
 
-	$cmdString = "$dirname/bin/GFF3Clear --genome $genome NGSReads_prediction_FilledByHomolog.ABC.gff3 homolog_prediction.AB.gff3 NGSReads_prediction_FilledByHomolog.D.gff3 homolog_prediction.CD.gff3 > evidence_gene_models.gff3 2> GFF3Clear.log";
-	print STDERR (localtime) . ": CMD: $cmdString\n";
-	system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+    $cmdString = "$dirname/bin/GFF3Clear --genome $genome NGSReads_prediction_FilledByHomolog.ABC.gff3 homolog_prediction.AB.gff3 NGSReads_prediction_FilledByHomolog.D.gff3 homolog_prediction.CD.gff3 > evidence_gene_models.gff3 2> GFF3Clear.log";
+    print STDERR (localtime) . ": CMD: $cmdString\n";
+    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
-	open IN, "evidence_gene_models.gff3" or die "Can not open file evidence_gene_models.gff3, $!";
-	my ( $num0, $num1, $num2, $num3, $num4, $num5, $num6 ) = (0, 0, 0, 0, 0, 0, 0);
-	while (<IN>) {
+    open IN, "evidence_gene_models.gff3" or die "Can not open file evidence_gene_models.gff3, $!";
+    my ( $num0, $num1, $num2, $num3, $num4, $num5, $num6 ) = (0, 0, 0, 0, 0, 0, 0);
+    while (<IN>) {
     if (m/\tgene\t/) {
         $num0 ++;
-		if ( m/ID=transfrag/ ) { $num5 ++; }
-		elsif ( m/ID=homolog/ ) { $num6 ++; }
+        if ( m/ID=transfrag/ ) { $num5 ++; }
+        elsif ( m/ID=homolog/ ) { $num6 ++; }
         if ( m/Type=excellent_gene_models_predicted_by_NGSReads/) { $num1 ++; }
         elsif ( m/Type=good_gene_models_predicted_by_NGSReads/) { $num2 ++; }
         elsif ( m/Type=fair_gene_models_predicted_by_NGSReads/) { $num3 ++; }
@@ -517,11 +517,11 @@ print OUT "Total $num0 gene models were divided into 4 classes : A, $num1; B, $n
 print STDERR "\nFinally, total $num0 gene models were divided into 4 classes : A, $num1; B, $num2; C, $num3; D, $num4.\ngene models predicted by NGSReads: $num5; predicted by Homolog: $num6.\n";
 
 
-	chdir "../";
-	open OUT, ">", "3.evidence_gene_models.ok" or die $!; close OUT;
+    chdir "../";
+    open OUT, ">", "3.evidence_gene_models.ok" or die $!; close OUT;
 }
 else {
-	print STDERR "Skip Step 3 for the file 3.evidence_gene_models.ok exists\n";
+    print STDERR "Skip Step 3 for the file 3.evidence_gene_models.ok exists\n";
 }
 
 # Step 4: Augustus gene prediction
@@ -541,7 +541,7 @@ unless (-e "4.augustus.ok") {
         $pwd = `pwd`; print STDERR "PWD: $pwd";
 
         # 准备Augustus training的输入文件
-		$cmdString = "/bin/cp -a ../../3.evidence_gene_models/evidence_gene_models.gff3 geneModels.gff3";
+        $cmdString = "/bin/cp -a ../../3.evidence_gene_models/evidence_gene_models.gff3 geneModels.gff3";
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
