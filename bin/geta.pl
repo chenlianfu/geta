@@ -541,7 +541,7 @@ unless (-e "4.augustus.ok") {
         $pwd = `pwd`; print STDERR "PWD: $pwd";
 
         # 准备Augustus training的输入文件
-		$cmdString = "ln -s ../../3.evidence_gene_models/evidence_gene_models.gff3 geneModels.gff3";
+		$cmdString = "/bin/cp -a ../../3.evidence_gene_models/evidence_gene_models.gff3 geneModels.gff3";
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
@@ -564,7 +564,7 @@ unless (-e "4.augustus.ok") {
         $pwd = `pwd`; print STDERR "PWD: $pwd";
 
         # 准备Augustus training的输入文件
-        $cmdString = "ln -s ../../3.evidence_gene_models/evidence_gene_models.gff3 geneModels.gff3";
+        $cmdString = "/bin/cp -a ../../3.evidence_gene_models/evidence_gene_models.gff3 geneModels.gff3";
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
@@ -648,7 +648,7 @@ unless (-e "4.augustus.ok") {
     #}
     #$cmdString = "$dirname/bin/prepareAugusutusHints $config{'prepareAugusutusHints'} bam2intronHints.gff ../1.NGSReads_prediction/c.transcript/transfrag.genome.gff3 ../2.homolog/genewise.gff3 ../2.homolog/genewise.start_stop_hints.gff > hints.gff";
     ########## version 2.5.1 ##########
-    $cmdString = "$dirname/bin/prepareAugusutusHints $config{'prepareAugusutusHints'} ../../1.NGSReads_prediction/c.transcript/intron.txt ../../1.NGSReads_prediction/c.transcript/transfrag.genome.gff3 ../2.homolog_prediction/homolog_prediction.gff3 > hints.gff";
+    $cmdString = "$dirname/bin/prepareAugusutusHints $config{'prepareAugusutusHints'} ../1.NGSReads_prediction/c.transcript/intron.txt ../1.NGSReads_prediction/c.transcript/transfrag.genome.gff3 ../2.homolog_prediction/homolog_prediction.gff3 > hints.gff";
     unless (-e "prepareAugusutusHints.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -973,7 +973,6 @@ geneModels.c.gff3\t以Transcript和Homolog预测结果整合得到的完全由�
 geneModels.d.gff3\t第二轮整合后以Transcript和Homolog预测的更优结果为主，优化后的基因模型。
 geneModels.e.gff3\t对geneModels.d.gff3中不完整基因模型成功进行强制补齐后获得的完整基因模型。
 geneModels.f.gff3\t对geneModels.d.gff3中不完整基因模型未能强制补齐后获得的不完整基因模型。
-        $cmdString = "$dirname/bin/GFF3Clear --genome $genome combine.1.gff3 > geneModels.gff3 2> GFF3Clear.log";
 geneModels.gb_AS.gff3\t对geneModels.b.gff3基因模型进行可变剪接分析的结果，增加的转录本没有CDS信息。
 geneModels.ge_AS.gff3\t对geneModels.e.gff3基因模型进行可变剪接分析的结果，增加的转录本没有CDS信息。
 geneModels.gf_AS.gff3\t对geneModels.f.gff3基因模型进行可变剪接分析的结果，增加的转录本没有CDS信息。
@@ -1257,7 +1256,8 @@ $cmdString = "$dirname/bin/gff3ToGtf.pl $genome $out_prefix.bestGeneModels.gff3 
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
-$cmdString = "$dirname/bin/eukaryotic_gene_model_statistics.pl $out_prefix.bestGeneModels.gtf $genome $out_prefix &> $out_prefix.geneModels.stats";
+#$cmdString = "$dirname/bin/eukaryotic_gene_model_statistics.pl $out_prefix.bestGeneModels.gtf $genome $out_prefix &> $out_prefix.geneModels.stats";
+$cmdString = "$dirname/bin/gff3_to_sequences.pl --out_prefix $out_prefix --only_gene_sequences --only_coding_gene_sequences --only_first_isoform --genetic_code 1 $genome $out_prefix.geneModels.gff3 > $out_prefix.geneModels.stats";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
@@ -1308,7 +1308,7 @@ if (($pe1 && $pe2) or $single_end) {
 }
 
 if ($protein) {
-    open IN, "$out_prefix.tmp/2.homolog/genewise.gff3" or die "Can not open file $out_prefix.tmp/2.homolog/genewise.gff3, $!";
+    open IN, "$out_prefix.tmp/2.homolog_prediction/homolog_prediction.gff3" or die "Can not open file $out_prefix.tmp/2.homolog/genewise.gff3, $!";
     open OUT, ">", "$out_prefix.homolog_prediction.gff3" or die "Can not create file $out_prefix.homolog_prediction.gff3, $!";
     print OUT <IN>;
     close IN; close OUT;
