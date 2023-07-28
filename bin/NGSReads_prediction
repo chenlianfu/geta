@@ -258,7 +258,9 @@ unless (-e "2.hisat2.ok") {
     $pwd = `pwd`; print STDERR "PWD: $pwd";
 
     # 构建基因组hisat2索引数据库
-    $cmdString = "hisat2-build -p $cpu $input_genome genome &> hisat2-build.log\n";
+    my $hisat2build_cpu = $cpu;
+    $hisat2build_cpu = 80 if $hisat2build_cpu > 80;
+    $cmdString = "hisat2-build -p $hisat2build_cpu $input_genome genome &> hisat2-build.log\n";
     unless (-e "hisat2-build.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";

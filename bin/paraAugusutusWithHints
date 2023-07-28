@@ -24,8 +24,8 @@ Usage:
     --tmp_dir <string>    default: aug_para_with_hints.tmp
     设置临时文件夹
 
-    --alternatives_from_evidence <bool>    default: True
-    是否进行可变剪接分析。
+    --alternatives_from_evidence    default: None
+    添加该参数后，Augustus会进行可变剪接分析。
 
     --min_intron_len <int>    default: 30
     设置augustus预测时最小的intron长度。
@@ -167,10 +167,10 @@ foreach my $seq_id (sort keys %seq) {
         close OUT;
 
         if ($alternatives_from_evidence) {
-            print COM "augustus --gff3=on --species=$species --hintsfile=$tmp_dir/$seq_id.0.gff --extrinsicCfgFile=extrinsic.cfg --allow_hinted_splicesites=gcag,atac --alternatives-from-evidence=true --min_intron_len=30 --softmasking=1 $tmp_dir/$seq_id.0.fasta > $tmp_dir/$seq_id.0.out\n";
+            print COM "augustus --gff3=on --species=$species --hintsfile=$tmp_dir/$seq_id.0.gff --extrinsicCfgFile=extrinsic.cfg --allow_hinted_splicesites=gcag,atac --alternatives-from-evidence=true --min_intron_len=$min_intron_len --softmasking=1 $tmp_dir/$seq_id.0.fasta > $tmp_dir/$seq_id.0.out\n";
         }
         else {
-            print COM "augustus --gff3=on --species=$species --hintsfile=$tmp_dir/$seq_id.0.gff --extrinsicCfgFile=extrinsic.cfg --allow_hinted_splicesites=gcag,atac --min_intron_len=30 --softmasking=1 $tmp_dir/$seq_id.0.fasta > $tmp_dir/$seq_id.0.out\n";
+            print COM "augustus --gff3=on --species=$species --hintsfile=$tmp_dir/$seq_id.0.gff --extrinsicCfgFile=extrinsic.cfg --allow_hinted_splicesites=gcag,atac --min_intron_len=$min_intron_len --softmasking=1 $tmp_dir/$seq_id.0.fasta > $tmp_dir/$seq_id.0.out\n";
         }
         $out_id{$seq_id}{"$seq_id.0"} = 1;
     }
