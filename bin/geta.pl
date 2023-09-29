@@ -324,7 +324,7 @@ unless (-e "0.RepeatMasker.ok") {
         # 若RepeatModeler版本为2.0.3或更低，则需要将-threads参数换为-pa参数。
         my $RepeatModeler_info = `RepeatModeler`;
         my $RepeatModeler_version = $1 if $RepeatModeler_info =~ m/RepeatModeler - ([\d\.]+)/;
-        if ( $RepeatModeler_version =~ m/(\d+)\.(\d+)\.(\d+)/ && ($1 < 2 or ( $1 == 2 && $1 == 0 && $3 <= 3)) )  {
+        if ( $RepeatModeler_version =~ m/(\d+)\.(\d+)\.(\d+)/ && ($1 < 2 or ( $1 == 2 && $2 == 0 && $3 <= 3)) )  {
             $cpu_RepeatModeler = int($cpu / 4);
             $cpu_RepeatModeler = 1 if $cpu_RepeatModeler < 1;
             $cmdString = "RepeatModeler -pa $cpu_RepeatModeler -database species -LTRStruct &> RepeatModeler.log";
