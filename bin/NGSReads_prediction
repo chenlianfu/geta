@@ -510,7 +510,7 @@ print STDERR "3.7 use Transdecoder for ORF prediction.\n";
 my $cmdString1 = "$dirname/TransDecoder-v5.5.0/TransDecoder.LongOrfs $config{'TransDecoder.LongOrfs'} -t transfrag.strand.fasta -S &> /dev/null";
 my $cmdString2 = "$dirname/TransDecoder-v5.5.0/TransDecoder.Predict $config{'TransDecoder.Predict'}  -t transfrag.strand.fasta &> /dev/null";
 my $cmdString3 = "$dirname/TransDecoder-v5.5.0/TransDecoder.LongOrfs $config{'TransDecoder.LongOrfs'} -t transfrag.noStrand.fasta &> /dev/null";
-$cmdString3 = "$dirname/TransDecoder-v5.5.0/TransDecoder.LongOrfs $config{'TransDecoder.LongOrfs'} -t transfrag.noStrand.fasta -S &> /dev/null" if $strand_specific;
+#$cmdString3 = "$dirname/TransDecoder-v5.5.0/TransDecoder.LongOrfs $config{'TransDecoder.LongOrfs'} -t transfrag.noStrand.fasta -S &> /dev/null" if $strand_specific;
 my $cmdString4 = "$dirname/TransDecoder-v5.5.0/TransDecoder.Predict $config{'TransDecoder.Predict'} -t transfrag.noStrand.fasta --train transfrag.strand.fasta.transdecoder_dir/longest_orfs.cds.top_500_longest &> /dev/null";
 my $cmdString5 = "cp transfrag.strand.fasta.transdecoder.gff3 transfrag.transdecoder.gff3";
 my $cmdString6 = "cat transfrag.noStrand.fasta.transdecoder.gff3 >> transfrag.transdecoder.gff3";
@@ -519,10 +519,12 @@ unless (-e "07.TransDecoder.ok") {
     system("$cmdString1") == 0 or die "failed to execute: $cmdString1\n";
     print STDERR (localtime) . ": CMD: $cmdString2\n";
     system("$cmdString2") == 0 or die "failed to execute: $cmdString2\n";
-    print STDERR (localtime) . ": CMD: $cmdString3\n";
-    system("$cmdString3") == 0 or die "failed to execute: $cmdString3\n";
-    print STDERR (localtime) . ": CMD: $cmdString4\n";
-    system("$cmdString4") == 0 or die "failed to execute: $cmdString4\n";
+    if ( -s "transfrag.noStrand.fasta" ) {
+        print STDERR (localtime) . ": CMD: $cmdString3\n";
+        system("$cmdString3") == 0 or die "failed to execute: $cmdString3\n";
+        print STDERR (localtime) . ": CMD: $cmdString4\n";
+        system("$cmdString4") == 0 or die "failed to execute: $cmdString4\n";
+    }
     print STDERR (localtime) . ": CMD: $cmdString5\n";
     system("$cmdString5") == 0 or die "failed to execute: $cmdString5\n";
     print STDERR (localtime) . ": CMD: $cmdString6\n";
