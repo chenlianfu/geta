@@ -230,8 +230,8 @@ mkdir "$out_prefix.tmp" unless -e "$out_prefix.tmp";
 chdir "$out_prefix.tmp";
 my $pwd = `pwd`; print STDERR "PWD: $pwd";
 
-# 准备基因组序列：读取FASTA序列以>开始的头部时，去除第一个空及之后的字符；去除基因组序列中尾部的换行符，将所有小写字符变换为大写字符。
-unless (-e "genome.fasta") {
+# 准备基因组序列：读取FASTA序列以>开始的头部时，去除第一个空及之后的字符；去除基因组序列中尾部的换行符，将所有小写字符碱基变换为大写字符。程序中断后再次运行时，则重新读取新的基因组序列文件，利用新的文件进行后续分析。
+#unless (-e "genome.fasta") {
     open OUT, ">", "genome.fasta" or die "Can not create file genome.fasta, $!\n";
     open IN, $genome or die "Can not open file $genome, $!\n";
     $_ = <IN>;
@@ -251,31 +251,14 @@ unless (-e "genome.fasta") {
     print "\n";
     close IN;
     close OUT;
-}
+#}
 $pwd = `pwd`; chomp($pwd);
 $genome = "$pwd/genome.fasta";
 
-# 准备直系同源基因蛋白序列：读取FASTA序列以>开始的头部时，去除第一个空及之后的字符，将所有怪异字符变为下划线字符；去除序列中尾部的换行符, 将所有小写字符变换为大写字符。
-unless (-e "homolog.fasta") {
-    open OUT, ">", "homolog.fasta" or die "Can not create file homolog.fasta, $!\n";
-    open IN, $protein or die "Can not open file $protein, $!\n";
-    $_ = <IN>;
-    s/\s.*\s?$/\n/; s/[^\w\n>]/_/g;
-    print OUT;
-    while (<IN>) {
-        if (m/^>/) {
-            s/\s.*\s?$/\n/; s/[^\w\n>]/_/g;
-            print OUT "\n$_";
-        }
-        else {
-            s/\s+?$//g;
-        $_ = uc($_);
-            print OUT;
-        }
-    }
-    close IN;
-    close OUT;
-}
+# 准备直系同源基因蛋白序列：读取FASTA序列以>开始的头部时，去除第一个空及之后的字符，将所有怪异字符变为下划线字符；若遇到 > 符号不在句首，则表示fasta文件格式有误，删除该 > 及到下一个 > 之前的数据；去除序列中尾部的换行符, 将所有小写字符氨基酸变换为大写字符。程序中断后再次运行时，则重新读取新的同源蛋白序列文件，利用新的文件进行后续分析。
+$cmdString = "fasta_format_revising.pl $protein > homolog.fasta 2> homolog.fasta.fasta_format_revising.log";
+print STDERR (localtime) . ": CMD: $cmdString\n";
+system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 $pwd = `pwd`; chomp($pwd);
 $protein = "$pwd/homolog.fasta";
 
