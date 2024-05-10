@@ -6,14 +6,14 @@ use Cwd qw/abs_path getcwd cwd/;
 
 my $usage = <<USAGE;
 Usage:
-    $0 [options] homolog_proteins.fasta genome.fasta out.diamond.tab > out.geneModels.tab
+    $0 [options] homolog_proteins.fasta genome.fasta out.filteredHits.tab > out.geneModels.tab
 
-    程序根据diamond blastx的结果文件out.diamond.tab，对各个基因区域调用exonerate/genewise/gth等软件进行基因预测(调用ParaFly程序进行并行化运算)。然后，对各个基因预测软件的结果进行过滤和排序，在标准输出中给出表格格式的基因模型信息。
-    程序的输入文件out.diamond.tab相比于常规的BLATX表格12列输出结果：多出了第13列表示多个HSPs累积的Identity值；额外多出的最后一列是两个使用中划线连接的坐标数据，表示同源蛋白所在的基因区域。
+    程序根据MMseqs2的结果文件out.filteredHits.tab，对各个基因区域调用exonerate/genewise/gth等软件进行基因预测(调用ParaFly程序进行并行化运算)。然后，对各个基因预测软件的结果进行过滤和排序，在标准输出中给出表格格式的基因模型信息。
+    本程序对输入文件out.filteredHits.tab的格式要求，相比于常规的BLATX表格12列输出结果：（1）第3列表示多个HSPs累积的Identity值；额外多出的最后一列是两个使用中划线连接的坐标数据，表示同源蛋白所在的基因区域。
     对各个基因预测软件的结果进行过滤：过滤protein长度过低，对同源蛋白覆盖过低的基因模型；过滤终止密码子过多的基因模型。
     对各个基因预测软件的结果进行排序：(1) 按对同源蛋白的匹配长度从大到小; (2) 按CDS内部的终止密码子数量从小到大；(3) 按得到的基因模型CDS总长从大到小；(4) 按对同源蛋白比对的Evalue值从小到大；(5) 按对同源蛋白比对的Score值从大到小；(6) 按对同源蛋白比对的Identity值从大到小；(7) 按基因预测软件gth/exonerate/genewise的顺序；(8) 按输出信息的ASCII字符顺序。
     程序运行过程中的的一些关键点：（1）将基因组序列的所有小写碱基字符变为大写后，再进行后续分析；（2）对同源蛋白序列的尾部添加终止密码子后，再计算其序列长度，并调用exonerate/genewise/gth等软件进行基因基因预测；（3）由于genewise命令给出的CDS不包含终止密码子，而exonerate和gth给出的CDS包含终止密码子，于是对genwise的结果进行修正，使其尾部的CDS能包含终止密码子；（4）其它关键点请见相关参数的描述。
-    程序输出表格有15列：(1) 目标基因组序列名称；(2) 预测软件名称；(3) 基因起始位点；(4) 基因结束位点；(5) introns信息，多个introns之间使用分号分割，每个intron前后坐标使用中划线分割；(6) 基因所在的正负链；(7) 同源蛋白名称；(8) 同源蛋白包含终止密码子后的长度；(9) 同源蛋白匹配的起始位点；(10) 同源蛋白匹配的结束位点；(11) CDS总长度；(12) CDS内部的终止密码子数量；(13) Diamond BLASTX比对的Evalue值；(14) Diamond BLASTX比对的Score值；(15) Diamond BLASTX比对的Identity。
+    程序输出表格有15列：(1) 目标基因组序列名称；(2) 预测软件名称；(3) 基因起始位点；(4) 基因结束位点；(5) introns信息，多个introns之间使用分号分割，每个intron前后坐标使用中划线分割；(6) 基因所在的正负链；(7) 同源蛋白名称；(8) 同源蛋白包含终止密码子后的长度；(9) 同源蛋白匹配的起始位点；(10) 同源蛋白匹配的结束位点；(11) CDS总长度；(12) CDS内部的终止密码子数量；(13) MMseqs2比对的Evalue值；(14) MMseqs2比对的Score值；(15) MMseqs2比对的Identity。
 
     --threshold_protein_length <int>    default: 25
     --threshold_homolog_coverage <float>    default: 0.2
@@ -21,7 +21,7 @@ Usage:
     设置使用同源蛋白进行基因预测后，对基因模型结果进行过滤的阈值。蛋白序列长度阈值、对同源蛋白覆盖率阈值和内部终止密码子数量阈值。使用genwise/gth/exonerate进行基因预测后，对获得的基因模型进行过滤，要求其蛋白序列长度不小于指定阈值，要求对同源蛋白的覆盖率不低于指定阈值，要求内部的终止密码子数量不高于指定阈值。
 
     --flanking_length <int>    default: None
-    设置侧翼序列长度。程序根据BLASTX比对结果，选取基因组序列匹配区域及其两侧翼--flanking_length参数指定长度的序列，作为核酸序列，输入给genewise或gth命令，用于基因预测。若不设置此参数，程序会根据diamond blastx的结果自动进行计算，侧翼长度刚好超过90%以上的query匹配区域。分析query在基因组上的匹配区域时，首先看BLASTX输入文件最后一列信息若满足"数字坐标-数字坐标"格式，则得到匹配区域，若不满足，则使用第7和8列数据作为匹配区域。若使用本参数直接指定侧翼长度，推荐设置为5000。
+    设置侧翼序列长度。程序根据MMseqs2比对结果，选取基因组序列匹配区域及其两侧翼--flanking_length参数指定长度的序列，作为核酸序列，输入给genewise或gth命令，用于基因预测。若不设置此参数，程序会根据MMseqs2的结果自动进行计算，侧翼长度刚好超过90%以上的query匹配区域。分析query在基因组上的匹配区域时，首先看MMseqs2输入文件最后一列信息若满足"数字坐标-数字坐标"格式，则得到匹配区域，若不满足，则使用第7和8列数据作为匹配区域。若使用本参数直接指定侧翼长度，推荐设置为5000。
 
     --cpu <int>    default: 8
     设置运行genewise或gth命令的并行化数。
@@ -32,7 +32,7 @@ Usage:
     --genetic_code <int>    default: 1
     设置遗传密码。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。本程序调用的exonerate、genewise和gth三个命令都支持遗传密码参数。由于genewise需要一个codon.table文件作为遗传密码支持，本程序会根据--genetic_code参数值专门生成相应的codon.table文件。而exonerate和gth分别使用--geneticcode和-translationtable参数可以直接支持相应的遗传密码，本参数的值会传递给它们。
 
-    --min_intron_length <int>    default: 30
+    --min_intron_length <int>    default: 20
     --max_intron_length <int>    default: 200000
     设置最小和最大intron长度。这两个参数仅在使用exonerate软件进行基因预测时生效，作为exonerate命令的--minintron和--maxintron参数的值。
 
@@ -60,7 +60,11 @@ GetOptions(
     "threshold_protein_length:i" => \$threshold_protein_length,
     "threshold_homolog_coverage:f" => \$threshold_homolog_coverage,
     "threshold_inter_stop_codon_num:i" => \$threshold_inter_stop_codon_num,
+	"min_intron_length:i" => \$min_intron_length,
+	"max_intron_length:i" => \$max_intron_length,
 );
+$min_intron_length ||= 20;
+$max_intron_length ||= 200000;
 $threshold_protein_length ||= 25;
 $threshold_homolog_coverage ||= 0.2;
 $threshold_inter_stop_codon_num ||= 3;
@@ -78,7 +82,7 @@ foreach ( split /,/, $method ) {
     $method{$_} = 1;
     warn "Warning: The method $_ is not correct.\n" unless ( $_ eq "exonerate" or $_ eq "genewise" or $_ eq "gth" );
 }
-print "#GenomeSeqID\tSoftware\tStart\tEnd\tIntrons\tStrand\tHomologProteinName\tHomologLength\tStart\tEnd\tCDSLength\tStopCodonNum\tBlastxEvalue\tBlastxScore\tBlastxIdentity\n";
+print "#GenomeSeqID\tSoftware\tStart\tEnd\tIntrons\tStrand\tHomologProteinName\tHomologLength\tStart\tEnd\tCDSLength\tStopCodonNum\tMMseqs2Evalue\tMMseqs2Score\tMMseqs2Identity\n";
 
 if ( $help_flag ) { die $usage }
 
@@ -114,7 +118,7 @@ while (<IN>) {
 }
 close IN;
 
-# 读取BLASTX比对结果信息，获取基因长度。也获取匹配evalue和score信息用，用于后续同一个基因区域多个基因模型排序。
+# 读取MMseqs2比对结果信息，获取基因长度。也获取匹配evalue和score信息用，用于后续同一个基因区域多个基因模型排序。
 open IN, $input_file3 or die "Can not open file $input_file3, $!";
 my (%gene_length, @gene_length, %hit_evalue, %hit_score, %hit_identity);
 <IN>;
@@ -122,15 +126,15 @@ while (<IN>) {
     chomp;
     @_ = split /\t/;
     if ( $_[-1] =~ m/(\d+)-(\d+)/ ) {
-        $gene_length{$_[0]}{$_[-1]} = 1;
+        $gene_length{$_[1]}{$_[-1]} = 1;
     }
     else {
-        $gene_length{$_[0]}{"$_[6]\-$_[7]"} = 1;
+        $gene_length{$_[1]}{"$_[6]\-$_[7]"} = 1;
     }
     $_[-1] =~ s/-/_/;
-    $hit_evalue{"$_[0].$_[-1]"}{$_[1]} = $_[10];
-    $hit_score{"$_[0].$_[-1]"}{$_[1]} = $_[11];
-    $hit_identity{"$_[0].$_[-1]"}{$_[1]} = $_[12];
+    $hit_evalue{"$_[1].$_[-1]"}{$_[0]} = $_[10];
+    $hit_score{"$_[1].$_[-1]"}{$_[0]} = $_[11];
+    $hit_identity{"$_[1].$_[-1]"}{$_[0]} = $_[2];
 }
 close IN;
 foreach ( keys %gene_length) {
@@ -142,9 +146,9 @@ foreach ( keys %gene_length) {
 # 获取基因长度信息，并设置侧翼序列长度。
 @gene_length = sort {$a <=> $b} @gene_length;
 $flanking_length = $gene_length[@gene_length * 0.9] unless defined($flanking_length);
-print STDERR "Through the BLASTX hits, 90% of the query length are greater than $gene_length[@gene_length * 0.9] bp, and the Flanking length was set to $flanking_length bp.\n";
+print STDERR "Through the MMseqs2 hits, 90% of the query length are greater than $gene_length[@gene_length * 0.9] bp, and the Flanking length was set to $flanking_length bp.\n";
 
-# 根据每个BLASTX Hit结果，输出基因预测的文件和命令行。
+# 根据每个MMseqs2 Hit结果，输出基因预测的文件和命令行。
 open IN, $input_file3 or die "Can not open file $input_file3, $!";
 if ( exists $method{"genewise"} && ! -e "$tmp_dir/1.create_CMD_genewise.ok" ) {
     open CMD1, ">", "$tmp_dir/command.genewise.list" or die "Can not create file $tmp_dir/command.genewise.list, $!";
@@ -186,38 +190,38 @@ while (<IN>) {
     @_ = split /\t/;
     # 检测基因在正义链还是负义链
     my $strand = "plus";
-    if ( $_[6] > $_[7] ) {
+    if ( $_[8] > $_[9] ) {
         $strand = "minus";
-        ($_[6], $_[7]) = ($_[7], $_[6]);
+        ($_[8], $_[9]) = ($_[9], $_[8]);
     }
 
     # 分析得到匹配区域及其两侧翼的序列信息
-    my ($region_start, $region_end) = ($_[6], $_[7]);
+    my ($region_start, $region_end) = ($_[8], $_[9]);
     my ($region_start, $region_end) = ($1, $2) if $_[-1] =~ m/(\d+)-(\d+)/;
     ($region_start, $region_end) = ($region_end, $region_start) if $region_start > $region_end;
     my $length = $region_end - $region_start + 1 + $flanking_length + $flanking_length;
     my $start = $region_start - 1 - $flanking_length;
     $start = 0 if $start < 0;
-    my $out_prefix = "$_[0].$region_start\_$region_end.start$start.$_[1]";
-    my $gene_region = "$_[0].$region_start\_$region_end.start$start";
+    my $out_prefix = "$_[1].$region_start\_$region_end.start$start.$_[0]";
+    my $gene_region = "$_[1].$region_start\_$region_end.start$start";
     $gene_region_sort1{$gene_region} = $seq_sort{$_[0]};
     $gene_region_sort2{$gene_region} = $region_start;
     $gene_region_sort3{$gene_region} = $region_end;
 
     # 输出基因组上的序列
     unless ( -e "$tmp_dir/1.create_fasta.ok" ) {
-        my $seq = substr($genome_seq{$_[0]}, $start, $length);
+        my $seq = substr($genome_seq{$_[1]}, $start, $length);
         open OUT, ">", "$tmp_dir/chunk$chunk_code/$out_prefix.genome.fasta" or die "Can not create file $tmp_dir/chunk$chunk_code/$out_prefix.genome.fasta, $!";
-        print OUT ">$_[0].$region_start\_$region_end.start$start\n$seq\n";
+        print OUT ">$_[1].$region_start\_$region_end.start$start\n$seq\n";
         close OUT; 
         #print STDERR "OKOK\n";
     }
 
     # 输出同源蛋白序列
     unless ( -e "$tmp_dir/1.create_fasta.ok" ) {
-        my $homolog_seq = $homolog_seq{$_[1]};
+        my $homolog_seq = $homolog_seq{$_[0]};
         open OUT, ">", "$tmp_dir/chunk$chunk_code/$out_prefix.homolog.fasta" or die "Can not create file $tmp_dir/chunk$chunk_code/$out_prefix.homolog.fasta, $!";
-        print OUT ">$_[1]\n$homolog_seq\n";
+        print OUT ">$_[0]\n$homolog_seq\n";
         close OUT;
     }
 
@@ -243,7 +247,7 @@ while (<IN>) {
         }
     }
     if ( exists $method{"exonerate"} ) {
-        print CMD3 "exonerate --model protein2genome --geneticcode $genetic_code --forcegtag true --minintron 30 --maxintron 200000 --showtargetgff true --showsugar true --showalignment false --showvulgar false $tmp_dir/chunk$chunk_code/$out_prefix.homolog.fasta $tmp_dir/chunk$chunk_code/$out_prefix.genome.fasta > $tmp_dir/chunk$chunk_code/exonerate/$out_prefix.gff\n" unless -e "$tmp_dir/1.create_CMD_exonerate.ok";
+        print CMD3 "exonerate --model protein2genome --geneticcode $genetic_code --forcegtag true --minintron $min_intron_length --maxintron $max_intron_length --showtargetgff true --showsugar true --showalignment false --showvulgar false $tmp_dir/chunk$chunk_code/$out_prefix.homolog.fasta $tmp_dir/chunk$chunk_code/$out_prefix.genome.fasta > $tmp_dir/chunk$chunk_code/exonerate/$out_prefix.gff\n" unless -e "$tmp_dir/1.create_CMD_exonerate.ok";
         $gene_region{$gene_region}{"$tmp_dir/chunk$chunk_code/exonerate/$out_prefix.gff"} = 1;
     }
 }

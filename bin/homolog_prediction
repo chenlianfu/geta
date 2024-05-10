@@ -14,15 +14,11 @@ Usage:
     本程序能利用临近物种的全基因组蛋白序列对目标物种的全基因组序列进行基因预测，并将结果以GFF3格式输出到标准输出。
     结果中的基因模型分为四类：A，excellent gene models，对同源蛋白序列覆盖100%，且起始密码子和终止密码子和同源蛋白匹配一致；B，good gene models，对同源蛋白覆盖不小于80%且强制补齐后完整基因模型长度不小于同源蛋白序列长度的80%；C，fair gene models，对同源蛋白覆盖不小于40%且强制补齐的完整基因模型长度不小于同源蛋白序列长度的40%；D，poor gene models，对同源蛋白覆盖小于40%、或强制补齐的完整基因模型长度小于同源蛋白序列长度的40%、或不能强制补齐的基因模型。前三类基因模型都是完整的基因模型，最后一个CDS是包含终止密码子的，最后一类基因模型有些是完整的，有些是不完整的，其尾部若是完整的，则最后一个CDS是包含终止密码子的。
     程序输出的基因模型中，其intron信息中包含Supported_times标签，表示不同的基因预测方法或不同的同源蛋白支持的次数。例如，有10个同源蛋白在3种预测方法都支持一个intron，则该intron的Supported_times值是30。默认情况下，--threshod_ratio_of_intron_Supported_times 参数的值是 0.5，表示程序根据A和B类基因模型计算出所有introns的Supported_times中位数值，再用于对C和D类基因模型进行过滤。若C或D类基因模型中所有introns的Supported_times值都低于上一步计算出的中位数值，则过滤其基因模型；若设置 --threshod_ratio_of_intron_Supported_times 参数值为 0，则不进行过滤；该参数值越大，则要求越严格，过滤的基因模型数量越多。
-    程序运行原理简述：（1）先调用diamond命令，将同源蛋白做成数据库，再将基因组序列和同源蛋白进行比对。（2）挑选blastx结果满足阈值的同源蛋白，从exonerate、genewise或gth三种软件中选择至少一个软件进行基因预测，并对目标基因区域多个软件和多个同源蛋白的预测结果进行排序。（3）挑选最优的基因预测结果，再对基因模型进行补齐并分成四类。（4）对较差的C和D类基因模型进行过滤。
+    程序运行原理简述：（1）先调用mmseqs命令，将同源蛋白比对到基因组序列上。（2）挑选满足比对阈值的同源蛋白，从exonerate、genewise或gth三种软件中选择至少一个软件进行基因预测，并对目标基因区域多个软件和多个同源蛋白的预测结果进行排序。（3）挑选最优的基因预测结果，再对基因模型进行补齐并分成四类。（4）对较差的C和D类基因模型进行过滤。
     根据程序的计算原理，使用的同源蛋白数量越多，预测基因模型的准确性和完整性会越好，相应的计算消耗时间越长。因此，推荐使用5~10个物种的全基因组蛋白序列作为输入。
 
     --out_prefix <string>    default: out
-    设置输出文件前缀。程序默认输出如下文件：（1）out.diamond.tab，将基因组序列和同源蛋白进行dimond blastx比对的结果文件；（2）out.
-
-    --segmentSize <int>    default: 1000000
-    --overlapSize <int>    default: 100000
-    程序将基因组较长的序列进行分割，以加快diamond blastx的并行化比对速度；若单条序列长度超过1Mb， 则将单条序列进行切割，两条相邻的序列间重叠的长度为100kb。
+    设置输出文件前缀。程序默认输出如下文件：（1）out.filteredHits.tab，将同源蛋白序列和基因组序列进行比对的结果文件；（2）out.
 
     --max_hits_num_per_match_region <int>    default: 10
     设置基因组上一个同源匹配区域（一个基因区域）的最大同源蛋白的匹配数量。
@@ -31,12 +27,12 @@ Usage:
     设置基因组上一个同源匹配区域（一个基因区域）和单个物种的最大同源蛋白的匹配数量。让一个基因区域尽量和多个物种的同源蛋白都有比对结果，利于后续的一致性预测结果分析，并根据一致性结果的数量判断结果的可靠性。该参数生效需要输入的同源蛋白FASTA文件头部中包含物种名称信息。程序识别蛋白序列名称中的关键词species（大小写均可以识别）及其后的字符[a-zA-Z0-9]作为物种名称。例如XP_002436309_2_SpeciesSorghumBicolor，程序识别其物种名称为SpeciesSorghumBicolor。
 
     --cpu <int>    default: 8
-    设置diamond程序使用线程数，genewise或gth命令运行的并行数。
+    设置mmseqs程序使用线程数，genewise或gth命令运行的并行数。
 
     --identity <float>    default: 0.2
     --evalue <float>    default: 1e-9
-    --subject_coverage <float>    default: 0.3
-    设置对diamond blastx比对结果进行过滤的Identity、E-value和subject_coverage阈值。
+    --homolog_coverage <float>    default: 0.3
+    设置对同源蛋白和基因序列的比对结果进行过滤的Identity、E-value和homolog_coverage阈值。
 
     --method <string>    default: exonerate
     设置进行基因预测的方法，其值可以设定为exonerate、genewise、gth或all。若需要同时使用多种方法，则输入使用逗号分割的多个值；若使用所有三种方法进行分析，可以设置--method参数值为all，但最消耗计算时间。三种方法中：exonerate和genewise的准确性结果比较一致，但gth方法预测基因模型的sensitivity下降很多，specificity提高很多。以三种方法对Oryza sativa基因组的预测为例，其预测结果的准确性如下表所示。和NCBI上标准的共28736个基因模型的注释结果进行比较，评估四个准确性值：基因水平sensitivity、基因水平specificity、exon水平sensitivity、exon水平specificity。可以看出，使用多种方法整合预测后再过滤，得到的基因模型数量能接近真实的基因数量，且结果较准确。
@@ -64,17 +60,15 @@ Usage:
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($out_prefix, $segmentSize, $overlapSize, $max_hits_num_per_match_region, $max_hit_num_per_single_species, $cpu, $identity, $evalue, $subject_coverage, $method, $genetic_code, $tmp_dir, $threshod_ratio_of_intron_Supported_times, $help_flag);
+my ($out_prefix, $max_hits_num_per_match_region, $max_hit_num_per_single_species, $cpu, $identity, $evalue, $homolog_coverage, $method, $genetic_code, $tmp_dir, $threshod_ratio_of_intron_Supported_times, $help_flag);
 GetOptions(
     "out_prefix:s" => \$out_prefix,
-    "segmentSize:i" => \$segmentSize,
-    "overlapSize:i" => \$overlapSize,
     "max_hits_num_per_match_region:i" => \$max_hits_num_per_match_region,
     "max_hit_num_per_single_species:i" => \$max_hit_num_per_single_species,
     "cpu:i" => \$cpu,
     "identity:f" => \$identity,
     "evalue:f" => \$evalue,
-    "subject_coverage:f" => \$subject_coverage,
+    "homolog_coverage:f" => \$homolog_coverage,
     "method:s" => \$method,
     "genetic_code:i" => \$genetic_code,
     "tmp_dir:s" => \$tmp_dir,
@@ -82,14 +76,12 @@ GetOptions(
     "help" => \$help_flag,
 );
 $out_prefix ||= "out";
-$segmentSize ||= 1000000;
-$overlapSize ||= 100000;
 $max_hits_num_per_match_region ||= 10;
 $max_hit_num_per_single_species ||= 2;
 $cpu ||= 8;
 $identity ||= 0.2;
 $evalue ||= 1e-9;
-$subject_coverage ||= 0.3;
+$homolog_coverage ||= 0.3;
 my %method;
 $method = "exonerate,gth,genewise" if $method eq "all";
 foreach ( split /,/, $method ) {
@@ -111,27 +103,27 @@ my $pwd = `pwd`; print STDERR "##########\nPWD (Current Directory): $pwd";
 print STDERR (localtime) . "CMD (Main Program): $0 " . join(" ", @ARGV) . "\n##########\n\n";
 
 
-# 1. 运行diamond分析，寻找蛋白序列和参考基因组的匹配位点。
-print STDERR "1. align genome sequences against homolog proteins through diamond software.\n";
+# 1. 运行MMseqs2分析，寻找蛋白序列和参考基因组的匹配位点。
+print STDERR "1. align genome sequences against homolog proteins through MMseqs2 software.\n";
 chdir $tmp_dir;
 my $pwd = `pwd`; print STDERR "PWD: $pwd";
-my $cmdString = "$binPath/homolog_prediction.01ParaDiamondBlastx --segmentSize $segmentSize --overlapSize $overlapSize --max_hits_num_per_match_region $max_hits_num_per_match_region --cpu $cpu --identity $identity --evalue $evalue --subject_coverage $subject_coverage --genetic_code $genetic_code --tmp_dir a.para_diamond $input_protein $input_genome > $out_prefix.diamond.tab 2> a.para_diamond.log";
-unless (-e "1.paraDiamond.ok" && -e "$out_prefix.diamond.tab") {
+my $cmdString = "$binPath/homolog_prediction.01MMseqs2CalHits --cpu $cpu --identity $identity --evalue $evalue --homolog_coverage $homolog_coverage --threshold_Hit_cover_ratio 0.9 --threshold_Hit_score_ratio 0.4 --threshold_species_num $max_hit_num_per_single_species --threshold_Hit_num $max_hits_num_per_match_region --tmp_dir a.MMseqs2CalHits $input_protein $input_genome > $out_prefix.filteredHits.tab 2> a.MMseqs2CalHits.log";
+unless (-e "a.MMseqs2CalHits.ok" && -e "$out_prefix.filteredHits.tab") {
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-    open OUT, ">", "1.paraDiamond.ok" or die $!; close OUT;
+    open OUT, ">", "a.MMseqs2CalHits.ok" or die $!; close OUT;
 }
 else {
     print STDERR "CMD(Skipped): $cmdString\n";
 }
 
 # 2. 进行基因预测，得到表格格式的基因模型，并对同一基因区域的基因模型进行排序。
-print STDERR "2. predicting gene models according the Hits of diamond.\n";
-$cmdString = "$binPath/homolog_prediction.03HitToGenePrediction --cpu $cpu --method $method --genetic_code $genetic_code --tmp_dir b.hitToGenePrediction $input_protein $input_genome out.diamond.tab > out.geneModels.tab 2> b.hitToGenePrediction.log";
-unless (-e "2.hitToGenePrediction.ok" && -s "out.geneModels.tab") {
+print STDERR "2. predicting gene models according the Hits of homologs.\n";
+$cmdString = "$binPath/homolog_prediction.02HitToGenePrediction --cpu $cpu --method $method --genetic_code $genetic_code --tmp_dir b.hitToGenePrediction $input_protein $input_genome $out_prefix.filteredHits.tab > $out_prefix.geneModels.tab 2> b.hitToGenePrediction.log";
+unless (-e "b.hitToGenePrediction.ok" && -s "$out_prefix.geneModels.tab") {
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-    open OUT, ">", "2.hitToGenePrediction.ok" or die $!; close OUT;
+    open OUT, ">", "b.hitToGenePrediction.ok" or die $!; close OUT;
 }
 else {
     print STDERR "CMD(Skipped): $cmdString\n";
@@ -139,11 +131,11 @@ else {
 
 # 3. 同一基因区域仅取一个最优基因模型，得到GFF3文件，并对基因模型进行好坏分类。
 print STDERR "3. picking out the best geng model for classification.\n";
-$cmdString = "$binPath/homolog_prediction.04GetGeneModels --tmp_dir c.getGeneModels $input_genome out.geneModels.tab > out.geneModels.gff3 2> c.getGeneModels.log";
-unless (-e "3.getGeneModels.ok" && -s "out.geneModels.gff3") {
+$cmdString = "$binPath/homolog_prediction.03GetGeneModels --tmp_dir c.getGeneModels $input_genome out.geneModels.tab > $out_prefix.geneModels.gff3 2> c.getGeneModels.log";
+unless (-e "c.getGeneModels.ok" && -s "$out_prefix.geneModels.gff3") {
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-    open OUT, ">", "3.getGeneModels.ok" or die $!; close OUT;
+    open OUT, ">", "c.getGeneModels.ok" or die $!; close OUT;
 }
 else {
     print STDERR "CMD(Skipped): $cmdString\n";

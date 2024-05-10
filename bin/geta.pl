@@ -187,7 +187,7 @@ my %config = (
     'sam2transfrag' => '--fraction 0.05 --min_expressed_base_depth 2 --max_expressed_base_depth 50 --min_junction_depth 2 --max_junction_depth 50 --min_fragment_count_per_transfrags 10 --min_intron_length 20',
     'TransDecoder.LongOrfs' => '-m 100 -G universal',
     'TransDecoder.Predict' => '--retain_long_orfs_mode dynamic',
-    'homolog_prediction' => '--identity 0.2 --evalue 1e-9 --subject_coverage 0.3 --max_hits_num_per_match_region 10 --max_hit_num_per_single_species 2 --method all --genetic_code 1 --threshod_ratio_of_intron_Supported_times 0.5',
+    'homolog_prediction' => '--identity 0.2 --evalue 1e-9 --homolog_coverage 0.3 --max_hits_num_per_match_region 10 --max_hit_num_per_single_species 2 --method all --genetic_code 1 --threshod_ratio_of_intron_Supported_times 0.5',
     'homolog_predictionGFF2GFF3' => '--min_score 15 --gene_prefix genewise --filterMiddleStopCodon',
     'geneModels2AugusutsTrainingInput' => '--min_evalue 1e-9 --min_identity 0.8 --min_coverage_ratio 0.8 --min_cds_num 2 --min_cds_length 450 --min_cds_exon_ratio 0.60',
     'BGM2AT' => '--min_gene_number_for_augustus_training 500 --gene_number_for_accuracy_detection 200 --min_gene_number_of_optimize_augustus_chunk 50 --max_gene_number_of_optimize_augustus_chunk 200',
@@ -414,7 +414,7 @@ unless (-e "2.homolog_prediction.ok") {
         $segmentSize = $overlapSize * 10;
     }
 
-    $cmdString = "$dirname/bin/homolog_prediction --tmp_dir homolog_prediction.tmp --cpu $cpu --segmentSize $segmentSize --overlapSize $overlapSize $config{'homolog_prediction'} $protein ../0.RepeatMasker/genome.masked.fasta > homolog_prediction.gff3 2> homolog_prediction.log";
+    $cmdString = "$dirname/bin/homolog_prediction --tmp_dir ./ --cpu $cpu $config{'homolog_prediction'} $protein ../0.RepeatMasker/genome.masked.fasta > homolog_prediction.gff3 2> homolog_prediction.log";
     unless (-e "homolog_prediction.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
