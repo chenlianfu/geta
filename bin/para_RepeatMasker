@@ -20,13 +20,16 @@ Usage:
     （3）RepeatMasker_out.stats   对重复序列的统计信息，由merge_repeatMasker_out.pl分析.out文件得到；
 
     --species <string>    default: None
-    设置RepeatMasker使用Repbase数据库进行重复序列分析时采用的物种名。推荐真菌物种使用Fungi；植物Viridiplantae；动物Metazoa。
+    设置RepeatMasker使用相应大类物种的数据库进行重复序列分析时采用的分类名称。推荐真菌物种使用Fungi；植物Viridiplantae；动物Metazoa。
+
+    --engine <string>    default: hmmer
+    设置RepeatMasker运行时使用的搜索引擎。在本程序中该参数的值是hmmer或ncbi。若参数值hmmer，则使用Dfam数据库进行分析；若参数值是ncbi，则使用Repbase数据库进行分析。程序的正常运行需要RepeatMasker已经配置好相应的数据库。该参数仅在--species参数有效的情况下生效。
 
     --lib <string>    default: None
-    输入一个FASTA文件作为重复序列数据库。和--species参数只能二选一；若两个参数同时进行了设置，则仅 --lib 参数生效。
+    输入一个FASTA文件作为重复序列数据库。和--species参数只能二选一；若两个参数同时进行了设置，则仅 --lib 参数生效。当 --lib 参数生效时，RepeatMasker自动使用rmblastn搜索引擎进行数据分析。
 
     --cpu <int>    default: 8
-    设置CPU线程数消耗。程序会查看 RepeatMasker/NCBIBlastSearchEngine.pm 文件中 -num_threads 参数设置单个任务运行rmblastn的线程数值，然后，设置 RepeatMasker 的并行数 =  --cpu 参数值 * 1.5 / rmblastn的线程数，且最终 RepeatMasker 的并行数至少为 1 。其中，乘以 1.5 是为了防止单个 rmblasn 程序运行效率不高，无法使用所有设定的CPU线程，从而降低整体CPU利用率。
+    设置CPU线程数消耗。程序会查看 RepeatMasker/NCBIBlastSearchEngine.pm 文件中 -num_threads 参数设置单个任务运行rmblastn的线程数值。而单个任务运行运行nhmmer的线程数默认是2。然后，程序设置 RepeatMasker 的并行数 =  --cpu 参数值 * 1.5 / 单个rmblastn或nhmmer的线程数，且最终 RepeatMasker 的并行数至少为 1 。其中，乘以 1.5 是为了防止单个 rmblasn或nhmmer 程序运行效率不高，无法使用所有设定的CPU线程，从而降低整体CPU利用率。
 
     --tmp_dir <string>    default: tmp_\$date_\$pid
     程序运行时临时文件夹名称。
@@ -40,18 +43,21 @@ Usage:
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($help_flag, $cpu, $tmp_dir, $species, $lib, $out_prefix, $min_coverge_ratio);
+my ($help_flag, $cpu, $tmp_dir, $species, $engine, $lib, $out_prefix, $min_coverge_ratio);
 GetOptions(
     "help" => \$help_flag,
     "cpu:i" => \$cpu,
     "tmp_dir:s" => \$tmp_dir,
     "species:s" => \$species,
+    "engine:s" => \$engine,
     "lib:s" => \$lib,
     "out_prefix:s" => \$out_prefix,
     "min_coverge_ratio:f" => \$min_coverge_ratio,
 );
 if ( $help_flag ) { die $usage }
 
+$engine ||= "hmmer";
+$engine = "ncbi" if $lib;
 $out_prefix ||= "RepeatMasker_out";
 $min_coverge_ratio ||= 0.25;
 
@@ -69,11 +75,18 @@ open IN, "$RepeatMasker_path/NCBIBlastSearchEngine.pm" or die "Can not open file
 while (<IN>) {
     if ( m/-num_threads\s+(\d+)/ ) {
         $rmblastn_cpu = $1;
+        $rmblastn_cpu = 2 if $engine eq "hmmer";
         $cpu = int($cpu * 1.5 / $rmblastn_cpu + 0.5);
         $cpu = 1 if $cpu < 1;
     }
 }
-print STDERR "将并行化运行 $cpu 个RepeatMasker任务，每个任务将调用rmblastn命令以 $rmblastn_cpu 线程运行。\n";
+close IN;
+if ( $engine eq "ncbi" ) {
+    print STDERR "将并行化运行 $cpu 个RepeatMasker任务，每个任务将调用rmblastn命令以 $rmblastn_cpu 线程运行。\n";
+}
+else {
+    print STDERR "将并行化运行 $cpu 个RepeatMasker任务，每个任务将调用nhmmer命令以 2 个线程运行。\n";
+}
 
 # 设置临时运行文件夹
 my $date = `date +%Y%m%d%H%M%S`; chomp($date);
@@ -95,10 +108,10 @@ while (<IN>) {
         push @split_file_name , "seq_$num";
         mkdir "$tmp_dir/seq_$num" unless -e "$tmp_dir/seq_$num";
         if ( $lib ) {
-            print CMD "RepeatMasker -pa 1 -e ncbi -lib $lib -dir $tmp_dir/seq_$num $tmp_dir/seq_$num.fasta &> $tmp_dir/seq_$num.log\n";
+            print CMD "RepeatMasker -no_is -pa 1 -e ncbi -lib $lib -dir $tmp_dir/seq_$num $tmp_dir/seq_$num.fasta &> $tmp_dir/seq_$num.log\n";
         }
         else {
-            print CMD "RepeatMasker -pa 1 -e ncbi -species $species -dir $tmp_dir/seq_$num $tmp_dir/seq_$num.fasta &> $tmp_dir/seq_$num.log\n";
+            print CMD "RepeatMasker -no_is -pa 1 -e $engine -species $species -dir $tmp_dir/seq_$num $tmp_dir/seq_$num.fasta &> $tmp_dir/seq_$num.log\n";
 
         }
         open OUT, ">", "$tmp_dir/seq_$num.fasta" or die "Can not create file $tmp_dir/seq_$num.fasta, $!";
@@ -115,10 +128,10 @@ $num ++;
 push @split_file_name , "seq_$num";
 mkdir "$tmp_dir/seq_$num" unless -e "$tmp_dir/seq_$num";
 if ( $lib ) {
-    print CMD "RepeatMasker -pa 1 -e ncbi -lib $lib -dir $tmp_dir/seq_$num $tmp_dir/seq_$num.fasta &> $tmp_dir/seq_$num.log\n";
+    print CMD "RepeatMasker -no_is -pa 1 -e ncbi -lib $lib -dir $tmp_dir/seq_$num $tmp_dir/seq_$num.fasta &> $tmp_dir/seq_$num.log\n";
 }
 else {
-    print CMD "RepeatMasker -pa 1 -e ncbi -species $species -dir $tmp_dir/seq_$num $tmp_dir/seq_$num.fasta &> $tmp_dir/seq_$num.log\n";
+    print CMD "RepeatMasker -no_is -pa 1 -e $engine -species $species -dir $tmp_dir/seq_$num $tmp_dir/seq_$num.fasta &> $tmp_dir/seq_$num.log\n";
 }
 open OUT, ">", "$tmp_dir/seq_$num.fasta" or die "Can not create file $tmp_dir/seq_$num.fasta, $!";
 print OUT $seq;
@@ -127,7 +140,10 @@ close CMD;
 
 # 先试运行，生成对应物种的数据库
 unless ( $lib ) {
-    my $cmdString = "RepeatMasker -pa 1 -e ncbi -species $species -dir $tmp_dir/seq_0 $tmp_dir/seq_0.fasta &> $tmp_dir/seq_0.log\n";
+    open OUT, ">", "$tmp_dir/seq_test.fasta";
+    print OUT ">test\n" . substr($seq, 0, 1000) . "\n";
+    close OUT;
+    my $cmdString = "RepeatMasker -no_is -pa 1 -e $engine -species $species -dir $tmp_dir/seq_test $tmp_dir/seq_test.fasta &> $tmp_dir/seq_test.log\n";
     print STDERR "CMD: $cmdString\n";
     system $cmdString;
 }

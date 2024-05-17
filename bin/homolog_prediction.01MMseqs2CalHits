@@ -176,7 +176,7 @@ unless ( -e "e.HSP2Hit.ok" ) {
     # 5.2 对HSPs进行分隔合并成Hits，再对Hits进行过滤
     print STDERR "\n5.2. Spliting the HSPs for different gene copys, and combining the HSPs from a intron gene to a Hit, and then filtring Hits.\n";
     open OUT, ">", "output.Hit.tab" or die "Can not create file $pwd/output.Hit.tab, $!";
-    print OUT "#QueryID\tTargetID\tCIP\tAlignmentLength\tQueryLength\tTargetLength\tQueryStart\tQueryEnd\tTargetStart\tTargetEnd\tEvalue\tBitScore\Query_coverage\tQuery_HSPs\tTarget_HSPs\n";
+    print OUT "#QueryID\tTargetID\tCIP\tAlignmentLength\tQueryLength\tTargetLength\tQueryStart\tQueryEnd\tTargetStart\tTargetEnd\tEvalue\tBitScore\tQuery_coverage\tQuery_HSPs\tTarget_HSPs\n";
     # 解析HSPs，并合并HSPs。一条基因组序列和一个同源蛋白的Hit，可能包含多个HSPs，对应多个多拷贝的基因区域。
     my ($line_num1, $line_num2) = (0, 0);
     foreach ( sort keys %input_info ) {

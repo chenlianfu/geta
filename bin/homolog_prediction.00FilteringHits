@@ -1,0 +1,591 @@
+#!/usr/bin/env perl
+
+use strict;
+use Getopt::Long;
+use Cwd qw/abs_path getcwd cwd/;
+use File::Basename;
+
+my $binPath = dirname($0);
+
+my $usage = <<USAGE;
+Usage:
+    $0 [options] homolog_proteins.fasta genome_seq.fasta > out.tab
+
+    本程序用于将全基因组序列和多个临近物种的全基因组同源蛋白使用MMseqs2软件进行比对，得到类似BLAST outfmt 6格式，由制表符分割的比对结果。
+    输出结果中，每一行代表同源蛋白匹配到基因组某一区域的比对结果。结果文件有16列：query同源蛋白ID、target参考基因组序列ID、CIP、Alignment Length、Query Length、Target Length、Query start、Query end、Target start、Target end、E-vaule、BitScore、Query coverage、Query HSPs、Target HSPs和Group_Region。其表头标识出了每一列的意义，其中：CIP，cumulative identity percentage，表示Hit累积的identity百分比；Query coverage，表示对query序列的累积覆盖率；Query HSPs，由逗号分隔在同源蛋白序列上的HSP（High-scoring Segment Pair）；Target HSPs，由逗号分隔在基因组序列上的HSPs；Group Region，多个同源蛋白在基因组序列上的匹配区域，表示对应同源基因的所在区域。
+
+    程序分析流程：（1）首先，调用MMseq2软件将多个物种的同源蛋白序列作为query，比对到全基因组序列上，得到比对结果。（2）对HSPs比对结果使用identity和evalue进行过滤。（3）由于一个基因可能在基因组中有多个拷贝，或基因中有introns，导致一个同源蛋白可能有多个HSPs比对结果。因此，再将多拷贝基因的HSPs分开，将可变剪接导致的多个HSPs合并为一个Hit。（4）对Hits使用identity、evaule和query coverage进行过滤。（5）最后，对匹配到相同基因组位点的同源蛋白比对Hits进行过滤，仅保留一定数量(最高10个)的高得分Hits。
+
+    程序在临时文件夹中生成了中间文件：
+    output.HSP.tab，MMseqs2程序的结果文件，包含所有HSPs信息；
+    output.Hit.tab，将HSPs过滤，合并为Hit，并对Hit进行了过滤。每行表示一个Hit信息，即同源蛋白和基因组上基因区域的比对结果。该文件有表头信息，第三列是整体的Identity百分比，第7-10行是整体比对的起始和结束位点，第11行是最优HSP的evalue值，第12行是多个HSPs的得分之和，最后两列是详细的HSPs信息。
+
+    --cpu <int>    default: 8
+    设置CPU线程数。该参数值将传递给mmseqs命令的--threads参数。
+
+    --HSP_identity <float>    default: 0.1
+    --HSP_evalue <float>    default: 1e-3
+    设置HSP (High-scoring Segment Pair) 阈值，对MMseqs2的比对结果进行过滤。MMseqs2程序分析完毕后，每行表示同源蛋白某一区域和基因组序列某一区域的比对结果，即一个HSP。通过设置identity和evalue阈值对所有HSPs结果统一进行过滤。
+
+    --HSP_max_distance <int>    default: 50000
+    --HSP_max_overlap_ratio <float>    default: 0.5
+    设置HSPs分隔或合并为Hits时的阈值参数。由于一个基因可能在基因组中有多个拷贝，或基因中有introns，导致一个同源蛋白可能有多个HSPs比对结果。程序需要将这些HSPs进行分隔和合并。将多拷贝基因的HSPs分开，将可变剪接导致的多个HSPs合并为一个Hit。操作算法：在多个HSPs中找最优HSP(按Evalue和Score排序)，将和最优HSP(组)方向一致、在基因组上距离较近（低于--HSP_max_distance参数设置值，单位bp）且在query蛋白序列上重叠较低（对待加入HSP重叠比例低于--HSP_max_overlap_ratio参数设置值）的HSPs合并为一组；继续于剩下的HSPs继续找最优HSP及其分组；于是将多个HSPs分割成不同的组，每个HSPs组表示一个Hit，即对应一个拷贝的基因区域。
+
+    --identity <float>    default: 0.2
+    --evalue <float>    default: 1e-9
+    --homolog_coverage <float>    default: 0.3
+    设置Hit阈值。Hit的identity为多个HSPs累积的一致性氨基酸数量除以匹配长度的值；Hit的evalue值为其所有HSPs中的最低evalue值；Hit的homolog coverage即其所有HSPs的氨基酸占同源蛋白序列的比例。
+
+    --threshold_Hit_cover_ratio <float>    default: 0.9
+    --threshold_Hit_score_ratio <foat>    default: 0.4
+    --threshold_species_num <int>    default: 2
+    --threshold_Hit_num <int>    default: 10
+    设置以上阈值，在基因组某一匹配区域上最优Hit包含多个其它Hits时，仅保留一定数量(最高10个)的高得分Hits。若Hit A和其它多个Hits之间重叠，且覆盖每个其它Hits区域的 >= 90% 时（此处认为Hit A包含了其它Hits），且Hit A的Evalue、Score得分都优于其它Hits，则对Hit A和其它Hits按Evalue和Score进行排序，挑选较好的Hits，采用以下三种方法过滤一部分Hits：（1）当其它Hit的Score得分低于Hit A Score的一定比例（默认40%）时， 对其Hit进去去除；（2）同一个物种最多保留指定数量（默认2个）的Hits；（3）最多保留指定数量（默认为10个）的较好Hits
+
+    对--threshold_Hit_cover_ratio参数更加详细描述：--threshold_Hit_cover_ratio，设置Hit A包含另外一个Hit B时，要求两个Hits重叠区域对Hit B匹配区域的覆盖比例阈值。当Hit A的Evalue和Score值都优于Hit B，且Hit B >=90%以上的区域和Hit A重叠时，则认为该Hit A包含Hit B，进而考虑对Hit B其进行去除。计算覆盖比例时 ，根据Hit A和Hit B的HSPs信息进行overlap比例计算，分子为Overlap部分的碱基数量，分母为Hit B的HSPs的总碱基数量。
+
+    对--threshold_Hit_score_ratio参数更加详细描述：设置Score比例阈值。当两个BLAST Hits的匹配区域有包含关系时，Hit A包含Hit B，Hit A evalue优于Hit B evalue， 且B Hit Score / A Hit Score低于--threshold_Hit_score_ratio参数设置的阈值，则去除Hit B。
+
+    对--threshold_species_num参数更加详细描述：设置物种数量阈值。若Hit A和包含了多个其它Hits，对这些Hits进行去冗余时，来自同一物种的Hits最多保留--threshold_species_num阈值指定的个数。该参数生效需要subject name中包含物种名称信息。程序识别query name中的关键词species（大小写均可以识别）及其后的字符[a-zA-Z0-9]作为物种名称。例如XP_002436309_2_SpeciesSorghumBicolor，程序识别其物种名称为SpeciesSorghumBicolor。若subject name中不包含关键词species及其后紧跟的物种名称，程序则以整个subject name为物 种名称，从而使本参数不生效。
+
+    对--threshold_Hit_num参数更加详细描述：设置数量阈值。若Hits之间有包含关系时，最多保留指定数量（默认为10个）的较好Hits。分析过程分多步：（1）在第一条基因组序列前3Kb窗口范围有重叠的所有Hits按Evalue从小到大、Score值从大到小、匹配范围从大到小进行排序，然后按顺序对Hits进行后 续分析；（2）根据排序对Evalue值最小的最优Hit进行分析，在所有Hits中检索Score值更低并被最优Hit包含（根据--threshold_Hit_cover_ratio参数分析结果）的Hits，对这些Hits按Evalue和Score进行排序，去除Score值过低的Hits，再同一物种保留最多--threshold_species_num个数的Hits，再最多保留较好的指定数量（--threshold_Hit_num参数设置值）的Hits，删除其余较差的Hits；（3）对剩下未保留也未删除的Hits，延用第二步 的策略，进一步的进行保留和删除操作，进行多轮直至分析完毕所有的Hit数据；（4）对整条基因组序列往后滑动，每次往后滑 动1Kb距离，分析3Kb窗口，鉴定需要删除的的Hits信息。
+
+    --tmp_dir <string>    default: tmp_\$date\$pid
+    程序运行时临时文件夹名称。
+
+    --help    default: None
+    display this help and exit.
+
+USAGE
+if (@ARGV==0){die $usage}
+
+my ($cpu, $HSP_identity, $HSP_evalue, $HSP_max_distance, $HSP_max_overlap_ratio, $identity, $evalue, $homolog_coverage, $threshold_Hit_cover_ratio, $threshold_Hit_score_ratio, $threshold_species_num, $threshold_Hit_num, $tmp_dir, $help_flag);
+GetOptions(
+    "cpu:i" => \$cpu,
+    "HSP_identity:f" => \$HSP_identity,
+    "HSP_evalue:f" => \$HSP_evalue,
+    "HSP_max_distance:i" => \$HSP_max_distance,
+    "HSP_max_overlap_ratio:f" => \$HSP_max_overlap_ratio,
+    "identity:f" => \$identity,
+    "evalue:f" => \$evalue,
+    "homolog_coverage:f" => \$homolog_coverage,
+    "threshold_Hit_cover_ratio:f" => \$threshold_Hit_cover_ratio,
+    "threshold_Hit_score_ratio:f" => \$threshold_Hit_score_ratio,
+    "threshold_species_num:i" => \$threshold_species_num,
+    "threshold_Hit_num:i" => \$threshold_Hit_num,
+    "tmp_dir:s" => \$tmp_dir,
+    "help" => \$help_flag,
+);
+$cpu ||= 8;
+$HSP_identity ||= 0.1;
+$HSP_evalue ||= 1e-3;
+$HSP_max_distance ||= 50000;
+$HSP_max_overlap_ratio ||= 0.5;
+$identity ||= 0.2;
+$evalue ||= 1e-9;
+$homolog_coverage ||= 0.3;
+$threshold_Hit_cover_ratio ||= 0.9;
+$threshold_Hit_score_ratio ||= 0.4;
+$threshold_species_num ||= 2;
+$threshold_Hit_num ||= 10;
+my $date = `date +%Y%m%d%H%M%S`; chomp($date);
+$tmp_dir ||= "tmp_$date$$";
+$tmp_dir = abs_path($tmp_dir);
+mkdir $tmp_dir unless -e $tmp_dir;
+
+if ( $help_flag ) { die $usage }
+
+my $input_protein = abs_path($ARGV[0]);
+my $input_genome = abs_path($ARGV[1]);
+
+my $pwd = `pwd`; print STDERR "##########\nPWD (Current Directory): $pwd";
+print STDERR (localtime) . "CMD (Main Program): $0 " . join(" ", @ARGV) . "\n##########\n";
+
+
+# 1 运行 mmseqs createdb 命令，将蛋白序列做成数据库。
+print STDERR "\n1. run the command \"mmseqs createdb\", to create homolog protein databases.\n";
+chdir $tmp_dir;
+my $pwd = `pwd`; print STDERR "PWD: $pwd";
+my $cmdString = "mmseqs createdb $input_protein homolog &> a.mmseqs_createdb_homolog.log";
+unless (-e "a.mmseqs_createdb_homolog.ok") {
+    print STDERR (localtime) . ": CMD: $cmdString\n";
+    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+    open OUT, ">", "a.mmseqs_createdb_homolog.ok" or die $!; close OUT;
+}
+else {
+    print STDERR "CMD(Skipped): $cmdString\n";
+}
+
+# 2 运行 mmseqs createdb 命令，将基因组序列做成数据库。
+print STDERR "\n2. run the command \"mmseqs createdb\", to create genome database.\n";
+my $pwd = `pwd`; print STDERR "PWD: $pwd";
+my $cmdString = "mmseqs createdb $input_genome genome &> b.mmseqs_createdb_genome.log";
+unless (-e "b.mmseqs_createdb_genome.ok") {
+    print STDERR (localtime) . ": CMD: $cmdString\n";
+    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+    open OUT, ">", "b.mmseqs_createdb_genome.ok" or die $!; close OUT;
+}
+else {
+    print STDERR "CMD(Skipped): $cmdString\n";
+}
+
+# 3 运行 mmseqs search 命令将蛋白序列（query）和基因组序列（target）进行比对。
+print STDERR "\n3. run the command \"mmseqs search\", to align homolog protein sequences (query) to genome sequences (target).\n";
+my $pwd = `pwd`; print STDERR "PWD: $pwd";
+my $cmdString = "mmseqs search homolog genome alignment mmseqs_search.tmp --threads $cpu &> c.mmseqs_search.log";
+unless (-e "c.mmseqs_search.ok") {
+    print STDERR (localtime) . ": CMD: $cmdString\n";
+    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+    open OUT, ">", "c.mmseqs_search.ok" or die $!; close OUT;
+}
+else {
+    print STDERR "CMD(Skipped): $cmdString\n";
+}
+
+# 4 运行 mmseqs convertalis 输出BLAST格式比对结果。
+print STDERR "\n4. run the command \"mmseqs convertalis\", and output the alignment results with BLAST format.\n";
+my $pwd = `pwd`; print STDERR "PWD: $pwd"; chomp($pwd);
+my $cmdString = "mmseqs convertalis homolog genome alignment output.HSP.tab --threads $cpu --format-output query,target,pident,alnlen,qlen,tlen,qstart,qend,tstart,tend,evalue,bits &> d.mmseqs_convertalis.log";
+unless (-e "d.mmseqs_convertalis.ok") {
+    print STDERR (localtime) . ": CMD: $cmdString\n";
+    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+    open OUT, ">", "d.mmseqs_convertalis.ok" or die $!; close OUT;
+}
+else {
+    print STDERR "CMD(Skipped): $cmdString\n";
+}
+
+# 5. 将比对HSP结果转换为Hit结果，并进行过滤。
+unless ( -e "e.HSP2Hit.ok" ) {
+    # 5.1 对 MMseqs2 的HSPs结果进行过滤。
+    print STDERR "\n5.1 filtering HSPs with threshold: identity >= $HSP_identity && E-value <= $HSP_evalue.\n";
+    my ($line_num1, $line_num2) = (0, 0);
+    my %input_info;
+    open IN, "output.HSP.tab" or die "Can not open file $pwd/out.tab, $!";
+    while (<IN>) {
+        $line_num1 ++;
+        @_ = split /\t/;
+        if ( $_[2] >= $HSP_identity && $_[-2] <= $HSP_evalue ) {
+            $line_num2 ++;
+            $input_info{"$_[0]\t$_[1]"} .= $_;
+        }
+    }
+    close IN;
+    print STDERR "The MMseqs result have $line_num1 HSPs, and $line_num2 HSPs were picked out for downstrem analysis.\n";
+
+    # 5.2 对HSPs进行分隔合并成Hits，再对Hits进行过滤
+    print STDERR "\n5.2. Spliting the HSPs for different gene copys, and combining the HSPs from a intron gene to a Hit, and then filtring Hits.\n";
+    open OUT, ">", "output.Hit.tab" or die "Can not create file $pwd/output.Hit.tab, $!";
+    print OUT "#QueryID\tTargetID\tCIP\tAlignmentLength\tQueryLength\tTargetLength\tQueryStart\tQueryEnd\tTargetStart\tTargetEnd\tEvalue\tBitScore\tQuery_coverage\tQuery_HSPs\tTarget_HSPs\n";
+    # 解析HSPs，并合并HSPs。一条基因组序列和一个同源蛋白的Hit，可能包含多个HSPs，对应多个多拷贝的基因区域。
+    my ($line_num1, $line_num2) = (0, 0);
+    foreach ( sort keys %input_info ) {
+        # 对一个query同源蛋白和一条基因组序列比对的HSPs进行分析，得到每行一个Hit结果
+        my $output = &parsingHSP($input_info{$_});
+        # 当前数据有14列：#QueryID\tTargetID\tIdentityPercentage\tAlignmentLength\tQueryLength\tTargetLength\tQueryStart\tQueryEnd\tTargetStart\tTargetEnd\tEvalue\tBitScore\tQuery_HSPs\tTarget_HSPs。其中第13列信息包含了query蛋白序列的HSPs及其Identity和匹配长度信息，可以用于计算Hit的累积identity和累积覆盖率，并用于过滤Hit。
+        # 对每行Hit信息进行过滤。
+        foreach ( split /\n/, $output ) {
+            #print "$_\n";
+            $line_num1 ++;
+            @_ = split /\t/;
+            # 要求Evalue优于阈值
+            if ( $_[10] <= $evalue ) {
+                # 再计算累积identity
+                my ($CIP_fenzi, $CIP_fenmu, $CIP) = (0, 0, 0);
+                my @HSP_query;
+                foreach ( split /,/, $_[-2] ) {
+                    my @value = split /-/;
+                    push @HSP_query, "$value[0]-$value[1]";
+                    $CIP_fenzi += $value[2] * $value[3];
+                    $CIP_fenmu += $value[3];
+                }
+                $CIP = int($CIP_fenzi / $CIP_fenmu * 100 + 0.5) / 100 if $CIP_fenmu > 0;
+                # 要求identity优于阈值
+                if ( $CIP >= $identity * 100 ) {
+                    # 再计算对同源蛋白的覆盖率
+                    my ($HSP_query_match_length, $HSP_query_match_coverage) = (0, 0);
+                    $HSP_query_match_length = &match_length(@HSP_query);
+                    $HSP_query_match_coverage = $HSP_query_match_length / $_[4] if $_[4];
+                    # 要求覆盖率优于阈值
+                    if ( $HSP_query_match_coverage >= $homolog_coverage ) {
+                        $line_num2 ++;
+                        $_[2] = $CIP;
+                        $_[3] = $CIP_fenmu;
+                        my $Target_HSPs = pop @_;
+                        my $Query_HSPs = pop @_;
+                        $Query_HSPs = join ",", @HSP_query;
+                        push @_, ($HSP_query_match_coverage, $Query_HSPs, $Target_HSPs);
+                        $_ = join("\t", @_) . "\n";
+                        print OUT;
+                    }
+    
+                }
+            }
+        }
+    }
+    close OUT;
+    
+    print STDERR "HSPs were combined to $line_num1 Hits, and $line_num2 Hits were reserved with thresholds identity >= $identity && homolog coverage >= $homolog_coverage && E-value <= $evalue.\n";
+
+    open OUT, ">", "e.HSP2Hit.ok" or die $!; close OUT;
+}
+else {
+    print STDERR "\n(Skipped): 5.1 filtering HSPs with threshold: identity >= $HSP_identity && E-value <= $HSP_evalue.\n";
+    print STDERR "\n(Skipped): 5.2. Spliting the HSPs for different gene copys, and combining the HSPs from a intron gene to a Hit, and then filtring Hits.\n";
+}
+    
+# 7. 对匹配到相同基因组位点的同源蛋白Hits进行过滤，仅保留一定数量(最高10个)的高得分Hits。
+print STDERR "\n7. retain a part of excellent Hits at each gene locus.\n";
+open IN, "output.Hit.tab" or die "Can not open file $pwd/output.HSP.tab, $!";
+my %combine_HSP_to_Hit;
+<IN>;
+while (<IN>) {
+    chomp;
+    $combine_HSP_to_Hit{$_} = 1;
+}
+# 对Hit进行索引
+my (%index, %score, %evalue, %alignment_length, %hits_all, %target, %target_start, %target_end);
+foreach my $line ( keys %combine_HSP_to_Hit ) {
+    $hits_all{$line} = 1;
+    @_ = split /\t/, $line;
+    my ($start, $end) = ($_[8], $_[9]);
+    ($start, $end) = ($end, $start) if $start > $end;
+    $start = int($start / 1000);
+    $end = int($end / 1000) + 1;
+    # 让每个索引位点，额外包括侧翼1Kb的区域。
+    $start --; $start = 0 if $start < 0; $end ++;
+    foreach ( $start .. $end ) {
+        $index{$_[1]}{$_}{$line} = 1;
+        $score{$line} = $_[11];
+        $evalue{$line} = $_[10];
+        $alignment_length{$line} = abs($_[8] - $_[9]) + 1;
+        $target{$line} = $_[1];
+        $target_start{$line} = $_[8];
+        $target_end{$line} = $_[9];
+    }
+}
+close IN;
+#print STDERR "index completed.\n";
+
+my %hits_filtered;
+#print STDERR "Seq_ID\tIndex_Num\tHit_Num_in_this_round\tRemain_Hit_num\n";
+foreach my $seq_ID ( sort keys %index ) {
+    foreach my $index ( sort {$a <=> $b} keys %{$index{$seq_ID}} ) {
+        my %hit;
+        foreach ( keys %{$index{$seq_ID}{$index}} ) {
+            $hit{$_} = $index{$seq_ID}{$index}{$_} unless exists $hits_filtered{$_};
+        }
+        #my $num1 = %hit; print STDERR "Round1: $seq_ID\t$index\t$num1\t$num1\n";
+        next unless %hit;
+        my @hit = sort { $evalue{$a} <=> $evalue{$b} or $score{$b} <=> $score{$a} or $alignment_length{$b} <=> $alignment_length{$a} or $a cmp $b } keys %hit;
+
+        my %remain;
+        while (@hit) {
+            # 对一个目标Hit A进行分析，找到所有被目标Hit包含且匹配效果更差的Hits：evalue值 >= Hit A && score值 <= Hit A。由于经过了排序，Hit A就是evalue值最低(优)的。
+            my $hit = shift @hit;
+            #print  "BEST HSP: $hit\n";
+            my (%be_contained_hit, @hit_A_group_pos, %hit_A_group_hit);
+            $be_contained_hit{$hit} = 1;
+            @_ = split /\t/, $hit;
+            my $score = $_[11];
+            foreach ( @hit ) {
+                @_ = split /\t/;
+                my $overlap_ratio = 0;
+                $overlap_ratio = &cal_overlap_ratio($hit, $_);
+                # 寻找和Hit A冗余的Hits
+                if ( $overlap_ratio >= $threshold_Hit_cover_ratio ) {
+                    # 第一步剔除方法：去除Score得分低于Hit A Score的一定比例（默认40%）Hits。
+                    if ( $_[11] < $score * $threshold_Hit_score_ratio ) {
+                        delete $hit{$_};
+                        $hits_filtered{$_} = 1;
+                        #print  "DELETE1: $_\n";
+                    }
+                    elsif ( $_[11] < $score ) {
+                        $be_contained_hit{$_} = 1;
+                    }
+                }
+            }
+            # 对冗余的Hits执行保留和删除操作
+            my @be_contained_hit = sort { $evalue{$a} <=> $evalue{$b} or $score{$b} <=> $score{$a} or $alignment_length{$b} <=> $alignment_length{$a} or $a cmp $b } keys %be_contained_hit;
+            my $keep_num = 0;
+            my %species_num;
+            foreach ( @be_contained_hit ) {
+                # 第二步剔除方法：同一个物种最多保留指定数量（默认2个）的Hits。
+                @_ = split /\t/;
+                my $subject_species = $_[0];
+                $subject_species = $1 if $_[0] =~ m/(species[a-zA-Z0-9]+)/i;
+                $species_num{$subject_species} ++;
+                if ( $species_num{$subject_species} > $threshold_species_num ) {
+                    $hits_filtered{$_} = 1;
+                    delete $hit{$_};
+                    #print "DELETE2: $_\n";
+                    next;
+                }
+                $keep_num ++;
+                # 第三步剔除方法：最多保留指定数量（默认为10个）的较好Hits。
+                if ( $keep_num > $threshold_Hit_num ) {
+                    $hits_filtered{$_} = 1;
+                    #print "DELETE3: $_\n";
+                }
+                else {
+                    #print "Remain: $_\n";
+                    $remain{$_} = 1;
+                    push @hit_A_group_pos, ($_[8], $_[9]);
+                    $hit_A_group_hit{$_} = 1;
+                }
+                delete $hit{$_};
+            }
+            # 得到Hit A group的区域，再于结果尾部增加一列Hit Group Region信息
+            @hit_A_group_pos = sort {$a <=> $b} @hit_A_group_pos;
+            foreach ( keys %hit_A_group_hit ) {
+                $hits_all{$_} = "$_\t$hit_A_group_pos[0]-$hit_A_group_pos[-1]";
+            }
+
+            # 下一轮的Hits，则去除了所有被保留和被删除的Hits。
+            @hit = sort { $evalue{$a} <=> $evalue{$b} or $score{$b} <=> $score{$a} or $alignment_length{$b} <=> $alignment_length{$a} or $a cmp $b } keys %hit;
+            #my $hit_num = @hit; my $remain_num = %remain; print STDERR "RoundNext: $seq_ID\t$index\t$hit_num\t$remain_num\n";
+        }
+    }
+}
+
+print "#QueryID\tTargetID\tCIP\tAlignmentLength\tQueryLength\tTargetLength\tQueryStart\tQueryEnd\tTargetStart\tTargetEnd\tEvalue\tBitScore\tQuery_coverage\tQuery_HSPs\tTarget_HSPs\tGroup_Region\n";
+foreach ( sort { $target{$a} cmp $target{$b} or $target_start{$a} <=> $target_start{$b} or $target_end{$a} <=> $target_end{$b} or $a cmp $b } keys %hits_all ) {
+    print "$hits_all{$_}\n" unless exists $hits_filtered{$_};
+}
+my $hits_all_num = %hits_all;
+my $hits_filtered_num = %hits_filtered;
+my $remain_num = $hits_all_num - $hits_filtered_num;
+print STDERR "Total Hits Number: $hits_all_num\nFiltered Hits Number: $hits_filtered_num\nRemained Hits Numer: $remain_num\n";
+
+
+# 本子程序用于解析HPSs，得到一个Hit结果。
+sub parsingHSP {
+    my $info = $_[0];
+    chomp($info);
+
+    # 去冗余。可能会出现相同的匹配区域出现两种不同的比对结果。例如：
+    # NC_029256.1     XP_002437861_1  35.48   372     138     102     6381589 6381819 289     365     1.7e-58 100.1   39.2    0.13    92.37
+    # NC_029256.1     XP_002437861_1  41.53   366     121     93      6381589 6381819 289     365     5.9e-67 100.1   44.24   0.13    92.92
+    my (%lines, @lines);
+    foreach ( split /\n/, $info ) {
+        @_ = split /\t/;
+        $lines{"$_[0]\t$_[1]\t$_[6]\t$_[7]\t$_[8]\t$_[9]"}{$_} = $_[10];
+    }
+    foreach ( keys %lines ) {
+        @_ = sort {$lines{$_}{$a} <=> $lines{$_}{$b}} keys %{$lines{$_}};
+        push @lines, $_[0];
+    }
+    my %lines;
+    foreach (@lines) { $lines{$_} = 1; }
+
+    my @out;
+    while ( @lines ) {
+        # 寻找最佳HSP，最优的evalue和score值。
+        my (%evalue, %score);
+        foreach ( @lines ) {
+            @_ = split /\t/;
+            $evalue{$_} = $_[10];
+            $score{$_} = $_[11];
+        }
+        @lines = sort {$evalue{$a} <=> $evalue{$b} or $score{$b} <=> $score{$a} or $a cmp $b} @lines;
+        my $best_HSP = shift @lines;
+        delete $lines{$best_HSP};
+
+        # 通过最佳HSP，确定匹配方向。
+        @_ = split /\t/, $best_HSP;
+        my @best_field = @_;
+        my ($direction_query, $direction_subject) = ("plus", "plus");
+        $direction_query = "minus" if $_[6] > $_[7];
+        $direction_subject = "minus" if $_[8] > $_[9];
+
+        my @query_region = ("$_[6]-$_[7]-$_[2]-$_[3]");
+        my @subject_region = ("$_[8]-$_[9]");
+        my @query_site = ($_[6], $_[7]);
+        my @subject_site = ($_[8], $_[9]);
+        my $score_out = $_[11];
+
+        # 对除最佳HSP外的其余HSPs，按距离从近到远进行分析。若距离低于--HSP_max_distance参数设定的值，且在同源蛋白上HSPs的重叠比例低于--HSP_max_overlap_ratio参数设定值，则两临近HSPs处于一个Hit，并入到HSP组中。继续对其余HSP进行分析和HSP组的距离，直至HSP组不再增加。
+        my @HSPs = keys %lines;
+        my $HSP_group_add = 1;
+        while ( $HSP_group_add ) {
+            # 对HSPs按离最佳HSP组从近到远排序
+            my %distance_to_best_HSP_group;
+            @subject_site = sort {$a <=> $b} @subject_site;
+            foreach my $HSP ( @HSPs ) {
+                my @HSP_filed = split /\t/, $HSP;
+                my $distance_value = 0;
+                my ($HSP_filed_start, $HSP_filed_end) = ($HSP_filed[8], $HSP_filed[9]);
+                ($HSP_filed_start, $HSP_filed_end) = ($HSP_filed[9], $HSP_filed[8]) if $HSP_filed[9] < $HSP_filed[8];
+                $distance_value = $HSP_filed_start - $subject_site[-1] if $HSP_filed_start > $subject_site[-1];
+                $distance_value = $subject_site[0] - $HSP_filed_end if $subject_site[0] > $HSP_filed_end;
+                $distance_to_best_HSP_group{$HSP} = $distance_value;
+            }
+            @HSPs = sort { $distance_to_best_HSP_group{$a} <=> $distance_to_best_HSP_group{$b} } @HSPs;
+
+            # 对距离HSP组从近到远的HSP进行分析
+            my $add_OK = 0;
+            foreach ( @HSPs ) {
+                # 若距离开始超出阈值，则直接退出foreach循环。
+                last if $distance_to_best_HSP_group{$_} > $HSP_max_distance;
+                # 分析HSP方向，需要一致
+                @_ = split /\t/;
+                #print "TEST: $distance_to_best_HSP_group{$_}\t$_[8]-$_[9]\t$subject_region[0]-$subject_region[-1]\n";
+                my ($direction_query1, $direction_subject1) = ("plus", "plus");
+                $direction_query1 = "minus" if $_[6] > $_[7];
+                $direction_subject1 = "minus" if $_[8] > $_[9];
+                # 若临近的HSP和最优HSP方向一致
+                if ($direction_query eq $direction_query1 && $direction_subject eq $direction_subject1) {
+                    # 继续分析临近HSP在query同源蛋白上重叠率
+                    my $HSPA = join ",", @query_region;
+                    my $HSPB = "$_[6]-$_[7]";
+                    my $overlap_ratio_for_B = &cal_overlap_ratio($HSPA, $HSPB);
+                    # 若重叠率低于阈值
+                    if ( $overlap_ratio_for_B <= $HSP_max_overlap_ratio ) {
+                        # 则将HSP添加到HSP组。
+                        push @query_region, "$_[6]-$_[7]-$_[2]-$_[3]";
+                        push @subject_region, "$_[8]-$_[9]";
+                        push @query_site, ($_[6], $_[7]);
+                        push @subject_site, ($_[8], $_[9]);
+                        $score_out += $_[11];
+                        delete $lines{$_};
+                        $add_OK = 1;
+                    }
+                }
+            }
+
+            # 若成功增加了临近的HSP，则进行下一轮增加，直至不能增加HSP为止。
+            if ( $add_OK == 1 ) {
+                $HSP_group_add = 1;
+            }
+            else {
+                $HSP_group_add = 0;
+            }
+        }
+
+        @query_site = sort {$a <=> $b} @query_site;
+        @subject_site = sort {$a <=> $b} @subject_site;
+        my $query_region = "$query_site[0]\t$query_site[-1]";
+        my $subject_region = "$subject_site[0]\t$subject_site[-1]";
+        $query_region = "$query_site[-1]\t$query_site[0]" if $direction_query eq "minus";
+        $subject_region = "$subject_site[-1]\t$subject_site[0]" if $direction_subject eq "minus";
+        ($best_field[6], $best_field[7]) = split /\t/, $query_region;
+        ($best_field[8], $best_field[9]) = split /\t/, $subject_region;
+        $best_field[11] = $score_out;
+
+        if ( $direction_query eq "minus" ) {
+            @query_region = sort {$b <=> $a} @query_region;
+        }
+        else {
+            @query_region = sort {$a <=> $b} @query_region;
+        }
+        if ( $direction_subject eq "minus" ) {
+            @subject_region = sort {$b <=> $a} @subject_region;
+        }
+        else {
+            @subject_region = sort {$a <=> $b} @subject_region;
+        }
+        # 在Hit尾部增加两列信息，Query的HSP匹配区域。
+        push @best_field, join(",", @query_region);
+        push @best_field, join(",", @subject_region);
+        push @out, join("\t", @best_field);
+
+        @lines = keys %lines;
+    }
+    return join("\n", @out);
+    #print "TEST: $info\n" if @out >= 2;
+}
+
+sub get_distance {
+    my $out = 0;
+    if ( $_[0] <= $_[3] && $_[1] >= $_[2] ) {
+        my $value1 = abs($_[2] - $_[1]) - 1;
+        my $value2 = abs($_[0] - $_[3]) - 1;
+        $out = $value1;
+        $out = $value2 if $value2 < $value1;
+        $out = 0 - $out;
+    }
+    elsif ( $_[2] > $_[1] )  {
+        $out = $_[2] - $_[1] - 1;
+    }
+    elsif ( $_[0] > $_[3] ) {
+        $out = $_[0] - $_[3] - 1;
+    }
+    return $out;
+}
+
+# 本程序用于计算Hit A和Hit B的重叠比例。前者是Evalue值更小的Hit。程序计算对B的覆盖率。
+sub cal_overlap_ratio {
+    my ($hitA, $hitB) = @_;
+    #print STDERR "HitA: $hitA\nHitB: $hitB\n";
+
+    # 得到Hit A和Hit B的HSPs信息
+    my (@HSPA, @HSPB);
+    @_ = split /\t/, $hitA;
+    foreach ( split /,/, $_[-1] ) {
+        push @HSPA, "$1\t$2" if m/(\d+)-(\d+)/;
+        #print STDERR "HSPA:$1\t$2\n";
+    }
+    @_ = split /\t/, $hitB;
+    foreach ( split /,/, $_[-1] ) {
+        push @HSPB, "$1\t$2" if m/(\d+)-(\d+)/;
+        #print STDERR "HSPB:$1\t$2\n";
+    }
+
+    # 计算Hit A和Hit B的重叠区域
+    my @overlap;
+    foreach my $HSPA ( @HSPA ) {
+        my ($startA, $endA) = split /\t/, $HSPA;
+        ($startA, $endA) = ($endA, $startA) if $startA > $endA;
+        foreach my $HSPB ( @HSPB ) {
+            my ($startB, $endB) = split /\t/, $HSPB;
+            ($startB, $endB) = ($endB, $startB) if $startB > $endB;
+            if ( $startA <= $endB && $startB <= $endA ) {
+                my @sites = sort { $a <=> $b } ($startA, $endA, $startB, $endB);
+                push @overlap, "$sites[1]\t$sites[2]";
+            }
+        }
+    }
+    #foreach (@overlap) { print STDERR "Overlap: $_\n"; }
+
+    # 计算重叠部分和HitB的碱基数
+    my $overlap_length = &match_length(@overlap);
+    my $HSPB_length = &match_length(@HSPB);
+    my $ratio = 0;
+    $ratio = $overlap_length / $HSPB_length if $HSPB_length;
+    #print join(",", @overlap) . "\t$overlap_length\t$HSPB_length\t$ratio\n";
+
+    return $ratio;
+}
+
+sub match_length {
+    my @inter_sorted_site;
+    foreach (@_) {
+        my @aaa = $_ =~ m/(\d+)/g;
+        @aaa = sort { $a <=> $b } @aaa;
+        push @inter_sorted_site, "$aaa[0]\t$aaa[1]";
+    }
+    @inter_sorted_site = sort { $a <=> $b } @inter_sorted_site;
+
+    my $out_site_number = 0;
+    my $former_region = shift @inter_sorted_site;
+    my @aaa = $former_region =~ m/(\d+)/g;
+    $out_site_number += ($aaa[1] - $aaa[0] + 1) if @aaa;
+    foreach (@inter_sorted_site) {
+        my @former_region = $former_region =~ m/(\d+)/g;
+        my @present_region = $_ =~ m/(\d+)/g;
+
+        if ($present_region[0] > $former_region[1]) {
+            $out_site_number += ($present_region[1] - $present_region[0] + 1);
+            $former_region = $_;
+        }
+        elsif ($present_region[1] > $former_region[1]) {
+            $out_site_number += ($present_region[1] - $former_region[1]);
+            $former_region = $_;
+        }
+        else {
+            next
+        }
+    }
+    return $out_site_number;
+}
+

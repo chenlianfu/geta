@@ -27,7 +27,7 @@ my $genome_size = 0;
 open IN, $genome_file or die "Can not open file $genome_file, $!";
 while (<IN>) {
     next if m/^>/;
-	chomp;
+    chomp;
     $genome_size += length($_);
 }
 close IN;
@@ -134,9 +134,10 @@ print "-------------------------------------------------------\n";
 printf "Total\t$total_repeat_num\t$total_repeat_size\t%.2f\%\n", $total_repeat_ratio;
 
 # 输出非散在重复序列的统计信息
-my $nonInterspersed_repeat_num = $nonInterspersed{"num"};
+my ($nonInterspersed_repeat_num, $nonInterspersed_size) = (0, 0);
+$nonInterspersed_repeat_num = $nonInterspersed{"num"} if $nonInterspersed{"num"};
 my @nonInterspersed_region = keys %{$nonInterspersed{"regions"}};
-my $nonInterspersed_size = &collect_length(@nonInterspersed_region);
+$nonInterspersed_size = &collect_length(@nonInterspersed_region) if @nonInterspersed_region;
 my $nonInterspersed_ratio = int($nonInterspersed_size / $genome_size * 10000) / 100;
 printf "    Non-interspersed Repeats\t$nonInterspersed_repeat_num\t$nonInterspersed_size\t%.2f\%\n", $nonInterspersed_ratio;
 
@@ -148,32 +149,38 @@ foreach (@class_nonInterspersed) {
     $class_nonInterspersed_sort{$_} = &collect_length(@region);
 }
 foreach my $class (sort {$class_nonInterspersed_sort{$b} <=> $class_nonInterspersed_sort{$a}} keys %class_nonInterspersed_sort) {
-    print "        $class\t$stats2{$class}{\"num\"}\t";
+    my ($num, $length) = (0, 0);
+    $num = $stats2{$class}{"num"} if $stats2{$class}{"num"};
+    print "        $class\t$num\t";
     my @length = keys %{$stats2{$class}{"regions"}};
-    my $length = &collect_length(@length);
+    $length = &collect_length(@length) if @length;
     my $ratio = int($length / $genome_size * 10000) / 100;
     printf "$length\t%.2f\%\n", $ratio;
 
     foreach my $subclass (sort keys %{$stats1{$class}}) {
-        print "            $subclass\t$stats1{$class}{$subclass}{\"num\"}\t";
+        my ($num, $length) = (0, 0);
+        $num = $stats1{$class}{$subclass}{"num"} if $stats1{$class}{$subclass}{"num"};
+        print "            $subclass\t$num\t";
         my @length = keys %{$stats1{$class}{$subclass}{"regions"}};
-        my $length = &collect_length(@length);
+        $length = &collect_length(@length) if @length;
         my $ratio = int($length / $genome_size * 10000) / 100;
         printf "$length\t%.2f\%\n", $ratio;
     }
 }
 
 # 输出散在重复序列的统计信息
-my $Interspersed_repeat_num = $Interspersed{"num"};
+my ($Interspersed_repeat_num, $Interspersed_size) = (0, 0);
+$Interspersed_repeat_num = $Interspersed{"num"} if $Interspersed{"num"};
 my @Interspersed_region = keys %{$Interspersed{"regions"}};
-my $Interspersed_size = &collect_length(@Interspersed_region);
+$Interspersed_size = &collect_length(@Interspersed_region) if @Interspersed_region;
 my $Interspersed_ratio = int($Interspersed_size / $genome_size * 10000) / 100;
 printf "    Interspersed Repeats\t$Interspersed_repeat_num\t$Interspersed_size\t%.2f\%\n", $Interspersed_ratio;
 
 # 输出逆转录转座子的统计信息
-my $Retroelements_num = $Retroelements{"num"};
+my ($Retroelements_num, $Retroelements_size) = (0, 0);
+$Retroelements_num = $Retroelements{"num"} if $Retroelements{"num"};
 my @Retroelements_region = keys %{$Retroelements{"regions"}};
-my $Retroelements_size = &collect_length(@Retroelements_region);
+$Retroelements_size = &collect_length(@Retroelements_region) if @Retroelements_region;
 my $Retroelements_ratio = int($Retroelements_size / $genome_size * 10000) / 100;
 printf "        Retroelements\t$Retroelements_num\t$Retroelements_size\t%.2f\%\n", $Retroelements_ratio;
 
@@ -200,9 +207,11 @@ foreach (@class) {
 }
 @class = sort {$for_sort{$a} <=> $for_sort{$b} or $a cmp $b} keys %for_sort;
 foreach my $class (@class) {
-    print "            $class\t$stats2{$class}{\"num\"}\t";
+    my ($num, $length) = (0, 0);
+    $num = $stats2{$class}{"num"} if $stats2{$class}{"num"};
+    print "            $class\t$num\t";
     my @length = keys %{$stats2{$class}{"regions"}};
-    my $length = &collect_length(@length);
+    $length = &collect_length(@length) if @length;
     my $ratio = int($length / $genome_size * 10000) / 100;
     printf "$length\t%.2f\%\n", $ratio;
 
@@ -214,18 +223,21 @@ foreach my $class (@class) {
     }
     @subclass = sort {$subclass_sort{$b} <=> $subclass_sort{$a}} @subclass;
     foreach my $subclass (@subclass) {
-        print "                $subclass\t$stats1{$class}{$subclass}{\"num\"}\t";
+        my ($num, $length) = (0, 0);
+        $num = $stats1{$class}{$subclass}{"num"} if $stats1{$class}{$subclass}{"num"};
+        print "                $subclass\t$num\t";
         my @length = keys %{$stats1{$class}{$subclass}{"regions"}};
-        my $length = &collect_length(@length);
+        $length = &collect_length(@length) if @length;
         my $ratio = int($length / $genome_size * 10000) / 100;
         printf "$length\t%.2f\%\n", $ratio;
     }
 }
 
 # 输出DNA转座子的统计信息
-my $DNAelements_num = $DNAelements{"num"};
+my ($DNAelements_num, $DNAelements_size) = (0, 0);
+$DNAelements_num = $DNAelements{"num"} if $DNAelements{"num"};
 my @DNAelements_region = keys %{$DNAelements{"regions"}};
-my $DNAelements_size = &collect_length(@DNAelements_region);
+$DNAelements_size = &collect_length(@DNAelements_region) if @DNAelements_region;
 my $DNAelements_ratio = int($DNAelements_size / $genome_size * 10000) / 100;
 printf "        DNA transposons\t$DNAelements_num\t$DNAelements_size\t%.2f\%\n", $DNAelements_ratio;
 
@@ -246,17 +258,21 @@ foreach my $class (@class) {
         }
         @subclass = sort {$subclass_sort{$b} <=> $subclass_sort{$a}} @subclass;
         foreach my $subclass (@subclass) {
-            print "            $subclass\t$stats1{$class}{$subclass}{\"num\"}\t";
+            my ($num, $length) = (0, 0);
+            $num = $stats1{$class}{$subclass}{"num"} if $stats1{$class}{$subclass}{"num"};
+            print "            $subclass\t$num\t";
             my @length = keys %{$stats1{$class}{$subclass}{"regions"}};
-            my $length = &collect_length(@length);
+            $length = &collect_length(@length) if @length;
             my $ratio = int($length / $genome_size * 10000) / 100;
             printf "$length\t%.2f\%\n", $ratio;
         }
     }
     else {
-        print "            $class\t$stats2{$class}{\"num\"}\t";
+        my ($num, $length) = (0, 0);
+        $num = $stats2{$class}{"num"} if $stats2{$class}{"num"};
+        print "            $class\t$num\t";
         my @length = keys %{$stats2{$class}{"regions"}};
-        my $length = &collect_length(@length);
+        $length = &collect_length(@length) if @length;
         my $ratio = int($length / $genome_size * 10000) / 100;
         printf "$length\t%.2f\%\n", $ratio;
     }
@@ -274,16 +290,20 @@ foreach (@class) {
 foreach my $class (@class) {
     my $class_out = $class;
     $class_out = "Rolling-circles" if $class eq "RC";
-    print "        $class_out\t$stats2{$class}{\"num\"}\t";
+    my ($num, $length) = (0, 0);
+    $num = $stats2{$class}{"num"} if $stats2{$class}{"num"};
+    print "        $class_out\t$num\t";
     my @length = keys %{$stats2{$class}{"regions"}};
-    my $length = &collect_length(@length);
+    $length = &collect_length(@length) if @length;
     my $ratio = int($length / $genome_size * 10000) / 100;
     printf "$length\t%.2f\%\n", $ratio;
 
     foreach my $subclass (sort keys %{$stats1{$class}}) {
+        my ($num, $length) = (0, 0);
+        $num = $stats1{$class}{$subclass}{"num"} if $stats1{$class}{$subclass}{"num"};
         print "            $subclass\t$stats1{$class}{$subclass}{\"num\"}\t";
         my @length = keys %{$stats1{$class}{$subclass}{"regions"}};
-        my $length = &collect_length(@length);
+        $length = &collect_length(@length) if @length;
         my $ratio = int($length / $genome_size * 10000) / 100;
         printf "$length\t%.2f\%\n", $ratio;
     }

@@ -14,10 +14,28 @@ Usage:
     perl $0 [options] genome.fasta
 
 For example:
-    perl $0 --RM_species Embryophyta -1 liba.1.fq.gz,libb.1.fq.gz -2 liba.2.fq.gz,libb.2.fq.gz --protein homolog.fasta --augustus_species oryza_sativa_20220608 --out_prefix out --config conf.txt --cpu 80 --gene_prefix OS01Gene --HMM_db /opt/biosoft/hmmer-3.3.1/EggNOG_Eukaryota.hmm genome.fasta
+    perl $0 --genome genome.fasta --RM_species Embryophyta --pe1 liba.1.fq.gz,libb.1.fq.gz --pe2 liba.2.fq.gz,libb.2.fq.gz --protein homolog.fasta --augustus_species genus_species_GETA --out_prefix out --config conf.txt --cpu 80 --gene_prefix GS01Gene --HMM_db /opt/biosoft/bioinfomatics_databases/Pfam/Pfam-A.hmm
 
 Parameters:
 [General]
+    --genome <string>    default: None, required
+    输入需要进行注释的基因组序列FASTA格式文件。当输入了屏蔽重复序列的基因组文件时，可以不使用--RM_species和--RM_lib参数，并添加--no_RepeatModeler参数，从而跳过重复序列分析与屏蔽步骤。此时，推荐输入文件中仅对转座子序列使用碱基N进行硬屏蔽，对简单重复或串联重复使用小写字符进行软屏蔽。
+    input a genome fasta file for annotation. If the nucleotides of a genomic sequence area were masked by lowercase characters or N, it is considered to be repetitive at downstream analysis.
+
+    --RM_species_Dfam | --RM_species <string>    default: None
+    输入一个物种名称，运用Dfam数据库中相应大类物种的HMM数据信息进行重复序列分析。该参数可以设置的表示物种大类的值来自于文件$dirname/RepeatMasker_lineage.txt。例如，设置Eukaryota适合真核生物、Viridiplantae适合植物、Metazoa适合动物、Fungi适合真菌。较新版本的RepeatMasker软件更推荐使用Dfam数据库进行重复序列分析，而不是从2018年至今依然不更新且收费的RepBase数据库了。较新版本RepeatMasker默认带有Dfam数据库，而很多人却往往没法下载并安装RepBase数据库。当输入了该参数，程序会调用RepatMasker软件基于Dfam数据库进行重复序列分析，需要安装好RepeatMasker软件并配置好Dfam数据库。
+
+    --RM_species_RepBase <string>    default: None
+    输入一个物种名称，运用RepBase数据库中相应大类物种的重复核酸序列信息进行重复序列分析。该参数可以设置的表示物种大类的值来自于文件$dirname/RepeatMasker_lineage.txt。例如，设置Eukaryota适合真核生物、Viridiplantae适合植物、Metazoa适合动物、Fungi适合真菌。当输入了该参数，程序会调用RepatMasker软件基于RepBase数据库进行重复序列分析，需要安装好RepeatMasker软件并配置好RepBase数据库。
+    species identifier for RepeatMasker. The acceptable value of this parameter can be found in file $dirname/RepeatMasker_species.txt. Such as, Eukaryota for eucaryon, Fungi for fungi, Viridiplantae for plants, Metazoa for animals. The repeats in genome sequences would be searched aganist the Repbase database when this parameter set. 
+
+    --RM_lib <string>    default: None
+    输入一个FASTA格式文件，运用其中的重复序列数据信息进行全基因组重复序列分析。该文件往往是RepeatModeler软件对全基因组序列进行分析的结果，表示全基因组上的重复序列。程序默认会调用RepeatModeler对全基因组序列进行分析，得到物种自身的重复序列数据库后，再调用RepeatMakser进行重复序列分析。若添加该参数，则程序跳过费时的RepeatModler步骤，减少程序运行时间。程序支持--RM_species_Dfam、--RM_species_RepBase和--RM_lib参数同时使用，则依次使用三种方法进行重复序列分析，并合并三种方法的结果。
+    A fasta file of repeat sequences. Generally to be the result of RepeatModeler. If not set, RepeatModeler will be used to product this file automaticly, which shall time-consuming.
+
+    --no_RepeatModeler    default: None
+    添加该参数后，程序不会运行RepeatModeler步骤，适合直接输入屏蔽了重复序列基因组文件的情形。
+
     --pe1 <string> --pe2 <string>    default: None, Not Required but Recommened.
     fastq format files contain of paired-end RNA-seq data. if you have data come from multi librarys, input multi fastq files separated by comma. the compress file format .gz also can be accepted.
 
@@ -46,12 +64,6 @@ Parameters:
     --genetic_code <int>    default: 1
     设置遗传密码。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。用于设置对基因模型强制补齐时的起始密码子和终止密码子。
     
-    --RM_species <string>    default: None
-    species identifier for RepeatMasker. The acceptable value of this parameter can be found in file $dirname/RepeatMasker_species.txt. Such as, Eukaryota for eucaryon, Fungi for fungi, Viridiplantae for plants, Metazoa for animals. The repeats in genome sequences would be searched aganist the Repbase database when this parameter set. 
-
-    --RM_lib <string>    default: None
-    A fasta file of repeat sequences. Generally to be the result of RepeatModeler. If not set, RepeatModeler will be used to product this file automaticly, which shall time-consuming.
-
     --augustus_species_start_from <string>    default: None
     species identifier for Augustus. The optimization step of Augustus training will start from the parameter file of this species, so it may save much time when setting a close species.
 
@@ -82,7 +94,7 @@ Parameters:
     --keep_all_files_of_6thStep_combineGeneModels    defaults: None
     若使用--delete_unimportant_intermediate_files参数后，默认会删除GETA流程第6步生成的文件夹，再次运行程序会完整运行第6步流程。若再额外添加本参数，则会保留第6步所有数据，再次运行程序，则会根据第6步结果数据直接生成最终结果文件，可以用于修改基因ID前缀。
 
-This script was tested on CentOS 8.4 with such softwares can be run directly in terminal:
+This script was tested on Rocky 9.2 with such softwares can be run directly in terminal:
 01. ParaFly
 02. java (version: 1.8.0_282)
 03. hisat2 (version: 2.1.0)
@@ -94,21 +106,25 @@ This script was tested on CentOS 8.4 with such softwares can be run directly in 
 09. genewise (version: 2.4.1)
 10. augustus/etraining (version: 3.4.0)
 11. diamond (version 2.0.2.140)
+12. mmseqs (version 15-6f452)
 
-Version: 2.6.1
+Version: 2.7.1
 
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($RM_species, $RM_lib, $genome, $out_prefix, $pe1, $pe2, $single_end, $sam, $protein, $cpu, $trimmomatic, $strand_specific, $sam2transfrag, $ORF2bestGeneModels, $augustus_species, $HMM_db, $BLASTP_db, $gene_prefix, $cmdString, $enable_augustus_training_iteration, $config, $use_existed_augustus_species, $augustus_species_start_from, $no_alternative_splicing_analysis, $delete_unimportant_intermediate_files, $keep_all_files_of_6thStep_combineGeneModels, $genetic_code);
+my ($genome, $RM_species, $RM_species_Dfam, $RM_species_RepBase, $RM_lib, $no_RepeatModeler, $out_prefix, $pe1, $pe2, $single_end, $sam, $protein, $cpu, $trimmomatic, $strand_specific, $sam2transfrag, $ORF2bestGeneModels, $augustus_species, $HMM_db, $BLASTP_db, $gene_prefix, $cmdString, $enable_augustus_training_iteration, $config, $use_existed_augustus_species, $augustus_species_start_from, $no_alternative_splicing_analysis, $delete_unimportant_intermediate_files, $keep_all_files_of_6thStep_combineGeneModels, $genetic_code);
 GetOptions(
-    "RM_species:s" => \$RM_species,
-    "RM_lib:s" => \$RM_lib,
     "genome:s" => \$genome,
+    "RM_species:s" => \$RM_species,
+    "RM_species_Dfam:s" => \$RM_species_Dfam,
+    "RM_species_RepBase:s" => \$RM_species_RepBase,
+    "RM_lib:s" => \$RM_lib,
+    "no_RepeatModeler!" => \$no_RepeatModeler,
     "out_prefix:s" => \$out_prefix,
     "pe1:s" => \$pe1,
     "pe2:s" => \$pe2,
-    "S:s" => \$single_end,
+    "se:s" => \$single_end,
     "sam:s" => \$sam,
     "protein:s" => \$protein,
     "cpu:i" => \$cpu,
@@ -132,7 +148,8 @@ GetOptions(
 
 # 输入参数设置
 # 输入基因组序列、同源蛋白序列、重复序列数据库、配置文件、转录组数据、Augustus物种信息、HMM数据库和BLASTP数据库。
-$genome = abs_path($ARGV[0]);
+$genome = abs_path($genome);
+$RM_species_Dfam = $RM_species if ( ! $RM_species_RepBase && $RM_species );
 $protein = abs_path($protein) if $protein;
 $RM_lib = abs_path($RM_lib) if $RM_lib;
 $config = abs_path($config) if $config;
@@ -230,8 +247,8 @@ mkdir "$out_prefix.tmp" unless -e "$out_prefix.tmp";
 chdir "$out_prefix.tmp";
 my $pwd = `pwd`; print STDERR "PWD: $pwd";
 
-# 准备基因组序列：读取FASTA序列以>开始的头部时，去除第一个空及之后的字符；去除基因组序列中尾部的换行符，将所有小写字符碱基变换为大写字符。程序中断后再次运行时，则重新读取新的基因组序列文件，利用新的文件进行后续分析。
-#unless (-e "genome.fasta") {
+# 准备基因组序列：读取FASTA序列以>开始的头部时，去除第一个空及之后的字符；去除基因组序列中尾部的换行符分析。
+unless (-e "genome.fasta") {
     open OUT, ">", "genome.fasta" or die "Can not create file genome.fasta, $!\n";
     open IN, $genome or die "Can not open file $genome, $!\n";
     $_ = <IN>;
@@ -244,14 +261,14 @@ my $pwd = `pwd`; print STDERR "PWD: $pwd";
         }
         else {
             s/\s+?$//g;
-            $_ = uc($_);
+            #$_ = uc($_);
             print OUT;
         }
     }
     print "\n";
     close IN;
     close OUT;
-#}
+}
 $pwd = `pwd`; chomp($pwd);
 $genome = "$pwd/genome.fasta";
 
@@ -267,13 +284,33 @@ print STDERR "Step 0: RepeatMasker and RepeatModeler " . "(" . (localtime) . ")"
 mkdir "0.RepeatMasker" unless -e "0.RepeatMasker";
 unless (-e "0.RepeatMasker.ok") {
     chdir "0.RepeatMasker";
-    mkdir "repeatMasker" unless -e "repeatMasker";
-    chdir "repeatMasker";
-    $pwd = `pwd`; print STDERR "PWD: $pwd";
     
-    # 进行RepeatMasker分析
-    if ( $RM_species ) {
-        $cmdString = "para_RepeatMasker --species $RM_species --cpu $cpu --tmp_dir para_RepeatMasker.tmp $genome &> para_RepeatMasker.log";
+    # 进行RepeatMasker / Dfam分析
+    mkdir "repeatMasker_Dfam" unless -e "repeatMasker_Dfam";
+    chdir "repeatMasker_Dfam";
+    $pwd = `pwd`; print STDERR "PWD: $pwd";
+    if ( $RM_species_Dfam ) {
+        $cmdString = "para_RepeatMasker --species $RM_species_Dfam --engine hmmer --cpu $cpu --tmp_dir para_RepeatMasker.tmp $genome &> para_RepeatMasker.log";
+    }
+    else {
+        $cmdString = "touch RepeatMasker_out.out";
+    }
+    unless (-e "RepeatMasker.ok") {
+        print STDERR (localtime) . ": CMD: $cmdString\n";
+        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+        open OUT, ">", "RepeatMasker.ok" or die $!; close OUT;
+    }
+    else {
+        print STDERR "CMD(Skipped): $cmdString\n";
+    }
+    chdir "../";
+
+    # 进行RepeatMasker / RepBase分析
+    mkdir "repeatMasker_RepBase" unless -e "repeatMasker_RepBase";
+    chdir "repeatMasker_RepBase";
+    $pwd = `pwd`; print STDERR "PWD: $pwd";
+    if ( $RM_species_RepBase ) {
+        $cmdString = "para_RepeatMasker --species $RM_species_RepBase --engine ncbi --cpu $cpu --tmp_dir para_RepeatMasker.tmp $genome &> para_RepeatMasker.log";
     }
     else {
         $cmdString = "touch RepeatMasker_out.out";
@@ -292,7 +329,13 @@ unless (-e "0.RepeatMasker.ok") {
     mkdir "repeatModeler" unless -e "repeatModeler";
     chdir "repeatModeler";
     $pwd = `pwd`; print STDERR "PWD: $pwd";
-    unless ($RM_lib) {
+    if ( $RM_lib ) {
+        $cmdString = "para_RepeatMasker --out_prefix RepeatModeler_out --lib $RM_lib --cpu $cpu --tmp_dir para_RepeatMasker.tmp $genome &> para_RepeatMasker.log";
+    }
+    elsif ( $no_RepeatModeler ) {
+        $cmdString = "touch RepeatModeler_out.out";
+    }
+    else {
         $cmdString = "BuildDatabase -name species -engine ncbi $genome";
         unless (-e "BuildDatabase.ok") {
             print STDERR (localtime) . ": CMD: $cmdString\n";
@@ -307,7 +350,7 @@ unless (-e "0.RepeatMasker.ok") {
         # 若RepeatModeler版本为2.0.3或更低，则需要将-threads参数换为-pa参数。
         my $RepeatModeler_info = `RepeatModeler`;
         my $RepeatModeler_version = $1 if $RepeatModeler_info =~ m/RepeatModeler - ([\d\.]+)/;
-	# 感谢Toney823在2023.07.27日提交的BUG反馈，https://github.com/chenlianfu/geta/issues/24，修改了下一行代码。
+    # 感谢Toney823在2023.07.27日提交的BUG反馈，https://github.com/chenlianfu/geta/issues/24，修改了下一行代码。
         if ( $RepeatModeler_version =~ m/(\d+)\.(\d+)\.(\d+)/ && ($1 < 2 or ( $1 == 2 && $2 == 0 && $3 <= 3)) )  {
             $cpu_RepeatModeler = int($cpu / 4);
             $cpu_RepeatModeler = 1 if $cpu_RepeatModeler < 1;
@@ -323,9 +366,6 @@ unless (-e "0.RepeatMasker.ok") {
         }
         $cmdString = "para_RepeatMasker --out_prefix RepeatModeler_out --lib RM_\*/\*.classified --cpu $cpu --tmp_dir para_RepeatMasker.tmp $genome &> para_RepeatMasker.log";
     }
-    else {
-        $cmdString = "para_RepeatMasker --out_prefix RepeatModeler_out --lib $RM_lib --cpu $cpu --tmp_dir para_RepeatMasker.tmp $genome &> para_RepeatMasker.log";
-    }
     unless (-e "RepeatMasker.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -338,15 +378,19 @@ unless (-e "0.RepeatMasker.ok") {
     $pwd = `pwd`; print STDERR "PWD: $pwd";
 
     # 合并RepeatMasker和RepeatModeler的结果
-    $cmdString = "$dirname/bin/merge_repeatMasker_out.pl $genome repeatMasker/RepeatMasker_out.out repeatModeler/RepeatModeler_out.out > genome.repeat.stats";
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-    $cmdString = "$dirname/bin/maskedByGff.pl genome.repeat.gff3 $genome > genome.masked.fasta";
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-    #$cmdString = "$dirname/bin/maskedByGff.pl --mask_type softmask genome.repeat.gff3 $genome > genome.softmask.fasta";
-    #print STDERR (localtime) . ": CMD: $cmdString\n";
-    #system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+    if ( -s "repeatMaskear_Dfam/RepeatMasker_out.out" && -s "repeatMaskear_RepBase/RepeatMasker_out.out" && "repeatModeler/RepeatModeler_out.out" ) {
+        $cmdString = "$dirname/bin/merge_repeatMasker_out.pl $genome repeatMaskear_Dfam/RepeatMasker_out.out repeatMasker_RepBase/RepeatMasker_out.out repeatModeler/RepeatModeler_out.out > genome.repeat.stats";
+        print STDERR (localtime) . ": CMD: $cmdString\n";
+        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+        $cmdString = "$dirname/bin/maskedByGff.pl genome.repeat.gff3 $genome > genome.masked.fasta";
+        print STDERR (localtime) . ": CMD: $cmdString\n";
+        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+    }
+    else{
+        $cmdString = "ln -s $genome genome.masked.fasta";
+        print STDERR (localtime) . ": CMD: $cmdString\n";
+        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+    }
     chdir "../";
     open OUT, ">", "0.RepeatMasker.ok" or die $!; close OUT;
 }
