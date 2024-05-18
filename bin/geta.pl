@@ -197,7 +197,7 @@ $cpu ||= 4;
 
 # 各个主要命令的参数设置
 my %config = (
-    'RepeatMasker' => '-e ncbi -gff',
+	'para_RepeatMasker' => '--min_coverge_ratio 0.25',
     'trimmomatic' => 'TruSeq3-PE-2.fa:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:50 TOPHRED33',
     'hisat2-build' => '-p 1',
     'hisat2' => '--min-intronlen 20 --max-intronlen 20000 --dta --score-min L,0.0,-0.4 -k 1',
@@ -290,7 +290,7 @@ unless (-e "0.RepeatMasker.ok") {
     chdir "repeatMasker_Dfam";
     $pwd = `pwd`; print STDERR "PWD: $pwd";
     if ( $RM_species_Dfam ) {
-        $cmdString = "para_RepeatMasker --species $RM_species_Dfam --engine hmmer --cpu $cpu --tmp_dir para_RepeatMasker.tmp $genome &> para_RepeatMasker.log";
+        $cmdString = "para_RepeatMasker $config{'para_RepeatMasker'} --species $RM_species_Dfam --engine hmmer --cpu $cpu --tmp_dir para_RepeatMasker.tmp $genome &> para_RepeatMasker.log";
     }
     else {
         $cmdString = "touch RepeatMasker_out.out";
@@ -310,7 +310,7 @@ unless (-e "0.RepeatMasker.ok") {
     chdir "repeatMasker_RepBase";
     $pwd = `pwd`; print STDERR "PWD: $pwd";
     if ( $RM_species_RepBase ) {
-        $cmdString = "para_RepeatMasker --species $RM_species_RepBase --engine ncbi --cpu $cpu --tmp_dir para_RepeatMasker.tmp $genome &> para_RepeatMasker.log";
+        $cmdString = "para_RepeatMasker $config{'para_RepeatMasker'} --species $RM_species_RepBase --engine ncbi --cpu $cpu --tmp_dir para_RepeatMasker.tmp $genome &> para_RepeatMasker.log";
     }
     else {
         $cmdString = "touch RepeatMasker_out.out";
@@ -330,7 +330,7 @@ unless (-e "0.RepeatMasker.ok") {
     chdir "repeatModeler";
     $pwd = `pwd`; print STDERR "PWD: $pwd";
     if ( $RM_lib ) {
-        $cmdString = "para_RepeatMasker --out_prefix RepeatModeler_out --lib $RM_lib --cpu $cpu --tmp_dir para_RepeatMasker.tmp $genome &> para_RepeatMasker.log";
+        $cmdString = "para_RepeatMasker $config{'para_RepeatMasker'} --out_prefix RepeatModeler_out --lib $RM_lib --cpu $cpu --tmp_dir para_RepeatMasker.tmp $genome &> para_RepeatMasker.log";
     }
     elsif ( $no_RepeatModeler ) {
         $cmdString = "touch RepeatModeler_out.out";
@@ -364,7 +364,7 @@ unless (-e "0.RepeatMasker.ok") {
         else {
             print STDERR "CMD(Skipped): $cmdString\n";
         }
-        $cmdString = "para_RepeatMasker --out_prefix RepeatModeler_out --lib RM_\*/\*.classified --cpu $cpu --tmp_dir para_RepeatMasker.tmp $genome &> para_RepeatMasker.log";
+        $cmdString = "para_RepeatMasker $config{'para_RepeatMasker'} --out_prefix RepeatModeler_out --lib RM_\*/\*.classified --cpu $cpu --tmp_dir para_RepeatMasker.tmp $genome &> para_RepeatMasker.log";
     }
     unless (-e "RepeatMasker.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
