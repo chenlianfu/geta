@@ -46,6 +46,9 @@ TruSeq3-PE-2.fa:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:50 TOPHRE
 --min_gene_number_for_augustus_training 500 --gene_number_for_accuracy_detection 200 --min_gene_number_of_optimize_augustus_chunk 50 --max_gene_number_of_optimize_augustus_chunk 200
 # During the step of BGM2AT: --flanking_length was automatically calculated; --stopAfterFirstEtraining was set or not set at different steps; --onlytrain_GFF3 was set to a intermediate file.
 
+[BGM2AT.optimize_augustus]
+--gene_models_minimum_num_for_test 100 --gene_models_maximum_num_for_test 600 --gene_models_ratio_for_test 0.2 --gene_models_num_per_test 50 --pstep 6 --rounds 6 --reduced_round 3
+
 [prepareAugusutusHints]
 --margin 20
 # note: to obtain the exonpart or cdspart hints, the margin 20bp will be removed.

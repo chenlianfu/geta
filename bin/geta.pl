@@ -387,7 +387,7 @@ unless (-e "0.RepeatMasker.ok") {
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
     }
     else{
-        $cmdString = "ln -s $genome genome.masked.fasta";
+        $cmdString = "ln -s $genome genome.masked.fasta && touch genome.repeat.gff3 genome.repeat.stats";
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
     }
@@ -575,6 +575,17 @@ unless (-e "4.augustus.ok") {
 
         chdir "../";
     }
+	
+	# 准备配置文件夹到程序运行目录下
+	my $AUGUSTUS_CONFIG_PATH_orig = $ENV{"AUGUSTUS_CONFIG_PATH"};
+	if ( ! -e $AUGUSTUS_CONFIG_PATH_orig ) {
+		die "Error: The Augustus config path not exists.\n";
+	}
+	mkdir "$pwd/config" unless -e "$pwd/config";
+	$cmdString = "/bin/cp -a $AUGUSTUS_CONFIG_PATH_orig/cgp $AUGUSTUS_CONFIG_PATH_orig/extrinsic $AUGUSTUS_CONFIG_PATH_orig/model $AUGUSTUS_CONFIG_PATH_orig/parameters $AUGUSTUS_CONFIG_PATH_orig/profile $pwd/config";
+	print STDERR (localtime) . ": CMD: $cmdString\n";
+	system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+	$ENV{"AUGUSTUS_CONFIG_PATH"} = "$pwd/config";
 
     # 第一次 Augustus HMM Training
     unless (-e "training") {

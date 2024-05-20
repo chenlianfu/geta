@@ -8,6 +8,9 @@ Usage:
 
     程序输入best_candidates.lowIdentity.gff3文件中包含完整且准确的基因模型（来源于转录本或同源蛋白的比对结果），且这些基因模型满足一些要求，例如：多CDS、CDS总长度较长、CDS长度占转录本序列比例较高、intron长度较短。这些基因模型适合用来做HMM准确性检测。
 
+	--AUGUSTUS_CONFIG_PATH <string>    default: None
+	设置AUGUSTUS软件的物种配置文件夹路径。在该路径下应该存在一个名为species的子文件夹，species文件夹下则存放物种名称文件夹。设置该参数有利于将物种配置文件存放到有权限读写的地方。需要注意的是：该参数比Linux下的$AUGUSTUS_CONFIG_PATH优先级更高；该参数指定的路径下还应该存在cgp、extrinsic、model、parameters和profile文件夹，运行etraining命令时需要依赖相应的文件。
+
     --augustus_species_start_from <string>    default: None
     若设置该参数，程序进行Augustus Training时，会将设置物种的parameters.cfg文件中的参数信息拷贝到新生成的文件中。若设置的物种比较临近，能加快optimization步骤的运行，也有利于Augustus Training结果的准确性。
 
@@ -26,11 +29,11 @@ Usage:
 
     --min_gene_number_of_optimize_augustus_chunk <int>    default: 50
     --max_gene_number_of_optimize_augustus_chunk <int>    default: 200
-    进行Augustus优化时，会将基因模型分成多份数据，每份数据包含 x 个基因模型，程序会自动计算该 x 值。按默认设置：首先，程序设定该值为50，从而计算出基因模型的份数(optimize_augustus.pl命令--cps参数的值)；若份数超过了--CPU设定的值，则基因模型将被分成--CPU指定的份数；每份数据包含的基因模型数量若超过了200，则强制使每份数据的基因模型数量为200。
+    运行optimize_augustus.pl进行Augustus优化时，会将基因模型分成多份数据，每份数据包含 x 个基因模型，程序会自动计算该 x 值。按默认设置：首先，程序设定该值为50，从而计算出基因模型的份数(optimize_augustus.pl命令--cps参数的值)；若份数超过了--CPU设定的值，则基因模型将被分成--CPU指定的份数；每份数据包含的基因模型数量若超过了200，则强制使每份数据的基因模型数量为200。
     这两个参数要根据能用于AUGUSTUS training的基因模型个数和能利用的CPU线程数综合判断。
 
     --optimize_augustus_rounds <int>    default: 5
-    进行Augustus优化时，对HMM参数进行5轮修正。
+    运行optimize_augustus.pl进行Augustus优化时，对HMM参数进行5轮修正。
 
     --onlytrain_GFF3 <string>    default: None
     输入一个GFF3文件，该GFF3中的基因模型是全基因组中所有准确的基因模型，可以包含不完整的基因模型。该GFF3文件也包含输入文件best_candidates.lowIdentity.gff3中所有的基因模型。
@@ -42,11 +45,15 @@ Usage:
     --stopAfterFirstEtraining
     在进行第一次etraining和准确性检测后，即终止程序运行。
 
+	--config <string>    default: None
+	输入配置文件，用于设置本程序调用BGM2AT.optimize_augustus时的运行参数。
+
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($flanking_length, $min_gene_number_for_augustus_training, $gene_number_for_accuracy_detection, $min_gene_number_of_optimize_augustus_chunk, $max_gene_number_of_optimize_augustus_chunk, $onlytrain_GFF3, $CPU, $allowStartCodonBesidesATG, $stopAfterFirstEtraining, $optimize_augustus_rounds, $augustus_species_start_from);
+my ($AUGUSTUS_CONFIG_PATH, $flanking_length, $min_gene_number_for_augustus_training, $gene_number_for_accuracy_detection, $min_gene_number_of_optimize_augustus_chunk, $max_gene_number_of_optimize_augustus_chunk, $onlytrain_GFF3, $CPU, $allowStartCodonBesidesATG, $stopAfterFirstEtraining, $optimize_augustus_rounds, $augustus_species_start_from, $config, $cmdString);
 GetOptions(
+	"AUGUSTUS_CONFIG_PATH:s" => \$AUGUSTUS_CONFIG_PATH,
     "flanking_length:i" => \$flanking_length,
     "min_gene_number_for_augustus_training:i" => \$min_gene_number_for_augustus_training,
     "gene_number_for_accuracy_detection:i" => \$gene_number_for_accuracy_detection,
@@ -58,6 +65,7 @@ GetOptions(
     "stopAfterFirstEtraining!" => \$stopAfterFirstEtraining,
     "optimize_augustus_rounds:i" => \$optimize_augustus_rounds,
     "augustus_species_start_from:s" => \$augustus_species_start_from,
+	"config:s" => \$config,
 );
 $min_gene_number_for_augustus_training ||= 500;
 $gene_number_for_accuracy_detection ||= 200;
@@ -65,6 +73,85 @@ $min_gene_number_of_optimize_augustus_chunk ||= 50;
 $max_gene_number_of_optimize_augustus_chunk ||= 200;
 $CPU ||= 8;
 $optimize_augustus_rounds ||= 5;
+if ( $AUGUSTUS_CONFIG_PATH ) { $AUGUSTUS_CONFIG_PATH = abs_path($AUGUSTUS_CONFIG_PATH); }
+if ( $config ) { $config = abs_path($config); }
+
+my %config;
+if ($config) {
+    open IN, $config or die "Can not open file $config, $!\n";
+    my $tag;
+    while (<IN>) {
+        next if m/^#/;
+        next if m/^\s*$/;
+        s/^\s+//;
+        s/\n/ /;
+        if (/\[(.*)\]/) { $tag = $1; delete $config{$1}; }
+        else { $config{$tag} .= $_; }
+    }
+    close IN;
+}
+
+# 优先使用自己设置的AUGUSTUS物种配置路径。从环境变量AUGUSTUS_CONFIG_PATH中拷贝配置文件夹到指定路径中。
+my $AUGUSTUS_CONFIG_PATH_orig = $ENV{"AUGUSTUS_CONFIG_PATH"};
+if ( $AUGUSTUS_CONFIG_PATH ) {
+	mkdir "$AUGUSTUS_CONFIG_PATH/species" unless -e "$AUGUSTUS_CONFIG_PATH/species";
+	if ( ! -e "$AUGUSTUS_CONFIG_PATH/cgp" ) {
+		if ( -e "$AUGUSTUS_CONFIG_PATH_orig/cgp" ) {
+			$cmdString = "cp -a $AUGUSTUS_CONFIG_PATH_orig/cgp $AUGUSTUS_CONFIG_PATH/";
+			print STDERR "CMD: $cmdString\n";
+			(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+		}
+		else {
+			die "Error: $AUGUSTUS_CONFIG_PATH路径和环境变量AUGUSTUS_CONFIG_PATH路径下均不存在cgp配置文件夹。\n";
+		}
+	}
+	if ( ! -e "$AUGUSTUS_CONFIG_PATH/extrinsic" ) {
+		if ( -e "$AUGUSTUS_CONFIG_PATH_orig/extrinsic" ) {
+			$cmdString = "cp -a $AUGUSTUS_CONFIG_PATH_orig/extrinsic $AUGUSTUS_CONFIG_PATH/";
+			print STDERR "CMD: $cmdString\n";
+			(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+		}
+		else {
+			die "Error: $AUGUSTUS_CONFIG_PATH路径和环境变量AUGUSTUS_CONFIG_PATH路径下均不存在extrinsic配置文件夹。\n";
+		}
+	}
+	if ( ! -e "$AUGUSTUS_CONFIG_PATH/model" ) {
+		if ( -e "$AUGUSTUS_CONFIG_PATH_orig/model" ) {
+			$cmdString = "cp -a $AUGUSTUS_CONFIG_PATH_orig/model $AUGUSTUS_CONFIG_PATH/";
+			print STDERR "CMD: $cmdString\n";
+			(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+		}
+		else {
+			die "Error: $AUGUSTUS_CONFIG_PATH路径和环境变量AUGUSTUS_CONFIG_PATH路径下均不存在model配置文件夹。\n";
+		}
+	}
+	if ( ! -e "$AUGUSTUS_CONFIG_PATH/parameters" ) {
+		if ( -e "$AUGUSTUS_CONFIG_PATH_orig/parameters" ) {
+			$cmdString = "cp -a $AUGUSTUS_CONFIG_PATH_orig/parameters $AUGUSTUS_CONFIG_PATH/";
+			print STDERR "CMD: $cmdString\n";
+			(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+		}
+		else {
+			die "Error: $AUGUSTUS_CONFIG_PATH路径和环境变量AUGUSTUS_CONFIG_PATH路径下均不存在parameters配置文件夹。\n";
+		}
+	}
+	if ( ! -e "$AUGUSTUS_CONFIG_PATH/profile" ) {
+		if ( -e "$AUGUSTUS_CONFIG_PATH_orig/profile" ) {
+			$cmdString = "cp -a $AUGUSTUS_CONFIG_PATH_orig/profile $AUGUSTUS_CONFIG_PATH/";
+			print STDERR "CMD: $cmdString\n";
+			(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+		}
+		else {
+			die "Error: $AUGUSTUS_CONFIG_PATH路径和环境变量AUGUSTUS_CONFIG_PATH路径下均不存在profile配置文件夹。\n";
+		}
+	}
+}
+else {
+	unless ( -e "$AUGUSTUS_CONFIG_PATH_orig/species" ) {
+		die "Error: 环境变量AUGUSTUS_CONFIG_PATH设置不正确。\n";
+	}
+}
+$ENV{"AUGUSTUS_CONFIG_PATH"} = $AUGUSTUS_CONFIG_PATH if $AUGUSTUS_CONFIG_PATH;
 
 # 计算gene长度
 open IN, $ARGV[0] or die $!;
@@ -88,7 +175,7 @@ if ($onlytrain_GFF3) {
 }
 
 # 去除错误的基因模型
-my $for_bad_genes_removing = `echo \$AUGUSTUS_CONFIG_PATH`;
+my $for_bad_genes_removing = $ENV{"AUGUSTUS_CONFIG_PATH"};
 chomp($for_bad_genes_removing);
 $for_bad_genes_removing = "$for_bad_genes_removing/species/for_bad_genes_removing_$$";
 if (-e $for_bad_genes_removing) {
@@ -161,7 +248,7 @@ else {
 }
 
 # 进行第一次augustus training
-my $species_config_path = `echo \$AUGUSTUS_CONFIG_PATH`;
+my $species_config_path = $ENV{"AUGUSTUS_CONFIG_PATH"};
 chomp($species_config_path);
 my $species_config_dir = "$species_config_path/species/$ARGV[2]";
 #$cmdString = "rm -rf $species_config_dir";
@@ -206,9 +293,9 @@ print STDERR "the frequecy of three stop codons: TAG($frequency_tag), TAA($frequ
 open IN, "$species_config_dir/$ARGV[2]_parameters.cfg" or die $!;
 open OUT, ">", "$ARGV[2]_parameters.cfg" or die $!;
 while (<IN>) {
-    s#/(Constant/amberprob\s+)\S+#$1$frequency_tag#;
-    s#/(Constant/ochreprob\s+)\S+#$1$frequency_taa#;
-    s#/(Constant/opalprob\s+)\S+#$1$frequency_tga#;
+    s#(/Constant/amberprob\s+)\S+#$1$frequency_tag#;
+    s#(/Constant/ochreprob\s+)\S+#$1$frequency_taa#;
+    s#(/Constant/opalprob\s+)\S+#$1$frequency_tga#;
     print OUT;
 }
 close IN;
@@ -238,7 +325,8 @@ if ($stopAfterFirstEtraining) {
     exit;
 }
 
-# 进行augustus training优化
+# 进行augustus training优化（第一轮快速优化）
+
 my $chunk_num = $min_gene_number_of_optimize_augustus_chunk;
 my $noly_train_gene_number = $gene_number_for_training % $chunk_num;
 my $cpus = int ($gene_number_for_training / $chunk_num);

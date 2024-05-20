@@ -1,0 +1,571 @@
+#!/usr/bin/env perl
+
+use strict;
+use Getopt::Long;
+use Cwd qw/abs_path getcwd cwd/;
+use File::Basename;
+use List::Util qw/shuffle/;
+
+my $usage = <<USAGE;
+Usage:
+    $0 [options] Species_Directory train.gb
+
+For example:
+    $0 --onlytrain genes.only_train.gb --cpu 120 --gene_models_minimum_num_for_test 100 --gene_models_maximum_num_for_test 600 --gene_models_ratio_for_test 0.20 --gene_models_num_per_test 50 --tmp_dir BGM2AT.optimize_augustus.tmp --AUGUSTUS_CONFIG_PATH ./config --pstep 6 --rounds 6 --reduced_round 3 Species_Directory train.gb
+
+    增加--gene_models_maximum_num_for_test参数值，可以使用更多基因模型进行检测，能让结果更准确，但线性增加计算消耗。
+    增加--pstep参数值，则对一个参数取更多值，有利于寻找更准确的参数值，但线性增加计算消耗。
+    增加--rounds参数值，则进行更多轮的优化，能让结果更准确，但线性增加计算消耗。
+
+    若为了让结果更加准确，推荐增大--gene_models_maximum_num_for_test和--rounds参数值。
+
+
+    本程序能利用train.gb中的基因模型，对AUGUSTUS的参数进行优化。相比于AUGUSTUS的optimize_augustus.pl程序一次仅能对一个参数进行优化，本程序可以充分利用所有CPU线程资源，一次性对所有参数同时优化，能减少计算时间消耗。本程序功能上也有减配：仅支持常规的AUGUSTUS参数优化，不支持CGP(comparative gene prediction)参数优化；要求用于检测的基因模型的尾部CDS包含终止密码子。
+    程序输入的Species_Directory必须是一个物种文件夹名称，配合Linux环境变量中\$AUGUSTUS_CONFIG_PATH指定的路径，或输入参数--AUGUSTUS_CONFIG_PATH(优先级更高)指定的路径。程序对\$AUGUSTUS_CONFIG_PATH/species/Species_Directory/Species_Directory_parameters.cfg配置文件中的28个参数进行优化。若该配置文件不存在，则程序无法运行。
+
+    --onlytrain <string>    default: None
+    输入一个genebank格式文件，包含一些仅用于etraining的基因模型。
+
+    --cpu <int>    default: 8
+    程序运行etraining和augustus时的并行数。
+
+    --gene_models_minimum_num_for_test <int>    default: 100
+    --gene_models_maximum_num_for_test <int>    default: 600
+    --gene_models_ratio_for_test <float>    default: 0.20
+    每测试一个参数时，需要利用一定数量的基因模型来测试其准确性。使用以上三个参数来设置检测基因模型的数量。默认设置下，随机挑选train.gb中基因模型数量的20%进行检测，且最高不超过600个，最小不低于100个。若train.gb中的基因模型数量低于100个，则使用全部基因模型用于检测。
+
+    --gene_models_num_per_test <int>    default: 50
+    每个augustus命令分析时检测的基因模型数量。此时，使用所有其它基因模型进行etraining。对一个AUGUSTUS参数值进行检测时，需要运行 int(用于检测的基因模型数量 / 50 + 1) 个etraining和augustus命令。运行完毕后，合并所有用于检测的基因模型在gene/exon/nucleotide水平上的TP/FP/FN值，再计算整体上的准确性值。
+
+    --tmp_dir <string>    default: tmp_\$date\$pid
+    程序运行时临时文件夹名称。
+
+    --AUGUSTUS_CONFIG_PATH <string>    default: None
+    设置AUGUSTUS软件的物种配置文件夹路径。在该路径下应该存在一个名为species的子文件夹，species文件夹下则存放物种名称文件夹。设置该参数有利于将物种配置文件存放到有权限读写的地方。需要注意的是：该参数比Linux下的\$AUGUSTUS_CONFIG_PATH优先级更高；该参数指定的路径下还应该存在cgp、extrinsic、model、parameters和profile文件夹，运行etraining命令时需要依赖相应的文件。
+
+    --pstep <int>    default: 6
+    设置对一个参数进行优化时，用于比较的参数值个数。程序读取\$AUGUSTUS_CONFIG_PATH/species/Species_Directory/Species_Directory__metapars.cfg内容确定优化的参数及其取值范围。例如，/IntronModel/d参数值的取值范围为100~950且是整数，默认情况下，则是比较100、270、440、610、780和950这六个参数值的优劣。程序会在取值范围内均匀选择5个参数值。该值越大，则计算量越大，可能越容易找到更优参数。
+
+    --rounds <int>    default: 6
+    设置程序优化的轮数。程序每轮对28个参数进行优化，直至某轮没有优化，或优化到指定轮数截止。
+
+    --reduced_round <int>    default: 3
+    程序会从第3轮结束后，缩小参数的取值范围。这样有利于寻找更优的参数值。而标准的AUGUSTUS的optimize_augustus.pl程序并没有该操作。有些参数取值数量低于--pstep参数设定值时，则不会缩小其取值范围。例如，/Constant/dss_end参数值为整数，只能取值0、1、2、3和4，则不会缩小其取值范围。缩小取值范围的方法：默认比较6个数据，按准确性结果从好到坏对这6个数据值进行排序，从排第2名往后寻找，直至同时找到比第一名大和小的值止。取找到的数值的最大和最小值作为新的取值范围。
+
+    --help    default: None
+    display this help and exit.
+
+USAGE
+if (@ARGV==0){die $usage}
+
+my ($onlytrain, $cpu, $gene_models_num_per_test, $gene_models_minimum_num_for_test, $gene_models_maximum_num_for_test, $gene_models_ratio_for_test, $rounds, $tmp_dir, $AUGUSTUS_CONFIG_PATH, $pstep, $reduced_round, $help_flag, $cmdString);
+GetOptions(
+    "onlytrain:s" => \$onlytrain,
+    "cpu:i" => \$cpu,
+    "gene_models_num_per_test:i" => \$gene_models_num_per_test,
+    "gene_models_minimum_num_for_test:i" => \$gene_models_minimum_num_for_test,
+    "gene_models_maximum_num_for_test:i" => \$gene_models_maximum_num_for_test,
+    "gene_models_ratio_for_test:f" => \$gene_models_ratio_for_test,
+    "rounds:i" => \$rounds,
+    "tmp_dir:s" => \$tmp_dir,
+    "AUGUSTUS_CONFIG_PATH:s" => \$AUGUSTUS_CONFIG_PATH,
+    "pstep:i" => \$pstep,
+    "reduced_round:i" => \$reduced_round,
+    "help" => \$help_flag,
+);
+$cpu ||= 8;
+$gene_models_num_per_test ||= 50;
+$gene_models_minimum_num_for_test ||= 100;
+$gene_models_maximum_num_for_test ||= 600;
+$gene_models_ratio_for_test ||= 0.20;
+$rounds ||= 6;
+my $date = `date +%Y%m%d%H%M%S`; chomp($date);
+$tmp_dir ||= "tmp_$date$$";
+$tmp_dir = abs_path($tmp_dir);
+mkdir $tmp_dir unless -e $tmp_dir;
+$pstep ||= 6;
+$reduced_round ||= 3;
+
+if ( $help_flag ) { die $usage }
+
+# 使用绝对路径
+my $file_testGeneModel = abs_path($ARGV[1]);
+my $file_onlytrainGeneModel;
+$file_onlytrainGeneModel = abs_path($onlytrain) if $onlytrain;
+$AUGUSTUS_CONFIG_PATH = abs_path($AUGUSTUS_CONFIG_PATH) if $AUGUSTUS_CONFIG_PATH;
+chdir $tmp_dir;
+
+# 优先使用自己设置的AUGUSTUS物种配置路径。
+$ENV{"AUGUSTUS_CONFIG_PATH"} = $AUGUSTUS_CONFIG_PATH if $AUGUSTUS_CONFIG_PATH;
+# 分析AUGUSTUS物种文件夹
+my $species_name = basename($ARGV[0]);
+my $file_parameters = "$ENV{'AUGUSTUS_CONFIG_PATH'}/species/$species_name/${species_name}_parameters.cfg";
+if ( -e $file_parameters ) {
+    print STDERR "程序将对 $file_parameters 文件进行参数优化。\n";
+}
+else {
+    die "Error: $file_parameters 文件不存在，程序没有优化的对象，停止运行。\n";
+}
+
+# 先备份metapars.cfg和parameters.cfg文件。
+my $file_metapars = "$ENV{'AUGUSTUS_CONFIG_PATH'}/species/$species_name/${species_name}_metapars.cfg";
+open IN, $file_metapars or die "Can not open file $file_metapars, $!";
+open OUT, ">", "$file_metapars.$date.$$" or die "Error: Can not create file $file_metapars.$date$$, $!";
+while (<IN>) { print OUT; }
+close IN; close OUT;
+print STDERR "将$file_metapars文件备份到$file_metapars.$date.$$\n";
+open IN, $file_parameters or die "Can not open file $file_parameters, $!";
+open OUT, ">", "$file_parameters.$date.$$" or die "Error: Can not create file $file_parameters.$date$$, $!";
+while (<IN>) { print OUT; }
+close IN; close OUT;
+print STDERR "将$file_parameters文件备份到$file_parameters.$date.$$\n";
+
+# 读取test基因模型和onlytrain基因模型
+my $num_of_geneModels = 0;
+$/ = "//\n";
+my (@geneModels_test, @geneModels_onlytrain, %CDS_length_of_geneModel);
+open IN, $file_testGeneModel or die "Error: Can not open file $file_testGeneModel, $!";
+while (<IN>) { 
+    push @geneModels_test, $_;
+    $num_of_geneModels ++;
+    # 计算个基因模型中CDS区域碱基总长度
+    my $geneModelInfo = $_;
+    s/\s*//g;
+    my $join = $1 if m/CDS.*join\((.*?)\)/;
+    foreach ( split /,/, $join ) {
+        $CDS_length_of_geneModel{$geneModelInfo} += (abs($2 - $1) + 1) if m/(\d+)\.\.(\d+)/;
+    }
+    #print "$geneModelInfo$CDS_length_of_geneModel{$geneModelInfo}\n";
+}
+close IN;
+if ( $onlytrain ) {
+    open IN, $file_onlytrainGeneModel or die "Error: Can not open file $file_onlytrainGeneModel, $!";
+    while (<IN>) { push @geneModels_onlytrain, $_; }
+    close IN;
+}
+$/ = "\n";
+
+# 分析用于test的基因模型数量。
+my $num_of_geneModels_for_test = $num_of_geneModels * $gene_models_ratio_for_test;
+if ( $num_of_geneModels < $gene_models_minimum_num_for_test ) {
+    $num_of_geneModels_for_test = $num_of_geneModels;
+}
+elsif ( $num_of_geneModels * $gene_models_ratio_for_test > $gene_models_maximum_num_for_test ) {
+    $num_of_geneModels_for_test = $gene_models_maximum_num_for_test;
+}
+elsif ( $num_of_geneModels * $gene_models_ratio_for_test < $gene_models_minimum_num_for_test ) {
+    $num_of_geneModels_for_test = $gene_models_minimum_num_for_test;
+}
+print STDERR "输入文件 $file_testGeneModel 中有 $num_of_geneModels 个基因模型，在每个参数优化测试中，随机使用使用其中 $num_of_geneModels_for_test 个基因模型用于准确性检测。\n";
+
+# 进行一轮轮的参数优化
+my $round_current = 1;
+while ( $round_current <= $rounds  ) {
+    print STDERR "\n\nROUND:\t$round_current\n";
+
+    # 若本轮有结果，则跳过。
+    if ( -e "round$round_current.stats" ) {
+        open IN, "round$round_current.stats" or die $!;
+        print <IN>;
+        $round_current ++;
+        next;
+    }
+    my $outStats;
+
+    # 读取参数值范围，得到每个参数进行比较的数据值。
+    my %metapars = &get_metapars($file_metapars);
+
+    # 准备本轮数据分析的文件夹
+    if ( ! -e "$tmp_dir/round$round_current" ) {
+        mkdir "$tmp_dir/round$round_current" or die "Error: can not create file $tmp_dir/round$round_current, $!";
+    }
+    chdir "$tmp_dir/round$round_current";
+    # 进行准确性检测
+    &analysis(\%metapars, \@geneModels_test, \@geneModels_onlytrain);
+
+    # 分析最优参数
+    my ($best_parameters_ref, $accuracy_ref) = &get_best_parameters(\%metapars);
+    my %best_parameters = %{$best_parameters_ref};  #存放最优参数，键是参数名称，值是参数值
+    my %accuracy = %{$accuracy_ref}; # 双重哈希，存放参数名、数值、准确性（值）。
+    
+    print STDERR "本轮最优参数及其取值：\n";
+    foreach ( sort keys %best_parameters ) { print "$_\t$best_parameters{$_}\n"; }
+    #foreach my $par_name ( sort keys %accuracy ) { foreach ( keys %{$accuracy{$par_name}} ) { print "$par_name\t$_: $accuracy{$par_name}{$_}\n"; } }
+
+    # 修改parameters.cfg文件参数并进行比较，得到改进的参数信息
+    my @compare_result = &improve_parameters(\%best_parameters, $file_parameters);
+    if ( @compare_result >= 1 ) {
+        my $compare_result_num = @compare_result;
+        print STDERR "在第 $round_current 轮参数优化中，有 $compare_result_num 个参数有优化：\n";
+        $outStats .= "在第 $round_current 轮参数优化中，有 $compare_result_num 个参数有优化：\n";
+        foreach ( @compare_result ) {
+            print STDERR "\t$_\n";
+            $outStats .= "\t$_\n";
+        }
+    }
+    else {
+        print STDERR "在第 $round_current 轮参数优化中，未能检测到更优的参数。\n";
+        $outStats .= "在第 $round_current 轮参数优化中，未能检测到更优的参数。\n";
+        $round_current = $rounds + 1;
+    }
+
+    # 缩小参数值范围
+    if ( $round_current >= $reduced_round ) {
+        # 改写metapars.cfg文件内容。
+        my @range_change = &modify_metapars(\%accuracy, $file_metapars);
+        my $range_change_num = @range_change;
+        print STDERR "在第 $round_current 轮参数优化中，有 $range_change_num 个参数的范围有优化：\n";
+        $outStats .= "在第 $round_current 轮参数优化中，有 $range_change_num 个参数的范围有优化：\n";
+        foreach ( @range_change  ) {
+            print STDERR "\t$_\n";
+            $outStats .= "\t$_\n";
+        }
+    }
+
+    open OUT, ">", "$tmp_dir/round$round_current.stats"  or die $!;
+    print OUT $outStats;
+    close OUT;
+
+    $cmdString = "rm -rf $tmp_dir/round$round_current";
+    print STDERR (localtime) . ": CMD: $cmdString\n";
+    system($cmdString) == 0 or die "Error: Failed to excute: $cmdString\n";
+
+    $round_current ++;
+}
+
+sub modify_metapars {
+    my %accuracy = %{$_[0]};
+    my $file_metapars = $_[1];
+    my @out;
+
+    open IN, $file_metapars or die $!;
+    my $file_info = join "", <IN>;
+    close IN;
+
+    open OUT, ">", $file_metapars or die $!;
+    foreach ( split /\n/, $file_info ) {
+        my ( $parname, $range );
+        if ( m/^#/ ) {
+            print OUT "$_\n";
+        }
+        elsif ( m/^\s*$/ ) {
+            print OUT "$_\n";
+        }
+        elsif ( /^\s*(\S+)\s+(.*)\s*/ ) {
+            my $line = $_;
+            ($parname, $range) = ($1, $2);
+            if ( exists $accuracy{$parname} && $range =~ m/("[^"]+"([-_])"[^"]+")/ ) {
+                # 获得文件中的取值范围；
+                my ($old_range, $fuhao) = ($1, $2);
+
+                # 寻找新的取值范围。首先，将取值按从好到坏排序。
+                my @value = sort {$accuracy{$parname}{$b} <=> $accuracy{$parname}{$a}} keys %{$accuracy{$parname}};
+                if ( @value < $pstep ) {
+                    print OUT "$line\n";
+                    next;
+                }
+                my @new_value;
+                # 将最优值加入到新的数组中
+                my $first_value = shift @value; push @new_value, $first_value;
+                my ($found_high, $found_low) = (0, 0);
+                # 将其它值加入到新的数组中，直至同时找到更大和更小值。
+                foreach ( @value ) {
+                    push @new_value, $_;
+                    $found_high = 1 if $_ > $first_value;
+                    $found_low = 1 if $_ < $first_value;
+                    last if ($found_high == 1 && $found_low == 1);
+                }
+                # 获得新的范围数据
+                @new_value = sort {$a <=> $b} @new_value;
+                my $new_range = "\"$new_value[0]\"$fuhao\"$new_value[-1]\"";
+
+                # 比较取值范围
+                if ( $new_range ne $old_range ) {
+                    my $out = sprintf("%-40s%-25s->  $new_range", $parname, $old_range);
+                    push @out, $out;
+                    $line =~ s/$old_range/$new_range/;
+                    print OUT "$line\n";
+                }
+                else {
+                    print OUT "$line\n";
+                }
+            }
+            else {
+                print OUT "$line\n";
+            }
+        }
+        else {
+            print OUT "$_\n";
+        }
+    }
+    close OUT;
+
+    my $out_num = 0; $out_num = @out if @out;
+    print STDERR "对配置文件 $file_metapars 的参数范围进行了 $out_num 项修改。\n";
+
+    return @out;
+}
+
+sub improve_parameters {
+    my %best_par = %{$_[0]};
+    my $file_for_modify = $_[1];
+
+    my @out;
+
+    open IN, $file_for_modify or die $!;
+    my $file_info = join "", <IN>;
+    close IN;
+
+    open OUT, ">", $file_for_modify or die $!;
+    foreach ( split /\n/, $file_info ) {
+        if ( m/^#/ ) {
+            print OUT "$_\n";
+        }
+        elsif ( m/^\s*$/ ) {
+            print OUT "$_\n";
+        }
+        elsif ( m/^(\S+)(\s+)(\S+)(.*)/ ) {
+            if ( exists $best_par{$1} ) {
+                if ( $best_par{$1} ne $3 ) {
+                    my $out = sprintf("%-40s%-10s ->  $best_par{$1}", "$1:", $3);
+                    #push @out, "$1: $3 -> $best_par{$1}";
+                    push @out, $out;
+                    s/^(\S+)(\s+)(\S+)(.*)/$1$2$best_par{$1}$4/;
+                    print OUT "$_\n";
+                }
+                else {
+                    print OUT "$_\n";
+                }
+            }
+            else {
+                print OUT "$_\n";
+            }
+        }
+        else {
+            print OUT "$_\n";
+        }
+    }
+    close OUT;
+
+    my $out_num = 0; $out_num = @out if @out;
+    print STDERR "对配置文件 $file_for_modify 的参数进行了 $out_num 项修改。\n";
+
+    return @out;
+}
+
+
+sub get_best_parameters {
+    my %metapars = %{@_[0]};
+
+    # 
+    my (%out, %out3);
+
+    # 读取结果文件路径
+    open IN, "command.list" or die "Can not open file command.list";
+    my %result_file;
+    while (<IN>) {
+        $result_file{$2}{$1} = 1 if m/.*>\s+((.*)\/\d+.out)\n$/;
+    }
+    close IN;
+
+    # 分析每个参数多个取值的准确性
+    print STDERR "本轮所有参数取值及其准确性如下：\n";
+    foreach my $par_name_orig ( sort keys %metapars ) {
+        my $par_name = $par_name_orig;
+        $par_name =~ s#^/##; $par_name =~ s#/#_#g;
+        my %out2;
+        foreach my $value ( sort {$a <=> $b} keys %{$metapars{$par_name_orig}} ) {
+            # 分析nucleotide、exon和gene的标准注释数量、预测数量、TP数量。
+            my ($nucleotide_annot, $nucleotide_pred, $nucleotide_TP, $exon_annot, $exon_pred, $exon_TP, $gene_annot, $gene_pred, $gene_TP) = (0,0,0,0,0,0,0,0,0);
+
+            # 每个参数取值有多个命令的结果
+            foreach my $file_out ( keys %{$result_file{"${par_name}_$value"}} ) {
+                # 分析nucleotide水平上的CDS碱基长度
+                my $file_TotalCDSLength = $file_out;
+                $file_TotalCDSLength =~ s/\.out/\.TotalCDSLength/;
+                open IN, $file_TotalCDSLength or die $!;
+                my $TotalCDSLength = <IN>;
+                close IN;
+                $nucleotide_annot += $TotalCDSLength;
+                #print "$par_name_orig\t$value\t$file_out\t";
+
+                # 分析augusts检测结果文件
+                open IN, $file_out or die $!;
+                while (<IN>) {
+                    if ( m/nucleotide level[\s|]+([\d\.]+)[\s|]+([\d\.]+)/ ) {
+                        $nucleotide_TP += int($TotalCDSLength * $1 + 0.5);
+                        $nucleotide_pred += int($TotalCDSLength * $1 / $2 + 0.5);
+                        #print "$1\t$TotalCDSLength\t$2\t";
+                    }
+                    elsif ( m/exon level[\s|]+([\d\.]+)[\s|]+([\d\.]+)[\s|]+([\d\.]+)/ ) {
+                        $exon_pred += $1;
+                        $exon_annot += $2;
+                        $exon_TP += $3;
+                        #print "$1\t$2\t$3\t";
+                    }
+                    elsif ( m/gene level[\s|]+([\d\.]+)[\s|]+([\d\.]+)[\s|]+([\d\.]+)/ ) {
+                        $gene_pred += $1;
+                        $gene_annot += $2;
+                        $gene_TP += $3;
+                        #print "$1\t$2\t$3\n";
+                    }
+                }
+            }
+
+            my ($nucleotide_sensitivity, $nucleotide_specificity, $exon_sensitivity, $exon_specificity, $gene_sensitivity, $gene_specificity) = (0,0,0,0,0,0);
+            $nucleotide_sensitivity = $nucleotide_TP / $nucleotide_annot;
+            $nucleotide_specificity = $nucleotide_TP / $nucleotide_pred;
+            $exon_sensitivity = $exon_TP / $exon_annot;
+            $exon_specificity = $exon_TP / $exon_pred;
+            $gene_sensitivity = $gene_TP / $gene_annot;
+            $gene_specificity = $gene_TP / $gene_pred;
+
+            my $accuracy = ($nucleotide_sensitivity * 3 + $nucleotide_specificity * 2 + $exon_sensitivity * 4 + $exon_specificity * 3 + $gene_sensitivity * 2 + $gene_specificity * 1) / 15;
+
+            my $accuracy_out = sprintf("%0.4f\t%0.4f\t%0.4f\t%0.4f\t%0.4f\t%0.4f\t%0.4f", $nucleotide_sensitivity, $nucleotide_specificity, $exon_sensitivity, $exon_specificity, $gene_sensitivity, $gene_specificity, $accuracy);
+            # %out2 存放核酸、exon和gene水平的准确性数据。
+            $out2{"$par_name_orig  $value:\t$accuracy_out\n"} = $accuracy;
+            # %out3 存放参数取值的整体准确性数据。
+            $out3{$par_name_orig}{$value} = sprintf("%0.4f", $accuracy);
+        }
+        my @out2 = sort {$out2{$b}<=> $out2{$a} or $a cmp $b} keys %out2;
+        my $best = shift @out2; 
+        print STDERR "*$best";
+        foreach ( @out2 ) { print STDERR; }
+        # %out 存放参数的最优值。
+        $out{$par_name_orig} = $1 if $best =~ m/(\S+):/;
+    }
+
+    # 返回两个哈希。
+    return (\%out, \%out3);
+}
+
+
+# 核心算法，输入检测用基因模型、仅训练用基因模型和各参数的比较值。进行准确性分析。
+sub analysis {
+    my %metapars = %{@_[0]};
+    my @GM_test = @{$_[1]};
+    my @GM_onlytrain = @{$_[2]};
+
+    unless ( -e "prepare_data.ok" ) {
+    open OUT, ">", "command.list" or die $!; close OUT;
+
+    foreach my $par_name_orig ( sort keys %metapars ) {
+        my $par_name = $par_name_orig;
+        $par_name =~ s#^/##; $par_name =~ s#/#_#g;
+        # 对每个参数取的每个值，进行准确性检测。随机选取一定数量的基因模型group1用于检测。
+        @GM_test = shuffle(@GM_test);
+        my @GM_test_group1 = @GM_test[0..$num_of_geneModels_for_test-1];
+        my @GM_test_group2 = @GM_test[$num_of_geneModels_for_test..$#GM_test];
+
+        foreach my $value ( sort {$a <=> $b} keys %{$metapars{$par_name_orig}} ) {
+            #print "TEST: $par_name\t$value\n";
+            # 准备数据存放文件夹
+            mkdir "${par_name}_$value" unless -e "${par_name}_$value";
+
+            # 默认设置下，使用group1中每50个基因模型运行一次etraining和augustus进行检测，生成train和test的基因模型
+            my @GM_test_group = ();
+            my $para_num = 0;
+            # 每个etraing和augustus命令从group1中挑出前50个基因模型。
+            my @GM_test_group1_new = @GM_test_group1;  #避免修改@GM_test_group1中的信息。
+            while ( @GM_test_group1_new ) {
+                $para_num ++;
+                mkdir "${par_name}_$value/$para_num" unless -e "${par_name}_$value/$para_num";
+                my @GM_test_group_test;
+                foreach ( 1 .. $gene_models_num_per_test ) {
+                    if ( @GM_test_group1_new ) {
+                        push @GM_test_group_test, shift @GM_test_group1_new;
+                    }
+                }
+
+                # 生成每个命令的train和test基因模型
+                open OUT, ">", "${par_name}_$value/$para_num/test.gb" or die "Error: Can not create file ${par_name}_$value/$para_num/test.gb, $!";
+                foreach ( @GM_test_group_test ) { print OUT; }
+                close OUT;
+                open OUT, ">", "${par_name}_$value/$para_num/train.gb" or die "Error: Can not create file ${par_name}_$value/$para_num/test.gb, $!";
+                foreach ( @GM_test_group ) { print OUT; }
+                foreach ( @GM_test_group1_new ) { print OUT; }
+                foreach ( @GM_test_group2 ) { print OUT; }
+                if ( $onlytrain ) { foreach ( @geneModels_onlytrain ) { print OUT; } }
+
+                # 生成test.gb中所有基因模型的CDS总长度信息。
+                my $CDS_length_total = 0;
+                foreach ( @GM_test_group_test ) {
+                    $CDS_length_total += $CDS_length_of_geneModel{$_};
+                }
+                open OUT, ">", "${par_name}_$value/$para_num.TotalCDSLength" or die $!;
+                print OUT $CDS_length_total;
+                close OUT;
+
+                push @GM_test_group, @GM_test_group_test;
+
+                # 给每个命令准备参数配置文件
+                system("cp -a $ENV{'AUGUSTUS_CONFIG_PATH'}/* ${par_name}_$value/$para_num/");
+                open IN, "${par_name}_$value/$para_num/species/$species_name/${species_name}_parameters.cfg" or die $!;
+                my $info = join "", <IN>;
+                close IN;
+                $info =~ s/($par_name_orig\s+)\S+/$1$value/;
+                open OUT, ">", "${par_name}_$value/$para_num/species/$species_name/${species_name}_parameters.cfg" or die $!;
+                print OUT $info;
+                close OUT;
+
+                # 给出命令行
+                open OUT, ">>", "command.list" or die $!;
+                print OUT "etraining --species=$species_name --AUGUSTUS_CONFIG_PATH=${par_name}_$value/$para_num ${par_name}_$value/$para_num/train.gb &> /dev/null; augustus --species=$species_name --AUGUSTUS_CONFIG_PATH=${par_name}_$value/$para_num ${par_name}_$value/$para_num/test.gb > ${par_name}_$value/$para_num.out\n";
+                close OUT;
+            }
+        }
+    }
+
+    open OUT, ">", "prepare_data.ok"; close OUT;
+    }
+
+    my $cmdString = "ParaFly -c command.list -CPU $cpu &> ParaFly.log";
+    print STDERR (localtime) . ": CMD: $cmdString\n";
+    system($cmdString) == 0 or die "Error: Failed to excute: $cmdString\n";
+}
+
+# 子程序，分析metapars.cfg文件，根据其取值范围，得到具体的取值信息。
+sub get_metapars {
+    my $file_metapars = $_[0];
+    my %metapars;
+
+    open IN, $file_metapars or die "Can not open file $file_metapars, $!";
+    # 以下代码借鉴了 optimize_augustus.pl 内容
+    while (<IN>) {
+        next if m/^#/;
+        my ( $parname, $range );
+        if ( /^\s*(\S+)\s+(.*)\s*/ ) {
+            ($parname, $range) = ($1, $2);
+            my @testlist;
+            if ( $range =~ /"([^"]+)"-"([^"]+)"/ ) {
+                ($a, $b) = ($1, $2);
+                for ( my $n = 0; $n < $pstep; $n ++ ) {
+                    my $tv = int( $a + $n * ( $b - $a ) / ( $pstep - 1 ) );
+                    if ( $tv ne $testlist[$#testlist] ) {
+                        push @testlist, $tv;
+                    }
+                }
+            }
+            elsif ( $range =~ /"([^"]+)"_"([^"]+)"/ ) {
+                ($a, $b) = ($1, $2);
+                for ( my $n = 0; $n < $pstep; $n ++ ) {
+                    push @testlist, $a + $n * ( $b - $a ) / ( $pstep - 1 );
+                }
+            }
+            else {
+                foreach ( split /\s+/, $2 ) {
+                    s/^"(.*)"$/$1/;
+                    push @testlist, $_;
+                }
+            }
+            #print "$parname\t" . join("\t", @testlist) . "\n";
+            foreach ( @testlist ) {
+                $metapars{$parname}{$_} = 1;
+            }
+        }
+    }
+    close IN;
+
+    return %metapars;
+}
