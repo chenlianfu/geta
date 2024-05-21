@@ -1,6 +1,6 @@
 GETA
 ============
-GETA (Genome-wide Electronic Tool for Annotation) is a pipeline with improved accuracy in the annotation of eukaryotes. This software was written with Perl by Lianfu Chen, Hansheng Zhao, Congcong Liu and Lei Deng.
+GETA (Genome-wide Electronic Tool for Annotation) is a pipeline with improved accuracy in the annotation of eukaryotic genome. This software was written with Perl by Lianfu Chen, Hansheng Zhao, Congcong Liu and Lei Deng.
 
 Introduction
 ============
