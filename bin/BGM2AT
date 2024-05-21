@@ -24,17 +24,6 @@ Usage:
     --gene_number_for_accuracy_detection <int>    default: 200
     若用于augustus training的基因模型数量超过上一个参数设定阈值时，进行Augustus traing，会将gene models随机分成两部分，第一部分包含该指定数目的基因，用于准确性检测（该准确性检测结果是可信的）；剩下的基因模型用于进行augustus training。
 
-    --CPU <int>    default: 8
-    程序调用optimize_augustus.pl命令时，会自动计算其--cpus参数的值，若该值超过本参数的值，则使用本参数的值。
-
-    --min_gene_number_of_optimize_augustus_chunk <int>    default: 50
-    --max_gene_number_of_optimize_augustus_chunk <int>    default: 200
-    运行optimize_augustus.pl进行Augustus优化时，会将基因模型分成多份数据，每份数据包含 x 个基因模型，程序会自动计算该 x 值。按默认设置：首先，程序设定该值为50，从而计算出基因模型的份数(optimize_augustus.pl命令--cps参数的值)；若份数超过了--CPU设定的值，则基因模型将被分成--CPU指定的份数；每份数据包含的基因模型数量若超过了200，则强制使每份数据的基因模型数量为200。
-    这两个参数要根据能用于AUGUSTUS training的基因模型个数和能利用的CPU线程数综合判断。
-
-    --optimize_augustus_rounds <int>    default: 5
-    运行optimize_augustus.pl进行Augustus优化时，对HMM参数进行5轮修正。
-
     --onlytrain_GFF3 <string>    default: None
     输入一个GFF3文件，该GFF3中的基因模型是全基因组中所有准确的基因模型，可以包含不完整的基因模型。该GFF3文件也包含输入文件best_candidates.lowIdentity.gff3中所有的基因模型。
     若使用该参数，则程序会使用该文件中的基因模型（best_candidates.lowIdentity.gff3文件得到的genes.gb中的基因模型除外）仅用作etraining。
@@ -45,22 +34,37 @@ Usage:
     --stopAfterFirstEtraining
     在进行第一次etraining和准确性检测后，即终止程序运行。
 
-	--config <string>    default: None
-	输入配置文件，用于设置本程序调用BGM2AT.optimize_augustus时的运行参数。
+    --cpu <int>    default: 8
+    程序调用optimize_augustus.pl命令时，会自动计算其--cpus参数的值，若该值超过本参数的值，则使用本参数的值。
+
+	--gene_models_minimum_num_for_test <int>    default: 100
+    --gene_models_maximum_num_for_test <int>    default: 600
+    --gene_models_ratio_for_test <float>    default: 0.20
+    每测试一个参数时，需要利用一定数量的基因模型来测试其准确性。使用以上三个参数来设置检测基因模型的数量。默认设 置下，随机挑选train.gb中基因模型数量的20%进行检测，且最高不超过600个，最小不低于100个。若train.gb中的基因模型数量低于100个，则使用全部基因模型用于检测。
+
+	 --gene_models_num_per_test <int>    default: 50
+    每个augustus命令分析时检测的基因模型数量。此时，使用所有其它基因模型进行etraining。对一个AUGUSTUS参数值进行检测时，需要运行 int(用于检测的基因模型数量 / 50 + 1) 个etraining和augustus命令。运行完毕后，合并所有用于检测的基因模型在gene/exon/nucleotide水平上的TP/FP/FN值，再计算整体上的准确性值。
+
+	--pstep <int>    default: 6
+    设置对一个参数进行优化时，用于比较的参数值个数。程序读取$AUGUSTUS_CONFIG_PATH/species/Species_Directory/Species_Directory__metapars.cfg内容确定优化的参数及其取值范围。例如，/IntronModel/d参数值的取值范围为100~950且是整数，默认情况下，则是比较100、270、440、610、780和950这六个参数值的优劣。程序会在取值范围内均匀选择5个参数值。该值越大，则计算量越大，可能越容易找到更优参数。
+
+    --rounds <int>    default: 6
+    设置程序优化的轮数。程序每轮对28个参数进行优化，直至某轮没有优化，或优化到指定轮数截止。
+
+    --optimize_augustus_method <int>    default: 1
+    设置AUGUSTUS参数优化的方法。1，表示仅调用BGM2AT.optimize_augustus进行优化，速度快；2，表示BGM2AT.optimize_augustus优化完毕后，再使用AUGUSTUS软件自带的optimize_augustus.pl程序再次进行优化，此步骤运行速度慢，效果可能更好。
 
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($AUGUSTUS_CONFIG_PATH, $flanking_length, $min_gene_number_for_augustus_training, $gene_number_for_accuracy_detection, $min_gene_number_of_optimize_augustus_chunk, $max_gene_number_of_optimize_augustus_chunk, $onlytrain_GFF3, $CPU, $allowStartCodonBesidesATG, $stopAfterFirstEtraining, $optimize_augustus_rounds, $augustus_species_start_from, $config, $cmdString);
+my ($AUGUSTUS_CONFIG_PATH, $flanking_length, $min_gene_number_for_augustus_training, $gene_number_for_accuracy_detection, $onlytrain_GFF3, $CPU, $allowStartCodonBesidesATG, $stopAfterFirstEtraining, $optimize_augustus_rounds, $augustus_species_start_from, $config, $cmdString);
 GetOptions(
 	"AUGUSTUS_CONFIG_PATH:s" => \$AUGUSTUS_CONFIG_PATH,
     "flanking_length:i" => \$flanking_length,
     "min_gene_number_for_augustus_training:i" => \$min_gene_number_for_augustus_training,
     "gene_number_for_accuracy_detection:i" => \$gene_number_for_accuracy_detection,
-    "min_gene_number_of_optimize_augustus_chunk:i" => \$min_gene_number_of_optimize_augustus_chunk,
-    "max_gene_number_of_optimize_augustus_chunk:i" => \$max_gene_number_of_optimize_augustus_chunk,
     "onlytrain_GFF3:s" => \$onlytrain_GFF3,
-    "CPU:i" => \$CPU,
+    "cpu:i" => \$CPU,
     "allowStartCodonBesidesATG!" => \$allowStartCodonBesidesATG,
     "stopAfterFirstEtraining!" => \$stopAfterFirstEtraining,
     "optimize_augustus_rounds:i" => \$optimize_augustus_rounds,
@@ -69,32 +73,24 @@ GetOptions(
 );
 $min_gene_number_for_augustus_training ||= 500;
 $gene_number_for_accuracy_detection ||= 200;
-$min_gene_number_of_optimize_augustus_chunk ||= 50;
-$max_gene_number_of_optimize_augustus_chunk ||= 200;
 $CPU ||= 8;
 $optimize_augustus_rounds ||= 5;
 if ( $AUGUSTUS_CONFIG_PATH ) { $AUGUSTUS_CONFIG_PATH = abs_path($AUGUSTUS_CONFIG_PATH); }
-if ( $config ) { $config = abs_path($config); }
-
-my %config;
-if ($config) {
-    open IN, $config or die "Can not open file $config, $!\n";
-    my $tag;
-    while (<IN>) {
-        next if m/^#/;
-        next if m/^\s*$/;
-        s/^\s+//;
-        s/\n/ /;
-        if (/\[(.*)\]/) { $tag = $1; delete $config{$1}; }
-        else { $config{$tag} .= $_; }
-    }
-    close IN;
-}
 
 # 优先使用自己设置的AUGUSTUS物种配置路径。从环境变量AUGUSTUS_CONFIG_PATH中拷贝配置文件夹到指定路径中。
 my $AUGUSTUS_CONFIG_PATH_orig = $ENV{"AUGUSTUS_CONFIG_PATH"};
 if ( $AUGUSTUS_CONFIG_PATH ) {
 	mkdir "$AUGUSTUS_CONFIG_PATH/species" unless -e "$AUGUSTUS_CONFIG_PATH/species";
+	if ( ! -e "$AUGUSTUS_CONFIG_PATH/species/generic" ) {
+		if ( -e "$AUGUSTUS_CONFIG_PATH_orig/species/generic" ) {
+			$cmdString = "cp -a $AUGUSTUS_CONFIG_PATH_orig/species/generic $AUGUSTUS_CONFIG_PATH/species";
+			print STDERR "CMD: $cmdString\n";
+			(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+		}
+		else {
+			die "Error: $AUGUSTUS_CONFIG_PATH路径和环境变量AUGUSTUS_CONFIG_PATH路径下均不存在species/generic配置文件夹。\n";
+		}
+	}
 	if ( ! -e "$AUGUSTUS_CONFIG_PATH/cgp" ) {
 		if ( -e "$AUGUSTUS_CONFIG_PATH_orig/cgp" ) {
 			$cmdString = "cp -a $AUGUSTUS_CONFIG_PATH_orig/cgp $AUGUSTUS_CONFIG_PATH/";
@@ -327,13 +323,11 @@ if ($stopAfterFirstEtraining) {
 
 # 进行augustus training优化（第一轮快速优化）
 
-my $chunk_num = $min_gene_number_of_optimize_augustus_chunk;
+my $chunk_num = $gene_models_num_per_test;
 my $noly_train_gene_number = $gene_number_for_training % $chunk_num;
 my $cpus = int ($gene_number_for_training / $chunk_num);
 if ($cpus > $CPU) {
     $cpus = $CPU;
-    $chunk_num = int($gene_number_for_training / $cpus);
-    $chunk_num = $max_gene_number_of_optimize_augustus_chunk if $chunk_num > $max_gene_number_of_optimize_augustus_chunk;
     $noly_train_gene_number = $gene_number_for_training - $cpus * $chunk_num;
 }
 print STDERR "$cpus chunks (each have $chunk_num gene models) were used for augustus training optimization\n";
