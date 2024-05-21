@@ -1,6 +1,7 @@
 #!/usr/bin/perl
 use strict;
 use Getopt::Long;
+use Cwd qw/abs_path getcwd cwd/;
 
 my $usage = <<USAGE;
 Usage:
@@ -30,10 +31,13 @@ Usage:
     --min_intron_len <int>    default: 30
     设置augustus预测时最小的intron长度。
 
+    --AUGUSTUS_CONFIG_PATH <string>    default: None
+    设置AUGUSTUS软件的物种配置文件夹路径。在该路径下应该存在一个名为species的子文件夹，species文件夹下则存放物种名称文件夹。设置该参数有利于将物种配置文件存放到有权限读写的地方。需要注意的是：该参数比Linux下的\$AUGUSTUS_CONFIG_PATH优先级更高；该参数指定的路径下还应该存在cgp、extrinsic、model、parameters和profile文件夹，运行etraining/augustus命令时需要依赖相应的文件。
+
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($species, $cpu, $tmp_dir, $gene_prefix, $segmentSize, $overlapSize, $alternatives_from_evidence, $min_intron_len);
+my ($species, $cpu, $tmp_dir, $gene_prefix, $segmentSize, $overlapSize, $alternatives_from_evidence, $min_intron_len, $AUGUSTUS_CONFIG_PATH);
 GetOptions(
     "species:s" => \$species,
     "cpu:i" => \$cpu,
@@ -43,6 +47,7 @@ GetOptions(
     "overlapSize:i" => \$overlapSize,
     "min_intron_len:i" => \$min_intron_len,
     "alternatives_from_evidence!" => \$alternatives_from_evidence,
+    "AUGUSTUS_CONFIG_PATH:s" => \$AUGUSTUS_CONFIG_PATH,
 );
 
 $gene_prefix ||= "augustus";
@@ -52,6 +57,10 @@ $segmentSize ||= 5000000;
 $overlapSize ||= 100000;
 $min_intron_len ||= 30;
 die "The --species parameter not setted!\n" unless $species;
+if ( $AUGUSTUS_CONFIG_PATH ) {
+    $AUGUSTUS_CONFIG_PATH = abs_path($AUGUSTUS_CONFIG_PATH);
+    $AUGUSTUS_CONFIG_PATH = "--AUGUSTUS_CONFIG_PATH=$AUGUSTUS_CONFIG_PATH";
+}
 
 open IN, $ARGV[0] or die $!;
 my (%seq, $id);
@@ -149,10 +158,10 @@ foreach my $seq_id (sort keys %seq) {
             close OUT;
 
             if ($alternatives_from_evidence) {
-                print COM "augustus --gff3=on --species=$species --hintsfile=$tmp_dir/$seq_id.$start.gff --extrinsicCfgFile=extrinsic.cfg --allow_hinted_splicesites=gcag,atac --alternatives-from-evidence=true --min_intron_len=$min_intron_len --softmasking=1 $tmp_dir/$seq_id.$start.fasta > $tmp_dir/$seq_id.$start.out\n";
+                print COM "augustus --gff3=on --species=$species $AUGUSTUS_CONFIG_PATH --hintsfile=$tmp_dir/$seq_id.$start.gff --extrinsicCfgFile=extrinsic.cfg --allow_hinted_splicesites=gcag,atac --alternatives-from-evidence=true --min_intron_len=$min_intron_len --softmasking=1 $tmp_dir/$seq_id.$start.fasta > $tmp_dir/$seq_id.$start.out\n";
             }
             else {
-                print COM "augustus --gff3=on --species=$species --hintsfile=$tmp_dir/$seq_id.$start.gff --extrinsicCfgFile=extrinsic.cfg --allow_hinted_splicesites=gcag,atac --min_intron_len=$min_intron_len --softmasking=1 $tmp_dir/$seq_id.$start.fasta > $tmp_dir/$seq_id.$start.out\n";
+                print COM "augustus --gff3=on --species=$species $AUGUSTUS_CONFIG_PATH --hintsfile=$tmp_dir/$seq_id.$start.gff --extrinsicCfgFile=extrinsic.cfg --allow_hinted_splicesites=gcag,atac --min_intron_len=$min_intron_len --softmasking=1 $tmp_dir/$seq_id.$start.fasta > $tmp_dir/$seq_id.$start.out\n";
             }
             $out_id{$seq_id}{"$seq_id.$start"} = $start;
         }
@@ -167,10 +176,10 @@ foreach my $seq_id (sort keys %seq) {
         close OUT;
 
         if ($alternatives_from_evidence) {
-            print COM "augustus --gff3=on --species=$species --hintsfile=$tmp_dir/$seq_id.0.gff --extrinsicCfgFile=extrinsic.cfg --allow_hinted_splicesites=gcag,atac --alternatives-from-evidence=true --min_intron_len=$min_intron_len --softmasking=1 $tmp_dir/$seq_id.0.fasta > $tmp_dir/$seq_id.0.out\n";
+            print COM "augustus --gff3=on --species=$species $AUGUSTUS_CONFIG_PATH --hintsfile=$tmp_dir/$seq_id.0.gff --extrinsicCfgFile=extrinsic.cfg --allow_hinted_splicesites=gcag,atac --alternatives-from-evidence=true --min_intron_len=$min_intron_len --softmasking=1 $tmp_dir/$seq_id.0.fasta > $tmp_dir/$seq_id.0.out\n";
         }
         else {
-            print COM "augustus --gff3=on --species=$species --hintsfile=$tmp_dir/$seq_id.0.gff --extrinsicCfgFile=extrinsic.cfg --allow_hinted_splicesites=gcag,atac --min_intron_len=$min_intron_len --softmasking=1 $tmp_dir/$seq_id.0.fasta > $tmp_dir/$seq_id.0.out\n";
+            print COM "augustus --gff3=on --species=$species $AUGUSTUS_CONFIG_PATH --hintsfile=$tmp_dir/$seq_id.0.gff --extrinsicCfgFile=extrinsic.cfg --allow_hinted_splicesites=gcag,atac --min_intron_len=$min_intron_len --softmasking=1 $tmp_dir/$seq_id.0.fasta > $tmp_dir/$seq_id.0.out\n";
         }
         $out_id{$seq_id}{"$seq_id.0"} = 1;
     }

@@ -21,7 +21,7 @@ For example:
 
     本程序能利用train.gb中的基因模型，对AUGUSTUS的参数进行优化。相比于AUGUSTUS的optimize_augustus.pl程序一次仅能对一个参数进行优化，本程序可以充分利用所有CPU线程资源，一次性对所有参数同时优化，能减少计算时间消耗。本程序功能上也有减配：仅支持常规的AUGUSTUS参数优化，不支持CGP(comparative gene prediction)参数优化；要求用于检测的基因模型的尾部CDS包含终止密码子。
     程序输入的Species_Directory必须是一个物种文件夹名称，配合Linux环境变量中\$AUGUSTUS_CONFIG_PATH指定的路径，或输入参数--AUGUSTUS_CONFIG_PATH(优先级更高)指定的路径。程序对\$AUGUSTUS_CONFIG_PATH/species/Species_Directory/Species_Directory_parameters.cfg配置文件中的28个参数进行优化。若该配置文件不存在，则程序无法运行。
-	程序运行原理：（1）首先解析metapars.cfg文件获得各个参数的取值范围，准备对每个参数最多取6个值，进行准确性检测，选最优值。（2）根据train.gb文件，随机挑选最多600条序列用于准确性检测。（3）对总共28个参数，每个参数约6个值，再将用于检测的600条序列分隔成多份，分别生成数据文件和命令行，调用ParaFly并行检测分析，得到nucleotide、exon和gene水平的sensitivity和specifity值，计算得到整体accuracy = (3*nucleotide_sensitivity + 2*nucleotide_specificity + 4*exon_sensitivity + 3*exon_specificity + 2*gene_sensitivity + 1*gene_specificity)/15。（4）选择28个参数的最优值，计算其准确性均值。若某个参数最优值的准确性超过了上一轮的均值，则对parameters.cfg文件内容中的参数进行修改优化。
+    程序运行原理：（1）首先解析metapars.cfg文件获得各个参数的取值范围，准备对每个参数最多取6个值，进行准确性检测，选最优值。（2）根据train.gb文件，随机挑选最多600条序列用于准确性检测。（3）对总共28个参数，每个参数约6个值，再将用于检测的600条序列分隔成多份，分别生成数据文件和命令行，调用ParaFly并行检测分析，得到nucleotide、exon和gene水平的sensitivity和specifity值，计算得到整体accuracy = (3*nucleotide_sensitivity + 2*nucleotide_specificity + 4*exon_sensitivity + 3*exon_specificity + 2*gene_sensitivity + 1*gene_specificity)/15。（4）选择28个参数的最优值，计算其准确性均值。若某个参数最优值的准确性超过了上一轮的均值，则对parameters.cfg文件内容中的参数进行修改优化。（5）程序进行多轮优化，直至没有参数能被优化，或完成指定轮数截止。在进行到第3轮优化后，若某参数值的准确性有提升，则程序额外对参数的范围也进行收缩，以利于下一轮找到更优的参数值。（6）此外，程序还会对/Constant/gc_range_min、/Constant/gc_range_max、/Constant/amberprob、/Constant/ochreprob和/Constant/opalprob这5个参数进行修正。
 
     --onlytrain <string>    default: None
     输入一个genebank格式文件，包含一些仅用于etraining的基因模型。
@@ -51,6 +51,9 @@ For example:
 
     --reduced_round <int>    default: 3
     程序会从第3轮结束后，缩小参数的取值范围。这样有利于寻找更优的参数值。而标准的AUGUSTUS的optimize_augustus.pl程序并没有该操作。有些参数取值数量低于--pstep参数设定值时，则不会缩小其取值范围。例如，/Constant/dss_end参数值为整数，只能取值0、1、2、3和4，则不会缩小其取值范围。缩小取值范围的方法：默认比较6个数据，按准确性结果从好到坏对这6个数据值进行排序，从排第2名往后寻找，直至同时找到比第一名大和小的值止。取找到的数值的最大和最小值作为新的取值范围。
+
+	--min_intron_len <int>    default: 20
+	设置允许的最小intron长度。
 
     --help    default: None
     display this help and exit.
@@ -88,8 +91,10 @@ $reduced_round ||= 3;
 
 if ( $help_flag ) { die $usage }
 
-# 用于确定Constant/decomp_num_steps是否因为 > 1修改过参数配置文件的/Constant/gc_range_min和/Constant/gc_range_max的值。只需要修改一次。
+# 当 Constant/decomp_num_steps > 1 时，推荐修改/Constant/gc_range_min和/Constant/gc_range_max的值。只需要做一次。
 my $Constant_decomp_num_steps = 0;
+# 推荐修改三种终止密码子的概率/Constant/amberprob、/Constant/ochreprob和/Constant/opalprob参数的值。只需要修改一次。
+my $Constant_stop_codon_prob = 0;
 
 # 使用绝对路径
 my $file_testGeneModel = abs_path($ARGV[1]);
@@ -195,11 +200,11 @@ while ( $round_current <= $rounds  ) {
     my %accuracy = %{$accuracy_ref}; # 双重哈希，存放参数名、数值、准确性（值）。
 
     print STDERR "在第 $round_current 轮分析中，其最优参数、其取值和准确性：\n";
-	$outStats .= "在第 $round_current 轮分析中，其最优参数、其取值和准确性：\n";
+    $outStats .= "在第 $round_current 轮分析中，其最优参数、其取值和准确性：\n";
     foreach ( sort keys %best_parameters ) {
-		print STDERR "\t$_\t$best_parameters{$_}\n";
-		$outStats .= "\t$_\t$best_parameters{$_}\n";
-	}
+        print STDERR "\t$_\t$best_parameters{$_}\n";
+        $outStats .= "\t$_\t$best_parameters{$_}\n";
+    }
     #foreach my $par_name ( sort keys %accuracy ) { foreach ( keys %{$accuracy{$par_name}} ) { print "$par_name\t$_: $accuracy{$par_name}{$_}\n"; } }
 
     # 修改parameters.cfg文件参数并进行比较，得到改进的参数信息
@@ -219,16 +224,10 @@ while ( $round_current <= $rounds  ) {
         $round_current = $rounds + 1;
     }
 
-	# 计算本轮所有最优参数准确性均值
-	my $accuracy_value_current = &get_accuracy_value(\%best_parameters);
-	$accuracy_value = $accuracy_value_current if $accuracy_value < $accuracy_value_current;
-	print STDERR "在第 $round_current 轮参数优化中，最优参数的准确性均值为 $accuracy_value_current ；下一轮优化参数时的准确性阈值为 $accuracy_value。\n";
-	$outStats .= "在第 $round_current 轮参数优化中，最优参数的准确性均值为 $accuracy_value_current ；下一轮优化参数时的准确性阈值为 $accuracy_value。\n";
-
     # 缩小参数值范围
     if ( $round_current >= $reduced_round ) {
         # 改写metapars.cfg文件内容。
-        my @range_change = &modify_metapars(\%accuracy, $file_metapars);
+        my @range_change = &modify_metapars(\%accuracy, $file_metapars, $accuracy_value);
         my $range_change_num = @range_change;
         print STDERR "在第 $round_current 轮参数优化中，有 $range_change_num 个参数的范围有优化：\n";
         $outStats .= "在第 $round_current 轮参数优化中，有 $range_change_num 个参数的范围有优化：\n";
@@ -237,6 +236,12 @@ while ( $round_current <= $rounds  ) {
             $outStats .= "\t$_\n";
         }
     }
+
+    # 计算本轮所有最优参数准确性均值
+    my $accuracy_value_current = &get_accuracy_value(\%best_parameters);
+    $accuracy_value = $accuracy_value_current if $accuracy_value < $accuracy_value_current;
+    print STDERR "在第 $round_current 轮参数优化中，最优参数的准确性均值为 $accuracy_value_current ；下一轮优化参数时的准确性阈值为 $accuracy_value。\n";
+    $outStats .= "在第 $round_current 轮参数优化中，最优参数的准确性均值为 $accuracy_value_current ；下一轮优化参数时的准确性阈值为 $accuracy_value。\n";
 
     open OUT, ">", "$tmp_dir/round$round_current.stats"  or die $!;
     print OUT $outStats;
@@ -250,23 +255,24 @@ while ( $round_current <= $rounds  ) {
 }
 
 sub get_accuracy_value {
-	my %best_parameters_in = %{$_[0]};
-	my ($out, $total, $num);
-	foreach ( keys %best_parameters_in ) {
-		@_ = split /\t/, $best_parameters_in{$_};
-		if ( $_ ) {
-			$num ++;
-			$total += $_[1];
-		}
-	}
-	$out = $total / $num;
-	$out = sprintf("%.4f", $out);
-	return $out;
+    my %best_parameters_in = %{$_[0]};
+    my ($out, $total, $num);
+    foreach ( keys %best_parameters_in ) {
+        @_ = split /\t/, $best_parameters_in{$_};
+        if ( $_ ) {
+            $num ++;
+            $total += $_[1];
+        }
+    }
+    $out = $total / $num;
+    $out = sprintf("%.4f", $out);
+    return $out;
 }
 
 sub modify_metapars {
     my %accuracy = %{$_[0]};
     my $file_metapars = $_[1];
+    my $accuracy_threshold = $_[2];
     my @out;
 
     open IN, $file_metapars or die $!;
@@ -291,13 +297,21 @@ sub modify_metapars {
 
                 # 寻找新的取值范围。首先，将取值按从好到坏排序。
                 my @value = sort {$accuracy{$parname}{$b} <=> $accuracy{$parname}{$a}} keys %{$accuracy{$parname}};
+                # 若参数取值数量少于 --pstep，则不进行范围收缩。
                 if ( @value < $pstep ) {
                     print OUT "$line\n";
                     next;
                 }
+
                 my @new_value;
                 # 将最优值加入到新的数组中
                 my $first_value = shift @value; push @new_value, $first_value;
+                # 若最优准确性值低于阈值，则不进行范围收缩。
+                if ( $accuracy{$parname}{$first_value} <= $accuracy_threshold ) {
+                    print OUT "$line\n";
+                    next;
+                }
+
                 my ($found_high, $found_low) = (0, 0);
                 # 将其它值加入到新的数组中，直至同时找到更大和更小值。
                 foreach ( @value ) {
@@ -340,16 +354,16 @@ sub modify_metapars {
 sub improve_parameters {
     my %best_par_in = %{$_[0]};
     my $file_for_modify = $_[1];
-	my $accuracy_threshold = $_[2];
+    my $accuracy_threshold = $_[2];
     my @out;
 
-	# 将 %best_par_in 拆成两个哈希 %best_par 存放参数及其值； %best_accuracy 存放参数及其准确性。
-	my (%best_par, %best_accuracy );
-	foreach ( keys %best_par_in ) {
-		@_ = split /\t/, $best_par_in{$_};
-		$best_par{$_} = $_[0];
-		$best_accuracy{$_} = $_[1];
-	}
+    # 将 %best_par_in 拆成两个哈希 %best_par 存放参数及其值； %best_accuracy 存放参数及其准确性。
+    my (%best_par, %best_accuracy );
+    foreach ( keys %best_par_in ) {
+        @_ = split /\t/, $best_par_in{$_};
+        $best_par{$_} = $_[0];
+        $best_accuracy{$_} = $_[1];
+    }
 
     open IN, $file_for_modify or die $!;
     my $file_info = join "", <IN>;
@@ -388,6 +402,8 @@ sub improve_parameters {
 
     my $out_num = 0; $out_num = @out if @out;
     print STDERR "对配置文件 $file_for_modify 的参数进行了 $out_num 项修改。\n";
+
+    # 运行一次 etraining，以用于修改/Constant/amberprob、/Constant/ochreprob、/Constant/opalprob、/Constant/gc_range_min 和 /Constant/gc_range_max 这5个参数的值。
 
     # 若 /Constant/decomp_num_steps 的值 > 1，需要修改 /Constant/gc_range_min 和 /Constant/gc_range_max的值。
     if ( $best_par{"/Constant/decomp_num_steps"} > 1 && $Constant_decomp_num_steps == 0) {
@@ -429,6 +445,55 @@ sub improve_parameters {
         }
     }
 
+    # 修改 /Constant/amberprob、/Constant/ochreprob和/Constant/opalprob参数值。
+    if ( $Constant_stop_codon_prob == 0 ) {
+        $Constant_stop_codon_prob = 1;
+        # 若没有 etraining 结果，则执行 etraining。
+        if ( ! -e "$tmp_dir/etraining.out" ) {
+            my $cmdString = "etraining --species=$species_name --AUGUSTUS_CONFIG_PATH=$ENV{'AUGUSTUS_CONFIG_PATH'} $tmp_dir/all.gb > $tmp_dir/etraining.out 2> /dev/null";
+            print STDERR (localtime) . ": CMD: $cmdString\n";
+            system($cmdString) == 0 or die "Error: Failed to excute: $cmdString\n";
+        }
+
+        # 获取三种终止密码止概率
+        my ($tag_prob, $taa_prob, $tga_prob) = (0.33, 0.33, 0.34);
+        open IN, "$tmp_dir/etraining.out" or die $!;
+        while (<IN>) {
+            $tag_prob = $1 if m/^tag:.*\((\S+?)\)/;
+            $taa_prob = $1 if m/^taa:.*\((\S+?)\)/;
+            $tga_prob = $1 if m/^tga:.*\((\S+?)\)/;
+        }
+        close IN;
+
+        # 修改参数文件
+        open IN, $file_for_modify or die $!;
+        my $file_info = join "", <IN>;
+        close IN;
+
+        $file_info =~ s#(/Constant/amberprob\s+)(\S+)#$1$tag_prob#; my $old_tag_prob = $2;
+        $file_info =~ s#(/Constant/ochreprob\s+)(\S+)#$1$taa_prob#; my $old_taa_prob = $2;
+        $file_info =~ s#(/Constant/opalprob\s+)(\S+)#$1$tga_prob#; my $old_tga_prob = $2;
+
+        open OUT, ">", $file_for_modify or die $!;
+        print OUT $file_info;
+        close OUT;
+
+        print STDERR "对配置文件 $file_for_modify 的参数进行了三项额外修改：\n\t/Constant/amberprob:  $old_tag_prob  ->  $tag_prob\n\t/Constant/ochreprob:  $old_taa_prob  ->  $taa_prob\n\t/Constant/opalprob:   $old_tga_prob  ->  $tga_prob\n";
+
+        if ( $old_tag_prob ne $tag_prob ) {
+            my $out = sprintf("%-40s%-10s ->  $tag_prob", "/Constant/amberprob:", $old_tag_prob);
+            push @out, $out;
+        }
+        if ( $old_taa_prob ne $taa_prob ) {
+            my $out = sprintf("%-40s%-10s ->  $taa_prob", "/Constant/ochreprob:", $old_taa_prob);
+            push @out, $out;
+        }
+        if ( $old_tga_prob ne $tga_prob ) {
+            my $out = sprintf("%-40s%-10s ->  $tga_prob", "/Constant/opalprob:", $old_tga_prob);
+            push @out, $out;
+        }
+    }
+
     return @out;
 }
 
@@ -452,7 +517,7 @@ sub get_best_parameters {
     foreach my $par_name_orig ( sort keys %metapars ) {
         my $par_name = $par_name_orig;
         $par_name =~ s#^/##; $par_name =~ s#/#_#g;
-        my %out2;
+        my (%out2, %sort1, %sort2, %sort3);
         foreach my $value ( sort {$a <=> $b} keys %{$metapars{$par_name_orig}} ) {
             # 分析nucleotide、exon和gene的标准注释数量、预测数量、TP数量。
             my ($nucleotide_annot, $nucleotide_pred, $nucleotide_TP, $exon_annot, $exon_pred, $exon_TP, $gene_annot, $gene_pred, $gene_TP) = (0,0,0,0,0,0,0,0,0);
@@ -504,15 +569,18 @@ sub get_best_parameters {
             my $accuracy_out = sprintf("%0.4f\t%0.4f\t%0.4f\t%0.4f\t%0.4f\t%0.4f\t%0.4f", $nucleotide_sensitivity, $nucleotide_specificity, $exon_sensitivity, $exon_specificity, $gene_sensitivity, $gene_specificity, $accuracy);
             # %out2 存放核酸、exon和gene水平的准确性数据。
             $out2{"$par_name_orig  $value:\t$accuracy_out\n"} = $accuracy;
+            $sort1{"$par_name_orig  $value:\t$accuracy_out\n"} = $exon_sensitivity;
+            $sort2{"$par_name_orig  $value:\t$accuracy_out\n"} = $nucleotide_sensitivity;
+            $sort3{"$par_name_orig  $value:\t$accuracy_out\n"} =  $gene_sensitivity;
             # %out3 存放参数取值的整体准确性数据。
             $out3{$par_name_orig}{$value} = sprintf("%0.4f", $accuracy);
         }
-        my @out2 = sort {$out2{$b}<=> $out2{$a} or $a cmp $b} keys %out2;
+        my @out2 = sort {$out2{$b}<=> $out2{$a} or $sort1{$b} <=> $sort1{$a} or $sort2{$b} <=> $sort2{$a} or $sort3{$b} <=> $sort3{$a} or $a cmp $b} keys %out2;
         my $best = shift @out2; 
         print STDERR "*$best";
         foreach ( @out2 ) { print STDERR; }
         # %out 存放参数的最优值。
-		my $best_accuracy = sprintf("%0.4f", $out2{$best});
+        my $best_accuracy = sprintf("%0.4f", $out2{$best});
         $out{$par_name_orig} = "$1\t$best_accuracy" if $best =~ m/(\S+):/;
     }
 

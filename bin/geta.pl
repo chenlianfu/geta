@@ -164,7 +164,7 @@ if ( $sam ) {
     my @files; foreach ( split /,/, $sam ) { push @files, abs_path($_); } $sam = join ",", @files;
 }
 if ($use_existed_augustus_species) {
-    my $species_config_dir = `echo \$AUGUSTUS_CONFIG_PATH`;
+    my $species_config_dir = $ENV{"AUGUSTUS_CONFIG_PATH"};
     chomp($species_config_dir);
     $species_config_dir = "$species_config_dir/species/$use_existed_augustus_species";
     if (-e $species_config_dir) {
@@ -190,14 +190,19 @@ die "No genome sequences was found in file $genome\n" unless -s $genome;
 die "No RNA-Seq short reads or homologous proteins was input\n" unless (($pe1 && $pe2) or $single_end or $sam or $protein);
 die "No Augustus species provided\n" unless ($augustus_species or $use_existed_augustus_species);
 
+if ( $augustus_species_start_from ) {
+    $augustus_species_start_from = " --augustus_species_start_from $augustus_species_start_from ";
+}
+
 # 其它参数
 $genetic_code ||= 1;
 $out_prefix ||= "out";
+$out_prefix = abs_path($out_prefix);
 $cpu ||= 4;
 
 # 各个主要命令的参数设置
 my %config = (
-	'para_RepeatMasker' => '--min_coverge_ratio 0.25',
+    'para_RepeatMasker' => '--min_coverge_ratio 0.25',
     'trimmomatic' => 'TruSeq3-PE-2.fa:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:50 TOPHRED33',
     'hisat2-build' => '-p 1',
     'hisat2' => '--min-intronlen 20 --max-intronlen 20000 --dta --score-min L,0.0,-0.4 -k 1',
@@ -207,7 +212,7 @@ my %config = (
     'homolog_prediction' => '--identity 0.2 --evalue 1e-9 --homolog_coverage 0.3 --max_hits_num_per_match_region 10 --max_hit_num_per_single_species 2 --method all --genetic_code 1 --threshod_ratio_of_intron_Supported_times 0.5',
     'homolog_predictionGFF2GFF3' => '--min_score 15 --gene_prefix genewise --filterMiddleStopCodon',
     'geneModels2AugusutsTrainingInput' => '--min_evalue 1e-9 --min_identity 0.8 --min_coverage_ratio 0.8 --min_cds_num 2 --min_cds_length 450 --min_cds_exon_ratio 0.60',
-    'BGM2AT' => '--min_gene_number_for_augustus_training 500 --gene_number_for_accuracy_detection 200 --min_gene_number_of_optimize_augustus_chunk 50 --max_gene_number_of_optimize_augustus_chunk 200',
+    'BGM2AT' => '--min_gene_number_for_augustus_training 500 --gene_number_for_accuracy_detection 200 --gene_models_minimum_num_for_test 100 --gene_models_maximum_num_for_test 600 --gene_models_ratio_for_test 0.2 --gene_models_num_per_test 50 --pstep 6 --rounds 6 --optimize_augustus_method 1',
     'prepareAugusutusHints' => '--margin 20',
     'paraAugusutusWithHints' => '--gene_prefix augustus --min_intron_len 20',
     'paraCombineGeneModels' => '--overlap 30 --min_augustus_transcriptSupport_percentage 10.0 --min_augustus_intronSupport_number 1 --min_augustus_intronSupport_ratio 0.01',
@@ -575,27 +580,10 @@ unless (-e "4.augustus.ok") {
 
         chdir "../";
     }
-	
-	# 准备配置文件夹到程序运行目录下
-	my $AUGUSTUS_CONFIG_PATH_orig = $ENV{"AUGUSTUS_CONFIG_PATH"};
-	if ( ! -e $AUGUSTUS_CONFIG_PATH_orig ) {
-		die "Error: The Augustus config path not exists.\n";
-	}
-	mkdir "$pwd/config" unless -e "$pwd/config";
-	$cmdString = "/bin/cp -a $AUGUSTUS_CONFIG_PATH_orig/cgp $AUGUSTUS_CONFIG_PATH_orig/extrinsic $AUGUSTUS_CONFIG_PATH_orig/model $AUGUSTUS_CONFIG_PATH_orig/parameters $AUGUSTUS_CONFIG_PATH_orig/profile $pwd/config";
-	print STDERR (localtime) . ": CMD: $cmdString\n";
-	system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-	$ENV{"AUGUSTUS_CONFIG_PATH"} = "$pwd/config";
-
+    
     # 第一次 Augustus HMM Training
     unless (-e "training") {
         mkdir "training";
-        #my $species_config_dir = `echo \$AUGUSTUS_CONFIG_PATH`;
-        #chomp($species_config_dir);
-        #$species_config_dir = "$species_config_dir/species/$augustus_species";
-        #$cmdString = "rm -rf $species_config_dir";
-        #print STDERR "CMD: $cmdString\n";
-        #(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
         unlink "training.ok" if (-e "training.ok");
     }
     unless (-e "training.ok") {
@@ -659,7 +647,8 @@ unless (-e "4.augustus.ok") {
         @flanking_length = sort {$a <=> $b} @flanking_length;
         $flanking_length = int($flanking_length[@flanking_length/2] / 8);
         $flanking_length = $gene_length[@gene_length/2] if $flanking_length >= $gene_length[@gene_length/2];
-        $cmdString = "$dirname/bin/BGM2AT $config{'BGM2AT'} --augustus_species_start_from $augustus_species_start_from --flanking_length $flanking_length --CPU $cpu --onlytrain_GFF3 ati.filter1.gff3 ati.filter2.gff3 $genome $augustus_species &> BGM2AT.log";
+
+        $cmdString = "$dirname/bin/BGM2AT $config{'BGM2AT'} --AUGUSTUS_CONFIG_PATH $out_prefix.tmp/4.augustus/config $augustus_species_start_from --flanking_length $flanking_length --CPU $cpu --onlytrain_GFF3 ati.filter1.gff3 ati.filter2.gff3 $genome $augustus_species &> BGM2AT.log";
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
@@ -717,7 +706,7 @@ unless (-e "4.augustus.ok") {
         $segmentSize = $overlapSize * 50;
     }
     # 第一次 Augustus gene prediction
-    $cmdString = "$dirname/bin/paraAugusutusWithHints $config{'paraAugusutusWithHints'} --species $augustus_species --cpu $cpu --segmentSize $segmentSize --overlapSize $overlapSize --tmp_dir aug_para_with_hints.tmp1  ../0.RepeatMasker/genome.masked.fasta hints.gff > augustus.1.gff3";
+    $cmdString = "$dirname/bin/paraAugusutusWithHints $config{'paraAugusutusWithHints'} --species $augustus_species --AUGUSTUS_CONFIG_PATH $out_prefix.tmp/4.augustus/config --cpu $cpu --segmentSize $segmentSize --overlapSize $overlapSize --tmp_dir aug_para_with_hints.tmp1  ../0.RepeatMasker/genome.masked.fasta hints.gff > augustus.1.gff3";
     unless (-e "first_augustus.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -732,7 +721,7 @@ unless (-e "4.augustus.ok") {
     if ($enable_augustus_training_iteration && (! $use_existed_augustus_species)) {
         unless (-e "training_again") {
             mkdir "training_again";
-            my $species_config_dir = `echo \$AUGUSTUS_CONFIG_PATH`;
+            my $species_config_dir = $ENV{"AUGUSTUS_CONFIG_PATH"};
             chomp($species_config_dir);
             $species_config_dir = "$species_config_dir/species/$augustus_species";
             $cmdString = "rm -rf $species_config_dir && cp -a ./training/hmm_files_bak/ $species_config_dir";
@@ -922,7 +911,7 @@ unless (-e "4.augustus.ok") {
                 }
 
                 # Augustus gene prediction
-                $cmdString = "$dirname/bin/paraAugusutusWithHints $config{'paraAugusutusWithHints'} --species $augustus_species --cpu $cpu --segmentSize $segmentSize --overlapSize $overlapSize --tmp_dir aug_para_with_hints.tmp2 ../0.RepeatMasker/genome.masked.fasta hints.gff > augustus.2.gff3";
+                $cmdString = "$dirname/bin/paraAugusutusWithHints $config{'paraAugusutusWithHints'} --species $augustus_species --AUGUSTUS_CONFIG_PATH $out_prefix.tmp/4.augustus/config --cpu $cpu --segmentSize $segmentSize --overlapSize $overlapSize --tmp_dir aug_para_with_hints.tmp2 ../0.RepeatMasker/genome.masked.fasta hints.gff > augustus.2.gff3";
                 print STDERR (localtime) . ": CMD: $cmdString\n";
                 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
@@ -934,7 +923,7 @@ unless (-e "4.augustus.ok") {
                 print STDERR "The iteration step could not increase the accuracy of augustus training! and the hmm files will be rolled back!\n";
                 chdir "../";
                 $pwd = `pwd`; print STDERR "PWD: $pwd";
-                my $species_config_dir = `echo \$AUGUSTUS_CONFIG_PATH`;
+                my $species_config_dir = $ENV{"AUGUSTUS_CONFIG_PATH"};
                 chomp($species_config_dir);
                 $species_config_dir = "$species_config_dir/species/$augustus_species";
                 $cmdString = "rm -rf $species_config_dir && cp -a ./training/hmm_files_bak/ $species_config_dir";
@@ -973,7 +962,7 @@ unless (-e "4.augustus.ok") {
                 }
 
                 # Augustus gene prediction
-                $cmdString = "$dirname/bin/paraAugusutusWithHints $config{'paraAugusutusWithHints'} --species $augustus_species --cpu $cpu --segmentSize $segmentSize --overlapSize $overlapSize --tmp_dir aug_para_with_hints.tmp2 ../0.RepeatMasker/genome.masked.fasta hints.gff > augustus.2.gff3";
+                $cmdString = "$dirname/bin/paraAugusutusWithHints $config{'paraAugusutusWithHints'} --species $augustus_species --AUGUSTUS_CONFIG_PATH $out_prefix.tmp/4.augustus/config --cpu $cpu --segmentSize $segmentSize --overlapSize $overlapSize --tmp_dir aug_para_with_hints.tmp2 ../0.RepeatMasker/genome.masked.fasta hints.gff > augustus.2.gff3";
                 print STDERR (localtime) . ": CMD: $cmdString\n";
                 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 

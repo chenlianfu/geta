@@ -1,6 +1,11 @@
 #!/usr/bin/perl
 use strict;
 use Getopt::Long;
+use Cwd qw/abs_path getcwd cwd/;
+use File::Basename;
+use File::Path qw(make_path);
+my $dirname = dirname($0);
+$dirname =~ s/\/bin$//;
 
 my $usage = <<USAGE;
 Usage:
@@ -8,8 +13,8 @@ Usage:
 
     程序输入best_candidates.lowIdentity.gff3文件中包含完整且准确的基因模型（来源于转录本或同源蛋白的比对结果），且这些基因模型满足一些要求，例如：多CDS、CDS总长度较长、CDS长度占转录本序列比例较高、intron长度较短。这些基因模型适合用来做HMM准确性检测。
 
-	--AUGUSTUS_CONFIG_PATH <string>    default: None
-	设置AUGUSTUS软件的物种配置文件夹路径。在该路径下应该存在一个名为species的子文件夹，species文件夹下则存放物种名称文件夹。设置该参数有利于将物种配置文件存放到有权限读写的地方。需要注意的是：该参数比Linux下的$AUGUSTUS_CONFIG_PATH优先级更高；该参数指定的路径下还应该存在cgp、extrinsic、model、parameters和profile文件夹，运行etraining命令时需要依赖相应的文件。
+    --AUGUSTUS_CONFIG_PATH <string>    default: None
+    设置AUGUSTUS软件的物种配置文件夹路径。在该路径下应该存在一个名为species的子文件夹，species文件夹下则存放物种名称文件夹。设置该参数有利于将物种配置文件存放到有权限读写的地方。需要注意的是：该参数比Linux下的\$AUGUSTUS_CONFIG_PATH优先级更高；该参数指定的路径下还应该存在cgp、extrinsic、model、parameters和profile文件夹，运行etraining命令时需要依赖相应的文件。
 
     --augustus_species_start_from <string>    default: None
     若设置该参数，程序进行Augustus Training时，会将设置物种的parameters.cfg文件中的参数信息拷贝到新生成的文件中。若设置的物种比较临近，能加快optimization步骤的运行，也有利于Augustus Training结果的准确性。
@@ -22,14 +27,14 @@ Usage:
     若用于augustus training的基因模型数量低于此数目的时候，程序直接使用所有的基因模型进行augustus training；再用这些基因模型进行准确性检测（该准确性检测结果是不可信的）。
 
     --gene_number_for_accuracy_detection <int>    default: 200
-    若用于augustus training的基因模型数量超过上一个参数设定阈值时，进行Augustus traing，会将gene models随机分成两部分，第一部分包含该指定数目的基因，用于准确性检测（该准确性检测结果是可信的）；剩下的基因模型用于进行augustus training。
+    若用于augustus training的基因模型数量超过上一个参数设定阈值时，进行Augustus training时，会将gene models随机分成两部分，第一部分包含该指定数目的基因，用于准确性检测（该准确性检测结果是可信的）；剩下的基因模型用于进行augustus training。
 
     --onlytrain_GFF3 <string>    default: None
     输入一个GFF3文件，该GFF3中的基因模型是全基因组中所有准确的基因模型，可以包含不完整的基因模型。该GFF3文件也包含输入文件best_candidates.lowIdentity.gff3中所有的基因模型。
     若使用该参数，则程序会使用该文件中的基因模型（best_candidates.lowIdentity.gff3文件得到的genes.gb中的基因模型除外）仅用作etraining。
 
     --allowStartCodonBesidesATG
-    若设置该参数后，则允许CTG和TTG可以作为起始密码子。
+    若设置该参数后，则允许CTG和TTG可以作为起始密码子。若etraining时添加了不完整基因模型，则会导致exon_probs.pbl配置文件中出现ATG之外的起始密码子。程序默认不添加该参数，会对exon_probs.pbl文件内容进行修正。
 
     --stopAfterFirstEtraining
     在进行第一次etraining和准确性检测后，即终止程序运行。
@@ -37,16 +42,16 @@ Usage:
     --cpu <int>    default: 8
     程序调用optimize_augustus.pl命令时，会自动计算其--cpus参数的值，若该值超过本参数的值，则使用本参数的值。
 
-	--gene_models_minimum_num_for_test <int>    default: 100
+    --gene_models_minimum_num_for_test <int>    default: 100
     --gene_models_maximum_num_for_test <int>    default: 600
     --gene_models_ratio_for_test <float>    default: 0.20
     每测试一个参数时，需要利用一定数量的基因模型来测试其准确性。使用以上三个参数来设置检测基因模型的数量。默认设 置下，随机挑选train.gb中基因模型数量的20%进行检测，且最高不超过600个，最小不低于100个。若train.gb中的基因模型数量低于100个，则使用全部基因模型用于检测。
 
-	 --gene_models_num_per_test <int>    default: 50
+     --gene_models_num_per_test <int>    default: 50
     每个augustus命令分析时检测的基因模型数量。此时，使用所有其它基因模型进行etraining。对一个AUGUSTUS参数值进行检测时，需要运行 int(用于检测的基因模型数量 / 50 + 1) 个etraining和augustus命令。运行完毕后，合并所有用于检测的基因模型在gene/exon/nucleotide水平上的TP/FP/FN值，再计算整体上的准确性值。
 
-	--pstep <int>    default: 6
-    设置对一个参数进行优化时，用于比较的参数值个数。程序读取$AUGUSTUS_CONFIG_PATH/species/Species_Directory/Species_Directory__metapars.cfg内容确定优化的参数及其取值范围。例如，/IntronModel/d参数值的取值范围为100~950且是整数，默认情况下，则是比较100、270、440、610、780和950这六个参数值的优劣。程序会在取值范围内均匀选择5个参数值。该值越大，则计算量越大，可能越容易找到更优参数。
+    --pstep <int>    default: 6
+    设置对一个参数进行优化时，用于比较的参数值个数。程序读取\$AUGUSTUS_CONFIG_PATH/species/Species_Directory/Species_Directory__metapars.cfg内容确定优化的参数及其取值范围。例如，/IntronModel/d参数值的取值范围为100~950且是整数，默认情况下，则是比较100、270、440、610、780和950这六个参数值的优劣。程序会在取值范围内均匀选择5个参数值。该值越大，则计算量越大，可能越容易找到更优参数。
 
     --rounds <int>    default: 6
     设置程序优化的轮数。程序每轮对28个参数进行优化，直至某轮没有优化，或优化到指定轮数截止。
@@ -57,9 +62,10 @@ Usage:
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($AUGUSTUS_CONFIG_PATH, $flanking_length, $min_gene_number_for_augustus_training, $gene_number_for_accuracy_detection, $onlytrain_GFF3, $CPU, $allowStartCodonBesidesATG, $stopAfterFirstEtraining, $optimize_augustus_rounds, $augustus_species_start_from, $config, $cmdString);
+my ($AUGUSTUS_CONFIG_PATH, $augustus_species_start_from, $flanking_length, $min_gene_number_for_augustus_training, $gene_number_for_accuracy_detection, $onlytrain_GFF3, $CPU, $allowStartCodonBesidesATG, $stopAfterFirstEtraining, $gene_models_num_per_test, $gene_models_minimum_num_for_test, $gene_models_maximum_num_for_test, $gene_models_ratio_for_test, $pstep, $rounds, $optimize_augustus_method, $cmdString);
 GetOptions(
-	"AUGUSTUS_CONFIG_PATH:s" => \$AUGUSTUS_CONFIG_PATH,
+    "AUGUSTUS_CONFIG_PATH:s" => \$AUGUSTUS_CONFIG_PATH,
+    "augustus_species_start_from:s" => \$augustus_species_start_from,
     "flanking_length:i" => \$flanking_length,
     "min_gene_number_for_augustus_training:i" => \$min_gene_number_for_augustus_training,
     "gene_number_for_accuracy_detection:i" => \$gene_number_for_accuracy_detection,
@@ -67,90 +73,108 @@ GetOptions(
     "cpu:i" => \$CPU,
     "allowStartCodonBesidesATG!" => \$allowStartCodonBesidesATG,
     "stopAfterFirstEtraining!" => \$stopAfterFirstEtraining,
-    "optimize_augustus_rounds:i" => \$optimize_augustus_rounds,
-    "augustus_species_start_from:s" => \$augustus_species_start_from,
-	"config:s" => \$config,
+    "gene_models_num_per_test:i" => \$gene_models_num_per_test,
+    "gene_models_minimum_num_for_test:i" => \$gene_models_minimum_num_for_test,
+    "gene_models_maximum_num_for_test:i" => \$gene_models_maximum_num_for_test,
+    "gene_models_ratio_for_test:f" => \$gene_models_ratio_for_test,
+    "pstep:i" => \$pstep,
+    "rounds:i" => \$rounds,
+    "optimize_augustus_method:i" => \$optimize_augustus_method,
 );
 $min_gene_number_for_augustus_training ||= 500;
 $gene_number_for_accuracy_detection ||= 200;
 $CPU ||= 8;
-$optimize_augustus_rounds ||= 5;
+$gene_models_num_per_test ||= 50;
+$gene_models_minimum_num_for_test ||= 100;
+$gene_models_maximum_num_for_test ||= 600;
+$gene_models_ratio_for_test ||= 0.20;
+$pstep ||= 6;
+$rounds ||= 6;
+$optimize_augustus_method ||= 1;
+
+# 使用绝对路径
+my $inputfile1 = abs_path($ARGV[0]);
+my $inputfile2 = abs_path($ARGV[1]);
+if ( $onlytrain_GFF3 ) { $onlytrain_GFF3 = abs_path($onlytrain_GFF3); }
 if ( $AUGUSTUS_CONFIG_PATH ) { $AUGUSTUS_CONFIG_PATH = abs_path($AUGUSTUS_CONFIG_PATH); }
+my $species_name = $ARGV[2];
 
 # 优先使用自己设置的AUGUSTUS物种配置路径。从环境变量AUGUSTUS_CONFIG_PATH中拷贝配置文件夹到指定路径中。
 my $AUGUSTUS_CONFIG_PATH_orig = $ENV{"AUGUSTUS_CONFIG_PATH"};
 if ( $AUGUSTUS_CONFIG_PATH ) {
-	mkdir "$AUGUSTUS_CONFIG_PATH/species" unless -e "$AUGUSTUS_CONFIG_PATH/species";
-	if ( ! -e "$AUGUSTUS_CONFIG_PATH/species/generic" ) {
-		if ( -e "$AUGUSTUS_CONFIG_PATH_orig/species/generic" ) {
-			$cmdString = "cp -a $AUGUSTUS_CONFIG_PATH_orig/species/generic $AUGUSTUS_CONFIG_PATH/species";
-			print STDERR "CMD: $cmdString\n";
-			(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
-		}
-		else {
-			die "Error: $AUGUSTUS_CONFIG_PATH路径和环境变量AUGUSTUS_CONFIG_PATH路径下均不存在species/generic配置文件夹。\n";
-		}
-	}
-	if ( ! -e "$AUGUSTUS_CONFIG_PATH/cgp" ) {
-		if ( -e "$AUGUSTUS_CONFIG_PATH_orig/cgp" ) {
-			$cmdString = "cp -a $AUGUSTUS_CONFIG_PATH_orig/cgp $AUGUSTUS_CONFIG_PATH/";
-			print STDERR "CMD: $cmdString\n";
-			(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
-		}
-		else {
-			die "Error: $AUGUSTUS_CONFIG_PATH路径和环境变量AUGUSTUS_CONFIG_PATH路径下均不存在cgp配置文件夹。\n";
-		}
-	}
-	if ( ! -e "$AUGUSTUS_CONFIG_PATH/extrinsic" ) {
-		if ( -e "$AUGUSTUS_CONFIG_PATH_orig/extrinsic" ) {
-			$cmdString = "cp -a $AUGUSTUS_CONFIG_PATH_orig/extrinsic $AUGUSTUS_CONFIG_PATH/";
-			print STDERR "CMD: $cmdString\n";
-			(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
-		}
-		else {
-			die "Error: $AUGUSTUS_CONFIG_PATH路径和环境变量AUGUSTUS_CONFIG_PATH路径下均不存在extrinsic配置文件夹。\n";
-		}
-	}
-	if ( ! -e "$AUGUSTUS_CONFIG_PATH/model" ) {
-		if ( -e "$AUGUSTUS_CONFIG_PATH_orig/model" ) {
-			$cmdString = "cp -a $AUGUSTUS_CONFIG_PATH_orig/model $AUGUSTUS_CONFIG_PATH/";
-			print STDERR "CMD: $cmdString\n";
-			(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
-		}
-		else {
-			die "Error: $AUGUSTUS_CONFIG_PATH路径和环境变量AUGUSTUS_CONFIG_PATH路径下均不存在model配置文件夹。\n";
-		}
-	}
-	if ( ! -e "$AUGUSTUS_CONFIG_PATH/parameters" ) {
-		if ( -e "$AUGUSTUS_CONFIG_PATH_orig/parameters" ) {
-			$cmdString = "cp -a $AUGUSTUS_CONFIG_PATH_orig/parameters $AUGUSTUS_CONFIG_PATH/";
-			print STDERR "CMD: $cmdString\n";
-			(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
-		}
-		else {
-			die "Error: $AUGUSTUS_CONFIG_PATH路径和环境变量AUGUSTUS_CONFIG_PATH路径下均不存在parameters配置文件夹。\n";
-		}
-	}
-	if ( ! -e "$AUGUSTUS_CONFIG_PATH/profile" ) {
-		if ( -e "$AUGUSTUS_CONFIG_PATH_orig/profile" ) {
-			$cmdString = "cp -a $AUGUSTUS_CONFIG_PATH_orig/profile $AUGUSTUS_CONFIG_PATH/";
-			print STDERR "CMD: $cmdString\n";
-			(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
-		}
-		else {
-			die "Error: $AUGUSTUS_CONFIG_PATH路径和环境变量AUGUSTUS_CONFIG_PATH路径下均不存在profile配置文件夹。\n";
-		}
-	}
+    make_path("$AUGUSTUS_CONFIG_PATH/species") unless -e "$AUGUSTUS_CONFIG_PATH/species";
+    if ( ! -e "$AUGUSTUS_CONFIG_PATH/species/generic" ) {
+        if ( -e "$AUGUSTUS_CONFIG_PATH_orig/species/generic" ) {
+            $cmdString = "cp -a $AUGUSTUS_CONFIG_PATH_orig/species/generic $AUGUSTUS_CONFIG_PATH/species";
+            print STDERR "CMD: $cmdString\n";
+            (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+        }
+        else {
+            die "Error: $AUGUSTUS_CONFIG_PATH路径和环境变量AUGUSTUS_CONFIG_PATH路径下均不存在species/generic配置文件夹。\n";
+        }
+    }
+    if ( ! -e "$AUGUSTUS_CONFIG_PATH/cgp" ) {
+        if ( -e "$AUGUSTUS_CONFIG_PATH_orig/cgp" ) {
+            $cmdString = "cp -a $AUGUSTUS_CONFIG_PATH_orig/cgp $AUGUSTUS_CONFIG_PATH/";
+            print STDERR "CMD: $cmdString\n";
+            (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+        }
+        else {
+            die "Error: $AUGUSTUS_CONFIG_PATH路径和环境变量AUGUSTUS_CONFIG_PATH路径下均不存在cgp配置文件夹。\n";
+        }
+    }
+    if ( ! -e "$AUGUSTUS_CONFIG_PATH/extrinsic" ) {
+        if ( -e "$AUGUSTUS_CONFIG_PATH_orig/extrinsic" ) {
+            $cmdString = "cp -a $AUGUSTUS_CONFIG_PATH_orig/extrinsic $AUGUSTUS_CONFIG_PATH/";
+            print STDERR "CMD: $cmdString\n";
+            (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+        }
+        else {
+            die "Error: $AUGUSTUS_CONFIG_PATH路径和环境变量AUGUSTUS_CONFIG_PATH路径下均不存在extrinsic配置文件夹。\n";
+        }
+    }
+    if ( ! -e "$AUGUSTUS_CONFIG_PATH/model" ) {
+        if ( -e "$AUGUSTUS_CONFIG_PATH_orig/model" ) {
+            $cmdString = "cp -a $AUGUSTUS_CONFIG_PATH_orig/model $AUGUSTUS_CONFIG_PATH/";
+            print STDERR "CMD: $cmdString\n";
+            (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+        }
+        else {
+            die "Error: $AUGUSTUS_CONFIG_PATH路径和环境变量AUGUSTUS_CONFIG_PATH路径下均不存在model配置文件夹。\n";
+        }
+    }
+    if ( ! -e "$AUGUSTUS_CONFIG_PATH/parameters" ) {
+        if ( -e "$AUGUSTUS_CONFIG_PATH_orig/parameters" ) {
+            $cmdString = "cp -a $AUGUSTUS_CONFIG_PATH_orig/parameters $AUGUSTUS_CONFIG_PATH/";
+            print STDERR "CMD: $cmdString\n";
+            (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+        }
+        else {
+            die "Error: $AUGUSTUS_CONFIG_PATH路径和环境变量AUGUSTUS_CONFIG_PATH路径下均不存在parameters配置文件夹。\n";
+        }
+    }
+    if ( ! -e "$AUGUSTUS_CONFIG_PATH/profile" ) {
+        if ( -e "$AUGUSTUS_CONFIG_PATH_orig/profile" ) {
+            $cmdString = "cp -a $AUGUSTUS_CONFIG_PATH_orig/profile $AUGUSTUS_CONFIG_PATH/";
+            print STDERR "CMD: $cmdString\n";
+            (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+        }
+        else {
+            die "Error: $AUGUSTUS_CONFIG_PATH路径和环境变量AUGUSTUS_CONFIG_PATH路径下均不存在profile配置文件夹。\n";
+        }
+    }
 }
 else {
-	unless ( -e "$AUGUSTUS_CONFIG_PATH_orig/species" ) {
-		die "Error: 环境变量AUGUSTUS_CONFIG_PATH设置不正确。\n";
-	}
+    unless ( -e "$AUGUSTUS_CONFIG_PATH_orig/species" ) {
+        die "Error: 环境变量AUGUSTUS_CONFIG_PATH设置不正确。\n";
+    }
 }
 $ENV{"AUGUSTUS_CONFIG_PATH"} = $AUGUSTUS_CONFIG_PATH if $AUGUSTUS_CONFIG_PATH;
+$AUGUSTUS_CONFIG_PATH = $ENV{"AUGUSTUS_CONFIG_PATH"};
+print STDERR "程序设置了Augustus的配置文件路径为$AUGUSTUS_CONFIG_PATH，进行后续的数据分析。\n";
 
 # 计算gene长度
-open IN, $ARGV[0] or die $!;
+open IN, $inputfile1 or die "Error: Can not open file $inputfile1, $!";
 my @gene_length;
 while (<IN>) {
     push @gene_length, $2 - $1 + 1 if m/\tgene\t(\d+)\t(\d+)/;
@@ -160,35 +184,27 @@ $flanking_length = $gene_length[@gene_length/2] unless $flanking_length;
 print STDERR "the median gene length is $gene_length[@gene_length/2], the flanking length was set to $flanking_length\n";
 
 # 将GFF3转换成GeneBank格式
-my $cmdString = "gff2gbSmallDNA.pl $ARGV[0] $ARGV[1] $flanking_length genes.raw.gb &> gff2gbSmallDNA.raw.log";
+my $cmdString = "gff2gbSmallDNA.pl $inputfile1 $inputfile2 $flanking_length genes.raw.gb &> gff2gbSmallDNA.raw.log";
 print STDERR "CMD: $cmdString\n";
 (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 
 if ($onlytrain_GFF3) {
-    $cmdString = "gff2gbSmallDNA.pl $onlytrain_GFF3 $ARGV[1] $flanking_length genes.all.gb &> gff2gbSmallDNA.all.log";
+    $cmdString = "gff2gbSmallDNA.pl $onlytrain_GFF3 $inputfile2 $flanking_length genes.all.gb &> gff2gbSmallDNA.all.log";
     print STDERR "CMD: $cmdString\n";
     (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 }
 
 # 去除错误的基因模型
-my $for_bad_genes_removing = $ENV{"AUGUSTUS_CONFIG_PATH"};
-chomp($for_bad_genes_removing);
-$for_bad_genes_removing = "$for_bad_genes_removing/species/for_bad_genes_removing_$$";
-if (-e $for_bad_genes_removing) {
-    $cmdString = "rm -rf $for_bad_genes_removing";
-    print STDERR "CMD: $cmdString\n";
-    (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
-}
-$cmdString = "new_species.pl --species=for_bad_genes_removing_$$ --ignore &> new_species.1.log";
+$cmdString = "new_species.pl --species=for_bad_genes_removing_$$ --AUGUSTUS_CONFIG_PATH=$AUGUSTUS_CONFIG_PATH --ignore &> new_species.1.log";
 print STDERR "CMD: $cmdString\n";
 (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
-$cmdString = "etraining --species=for_bad_genes_removing_$$ --stopCodonExcludedFromCDS=false genes.all.gb 1> etraining.out0 2> etraining.err0";
+$cmdString = "etraining --species=for_bad_genes_removing_$$ --AUGUSTUS_CONFIG_PATH=$AUGUSTUS_CONFIG_PATH --stopCodonExcludedFromCDS=false genes.all.gb 1> etraining.out0 2> etraining.err0";
 print STDERR "CMD: $cmdString\n";
 (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
-$cmdString = "etraining --species=for_bad_genes_removing_$$ --stopCodonExcludedFromCDS=false genes.raw.gb 1>> etraining.out0 2>> etraining.err0";
+$cmdString = "etraining --species=for_bad_genes_removing_$$ --AUGUSTUS_CONFIG_PATH=$AUGUSTUS_CONFIG_PATH --stopCodonExcludedFromCDS=false genes.raw.gb 1>> etraining.out0 2>> etraining.err0";
 print STDERR "CMD: $cmdString\n";
 (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
-$cmdString = "rm -rf $for_bad_genes_removing";
+$cmdString = "rm -rf $AUGUSTUS_CONFIG_PATH/species/for_bad_genes_removing_$$";
 print STDERR "CMD: $cmdString\n";
 (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 $cmdString = "cat etraining.err0 | perl -ne 'print \"\$1\\n\" if m/in sequence (\\S+):/' | sort | uniq > badgenes.lst";
@@ -244,22 +260,17 @@ else {
 }
 
 # 进行第一次augustus training
-my $species_config_path = $ENV{"AUGUSTUS_CONFIG_PATH"};
-chomp($species_config_path);
-my $species_config_dir = "$species_config_path/species/$ARGV[2]";
-#$cmdString = "rm -rf $species_config_dir";
-#print STDERR "CMD: $cmdString\n";
-#(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+my $species_config_dir = "$AUGUSTUS_CONFIG_PATH/species/$species_name";
 unless (-e $species_config_dir) {
-    $cmdString = "new_species.pl --species=$ARGV[2] --ignore &> new_species.2.log";
+    $cmdString = "new_species.pl --species=$species_name --AUGUSTUS_CONFIG_PATH=$AUGUSTUS_CONFIG_PATH --ignore &> new_species.2.log";
     print STDERR "CMD: $cmdString\n";
     (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 
     if ( $augustus_species_start_from ) {
-        if ( open IN, "$species_config_path/species/$augustus_species_start_from/${augustus_species_start_from}_parameters.cfg" ) {
-            open OUT, ">", "$species_config_path/species/$ARGV[2]/$ARGV[2]_parameters.cfg" or die "Can not create file $species_config_path/species/$ARGV[2]/$ARGV[2]_parameters.cfg, \n";
+        if ( open IN, "$AUGUSTUS_CONFIG_PATH/species/$augustus_species_start_from/${augustus_species_start_from}_parameters.cfg" ) {
+            open OUT, ">", "$AUGUSTUS_CONFIG_PATH/species/$species_name/${species_name}_parameters.cfg" or die "Can not create file $AUGUSTUS_CONFIG_PATH/species/$species_name/${species_name}_parameters.cfg, \n";
             while (<IN>) {
-                s/$augustus_species_start_from/$ARGV[2]/;
+                s/$augustus_species_start_from/$species_name/;
                 print OUT;
             }
             close OUT;
@@ -267,14 +278,14 @@ unless (-e $species_config_dir) {
             print STDERR "Augustus Training was started from $augustus_species_start_from.\n";
         }
         else {
-            warn "Can not open the parameters file specified by --augustus_species_start_from : $species_config_path/species/$augustus_species_start_from/${augustus_species_start_from}_parameters.cfg\n";
+            warn "Warning: Can not open the parameters file specified by --augustus_species_start_from : $AUGUSTUS_CONFIG_PATH/species/$augustus_species_start_from/${augustus_species_start_from}_parameters.cfg\n";
         } 
     }
 }
 $cmdString = "cat genes.only_train.gb genes.gb.train > genes.gb.etraining";
 print STDERR "CMD: $cmdString\n";
 (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
-$cmdString = "etraining --species=$ARGV[2] genes.gb.etraining > etraining.out1 2> etraining.err1";
+$cmdString = "etraining --species=$species_name --AUGUSTUS_CONFIG_PATH=$AUGUSTUS_CONFIG_PATH genes.gb.etraining > etraining.out1 2> etraining.err1";
 print STDERR "CMD: $cmdString\n";
 (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 
@@ -286,30 +297,27 @@ while (<IN>) {
     $frequency_tga = $1 if m/^tga:.+\((.*)\)/;
 }
 print STDERR "the frequecy of three stop codons: TAG($frequency_tag), TAA($frequency_taa), TGA($frequency_tga)\n";
-open IN, "$species_config_dir/$ARGV[2]_parameters.cfg" or die $!;
-open OUT, ">", "$ARGV[2]_parameters.cfg" or die $!;
-while (<IN>) {
-    s#(/Constant/amberprob\s+)\S+#$1$frequency_tag#;
-    s#(/Constant/ochreprob\s+)\S+#$1$frequency_taa#;
-    s#(/Constant/opalprob\s+)\S+#$1$frequency_tga#;
-    print OUT;
-}
+my $parameters_cfg = "$AUGUSTUS_CONFIG_PATH/species/$species_name/${species_name}_parameters.cfg";
+open IN, $parameters_cfg or die "Can not open file $parameters_cfg, $!";
+my $parameters_info = join "", <IN>;
 close IN;
+$parameters_info =~ s#(/Constant/amberprob\s+)\S+#$1$frequency_tag#;
+$parameters_info =~ s#(/Constant/ochreprob\s+)\S+#$1$frequency_taa#;
+$parameters_info =~ s#(/Constant/opalprob\s+)\S+#$1$frequency_tga#;
+open OUT, ">", $parameters_cfg or die $!;
+print OUT $parameters_info;
 close OUT;
-$cmdString = "mv $ARGV[2]_parameters.cfg $species_config_dir/$ARGV[2]_parameters.cfg";
-print STDERR "CMD: $cmdString\n";
-(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
-print STDERR "the parameters of the frequecy of three stop codons were changed in file $species_config_dir/$ARGV[2]_parameters.cfg\n";
+print STDERR "the parameters of the frequecy of three stop codons were changed in file $parameters_cfg\n";
 
 # 进行第一次准确性检测
-$cmdString = "augustus --species=$ARGV[2] genes.gb.test > firsttest.out";
+$cmdString = "augustus --species=$species_name --AUGUSTUS_CONFIG_PATH=$AUGUSTUS_CONFIG_PATH genes.gb.test > firsttest.out";
 unless (-e "firsttest.ok") {
     print STDERR "CMD: $cmdString\n";
     (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
     open OUT, ">", "firsttest.ok" or die $!; close OUT;
 
     # 备份hmm文件
-    $cmdString = "cp -a $species_config_dir hmm_files_bak01";
+    $cmdString = "cp -a $AUGUSTUS_CONFIG_PATH/species/$species_name hmm_files_bak01";
     print STDERR "CMD: $cmdString\n";
     (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 }
@@ -321,37 +329,51 @@ if ($stopAfterFirstEtraining) {
     exit;
 }
 
-# 进行augustus training优化（第一轮快速优化）
-
-my $chunk_num = $gene_models_num_per_test;
-my $noly_train_gene_number = $gene_number_for_training % $chunk_num;
-my $cpus = int ($gene_number_for_training / $chunk_num);
-if ($cpus > $CPU) {
-    $cpus = $CPU;
-    $noly_train_gene_number = $gene_number_for_training - $cpus * $chunk_num;
-}
-print STDERR "$cpus chunks (each have $chunk_num gene models) were used for augustus training optimization\n";
-$cmdString = "randomSplit.pl genes.gb.train $noly_train_gene_number";
-print STDERR "CMD: $cmdString\n";
-(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
-$cmdString = "cat genes.gb.train.test genes.only_train.gb > training.gb.onlytrain";
-print STDERR "CMD: $cmdString\n";
-(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
-$cmdString = "optimize_augustus.pl --species=$ARGV[2] --rounds=$optimize_augustus_rounds --cpus=$cpus --kfold=$cpus --onlytrain=training.gb.onlytrain genes.gb.train.train > optimize.out";
-unless (-e "optimize_augustus.ok") {
+# 使用BGM2AT.optimize_augustus算法进行augustus training参数优化（快速优化）
+$cmdString = "$dirname/bin/BGM2AT.optimize_augustus --onlytrain genes.only_train.gb --cpu $CPU --gene_models_minimum_num_for_test $gene_models_minimum_num_for_test --gene_models_maximum_num_for_test $gene_models_maximum_num_for_test --gene_models_ratio_for_test $gene_models_ratio_for_test --gene_models_num_per_test $gene_models_num_per_test --tmp_dir BGM2AT.optimize_augustus.tmp --AUGUSTUS_CONFIG_PATH=$AUGUSTUS_CONFIG_PATH --pstep $pstep --rounds $rounds --reduced_round 3 $species_name genes.gb.train &> BGM2AT.optimize_augustus.log";
+unless ( -e "BGM2AT.optimize_augustus.ok" ) {
     print STDERR "CMD: $cmdString\n";
     (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
-    open OUT, ">", "optimize_augustus.ok" or die $!; close OUT;
+    open OUT, ">", "BGM2AT.optimize_augustus.ok" or die $!; close OUT;
 }
 else {
     print STDERR "CMD(Skipped): $cmdString\n";
 }
 
+# 若--optimize_augustus_method参数值为2，则继续使用AUGUSTUS软件自带的optimize_augustus.pl程序再次进行优化
+if ( $optimize_augustus_method == 2 ) {
+    my $chunk_num = $gene_models_num_per_test;
+    my $noly_train_gene_number = $gene_number_for_training % $chunk_num;
+    my $cpus = int ($gene_number_for_training / $chunk_num);
+    if ($cpus > $CPU) {
+        $cpus = $CPU;
+        $noly_train_gene_number = $gene_number_for_training - $cpus * $chunk_num;
+    }
+    print STDERR "$cpus chunks (each have $chunk_num gene models) were used for augustus training optimization\n";
+    $cmdString = "randomSplit.pl genes.gb.train $noly_train_gene_number";
+    print STDERR "CMD: $cmdString\n";
+    (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+    $cmdString = "cat genes.gb.train.test genes.only_train.gb > training.gb.onlytrain";
+    print STDERR "CMD: $cmdString\n";
+    (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+    $cmdString = "optimize_augustus.pl --species=$species_name --AUGUSTUS_CONFIG_PATH=$AUGUSTUS_CONFIG_PATH --rounds=$rounds --cpus=$cpus --kfold=$cpus --pstep=$pstep --onlytrain=training.gb.onlytrain genes.gb.train.train > optimize.out";
+    unless (-e "optimize_augustus.ok") {
+        print STDERR "CMD: $cmdString\n";
+        (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+        open OUT, ">", "optimize_augustus.ok" or die $!; close OUT;
+    }
+    else {
+        print STDERR "CMD(Skipped): $cmdString\n";
+    }
+}
+
 # 进行第二次augustus training
-$cmdString = "etraining --species=$ARGV[2] genes.gb.etraining > etraining.out2 2> etraining.err2";
+$cmdString = "etraining --species=$species_name --AUGUSTUS_CONFIG_PATH=$AUGUSTUS_CONFIG_PATH genes.gb.etraining > etraining.out2 2> etraining.err2";
 print STDERR "CMD: $cmdString\n";
 (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 
+=cut
+# 在BGM2AT.optimize_augustus步骤一家修改了，予以去除。
 # 若optimize_augustus.pl运行后对parameters.cfg文件的/Constant/decomp_num_steps参数进行了修改，使其值不等于1，则还需要根据etraining的结果，对/Constant/gc_range_min和/Constant/gc_range_max参数进行修改。
 my ($gc_range_min, $gc_range_max);
 open IN, "etraining.out2" or die $!;
@@ -363,9 +385,9 @@ while (<IN>) {
 }
 close IN;
 if ($gc_range_min && $gc_range_max) {
-    print STDERR "Set /Constant/gc_range_min to $gc_range_min and Set /Constant/gc_range_max to $gc_range_max for file $species_config_dir/$ARGV[2]_parameters.cfg\n";
-    open IN, "$species_config_dir/$ARGV[2]_parameters.cfg" or die $!;
-    open OUT, ">", "$ARGV[2]_parameters.cfg" or die $!;
+    print STDERR "Set /Constant/gc_range_min to $gc_range_min and Set /Constant/gc_range_max to $gc_range_max for file $AUGUSTUS_CONFIG_PATH/${species_name}_parameters.cfg\n";
+    open IN, "$AUGUSTUS_CONFIG_PATH/${species_name}_parameters.cfg" or die $!;
+    open OUT, ">", "${species_name}_parameters.cfg" or die $!;
     while (<IN>) {
         s#(/Constant/gc_range_min\s+)\S+#$1$gc_range_min#;
         s#(/Constant/gc_range_max\s+)\S+#$1$gc_range_max#;
@@ -373,17 +395,13 @@ if ($gc_range_min && $gc_range_max) {
     }
     close IN;
     close OUT; 
-    $cmdString = "mv $ARGV[2]_parameters.cfg $species_config_dir/$ARGV[2]_parameters.cfg";
+    $cmdString = "mv ${species_name}_parameters.cfg $AUGUSTUS_CONFIG_PATH/${species_name}_parameters.cfg";
     (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 }
+=cut
 
 unless ($allowStartCodonBesidesATG) {
-    open IN, "etraining.out2" or die "Cannot open file etraining.out2, $!\n";
-    my $exon_probs_file_path;
-    while (<IN>) {
-        $exon_probs_file_path = $1 if m#to file (.*exon_probs.pbl)#;
-    }
-    close IN;
+    my $exon_probs_file_path = "$AUGUSTUS_CONFIG_PATH/species/$species_name/${species_name}_exon_probs.pbl";
     open IN, $exon_probs_file_path or die "Can not open file $exon_probs_file_path, $!\n";
     my $exon_probs_info = join "", <IN>;
     close IN;
@@ -395,14 +413,14 @@ unless ($allowStartCodonBesidesATG) {
 }
 
 # 进行第二次准确性检测
-$cmdString = "augustus --species=$ARGV[2] genes.gb.test > secondtest.out";
+$cmdString = "augustus --species=$species_name --AUGUSTUS_CONFIG_PATH=$AUGUSTUS_CONFIG_PATH genes.gb.test > secondtest.out";
 unless (-e "secondtest.ok") {
     print STDERR "CMD: $cmdString\n";
     (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
     open OUT, ">", "secondtest.ok" or die $!; close OUT;
 
     # 备份hmm文件
-    $cmdString = "cp -a $species_config_dir hmm_files_bak02";
+    $cmdString = "cp -a $AUGUSTUS_CONFIG_PATH/species/$species_name hmm_files_bak02";
     print STDERR "CMD: $cmdString\n";
     (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 }
@@ -453,7 +471,7 @@ print STDERR "The first tested accuracy value of augustus training is: $first_ac
 print STDERR "The second tested accuracy value of augustus training is: $second_accuracy\n";
 if ($second_accuracy < $first_accuracy) {
     print STDERR "The optimizing step could not increase the accuracy of augustus training! and the hmm files will be rolled back!\n";
-    $cmdString = "rm -rf $species_config_dir && cp -a hmm_files_bak01 $species_config_dir && ln -sf -T hmm_files_bak01 hmm_files_bak";
+    $cmdString = "rm -rf $AUGUSTUS_CONFIG_PATH/species/$species_name && cp -a hmm_files_bak01 $AUGUSTUS_CONFIG_PATH/species/$species_name && ln -sf -T hmm_files_bak01 hmm_files_bak";
     print STDERR "CMD: $cmdString\n";
     (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 }
