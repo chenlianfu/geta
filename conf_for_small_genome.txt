@@ -43,7 +43,7 @@ TruSeq3-PE-2.fa:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:50 TOPHRE
 # if gene models number of ati.filter2.gff3 was few, recommed to decrease --min_cds_exon_ratio and increase --min_coverage_ratio.
 
 [BGM2AT]
---min_gene_number_for_augustus_training 500 --gene_number_for_accuracy_detection 200 --gene_models_minimum_num_for_test 100 --gene_models_maximum_num_for_test 600 --gene_models_ratio_for_test 0.2 --gene_models_num_per_test 50 --pstep 6 --rounds 6 --optimize_augustus_method 1 --min_intron_len 30
+--min_gene_number_for_augustus_training 500 --gene_number_for_accuracy_detection 200 --gene_models_minimum_num_for_test 100 --gene_models_maximum_num_for_test 600 --gene_models_ratio_for_test 0.2 --gene_models_num_per_test 50 --pstep 6 --rounds 6 --optimize_augustus_method 1 --min_intron_len 20
 # During the step of BGM2AT: --flanking_length was automatically calculated; --stopAfterFirstEtraining was set or not set at different steps; --onlytrain_GFF3 was set to a intermediate file.
 
 [prepareAugusutusHints]
@@ -51,7 +51,7 @@ TruSeq3-PE-2.fa:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:50 TOPHRE
 # note: to obtain the exonpart or cdspart hints, the margin 20bp will be removed.
 
 [paraAugusutusWithHints]
---gene_prefix augustus --min_intron_len 30
+--gene_prefix augustus --min_intron_len 20
 # During the step of paraAugusutusWithHints: --species was passed by --augustus_species; --cpu was passed by --CPU; --segmentSize and --overlapSize were automatically calculated.
 
 [paraCombineGeneModels]

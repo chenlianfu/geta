@@ -52,8 +52,8 @@ For example:
     --reduced_round <int>    default: 3
     程序会从第3轮结束后，缩小参数的取值范围。这样有利于寻找更优的参数值。而标准的AUGUSTUS的optimize_augustus.pl程序并没有该操作。有些参数取值数量低于--pstep参数设定值时，则不会缩小其取值范围。例如，/Constant/dss_end参数值为整数，只能取值0、1、2、3和4，则不会缩小其取值范围。缩小取值范围的方法：默认比较6个数据，按准确性结果从好到坏对这6个数据值进行排序，从排第2名往后寻找，直至同时找到比第一名大和小的值止。取找到的数值的最大和最小值作为新的取值范围。
 
-	--min_intron_len <int>    default: 20
-	设置允许的最小intron长度。
+    --min_intron_len <int>    default: 30
+    设置augustus/etraining程序运行的--min_intron_len参数。augustus默认的参数值是39，对于一些小基因组来说，偏大。推荐对于较 小基因组，将该参数值设置为20。
 
     --help    default: None
     display this help and exit.
@@ -61,7 +61,7 @@ For example:
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($onlytrain, $cpu, $gene_models_num_per_test, $gene_models_minimum_num_for_test, $gene_models_maximum_num_for_test, $gene_models_ratio_for_test, $rounds, $tmp_dir, $AUGUSTUS_CONFIG_PATH, $pstep, $reduced_round, $help_flag, $cmdString);
+my ($onlytrain, $cpu, $gene_models_num_per_test, $gene_models_minimum_num_for_test, $gene_models_maximum_num_for_test, $gene_models_ratio_for_test, $rounds, $tmp_dir, $AUGUSTUS_CONFIG_PATH, $pstep, $reduced_round, $help_flag, $min_intron_len, $cmdString);
 GetOptions(
     "onlytrain:s" => \$onlytrain,
     "cpu:i" => \$cpu,
@@ -74,6 +74,7 @@ GetOptions(
     "AUGUSTUS_CONFIG_PATH:s" => \$AUGUSTUS_CONFIG_PATH,
     "pstep:i" => \$pstep,
     "reduced_round:i" => \$reduced_round,
+    "min_intron_len:i" => \$min_intron_len,
     "help" => \$help_flag,
 );
 $cpu ||= 8;
@@ -88,6 +89,7 @@ $tmp_dir = abs_path($tmp_dir);
 mkdir $tmp_dir unless -e $tmp_dir;
 $pstep ||= 6;
 $reduced_round ||= 3;
+$min_intron_len ||= 30;
 
 if ( $help_flag ) { die $usage }
 
@@ -409,7 +411,7 @@ sub improve_parameters {
     if ( $best_par{"/Constant/decomp_num_steps"} > 1 && $Constant_decomp_num_steps == 0) {
         $Constant_decomp_num_steps = 1;
         my ($gc_range_min, $gc_range_max);
-        my $cmdString = "etraining --species=$species_name --AUGUSTUS_CONFIG_PATH=$ENV{'AUGUSTUS_CONFIG_PATH'} $tmp_dir/all.gb > $tmp_dir/etraining.out 2> /dev/null";
+        my $cmdString = "etraining --min_intron_len=$min_intron_len --species=$species_name --AUGUSTUS_CONFIG_PATH=$ENV{'AUGUSTUS_CONFIG_PATH'} $tmp_dir/all.gb > $tmp_dir/etraining.out 2> /dev/null";
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system($cmdString) == 0 or die "Error: Failed to excute: $cmdString\n";
         open IN, "$tmp_dir/etraining.out" or die $!;
@@ -450,7 +452,7 @@ sub improve_parameters {
         $Constant_stop_codon_prob = 1;
         # 若没有 etraining 结果，则执行 etraining。
         if ( ! -e "$tmp_dir/etraining.out" ) {
-            my $cmdString = "etraining --species=$species_name --AUGUSTUS_CONFIG_PATH=$ENV{'AUGUSTUS_CONFIG_PATH'} $tmp_dir/all.gb > $tmp_dir/etraining.out 2> /dev/null";
+            my $cmdString = "etraining --min_intron_len=$min_intron_len --species=$species_name --AUGUSTUS_CONFIG_PATH=$ENV{'AUGUSTUS_CONFIG_PATH'} $tmp_dir/all.gb > $tmp_dir/etraining.out 2> /dev/null";
             print STDERR (localtime) . ": CMD: $cmdString\n";
             system($cmdString) == 0 or die "Error: Failed to excute: $cmdString\n";
         }
@@ -659,7 +661,7 @@ sub analysis {
 
                 # 给出命令行
                 open OUT, ">>", "command.list" or die $!;
-                print OUT "etraining --species=$species_name --AUGUSTUS_CONFIG_PATH=${par_name}_$value/$para_num ${par_name}_$value/$para_num/train.gb &> /dev/null; augustus --species=$species_name --AUGUSTUS_CONFIG_PATH=${par_name}_$value/$para_num ${par_name}_$value/$para_num/test.gb > ${par_name}_$value/$para_num.out\n";
+                print OUT "etraining --min_intron_len=$min_intron_len --species=$species_name --AUGUSTUS_CONFIG_PATH=${par_name}_$value/$para_num ${par_name}_$value/$para_num/train.gb &> /dev/null; augustus --min_intron_len=$min_intron_len --species=$species_name --AUGUSTUS_CONFIG_PATH=${par_name}_$value/$para_num ${par_name}_$value/$para_num/test.gb > ${par_name}_$value/$para_num.out\n";
                 close OUT;
             }
         }

@@ -59,10 +59,13 @@ Usage:
     --optimize_augustus_method <int>    default: 1
     设置AUGUSTUS参数优化的方法。1，表示仅调用BGM2AT.optimize_augustus进行优化，速度快；2，表示BGM2AT.optimize_augustus优化完毕后，再使用AUGUSTUS软件自带的optimize_augustus.pl程序再次进行优化，此步骤运行速度慢，效果可能更好。
 
+    --min_intron_len <int>    default: 30
+    设置augustus/etraining程序运行的--min_intron_len参数。augustus默认的参数值是39，对于一些小基因组来说，偏大。推荐对于较小基因组，将该参数值设置为20。
+
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($AUGUSTUS_CONFIG_PATH, $augustus_species_start_from, $flanking_length, $min_gene_number_for_augustus_training, $gene_number_for_accuracy_detection, $onlytrain_GFF3, $CPU, $allowStartCodonBesidesATG, $stopAfterFirstEtraining, $gene_models_num_per_test, $gene_models_minimum_num_for_test, $gene_models_maximum_num_for_test, $gene_models_ratio_for_test, $pstep, $rounds, $optimize_augustus_method, $cmdString);
+my ($AUGUSTUS_CONFIG_PATH, $augustus_species_start_from, $flanking_length, $min_gene_number_for_augustus_training, $gene_number_for_accuracy_detection, $onlytrain_GFF3, $CPU, $allowStartCodonBesidesATG, $stopAfterFirstEtraining, $gene_models_num_per_test, $gene_models_minimum_num_for_test, $gene_models_maximum_num_for_test, $gene_models_ratio_for_test, $pstep, $rounds, $optimize_augustus_method, $min_intron_len, $cmdString);
 GetOptions(
     "AUGUSTUS_CONFIG_PATH:s" => \$AUGUSTUS_CONFIG_PATH,
     "augustus_species_start_from:s" => \$augustus_species_start_from,
@@ -80,6 +83,7 @@ GetOptions(
     "pstep:i" => \$pstep,
     "rounds:i" => \$rounds,
     "optimize_augustus_method:i" => \$optimize_augustus_method,
+    "min_intron_len:i" => \$min_intron_len,
 );
 $min_gene_number_for_augustus_training ||= 500;
 $gene_number_for_accuracy_detection ||= 200;
@@ -91,6 +95,7 @@ $gene_models_ratio_for_test ||= 0.20;
 $pstep ||= 6;
 $rounds ||= 6;
 $optimize_augustus_method ||= 1;
+$min_intron_len ||= 30;
 
 # 使用绝对路径
 my $inputfile1 = abs_path($ARGV[0]);
@@ -198,10 +203,10 @@ if ($onlytrain_GFF3) {
 $cmdString = "new_species.pl --species=for_bad_genes_removing_$$ --AUGUSTUS_CONFIG_PATH=$AUGUSTUS_CONFIG_PATH --ignore &> new_species.1.log";
 print STDERR "CMD: $cmdString\n";
 (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
-$cmdString = "etraining --species=for_bad_genes_removing_$$ --AUGUSTUS_CONFIG_PATH=$AUGUSTUS_CONFIG_PATH --stopCodonExcludedFromCDS=false genes.all.gb 1> etraining.out0 2> etraining.err0";
+$cmdString = "etraining --min_intron_len=$min_intron_len --species=for_bad_genes_removing_$$ --AUGUSTUS_CONFIG_PATH=$AUGUSTUS_CONFIG_PATH --stopCodonExcludedFromCDS=false genes.all.gb 1> etraining.out0 2> etraining.err0";
 print STDERR "CMD: $cmdString\n";
 (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
-$cmdString = "etraining --species=for_bad_genes_removing_$$ --AUGUSTUS_CONFIG_PATH=$AUGUSTUS_CONFIG_PATH --stopCodonExcludedFromCDS=false genes.raw.gb 1>> etraining.out0 2>> etraining.err0";
+$cmdString = "etraining --min_intron_len=$min_intron_len --species=for_bad_genes_removing_$$ --AUGUSTUS_CONFIG_PATH=$AUGUSTUS_CONFIG_PATH --stopCodonExcludedFromCDS=false genes.raw.gb 1>> etraining.out0 2>> etraining.err0";
 print STDERR "CMD: $cmdString\n";
 (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 $cmdString = "rm -rf $AUGUSTUS_CONFIG_PATH/species/for_bad_genes_removing_$$";
@@ -285,7 +290,7 @@ unless (-e $species_config_dir) {
 $cmdString = "cat genes.only_train.gb genes.gb.train > genes.gb.etraining";
 print STDERR "CMD: $cmdString\n";
 (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
-$cmdString = "etraining --species=$species_name --AUGUSTUS_CONFIG_PATH=$AUGUSTUS_CONFIG_PATH genes.gb.etraining > etraining.out1 2> etraining.err1";
+$cmdString = "etraining --min_intron_len=$min_intron_len --species=$species_name --AUGUSTUS_CONFIG_PATH=$AUGUSTUS_CONFIG_PATH genes.gb.etraining > etraining.out1 2> etraining.err1";
 print STDERR "CMD: $cmdString\n";
 (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 
@@ -310,7 +315,7 @@ close OUT;
 print STDERR "the parameters of the frequecy of three stop codons were changed in file $parameters_cfg\n";
 
 # 进行第一次准确性检测
-$cmdString = "augustus --species=$species_name --AUGUSTUS_CONFIG_PATH=$AUGUSTUS_CONFIG_PATH genes.gb.test > firsttest.out";
+$cmdString = "augustus --min_intron_len=$min_intron_len --species=$species_name --AUGUSTUS_CONFIG_PATH=$AUGUSTUS_CONFIG_PATH genes.gb.test > firsttest.out";
 unless (-e "firsttest.ok") {
     print STDERR "CMD: $cmdString\n";
     (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
@@ -330,7 +335,7 @@ if ($stopAfterFirstEtraining) {
 }
 
 # 使用BGM2AT.optimize_augustus算法进行augustus training参数优化（快速优化）
-$cmdString = "$dirname/bin/BGM2AT.optimize_augustus --onlytrain genes.only_train.gb --cpu $CPU --gene_models_minimum_num_for_test $gene_models_minimum_num_for_test --gene_models_maximum_num_for_test $gene_models_maximum_num_for_test --gene_models_ratio_for_test $gene_models_ratio_for_test --gene_models_num_per_test $gene_models_num_per_test --tmp_dir BGM2AT.optimize_augustus.tmp --AUGUSTUS_CONFIG_PATH=$AUGUSTUS_CONFIG_PATH --pstep $pstep --rounds $rounds --reduced_round 3 $species_name genes.gb.train &> BGM2AT.optimize_augustus.log";
+$cmdString = "$dirname/bin/BGM2AT.optimize_augustus --onlytrain genes.only_train.gb --cpu $CPU --gene_models_minimum_num_for_test $gene_models_minimum_num_for_test --gene_models_maximum_num_for_test $gene_models_maximum_num_for_test --gene_models_ratio_for_test $gene_models_ratio_for_test --gene_models_num_per_test $gene_models_num_per_test --tmp_dir BGM2AT.optimize_augustus.tmp --min_intron_len=$min_intron_len --AUGUSTUS_CONFIG_PATH=$AUGUSTUS_CONFIG_PATH --pstep $pstep --rounds $rounds --reduced_round 3 $species_name genes.gb.train &> BGM2AT.optimize_augustus.log";
 unless ( -e "BGM2AT.optimize_augustus.ok" ) {
     print STDERR "CMD: $cmdString\n";
     (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
@@ -368,38 +373,11 @@ if ( $optimize_augustus_method == 2 ) {
 }
 
 # 进行第二次augustus training
-$cmdString = "etraining --species=$species_name --AUGUSTUS_CONFIG_PATH=$AUGUSTUS_CONFIG_PATH genes.gb.etraining > etraining.out2 2> etraining.err2";
+$cmdString = "etraining ---min_intron_len=$min_intron_len -species=$species_name --AUGUSTUS_CONFIG_PATH=$AUGUSTUS_CONFIG_PATH genes.gb.etraining > etraining.out2 2> etraining.err2";
 print STDERR "CMD: $cmdString\n";
 (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 
-=cut
-# 在BGM2AT.optimize_augustus步骤一家修改了，予以去除。
-# 若optimize_augustus.pl运行后对parameters.cfg文件的/Constant/decomp_num_steps参数进行了修改，使其值不等于1，则还需要根据etraining的结果，对/Constant/gc_range_min和/Constant/gc_range_max参数进行修改。
-my ($gc_range_min, $gc_range_max);
-open IN, "etraining.out2" or die $!;
-while (<IN>) {
-    if (m#/Constant/gc_range_min to (\S*) and /Constant/gc_range_max to (\S+)#) {
-        ($gc_range_min, $gc_range_max) = ($1, $2);
-        last;
-    }
-}
-close IN;
-if ($gc_range_min && $gc_range_max) {
-    print STDERR "Set /Constant/gc_range_min to $gc_range_min and Set /Constant/gc_range_max to $gc_range_max for file $AUGUSTUS_CONFIG_PATH/${species_name}_parameters.cfg\n";
-    open IN, "$AUGUSTUS_CONFIG_PATH/${species_name}_parameters.cfg" or die $!;
-    open OUT, ">", "${species_name}_parameters.cfg" or die $!;
-    while (<IN>) {
-        s#(/Constant/gc_range_min\s+)\S+#$1$gc_range_min#;
-        s#(/Constant/gc_range_max\s+)\S+#$1$gc_range_max#;
-        print OUT;
-    }
-    close IN;
-    close OUT; 
-    $cmdString = "mv ${species_name}_parameters.cfg $AUGUSTUS_CONFIG_PATH/${species_name}_parameters.cfg";
-    (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
-}
-=cut
-
+# 修改exon_probs.pbl文件，仅允许ATG作为起始密码子。避免因不完整基因模型做etraining导致文件中允许其它起始密码子。
 unless ($allowStartCodonBesidesATG) {
     my $exon_probs_file_path = "$AUGUSTUS_CONFIG_PATH/species/$species_name/${species_name}_exon_probs.pbl";
     open IN, $exon_probs_file_path or die "Can not open file $exon_probs_file_path, $!\n";
@@ -413,7 +391,7 @@ unless ($allowStartCodonBesidesATG) {
 }
 
 # 进行第二次准确性检测
-$cmdString = "augustus --species=$species_name --AUGUSTUS_CONFIG_PATH=$AUGUSTUS_CONFIG_PATH genes.gb.test > secondtest.out";
+$cmdString = "augustus --min_intron_len=$min_intron_len --species=$species_name --AUGUSTUS_CONFIG_PATH=$AUGUSTUS_CONFIG_PATH genes.gb.test > secondtest.out";
 unless (-e "secondtest.ok") {
     print STDERR "CMD: $cmdString\n";
     (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
