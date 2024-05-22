@@ -454,27 +454,6 @@ unless (-e "2.homolog_prediction.ok") {
     chdir "2.homolog_prediction";
     $pwd = `pwd`; print STDERR "PWD: $pwd";
 
-    open IN, "../1.NGSReads_prediction/NGSReads_prediction.gff3" or die "Can not open the file ../1.NGSReads_prediction/NGSReads_prediction.gff3, $!\n";
-    my @gene_length;
-    while (<IN>) {
-        if (m/\tgene\t(\d+)\t(\d+)\t/) {
-            push @gene_length, $2 - $1 + 1;
-        }
-    }
-    close IN;
-    @gene_length = sort {$a <=> $b} @gene_length;
-    my $max_gene_length = 20000;
-    $max_gene_length = $gene_length[@gene_length * 0.995] if $gene_length[@gene_length * 0.995];
-    my ($segmentSize, $overlapSize) = (1000000, 100000);
-    if ($max_gene_length * 4 > $overlapSize) {
-        $overlapSize = $max_gene_length * 4;
-        my $overlapSize_length = length($overlapSize);
-        $overlapSize_length --;
-        $overlapSize_length --;
-        $overlapSize = int(($overlapSize / (10 ** $overlapSize_length)) + 1) * (10 ** $overlapSize_length);
-        $segmentSize = $overlapSize * 10;
-    }
-
     $cmdString = "$dirname/bin/homolog_prediction --tmp_dir ./ --cpu $cpu $config{'homolog_prediction'} $protein ../0.RepeatMasker/genome.masked.fasta > homolog_prediction.gff3 2> homolog_prediction.log";
     unless (-e "homolog_prediction.ok") {
         print STDERR (localtime) . ": CMD: $cmdString\n";
