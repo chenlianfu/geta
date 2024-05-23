@@ -561,7 +561,7 @@ sub intron_splcing {
 
         my $group_add_ok = 0;
         foreach ( keys %group_intron_end ) {
-			# 当intron的起始位点比该套introns的结束位点要大，就将该intron加入到该套introns中。注意两introns间距要>=1bp，所以有个数字1。
+            # 当intron的起始位点比该套introns的结束位点要大，就将该intron加入到该套introns中。注意两introns间距要>=1bp，所以有个数字1。
             if ($_[0] > ($group_intron_end{$_} + 1)) {
                 $group_intron_end{"$_;$intron"} = $_[1];
                 delete $group_intron_end{$_};

@@ -203,11 +203,11 @@ sub sort_mRNA_info {
         my ($num, $CDS_length, $frame) = (0, 0, 0);
         foreach ( split /\n/, $mRNA_CDSs ) {
             $num ++; @_ = split /\t/, $_; my $feature_type = "CDS"; my $feature_showname = $feature_type;
-			$CDS_length += (abs($_[1] - $_[0]) + 1);
+            $CDS_length += (abs($_[1] - $_[0]) + 1);
             my $out_content = &get_content($chr, $source, $feature_type, $_[0], $_[1], $strand, $frame, $mRNA_ID, $num, $feature_showname, \%gff3_score_attr);
             $sort1{$out_content} = $_[0];
             $sort2{$out_content} = 3;
-			$frame = $CDS_length % 3; if ($frame == 1) {$frame = 2;} elsif ($frame == 2) {$frame = 1;}
+            $frame = $CDS_length % 3; if ($frame == 1) {$frame = 2;} elsif ($frame == 2) {$frame = 1;}
         }
         my $num = 0;
         foreach ( split /\n/, $mRNA_introns ) {
@@ -230,7 +230,7 @@ sub sort_mRNA_info {
                 $feature_showname = "utr3p";
                 $num3 ++; $num = $num3; $sort_num = 5;
             }
-			my $frame = '.';
+            my $frame = '.';
             my $out_content = &get_content($chr, $source, $feature_type, $_[1], $_[2], $strand, $frame, $mRNA_ID, $num, $feature_showname, \%gff3_score_attr);
             $sort1{$out_content} = $_[1];
             $sort2{$out_content} = $sort_num;
@@ -251,11 +251,11 @@ sub sort_mRNA_info {
         my ($num, $CDS_length, $frame) = (0, 0, 0);
         foreach ( reverse split /\n/, $mRNA_CDSs ) {
             $num ++; @_ = split /\t/, $_; my $feature_type = "CDS"; my $feature_showname = $feature_type;
-			$CDS_length += (abs($_[1] - $_[0]) + 1);
+            $CDS_length += (abs($_[1] - $_[0]) + 1);
             my $out_content = &get_content($chr, $source, $feature_type, $_[0], $_[1], $strand, $frame, $mRNA_ID, $num, $feature_showname, \%gff3_score_attr);
             $sort1{$out_content} = $_[0];
             $sort2{$out_content} = 3;
-			$frame = $CDS_length % 3; if ($frame == 1) {$frame = 2;} elsif ($frame == 2) {$frame = 1;}
+            $frame = $CDS_length % 3; if ($frame == 1) {$frame = 2;} elsif ($frame == 2) {$frame = 1;}
         }
         my $num = 0;
         foreach ( reverse split /\n/, $mRNA_introns ) {
@@ -278,7 +278,7 @@ sub sort_mRNA_info {
                 $feature_showname = "utr3p";
                 $num3 ++; $num = $num3; $sort_num = 5;
             }
-			my $frame = '.';
+            my $frame = '.';
             my $out_content = &get_content($chr, $source, $feature_type, $_[1], $_[2], $strand, $frame, $mRNA_ID, $num, $feature_showname, \%gff3_score_attr);
             $sort1{$out_content} = $_[1];
             $sort2{$out_content} = $sort_num;

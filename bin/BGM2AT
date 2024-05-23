@@ -106,7 +106,7 @@ my $species_name = $ARGV[2];
 
 # 优先使用自己设置的AUGUSTUS物种配置路径。从环境变量AUGUSTUS_CONFIG_PATH中拷贝配置文件夹到指定路径中。
 my $AUGUSTUS_CONFIG_PATH_orig = $ENV{"AUGUSTUS_CONFIG_PATH"};
-if ( $AUGUSTUS_CONFIG_PATH ) {
+if ( $AUGUSTUS_CONFIG_PATH && ($AUGUSTUS_CONFIG_PATH_orig ne $AUGUSTUS_CONFIG_PATH) ) {
     make_path("$AUGUSTUS_CONFIG_PATH/species") unless -e "$AUGUSTUS_CONFIG_PATH/species";
     if ( ! -e "$AUGUSTUS_CONFIG_PATH/species/generic" ) {
         if ( -e "$AUGUSTUS_CONFIG_PATH_orig/species/generic" ) {
@@ -155,7 +155,7 @@ if ( $AUGUSTUS_CONFIG_PATH ) {
             (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
         }
         else {
-            die "Error: $AUGUSTUS_CONFIG_PATH路径和环境变量AUGUSTUS_CONFIG_PATH路径下均不存在parameters配置文件夹。\n";
+            warn "Warning: $AUGUSTUS_CONFIG_PATH路径和环境变量AUGUSTUS_CONFIG_PATH路径下均不存在parameters配置文件夹。\n";
         }
     }
     if ( ! -e "$AUGUSTUS_CONFIG_PATH/profile" ) {
@@ -265,28 +265,29 @@ else {
 }
 
 # 进行第一次augustus training
+# 先创建初始化的物种HMM Training文件夹。
 my $species_config_dir = "$AUGUSTUS_CONFIG_PATH/species/$species_name";
-unless (-e $species_config_dir) {
+if ( ! -e $species_config_dir ) {
     $cmdString = "new_species.pl --species=$species_name --AUGUSTUS_CONFIG_PATH=$AUGUSTUS_CONFIG_PATH --ignore &> new_species.2.log";
     print STDERR "CMD: $cmdString\n";
     (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
-
-    if ( $augustus_species_start_from ) {
-        if ( open IN, "$AUGUSTUS_CONFIG_PATH/species/$augustus_species_start_from/${augustus_species_start_from}_parameters.cfg" ) {
-            open OUT, ">", "$AUGUSTUS_CONFIG_PATH/species/$species_name/${species_name}_parameters.cfg" or die "Can not create file $AUGUSTUS_CONFIG_PATH/species/$species_name/${species_name}_parameters.cfg, \n";
-            while (<IN>) {
-                s/$augustus_species_start_from/$species_name/;
-                print OUT;
-            }
-            close OUT;
-            close IN;
-            print STDERR "Augustus Training was started from $augustus_species_start_from.\n";
-        }
-        else {
-            warn "Warning: Can not open the parameters file specified by --augustus_species_start_from : $AUGUSTUS_CONFIG_PATH/species/$augustus_species_start_from/${augustus_species_start_from}_parameters.cfg\n";
-        } 
-    }
 }
+# 若添加了--augustus_species_start_from参数，则拷贝parameters.cfg文件。
+if ( $augustus_species_start_from ) {
+    my $input_file = "$AUGUSTUS_CONFIG_PATH_orig/species/$augustus_species_start_from/${augustus_species_start_from}_parameters.cfg" ;
+    open IN, $input_file or die "Error: Can not open the parameters file specified by --augustus_species_start_from: $input_file, $!";
+    my $input_file_info = join "", <IN>;
+    close IN;
+    $input_file_info =~ s/$augustus_species_start_from/$species_name/;
+
+    my $outpu_file = "$AUGUSTUS_CONFIG_PATH/species/$species_name/${species_name}_parameters.cfg";
+    open OUT, ">", $outpu_file or die "Error: Can not create file $outpu_file, $!";
+    print OUT $input_file_info;
+    close OUT;
+
+    print STDERR "Augustus Training was started from $augustus_species_start_from.\n";
+}
+# 进行etraining
 $cmdString = "cat genes.only_train.gb genes.gb.train > genes.gb.etraining";
 print STDERR "CMD: $cmdString\n";
 (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";

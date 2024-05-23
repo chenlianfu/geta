@@ -60,8 +60,8 @@ GetOptions(
     "threshold_protein_length:i" => \$threshold_protein_length,
     "threshold_homolog_coverage:f" => \$threshold_homolog_coverage,
     "threshold_inter_stop_codon_num:i" => \$threshold_inter_stop_codon_num,
-	"min_intron_length:i" => \$min_intron_length,
-	"max_intron_length:i" => \$max_intron_length,
+    "min_intron_length:i" => \$min_intron_length,
+    "max_intron_length:i" => \$max_intron_length,
 );
 $min_intron_length ||= 20;
 $max_intron_length ||= 200000;
@@ -271,62 +271,62 @@ my $cmdString;
 if ( exists $method{"genewise"} ) {
     $cmdString = "ParaFly -c $tmp_dir/command.genewise.list -CPU $cpu &> /dev/null";
     print STDERR (localtime) . ": CMD: $cmdString\n";
-	system("$cmdString");
-	# 检测运行成功的命令超过90%，则让程序继续运行。
-	open IN1, "$tmp_dir/command.genewise.list";
-	open IN2, "$tmp_dir/command.genewise.list.completed";
-	my ($num1, $num2) = (0, 0); my %cmd;
-	while (<IN1>) {
-		$num1 ++; $cmd{$_} = 1;
-	}
-	close IN1;
-	while (<IN2>) {
-		$num2 ++ if exists $cmd{$_};
-	}
-	close IN2;
-	if ( $num1 == 0 or $num2 / $num1 < 0.9 ) {
-		die "failed to execute: $cmdString\n";
-	}
+    system("$cmdString");
+    # 检测运行成功的命令超过90%，则让程序继续运行。
+    open IN1, "$tmp_dir/command.genewise.list";
+    open IN2, "$tmp_dir/command.genewise.list.completed";
+    my ($num1, $num2) = (0, 0); my %cmd;
+    while (<IN1>) {
+        $num1 ++; $cmd{$_} = 1;
+    }
+    close IN1;
+    while (<IN2>) {
+        $num2 ++ if exists $cmd{$_};
+    }
+    close IN2;
+    if ( $num1 == 0 or $num2 / $num1 < 0.9 ) {
+        die "failed to execute: $cmdString\n";
+    }
 }
 if ( exists $method{"gth"} ) {
     $cmdString = "ParaFly -c $tmp_dir/command.gth.list -CPU $cpu &> /dev/null";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString");
-	# 检测运行成功的命令超过90%，则让程序继续运行。
-	open IN1, "$tmp_dir/command.gth.list";
-	open IN2, "$tmp_dir/command.gth.list.completed";
-	my ($num1, $num2) = (0, 0); my %cmd;
-	while (<IN1>) {
-		$num1 ++; $cmd{$_} = 1;
-	}
-	close IN1;
-	while (<IN2>) {
-		$num2 ++ if exists $cmd{$_};
-	}
-	close IN2;
-	if ( $num1 == 0 or $num2 / $num1 < 0.9 ) {
-		die "failed to execute: $cmdString\n";
-	}
+    # 检测运行成功的命令超过90%，则让程序继续运行。
+    open IN1, "$tmp_dir/command.gth.list";
+    open IN2, "$tmp_dir/command.gth.list.completed";
+    my ($num1, $num2) = (0, 0); my %cmd;
+    while (<IN1>) {
+        $num1 ++; $cmd{$_} = 1;
+    }
+    close IN1;
+    while (<IN2>) {
+        $num2 ++ if exists $cmd{$_};
+    }
+    close IN2;
+    if ( $num1 == 0 or $num2 / $num1 < 0.9 ) {
+        die "failed to execute: $cmdString\n";
+    }
 }
 if ( exists $method{"exonerate"} ) {
     $cmdString = "ParaFly -c $tmp_dir/command.exonerate.list -CPU $cpu &> /dev/null";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString");
-	# 检测运行成功的命令超过90%，则让程序继续运行。
-	open IN1, "$tmp_dir/command.exonerate.list";
-	open IN2, "$tmp_dir/command.exonerate.list.completed";
-	my ($num1, $num2) = (0, 0); my %cmd;
-	while (<IN1>) {
-		$num1 ++; $cmd{$_} = 1;
-	}
-	close IN1;
-	while (<IN2>) {
-		$num2 ++ if exists $cmd{$_};
-	}
-	close IN2;
-	if ( $num1 == 0 or $num2 / $num1 < 0.9 ) {
-		die "failed to execute: $cmdString\n";
-	}
+    # 检测运行成功的命令超过90%，则让程序继续运行。
+    open IN1, "$tmp_dir/command.exonerate.list";
+    open IN2, "$tmp_dir/command.exonerate.list.completed";
+    my ($num1, $num2) = (0, 0); my %cmd;
+    while (<IN1>) {
+        $num1 ++; $cmd{$_} = 1;
+    }
+    close IN1;
+    while (<IN2>) {
+        $num2 ++ if exists $cmd{$_};
+    }
+    close IN2;
+    if ( $num1 == 0 or $num2 / $num1 < 0.9 ) {
+        die "failed to execute: $cmdString\n";
+    }
 }
 
 # 对每个基因区域进行基因预测的结果分析和排序
