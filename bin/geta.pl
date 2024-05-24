@@ -49,7 +49,7 @@ Parameters:
     输入临近物种的全基因组蛋白序列。推荐使用多个（3~10个）物种的全基因组同源蛋白序列。使用的物种数量越多，预测的基因越多越准确，但是越消耗计算时间。同源蛋白和二代测序数据，至少需要输入其中一种数据用于有证据支持的基因预测。
 
     --augustus_species <string>    default: None
-    输入一个AUGUSTUS物种名称，则程序在利用转录本或同源蛋白预测的基因模型进行AUGUSTUS Training时，使用已有的物种模型或训练新的物种模型。若输入的AUGUSTUS物种模型存在，则在其基础上对其进行优化；若不存在，则生成新的AUGUSTUS物种模型，并进行参数优化。程序进行AUGUSTUS Training需要安装好AUGSTUS软件，并设置好\$AUGUSTUS_CONFIG_PATH环境变量。程序运行完毕后，在临时文件夹中有生成AUGUSTUS的物种配置文件夹；若对\$AUGUSTUS_CONFIG_PATH路径中指定的species文件夹有写入权限，则将生成的物种配置文件夹拷贝过去。若不输入本参数信息，则程序仅在临时文件夹中生成名为augustus_species_by_GETA的HMM模型文件夹。
+    输入一个AUGUSTUS物种名称，则程序在利用转录本或同源蛋白预测的基因模型进行AUGUSTUS Training时，使用已有的物种模型或训练新的物种模型。若输入的AUGUSTUS物种模型存在，则在其基础上对其进行优化；若不存在，则生成新的AUGUSTUS物种模型，并进行参数优化。程序进行AUGUSTUS Training需要安装好AUGSTUS软件，并设置好\$AUGUSTUS_CONFIG_PATH环境变量。程序运行完毕后，在临时文件夹中有生成AUGUSTUS的物种配置文件夹；若对\$AUGUSTUS_CONFIG_PATH路径中指定的species文件夹有写入权限，则将生成的物种配置文件夹拷贝过去。若不输入本参数信息，则程序自动设置本参数的值为“GETA + 基因组FASTA文件名称前缀 + 日期 + 进程ID”。
 
     --HMM_db <string>    default: None
     输入HMM数据库路径，用于对基因模型进行过滤。参数支持输入多个数据库路径，使用逗号进行分隔。当使用多个HMM数据库时，程序过滤在所有数据库中都没有匹配的基因模型。
@@ -82,6 +82,9 @@ Parameters:
 
     --genetic_code <int>    default: 1
     设置遗传密码。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。用于设置对基因模型强制补齐时的起始密码子和终止密码子。
+
+    --optimize_augustus_method <int>    default: 1
+    设置AUGUSTUS Training时的参数优化方法。1，表示仅调用BGM2AT.optimize_augustus进行优化，能充分利用所有CPU线程对所有参数并行化测试，速度快；2，表示BGM2AT.optimize_augustus优化完毕后，再使用AUGUSTUS软件自带的optimize_augustus.pl程序再次进行优化，此时运行速度慢，效果可能更好。使用本参数的优先级更高，能覆盖参数配置文件中BGM2AT的参数值。
     
     --no_alternative_splicing_analysis    default: None
     添加该参数后，程序不会进行可变剪接分析。
@@ -116,7 +119,7 @@ if (@ARGV==0){die $usage_chinese}
 
 my ($genome, $RM_species, $RM_species_Dfam, $RM_species_RepBase, $RM_lib, $no_RepeatModeler, $pe1, $pe2, $single_end, $sam, $strand_specific, $protein, $augustus_species, $HMM_db, $BLASTP_db, $config, $BUSCO_lineage_dataset);
 my ($out_prefix, $gene_prefix, $chinese_help, $help);
-my ($cpu, $genetic_code, $no_alternative_splicing_analysis, $delete_unimportant_intermediate_files);
+my ($cpu, $genetic_code, $optimize_augustus_method, $no_alternative_splicing_analysis, $delete_unimportant_intermediate_files);
 my ($cmdString, $cmdString1, $cmdString2, $cmdString3, $cmdString4, $cmdString5);
 GetOptions(
     "genome:s" => \$genome,
@@ -524,8 +527,9 @@ if ( -e "$ENV{'AUGUSTUS_CONFIG_PATH'}/species/$augustus_species/${augustus_speci
 }
 $cmdString1 = "$bin_path/BGM2AT $config{'BGM2AT'} --AUGUSTUS_CONFIG_PATH $tmp_dir/5.augustus/config $augustus_species_start_from --flanking_length $flanking_length --CPU $cpu --onlytrain_GFF3 ati.filter1.gff3 ati.filter2.gff3 $genome $augustus_species &> BGM2AT.log";
 $cmdString2 = "cp accuary_of_AUGUSTUS_HMM_Training.txt ../";
+$cmdString3 = "cp -a $tmp_dir/5.augustus/config/species/$augustus_species $ENV{'AUGUSTUS_CONFIG_PATH'}/species/ || echo Can not create file in directory $ENV{'AUGUSTUS_CONFIG_PATH'}/species/";
 
-&execute_cmds($cmdString1, $cmdString2, "$tmp_dir/5.augustus/training.ok");
+&execute_cmds($cmdString1, $cmdString2, $cmdString3, "$tmp_dir/5.augustus/training.ok");
 
 # 5.2 准备Hints信息
 chdir "$tmp_dir/5.augustus"; print STDERR "\nPWD: $tmp_dir/5.augustus\n";
@@ -1223,6 +1227,13 @@ sub parsing_input_parameters {
     # 检测AUGUSTUS的环境变量\$AUGUSTUS_CONFIG_PATH
     die "The directory assigned by \$AUGUSTUS_CONFIG_PATH was not exists.\n" unless -e $ENV{"AUGUSTUS_CONFIG_PATH"};
 
+    my $date = `date +%Y%m%d%H%M%S`; chomp($date);
+    unless ( $augustus_species ) {
+        $augustus_species = basename($genome);
+        $augustus_species =~ s/\.fa.*//;
+        $augustus_species = "GETA_${augustus_species}${date}_$$";
+    }
+
     if ( $HMM_db ) {
         foreach ( split /,/, $HMM_db ) {
             $_ = abs_path($_);
@@ -1293,6 +1304,13 @@ sub choose_config_file {
         }
     }
     close IN;
+
+    # 覆盖%config数据
+    $optimize_augustus_method ||= 1;
+    unless ( $optimize_augustus_method == 1 or $optimize_augustus_method == 2 ) {
+        die "Error: The value of --optimize_augustus_method shoud be 1 or 2\n";
+    }
+    $config{"BGM2AT"} =~ s/--optimize_augustus_method \d+/--optimize_augustus_method $optimize_augustus_method/;
 
     return 1;
 }
