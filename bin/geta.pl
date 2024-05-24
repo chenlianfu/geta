@@ -302,7 +302,7 @@ if (($pe1 && $pe2) or $single_end or $sam) {
 }
 else {
     $cmdString1 = "touch $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.gff3";
-    $cmdString2 = "touch $tmp_dir/2.NGSReads_prediction/intron.txt; touch $tmp_dir/2.NGSReads_prediction/base_depth.txt; touch $tmp_dir/2.NGSReads_prediction/c.transcript/transfrag.genome.gff3";
+    $cmdString2 = "touch $tmp_dir/2.NGSReads_prediction/intron.txt; touch $tmp_dir/2.NGSReads_prediction/base_depth.txt; touch $tmp_dir/2.NGSReads_prediction/transfrag.genome.gff3";
 }
 
 &execute_cmds($cmdString1, $cmdString2, "$tmp_dir/2.NGSReads_prediction.ok");
