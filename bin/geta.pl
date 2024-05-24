@@ -60,6 +60,9 @@ Parameters:
     --config <string>    default: None
     输入一个参数配置文件路径，用于设置本程序调用的其它命令的详细参数。若不设置该参数，当基因组>1GB时，自动使用软件安装目录中的conf_for_big_genome.txt配置文件；当基因组<50MB时，自动使用软件安装目录中的conf_for_small_genome.txt配置文件；当基因组在50MB~1GB之间时，使用默认参数配置。若有特殊需求，可以自行修改软件安装目录中的conf_all_defaults.txt文件，并输入给本参数进行流程分析。
 
+    --BUSCO_lineage_dataset <string>    default: None
+    输入BUSCO数据库路径，则程序额外对基因预测得到的全基因组蛋白序列进行BUSCO分析。本参数支持输入多个BUSCO数据库路径，使用逗号进行分隔，则分别利用多个数据库进行分析。可以根据$software_dir/BUSCO_lineages_list.2021-12-14.txt文件内容选择合适的BUSCO数据库。BUSCO的结果输出到7.outputResults子目录下和gene_prediction.summary文件中。
+
 [OUTPUT]
     --out_prefix <string>    default: out
     设置输出文件前缀。
@@ -84,10 +87,8 @@ Parameters:
     添加该参数后，程序不会进行可变剪接分析。
 
     --delete_unimportant_intermediate_files    defaults: None
-    添加该参数后，若程序运行成功，会删除不重要的中间文件，仅保留最少的、较小的、重要的中间结果文件。删除这些中间文件后，若程序重新运行后，能继续运行GETA的第六个步骤，即合并三种预测结果并对基因模型进行过滤。
+    添加该参数后，若程序运行成功，会删除不重要的中间文件，仅保留最少的、较小的、重要的中间结果文件。
 
-    --keep_all_files_of_6thStep_combineGeneModels    defaults: None
-    若使用--delete_unimportant_intermediate_files参数后，默认会删除GETA流程第6步生成的文件夹，再次运行程序会完整运行第6步流程。若再额外添加本参数，则会保留第6步所有数据，再次运行程序，则会根据第6步结果数据直接生成最终结果文件，可以用于修改基因ID前缀。
 
 在Rocky 9.2系统使用以下依赖的软件版本对本软件进行了测试并运行成功。
 01. ParaFly
@@ -104,6 +105,7 @@ Parameters:
 12. augustus/etraining (version: 3.5.0)
 13. diamond (version 2.1.8)
 14. hmmscan (version: 3.3.2)
+15. busco (Version: 5.4.7)
 
 Version of GETA: 2.7.1
 
@@ -112,9 +114,9 @@ USAGE
 my $usage_english = &get_usage_english();
 if (@ARGV==0){die $usage_chinese}
 
-my ($genome, $RM_species, $RM_species_Dfam, $RM_species_RepBase, $RM_lib, $no_RepeatModeler, $pe1, $pe2, $single_end, $sam, $strand_specific, $protein, $augustus_species, $HMM_db, $BLASTP_db, $config);
+my ($genome, $RM_species, $RM_species_Dfam, $RM_species_RepBase, $RM_lib, $no_RepeatModeler, $pe1, $pe2, $single_end, $sam, $strand_specific, $protein, $augustus_species, $HMM_db, $BLASTP_db, $config, $BUSCO_lineage_dataset);
 my ($out_prefix, $gene_prefix, $chinese_help, $help);
-my ($cpu, $genetic_code, $no_alternative_splicing_analysis, $delete_unimportant_intermediate_files, $keep_all_files_of_6thStep_combineGeneModels);
+my ($cpu, $genetic_code, $no_alternative_splicing_analysis, $delete_unimportant_intermediate_files);
 my ($cmdString, $cmdString1, $cmdString2, $cmdString3, $cmdString4, $cmdString5);
 GetOptions(
     "genome:s" => \$genome,
@@ -133,6 +135,7 @@ GetOptions(
     "HMM_db:s" => \$HMM_db,
     "BLASTP_db:s" => \$BLASTP_db,
     "config:s" => \$config,
+    "BUSCO_lineage_dataset:s" => \$BUSCO_lineage_dataset,
     "out_prefix:s" => \$out_prefix,
     "gene_prefix:s" => \$gene_prefix,
     "chinese_help!" => \$chinese_help,
@@ -141,12 +144,11 @@ GetOptions(
     "genetic_code:i" => \$genetic_code,
     "no_alternative_splicing_analysis!" => \$no_alternative_splicing_analysis,
     "delete_unimportant_intermediate_files!" => \$delete_unimportant_intermediate_files,
-    "keep_all_files_of_6thStep_combineGeneModels!" => \$keep_all_files_of_6thStep_combineGeneModels,
 );
 
 # Step 0: 程序运行前的准备工作
 # 0.1 对输入参数进行分析，使用绝对路径。若有参数设置不正确，则程序拒绝运行。
-my (%HMM_db, %BLASTP_db, %config);
+my (%HMM_db, %BLASTP_db, %config, %BUSCO_db, @BUSCO_db);
 &parsing_input_parameters();
 
 # 0.2 检测依赖的软件是否满足。
@@ -168,6 +170,28 @@ else {
     print STDERR "CMD(Skipped): $cmdString\n";
 }
 $genome = "$tmp_dir/genome.fasta";
+
+# 获取基因组大小
+my $genome_size = 0;
+unless ( -s "genome.size" ) {
+    open IN, $genome or die "Error: Can not open file $genome, $!";
+    while ( <IN> ) {
+        next if /^>/;
+        $genome_size += (length($_) - 1);
+    }
+    close IN;
+
+    open OUT, ">", "genome.size" or die "Error: Can not create file $tmp_dir/genome.size, $!";
+    print OUT $genome_size;
+    close OUT;
+}
+else {
+    open IN, "$tmp_dir/genome.size" or die "Error: Can not open file $tmp_dir/genome.size, $!";
+    $genome_size = <IN>;
+    close IN;
+}
+# 根据基因组大小选择软件自带的配置文件，或使用 --config 参数指定的配置文件。
+&choose_config_file($genome_size);
 
 # 0.5 准备直系同源基因蛋白序列：
 # 读取FASTA序列以>开始的头部时，去除第一个空及之后的字符，将所有怪异字符变为下划线字符；若遇到 > 符号不在句首，则表示fasta文件格式有误，删除该 > 及到下一个 > 之前的数据；去除序列中尾部的换行符, 将所有小写字符氨基酸变换为大写字符。程序中断后再次运行时，则重新读取新的同源蛋白序列文件，利用新的文件进行后续分析。
@@ -498,9 +522,10 @@ my $augustus_species_start_from = "";
 if ( -e "$ENV{'AUGUSTUS_CONFIG_PATH'}/species/$augustus_species/${augustus_species}_parameters.cfg" ) {
     $augustus_species_start_from = "--augustus_species_start_from $augustus_species";
 }
-$cmdString = "$bin_path/BGM2AT $config{'BGM2AT'} --AUGUSTUS_CONFIG_PATH $tmp_dir/5.augustus/config $augustus_species_start_from --flanking_length $flanking_length --CPU $cpu --onlytrain_GFF3 ati.filter1.gff3 ati.filter2.gff3 $genome $augustus_species &> BGM2AT.log";
+$cmdString1 = "$bin_path/BGM2AT $config{'BGM2AT'} --AUGUSTUS_CONFIG_PATH $tmp_dir/5.augustus/config $augustus_species_start_from --flanking_length $flanking_length --CPU $cpu --onlytrain_GFF3 ati.filter1.gff3 ati.filter2.gff3 $genome $augustus_species &> BGM2AT.log";
+$cmdString2 = "cp accuary_of_AUGUSTUS_HMM_Training.txt ../";
 
-&execute_cmds($cmdString, "$tmp_dir/5.augustus/training.ok");
+&execute_cmds($cmdString1, $cmdString2, "$tmp_dir/5.augustus/training.ok");
 
 # 5.2 准备Hints信息
 chdir "$tmp_dir/5.augustus"; print STDERR "\nPWD: $tmp_dir/5.augustus\n";
@@ -752,7 +777,34 @@ if (($pe1 && $pe2) or $single_end) {
     &execute_cmds($cmdString1, $cmdString2, $cmdString3, $cmdString4, "4.output_methods_GFF3.ok");
 }
 
-# 7.5 输出GETA流程信息，用于追踪基因预测结果的可靠性
+# 7.5 进行BUSCO分析
+my @cmdString;
+if ( $BUSCO_lineage_dataset ) {
+    foreach my $BUSCO_db_path ( @BUSCO_db ) {
+        my $BUSCO_db_name = $BUSCO_db{$BUSCO_db_path};
+        push @cmdString, "rm -rf BUSCO_OUT_$BUSCO_db_name*; busco -i $out_prefix.protein.fasta -o BUSCO_OUT_$BUSCO_db_name -m protein -l $BUSCO_db_path -c $cpu --offline &> BUSCO_OUT_$BUSCO_db_name.log";
+    }
+    push @cmdString, "5.BUSCO.ok";
+
+    &execute_cmds(@cmdString);
+
+    # 合并多个数据库的BUSCO结果
+    unless ( -e "BUSCO_results.txt" ) {
+        open OUT, ">", "BUSCO_results.txt" or die "Error: Can not create file BUSCO_results.txt, $!";
+        print OUT "The BUSCO result of predicted whole genome proteins:\n";
+        foreach my $BUSCO_db_path ( @BUSCO_db ) {
+            my $BUSCO_db_name = $BUSCO_db{$BUSCO_db_path};
+            open IN, "BUSCO_OUT_$BUSCO_db_name.log" or die "Can not open file BUSCO_OUT_$BUSCO_db_name.log, $!";
+            while ( <IN> ) {
+                print OUT sprintf("%-25s$1\n", $BUSCO_db_name) if m/(C:\S+)/;
+            }
+            close IN;
+        }
+        close OUT;
+    }
+}
+
+# 7.6 输出GETA流程信息，用于追踪基因预测结果的可靠性
 # (1) 获取基因组重复序列统计信息
 open OUT, ">", "$out_prefix.gene_prediction.summary" or die "Can not create file $out_prefix.gene_prediction.summary, $!";
 open IN, "$out_prefix.repeat.stats" or die "Can not open file $out_prefix.repeat.stats, $!";
@@ -789,30 +841,11 @@ if (-e "$tmp_dir/5.augustus/augustus.gff3") {
     print OUT "$gene_num genes were predicted by augustus.\n\n";
 }
 # (6) 获取AUGUSTUS Training的准确率信息和预测基因数量统计
-my $input_file = "$tmp_dir/5.augustus/training/secondtest.out";
+my $input_file = "$tmp_dir/5.augustus/accuary_of_AUGUSTUS_HMM_Training.txt";
 open IN, $input_file or die "Error: Can not open file $input_file, $!";
-my ($accuary1, $accuary2, $accuary3, $accuary4, $accuary5, $accuary6, $out);
-while (<IN>) {
-    if (m/^nucleotide level/) {
-        @_ = m/([\d\.]+)/g;
-        $out .= sprintf("%-15s\t%.3f\t%.3f\n", "nucleotide", $_[-2], $_[-1]);
-        ($accuary1, $accuary2) = ($_[-2], $_[-1]);
-    }
-    elsif (m/^exon level/) {
-        @_ = m/([\d\.]+)/g;
-        $out .= sprintf("%-15s\t%.3f\t%.3f\n", "exon", $_[-2], $_[-1]);
-        ($accuary3, $accuary4) = ($_[-2], $_[-1]);
-    }
-    elsif (m/^gene level/) {
-        @_ = m/([\d\.]+)/g;
-        $out .= sprintf("%-15s\t%.3f\t%.3f\n", "gene", $_[-2], $_[-1]);
-        ($accuary5, $accuary6) = ($_[-2], $_[-1]);
-    }
-}
-my $accuary = ($accuary1 * 3 + $accuary2 * 2 + $accuary3 * 4 + $accuary4 * 3 + $accuary5 * 2 + $accuary6 * 1) / 15;
-$accuary = sprintf("%.2f", $accuary * 100);
-$out = sprintf("The accuary of AUGUSTUS Training is $accuary\%.\n%-15s\tSensitivity\tSpecificity\n$out\n", "Level");
-print OUT $out;
+print OUT <IN>;
+close IN;
+print OUT "\n";
 
 # (7) 获取基因预测整合过滤的统计信息
 print OUT "Statistics of the combination of 3 gene prediction methods and filtration of gene models:\n";
@@ -894,23 +927,39 @@ while (<IN>) {
 close IN;
 $num_of_gene3 = $num_of_gene1 + $num_of_gene2;
 print OUT "(6) $num_of_gene3 gene models were filtered, and $num_of_gene1 of which had lncRNA transcripts.\n";
+print OUT "\n";
+
+# (8) 获取BUSCO分析结果
+if ( -e "$tmp_dir/7.outputResults/BUSCO_results.txt" ) {
+    my $input_file = "$tmp_dir/7.outputResults/BUSCO_results.txt";
+    open IN, $input_file or die "Error: Can not open file $input_file, $!";
+    print OUT <IN>;
+    close IN;
+    print OUT "\n";
+}
+close OUT;
 
 # 7.6 删除中间文件
 if ( $delete_unimportant_intermediate_files ) {
+    my @cmdString;
     print STDERR "Due to the --delete_unimportant_intermediate_files was set, so the unimportant and large intermediate files are being deleted...\n";
     # 删除 1.RepeatMasker 文件夹下的数据
-    $cmdString1 = "rm -rf $tmp_dir/1.RepeatMasker/repeatMasker_Dfam $tmp_dir/1.RepeatMasker/repeatMasker_RepBase $tmp_dir/1.RepeatMasker/repeatModeler";
+    push @cmdString, "rm -rf $tmp_dir/1.RepeatMasker/repeatMasker_Dfam $tmp_dir/1.RepeatMasker/repeatMasker_RepBase $tmp_dir/1.RepeatMasker/repeatModeler";
     # 删除 2.NGSReads_prediction 文件夹下的数据
-    $cmdString2 = "rm -rf $tmp_dir/2.NGSReads_prediction/a.trimmomatic $tmp_dir/2.NGSReads_prediction/b.hisat2 $tmp_dir/2.NGSReads_prediction/c.transcript";
+    push @cmdString, "rm -rf $tmp_dir/2.NGSReads_prediction/a.trimmomatic $tmp_dir/2.NGSReads_prediction/b.hisat2 $tmp_dir/2.NGSReads_prediction/c.transcript";
     # 删除 3.homolog_prediction 文件夹下的数据
-    $cmdString3 = "rm -rf $tmp_dir/3.homolog_prediction/a.MMseqs2CalHits $tmp_dir/3.homolog_prediction/b.hitToGenePrediction $tmp_dir/3.homolog_prediction/c.getGeneModels";
+    push @cmdString, "rm -rf $tmp_dir/3.homolog_prediction/a.MMseqs2CalHits $tmp_dir/3.homolog_prediction/b.hitToGenePrediction $tmp_dir/3.homolog_prediction/c.getGeneModels";
     # 删除 5.augustus 文件夹下的数据
-    $cmdString4 = "rm -rf $tmp_dir/5.augustus/aug_para_with_hints $tmp_dir/5.augustus/training";
+    push @cmdString, "rm -rf $tmp_dir/5.augustus/aug_para_with_hints $tmp_dir/5.augustus/training";
     # 删除 6.combineGeneModels 文件夹下的数据
-    $cmdString5 = "rm -rf $tmp_dir/6.combineGeneModels/combineGeneModels_tmp $tmp_dir/6.combineGeneModels/*tmp";
+    push @cmdString, "rm -rf $tmp_dir/6.combineGeneModels/combineGeneModels_tmp $tmp_dir/6.combineGeneModels/*tmp";
+    # 删除 7.outputResults 文件夹下的数据
+    push @cmdString, "rm -rf $tmp_dir/7.outputResults/BUSCO*";
 
-    &execute_cmds($cmdString1, $cmdString2, $cmdString3, $cmdString4, $cmdString5, "6.rm_unimportant_intermediate_files.ok");
+    push @cmdString, "6.rm_unimportant_intermediate_files.ok";
+    &execute_cmds(@cmdString);
 }
+
 
 print STDERR "\n============================================\n";
 print STDERR "GETA complete successfully! " . "(" . (localtime) . ")" . "\n\n";
@@ -1127,8 +1176,6 @@ Parameters:
     --delete_unimportant_intermediate_files    defaults: None
     添加该参数后，若程序运行成功，会删除不重要的中间文件，仅保留最少的、较小的、重要的中间结果文件。删除这些中间文件后，若程序重新运行后，能继续运行GETA的第六个步骤，即合并三种预测结果并对基因模型进行过滤。
 
-    --keep_all_files_of_6thStep_combineGeneModels    defaults: None
-    若使用--delete_unimportant_intermediate_files参数后，默认会删除GETA流程第6步生成的文件夹，再次运行程序会完整运行第6步流程。若再额外添加本参数，则会保留第6步所有数据，再次运行程序，则会根据第6步结果数据直接生成最终结果文件，可以用于修改基因ID前缀。
 
 This script was tested on Rocky 9.2 with such softwares can be run directly in terminal:
 01. ParaFly
@@ -1171,6 +1218,8 @@ sub parsing_input_parameters {
 
     $protein = abs_path($protein) if $protein;
 
+    die "No genome sequences was found in file $genome\n" unless -s $genome;
+    die "No RNA-Seq short reads or homologous proteins was input\n" unless (($pe1 && $pe2) or $single_end or $sam or $protein);
     # 检测AUGUSTUS的环境变量\$AUGUSTUS_CONFIG_PATH
     die "The directory assigned by \$AUGUSTUS_CONFIG_PATH was not exists.\n" unless -e $ENV{"AUGUSTUS_CONFIG_PATH"};
 
@@ -1185,11 +1234,15 @@ sub parsing_input_parameters {
             $BLASTP_db{$_} = basename($_);
         }
     }
+    if ( $BUSCO_lineage_dataset ) {
+        foreach ( split /,/, $BUSCO_lineage_dataset ) {
+            $_ = abs_path($_);
+            push @BUSCO_db, $_ unless exists $BUSCO_db{$_};
+            $BUSCO_db{$_} = basename($_);
+        }
+    }
 
     $config = abs_path($config) if $config;
-
-    die "No genome sequences was found in file $genome\n" unless -s $genome;
-    die "No RNA-Seq short reads or homologous proteins was input\n" unless (($pe1 && $pe2) or $single_end or $sam or $protein);
 
     $out_prefix ||= "out";
     $out_prefix = abs_path($out_prefix);
@@ -1203,44 +1256,45 @@ sub parsing_input_parameters {
     die $chinese_help if $chinese_help;
     die $help if $help;
 
-    # 各个主要命令的参数设置
-    %config = (
-        'para_RepeatMasker' => '--min_coverge_ratio 0.25',
-        'trimmomatic' => 'TruSeq3-PE-2.fa:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:50 TOPHRED33',
-        'hisat2' => '--min-intronlen 20 --max-intronlen 20000 --dta --score-min L,0.0,-0.4 -k 1',
-        'sam2transfrag' => '--fraction 0.05 --min_expressed_base_depth 2 --max_expressed_base_depth 50 --min_junction_depth 2 --max_junction_depth 50 --min_fragment_count_per_transfrags 10 --min_intron_length 20',
-        'TransDecoder.LongOrfs' => '-m 100 -G universal',
-        'TransDecoder.Predict' => '--retain_long_orfs_mode dynamic',
-        'homolog_prediction' => '--identity 0.2 --evalue 1e-9 --homolog_coverage 0.3 --max_hits_num_per_match_region 10 --max_hit_num_per_single_species 2 --method all --threshod_ratio_of_intron_Supported_times 0.5',
-        'geneModels2AugusutsTrainingInput' => '--min_evalue 1e-9 --min_identity 0.8 --min_coverage_ratio 0.8 --min_cds_num 2 --min_cds_length 450 --min_cds_exon_ratio 0.60',
-        'BGM2AT' => '--min_gene_number_for_augustus_training 500 --gene_number_for_accuracy_detection 200 --gene_models_minimum_num_for_test 100 --gene_models_maximum_num_for_test 600 --gene_models_ratio_for_test 0.2 --gene_models_num_per_test 50 --pstep 6 --rounds 6 --optimize_augustus_method 1 --min_intron_len 30',
-        'prepareAugusutusHints' => '--margin 20',
-        'paraAugusutusWithHints' => '--gene_prefix augustus --min_intron_len 20',
-        'paraCombineGeneModels' => '--overlap 30 --min_augustus_transcriptSupport_percentage 10.0 --min_augustus_intronSupport_number 1 --min_augustus_intronSupport_ratio 0.01',
-        'pickout_better_geneModels_from_evidence' => '--overlap_ratio 0.2 --ratio1 2 --ratio2 1.5 --ratio3 0.85 --ratio4 0.85',
-        'fillingEndsOfGeneModels' => '--start_codon ATG --stop_codon TAG,TGA,TAA',
-        'alternative_splicing_analysis' => '--min_intron_depth 1 --min_base_depth_ratio_for_ref_specific_intron 0.3 --min_intron_depth_ratio_for_evidence_specific_intron 0.2 --min_base_depth_ratio_for_common_intron 0.2 --min_gene_depth 10 --min_transcript_confidence_for_output 0.05 --transcript_num_for_output_when_all_low_confidence 8 --added_mRNA_ID_prefix t',
-        'GFF3_extract_TranscriptID_for_filtering' => '--min_CDS_ratio 0.3 --min_CDS_length 600 --max_repeat_overlap_ratio 0.3 --ignore_repeat_Name Simple_repeat,Low_complexity,Satellite,Unknown,Tandem_repeat',
-        'para_hmmscan' => '--evalue1 1e-5 --evalue2 1e-3 --hmm_length 80 --coverage 0.25 --no_cut_ga --chunk 20 --hmmscan_cpu 2',
-        'diamond' => '--sensitive --max-target-seqs 20 --evalue 1e-5 --id 10 --index-chunks 1 --block-size 5',
-        'parsing_blast_result.pl' => '--evalue 1e-9 --identity 0.1 --CIP 0.4 --subject-coverage 0.4 --query-coverage 0.4',
-        'get_valid_geneModels' => '',
-        'get_valid_transcriptID' => '--hmm_evalue 1e-7 --hmm_coverage 0.4 --blast_evalue 1e-10 --blast_CIP 0.5 --blast_coverage 0.5 --blast_evalue_for_genesie 1e-10 --blast_CIP_for_genewise 0.5 --blast_coverage_for_genewise 0.8',
-    );
+    return 1;
+}
 
-    if ($config) {
-        open IN, $config or die "Can not open file $config, $!\n";
-        my $tag;
-        while (<IN>) {
-            next if m/^#/;
-            next if m/^\s*$/;
-            s/^\s+//;
-            s/\n/ /;
-            if (/\[(.*)\]/) { $tag = $1; delete $config{$1}; }
-            else { $config{$tag} .= $_; }
-        }
-        close IN;
+# 根据基因组大小选择程序自带的配置文件。
+sub choose_config_file {
+    my $genomeSize = $_[0];
+
+    # 程序默认使用 conf_all_defaults.txt 配置文件
+    my $config_file = "$software_dir/conf_all_defaults.txt";
+    # 当基因组较大或较小时，自动选择相应的配置文件
+    if ( $genomeSize > 1000000000 ) {
+        $config_file = "$software_dir/conf_for_big_genome.txt";
     }
+    elsif ( $genomeSize < 50000000 ) {
+        $config_file = "$software_dir/conf_for_small_genome.txt";
+    }
+    # 若手动指定了配置文件，则其优先度最高
+    $config_file = $config if $config;
+
+    # 读取配置文件，读取参数信息
+    open IN, $config_file or die "Can not open file $config_file, $!\n";
+    my $tag;
+    while (<IN>) {
+        s/#.*//;
+        next if m/^\s*$/;
+        s/^\s+//;
+        s/\s*$/ /;
+        if (/\[(.*)\]/) {
+            $tag = $1;
+            delete $config{$1};
+        }
+        else {
+            if ( $config{$tag} ) { $config{$tag} .= " $_"; }
+            else { $config{$tag} = $_; }
+        }
+    }
+    close IN;
+
+    return 1;
 }
 
 # 子程序，用于执行调用的Linux命令。程序运行完毕后，生成.ok文件。

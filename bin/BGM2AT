@@ -410,20 +410,26 @@ else {
 print STDERR "the Augustus training completed\n";
 
 # 两次准确性结果比较
-my $accuracy_value = 0;
+my $accuracy_value = 0; 
+my $accuary_out1 = "Level          Sensitivity    Specificity\n";
+my $accuary_out2 = "Level          Sensitivity    Specificity\n";
+open OUT, ">", "accuary_of_AUGUSTUS_HMM_Training.txt" or die $!;
 open IN, "firsttest.out" or die "Can not open file firsttest.out, $!\n";
 while (<IN>) {
     if (m/^nucleotide level/) {
         @_ = split /[\s\|]+/;
         $accuracy_value += ($_[-2] * 3 + $_[-1] * 2);
+		$accuary_out1 .= sprintf("%-15s%.3f          %.3f\n", "nucleotide", $_[-2], $_[-1]);
     }
     elsif (m/^exon level/) {
         @_ = split /[\s\|]+/;
         $accuracy_value += ($_[-2] * 4 + $_[-1] * 3);
+		$accuary_out1 .= sprintf("%-15s%.3f          %.3f\n", "exon", $_[-2], $_[-1]);
     }
     elsif (m/^gene level/) {
         @_ = split /[\s\|]+/;
         $accuracy_value += ($_[-2] * 2 + $_[-1] * 1);
+		$accuary_out1 .= sprintf("%-15s%.3f          %.3f\n", "gene", $_[-2], $_[-1]);
     }
 }
 close IN;
@@ -434,14 +440,17 @@ while (<IN>) {
     if (m/^nucleotide level/) {
         @_ = split /[\s\|]+/;
         $accuracy_value += ($_[-2] * 3 + $_[-1] * 2);
+		$accuary_out2 .= sprintf("%-15s%.3f          %.3f\n", "nucleotide", $_[-2], $_[-1]);
     }
     elsif (m/^exon level/) {
         @_ = split /[\s\|]+/;
         $accuracy_value += ($_[-2] * 4 + $_[-1] * 3);
+		$accuary_out2 .= sprintf("%-15s%.3f          %.3f\n", "exon", $_[-2], $_[-1]);
     }
     elsif (m/^gene level/) {
         @_ = split /[\s\|]+/;
         $accuracy_value += ($_[-2] * 2 + $_[-1] * 1);
+		$accuary_out2  .= sprintf("%-15s%.3f          %.3f\n", "gene", $_[-2], $_[-1]);
     }
 }
 close IN;
@@ -453,9 +462,12 @@ if ($second_accuracy < $first_accuracy) {
     $cmdString = "rm -rf $AUGUSTUS_CONFIG_PATH/species/$species_name && cp -a hmm_files_bak01 $AUGUSTUS_CONFIG_PATH/species/$species_name && ln -sf -T hmm_files_bak01 hmm_files_bak";
     print STDERR "CMD: $cmdString\n";
     (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+	print OUT "The accuary of AUGUSTUS HMM Training is: " . sprintf("%.2f", $first_accuracy * 100) . "%.\n$accuary_out1";
 }
 else {
     $cmdString = "ln -sf -T hmm_files_bak02 hmm_files_bak";
     print STDERR "CMD: $cmdString\n";
     (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+	print OUT "The accuary of AUGUSTUS HMM Training is: " . sprintf("%.2f", $second_accuracy * 100) . "%.\n$accuary_out2";
 }
+close OUT;
