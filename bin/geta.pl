@@ -285,7 +285,7 @@ if ( -s "repeatMaskear_Dfam/RepeatMasker_out.out" && -s "repeatMaskear_RepBase/R
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 }
 else{
-    $cmdString = "ln -s $genome genome.masked.fasta && touch genome.repeat.gff3 genome.repeat.stats";
+    $cmdString = "ln -sf $genome genome.masked.fasta && touch genome.repeat.gff3 genome.repeat.stats";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 }
