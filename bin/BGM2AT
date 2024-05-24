@@ -374,7 +374,7 @@ if ( $optimize_augustus_method == 2 ) {
 }
 
 # 进行第二次augustus training
-$cmdString = "etraining ---min_intron_len=$min_intron_len -species=$species_name --AUGUSTUS_CONFIG_PATH=$AUGUSTUS_CONFIG_PATH genes.gb.etraining > etraining.out2 2> etraining.err2";
+$cmdString = "etraining --min_intron_len=$min_intron_len --species=$species_name --AUGUSTUS_CONFIG_PATH=$AUGUSTUS_CONFIG_PATH genes.gb.etraining > etraining.out2 2> etraining.err2";
 print STDERR "CMD: $cmdString\n";
 (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 
