@@ -10,11 +10,13 @@ my $bin_path = dirname($0);
 my $software_dir = $bin_path; $software_dir =~ s/\/bin$//;
 
 my $usage_chinese = <<USAGE;
+GETA (Genome-wide Electronic Tool for Annotation) Version 2.7.1
+
 Usage:
     perl $0 [options]
 
 For example:
-    perl $0 --genome genome.fasta --RM_species_Dfam Embryophyta --RM_species_RepBase Embryophyta --pe1 libA.1.fq.gz,libB.1.fq.gz --pe2 libA.2.fq.gz,libB.2.fq.gz --protein homolog.fasta --augustus_species genus_species_GETA --HMM_db /opt/biosoft/bioinfomatics_databases/Pfam/Pfam-A.hmm --config /opt/biosoft/geta/conf_for_big_genome.txt --out_prefix out --gene_prefix GS01Gene --cpu 120
+    perl $0 --genome genome.fasta --RM_species_Dfam Embryophyta --RM_species_RepBase Embryophyta --pe1 libA.1.fq.gz,libB.1.fq.gz --pe2 libA.2.fq.gz,libB.2.fq.gz --protein homolog.fasta --augustus_species GETA_genus_species --HMM_db /opt/biosoft/bioinfomatics_databases/Pfam/Pfam-A.hmm --config /opt/biosoft/geta/conf_for_big_genome.txt --out_prefix out --gene_prefix GS01Gene --cpu 120
 
 Parameters:
 [INPUT]
@@ -303,7 +305,7 @@ else {
     $cmdString2 = "touch $tmp_dir/2.NGSReads_prediction/intron.txt; touch $tmp_dir/2.NGSReads_prediction/base_depth.txt; touch $tmp_dir/2.NGSReads_prediction/c.transcript/transfrag.genome.gff3";
 }
 
-&execute_cmds($cmdString1, $cmdString2, "2.NGSReads_prediction.ok");
+&execute_cmds($cmdString1, $cmdString2, "$tmp_dir/2.NGSReads_prediction.ok");
 
 
 # Step 3: homolog_prediction
@@ -319,7 +321,7 @@ else {
     $cmdString = "touch $tmp_dir/3.homolog_prediction/homolog_prediction.gff3";
 }
 
-&execute_cmds($cmdString, "3.homolog_prediction.ok");
+&execute_cmds($cmdString, "$tmp_dir/3.homolog_prediction.ok");
 
 
 # Step 4: Combine NGSReads and Homolog Predictions
