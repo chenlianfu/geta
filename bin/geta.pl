@@ -155,8 +155,8 @@ my (%HMM_db, %BLASTP_db, %config);
 # 0.3 生成临时文件夹
 my $tmp_dir = abs_path("$out_prefix.tmp");
 mkdir $tmp_dir unless -e $tmp_dir;
-chdir "$out_prefix.tmp";
-my $pwd = `pwd`; print STDERR "PWD: $pwd";
+chdir "$tmp_dir";
+my $pwd = `pwd`; print STDERR "\nPWD: $pwd";
 
 # 0.4 准备基因组序列：
 # 读取FASTA序列以>开始的头部时，去除第一个空及之后的字符。若序列名又重复，则仅保留先出现的序列。
@@ -188,7 +188,7 @@ mkdir "$tmp_dir/1.RepeatMasker" unless -e "$tmp_dir/1.RepeatMasker";
 # 1.1 进行RepeatMasker Dfam分析
 mkdir "$tmp_dir/1.RepeatMasker/repeatMasker_Dfam" unless -e "$tmp_dir/1.RepeatMasker/repeatMasker_Dfam";
 chdir "$tmp_dir/1.RepeatMasker/repeatMasker_Dfam";
-$pwd = `pwd`; print STDERR "PWD: $pwd";
+$pwd = `pwd`; print STDERR "\nPWD: $pwd";
 if ( $RM_species_Dfam ) {
     $cmdString = "$bin_path/para_RepeatMasker $config{'para_RepeatMasker'} --species $RM_species_Dfam --engine hmmer --cpu $cpu --tmp_dir para_RepeatMasker.tmp $genome &> para_RepeatMasker.log";
 }
@@ -207,7 +207,7 @@ else {
 # 1.2 进行RepeatMasker RepBase分析
 mkdir "$tmp_dir/1.RepeatMasker/repeatMasker_RepBase" unless -e "$tmp_dir/1.RepeatMasker/repeatMasker_RepBase";
 chdir "$tmp_dir/1.RepeatMasker/repeatMasker_RepBase";
-$pwd = `pwd`; print STDERR "PWD: $pwd";
+$pwd = `pwd`; print STDERR "\nPWD: $pwd";
 if ( $RM_species_RepBase ) {
     $cmdString = "$bin_path/para_RepeatMasker $config{'para_RepeatMasker'} --species $RM_species_RepBase --engine ncbi --cpu $cpu --tmp_dir para_RepeatMasker.tmp $genome &> para_RepeatMasker.log";
 }
@@ -226,7 +226,7 @@ else {
 # 1.3 进行RepeatModeler分析
 mkdir "$tmp_dir/1.RepeatMasker/repeatModeler" unless -e "$tmp_dir/1.RepeatMasker/repeatModeler";
 chdir "$tmp_dir/1.RepeatMasker/repeatModeler";
-$pwd = `pwd`; print STDERR "PWD: $pwd";
+$pwd = `pwd`; print STDERR "\nPWD: $pwd";
 if ( $RM_lib ) {
     $cmdString = "$bin_path/para_RepeatMasker $config{'para_RepeatMasker'} --out_prefix RepeatModeler_out --lib $RM_lib --cpu $cpu --tmp_dir para_RepeatMasker.tmp $genome &> para_RepeatMasker.log";
 }
@@ -275,31 +275,30 @@ else {
 
 # 1.4 合并RepeatMasker和RepeatModeler的结果
 chdir "$tmp_dir/1.RepeatMasker/";
-$pwd = `pwd`; print STDERR "PWD: $pwd";
-if ( -s "repeatMaskear_Dfam/RepeatMasker_out.out" && -s "repeatMaskear_RepBase/RepeatMasker_out.out" && "repeatModeler/RepeatModeler_out.out" ) {
-    $cmdString = "$bin_path/merge_repeatMasker_out.pl $genome repeatMaskear_Dfam/RepeatMasker_out.out repeatMasker_RepBase/RepeatMasker_out.out repeatModeler/RepeatModeler_out.out > genome.repeat.stats";
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-    $cmdString = "$bin_path/maskedByGff.pl genome.repeat.gff3 $genome > genome.masked.fasta";
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+$pwd = `pwd`; print STDERR "\nPWD: $pwd";
+if ( -s "repeatMasker_Dfam/RepeatMasker_out.out" or -s "repeatMasker_RepBase/RepeatMasker_out.out" or -s "repeatModeler/RepeatModeler_out.out" ) {
+    $cmdString = "rm -rf genome.masked.fasta; $bin_path/merge_repeatMasker_out.pl $genome repeatMasker_Dfam/RepeatMasker_out.out repeatMasker_RepBase/RepeatMasker_out.out repeatModeler/RepeatModeler_out.out > genome.repeat.stats; $bin_path/maskedByGff.pl genome.repeat.gff3 $genome > genome.masked.fasta";
 }
 else{
     $cmdString = "ln -sf $genome genome.masked.fasta && touch genome.repeat.gff3 genome.repeat.stats";
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 }
 
 unless ( -e "$tmp_dir/1.RepeatMasker.ok" ) {
+    print STDERR (localtime) . ": CMD: $cmdString\n";
+    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
     open OUT, ">", "$tmp_dir/1.RepeatMasker.ok" or die $!; close OUT;
+}
+else {
+	print STDERR "CMD(Skipped): $cmdString\n";
 }
 
 
 # Step 2: NGSReads_predcition
 print STDERR "\n============================================\n";
 print STDERR "Step 2: NGSReads_predcition " . "(" . (localtime) . ")" . "\n";
-my $pwd = `pwd`; print STDERR "PWD: $pwd";
+chdir $tmp_dir; print STDERR "\nPWD: $tmp_dir\n";
 mkdir "$tmp_dir/2.NGSReads_prediction" unless -e "$tmp_dir/2.NGSReads_prediction";
+
 my $cmdString_Step2_paramter;
 if (($pe1 && $pe2) or $single_end or $sam) {
     my @input_paramter;
@@ -316,21 +315,15 @@ else {
     $cmdString = "touch $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.gff3; mkdir $tmp_dir/2.NGSReads_prediction/c.transcript/; touch $tmp_dir/2.NGSReads_prediction/c.transcript/intron.txt; touch $tmp_dir/2.NGSReads_prediction/c.transcript/transfrag.genome.gff3; touch $tmp_dir/2.NGSReads_prediction/c.transcript/base_depth.txt";
 }
 
-unless ( -e "2.NGSReads_prediction.ok" ) {
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-    open OUT, ">", "2.NGSReads_prediction.ok" or die $!; close OUT;
-}
-else {
-    print STDERR "CMD(Skipped): $cmdString\n";
-}
+&execute_cmds($cmdString, "2.NGSReads_prediction.ok");
 
 
 # Step 3: homolog_prediction
 print STDERR "\n============================================\n";
 print STDERR "Step 3: Homolog_prediction" . "(" . (localtime) . ")" . "\n";
-my $pwd = `pwd`; print STDERR "PWD: $pwd";
-mkdir "3.homolog_prediction" unless -e "3.homolog_prediction";
+chdir $tmp_dir; print STDERR "\nPWD: $tmp_dir\n";
+mkdir "$tmp_dir/3.homolog_prediction" unless -e "$tmp_dir/3.homolog_prediction";
+
 if ( $protein ) {
     $cmdString = "$bin_path/homolog_prediction --tmp_dir $tmp_dir/3.homolog_prediction --cpu $cpu $config{'homolog_prediction'} --genetic_code $genetic_code $protein $tmp_dir/1.RepeatMasker/genome.masked.fasta > $tmp_dir/3.homolog_prediction/homolog_prediction.gff3 2> $tmp_dir/3.homolog_prediction/homolog_prediction.log";
 }
@@ -338,14 +331,7 @@ else {
     $cmdString = "touch $tmp_dir/3.homolog_prediction/homolog_prediction.gff3";
 }
 
-unless (-e "3.homolog_prediction.ok") {
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-    open OUT, ">", "3.homolog_prediction.ok" or die $!; close OUT;
-}
-else {
-    print STDERR "CMD(Skipped): $cmdString\n";
-}
+&execute_cmds($cmdString, "3.homolog_prediction.ok");
 
 
 # Step 4: Combine NGSReads and Homolog Predictions
@@ -353,29 +339,23 @@ print STDERR "\n============================================\n";
 print STDERR "Step 4: Combine NGSReads and Homolog Predictions" . "(" . (localtime) . ")" . "\n";
 mkdir "$tmp_dir/4.evidence_gene_models" unless -e "$tmp_dir/4.evidence_gene_models";
 chdir "$tmp_dir/4.evidence_gene_models";
-$pwd = `pwd`; print STDERR "PWD: $pwd";
+$pwd = `pwd`; print STDERR "\nPWD: $pwd";
 
 # 4.1 准备NGS reads预测的基因模型：ABC一组，D另一组。
 if ( ($pe1 && $pe2) or $single_end or $sam ) {
     # 若有同源蛋白预测，则利用同源蛋白对NGS reads预测结果作改进，即第二次运行NGSReads_prediction命令。
     if ( $protein ) {
-        unless ( -e "NGSReads_prediction_FilledByHomolog.ok" ) {
-            unlink "$tmp_dir/2.NGSReads_prediction/c.transcript/10.FillingGeneModelsByHomolog.ok";
-            unlink "$tmp_dir/2.NGSReads_prediction/c.transcript/11.fillingEndsOfGeneModels.ok";
-            unlink "$tmp_dir/2.NGSReads_prediction/c.transcript/12.classGeneModels.ok";
-            unlink "$tmp_dir/2.NGSReads_prediction/c.transcript/FillingGeneModelsByHomolog_tmp/command.combineGeneModels.list.completed";
-            $cmdString = "$bin_path/NGSReads_prediction $cmdString_Step2_paramter --cpu $cpu --tmp_dir $tmp_dir/2.NGSReads_prediction --homolog_gene_models $tmp_dir/3.homolog_prediction/homolog_prediction.gff3 $tmp_dir/1.RepeatMasker/genome.masked.fasta > $tmp_dir/4.evidence_gene_models/NGSReads_prediction_FilledByHomolog.gff3 2> $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.B.log";
-            print STDERR (localtime) . ": CMD: $cmdString\n";
-            system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-            open OUT, ">", "NGSReads_prediction_FilledByHomolog.ok" or die $!; close OUT;
-        }
-        else {
-            print STDERR "CMD(Skipped): $cmdString\n";
-        }
+        $cmdString1 = "rm $tmp_dir/2.NGSReads_prediction/c.transcript/10.FillingGeneModelsByHomolog.ok";
+		$cmdString2 = "rm $tmp_dir/2.NGSReads_prediction/c.transcript/11.fillingEndsOfGeneModels.ok";
+        $cmdString3 = "rm $tmp_dir/2.NGSReads_prediction/c.transcript/12.classGeneModels.ok";
+        $cmdString4 = "rm $tmp_dir/2.NGSReads_prediction/c.transcript/FillingGeneModelsByHomolog_tmp/command.combineGeneModels.list.completed";
+        $cmdString5 = "$bin_path/NGSReads_prediction $cmdString_Step2_paramter --cpu $cpu --tmp_dir $tmp_dir/2.NGSReads_prediction --homolog_gene_models $tmp_dir/3.homolog_prediction/homolog_prediction.gff3 $tmp_dir/1.RepeatMasker/genome.masked.fasta > $tmp_dir/4.evidence_gene_models/NGSReads_prediction_FilledByHomolog.gff3 2> $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.B.log";
+
+		&execute_cmds("1.NGSReads_prediction_FilledByHomolog.ok");
     }
 
     # 生成两组NGS reads预测的GFF3文件。
-    unless ( -e "NGSReads_prediction.create_two_groups.ok" ) {
+    unless ( -e "1.NGSReads_prediction.create_two_groups.ok" ) {
         my $outpu_file = "$tmp_dir/4.evidence_gene_models/NGSReads_prediction.ABC.gff3";
         open OUT1, ">", $outpu_file or die "Error: Can not create file $outpu_file, $!";
         my $outpu_file = "$tmp_dir/4.evidence_gene_models/NGSReads_prediction.D.gff3";
@@ -398,14 +378,14 @@ if ( ($pe1 && $pe2) or $single_end or $sam ) {
         $/ = "\n";
         close IN; close OUT1; close OUT2;
 
-        open OUT, ">", "NGSReads_prediction.create_two_groups.ok" or die $!; close OUT;
+        open OUT, ">", "1.NGSReads_prediction.create_two_groups.ok" or die $!; close OUT;
         print STDERR (localtime) . "Two groups of gene models predicted by NGSReads_prediction were created: \n\t$tmp_dir/4.evidence_gene_models/NGSReads_prediction.ABC.gff3\n\t$tmp_dir/4.evidence_gene_models/NGSReads_prediction.D.gff3\n";
     }
 }
 
 # 4.2 准备 homolog 预测的基因模型：AB一组，CD另一组。
 if ( $protein ) {
-    unless ( -e "homolog_prediction.create_two_groups.ok" ) {
+    unless ( -e "2.homolog_prediction.create_two_groups.ok" ) {
         my $input_file = "$tmp_dir/3.homolog_prediction/homolog_prediction.gff3";
         open IN, $input_file or die "Error: Can not open file $input_file, $!";
         my $outpu_file = "$tmp_dir/4.evidence_gene_models/homolog_prediction.AB.gff3";
@@ -421,12 +401,12 @@ if ( $protein ) {
         $/ = "\n";
         close IN; close OUT1; close OUT2;
 
-        open OUT, ">", "homolog_prediction.create_two_groups.ok" or die $!; close OUT;
+        open OUT, ">", "2.homolog_prediction.create_two_groups.ok" or die $!; close OUT;
         print STDERR (localtime) . "Two groups of gene models predicted by homolog:\n\t$tmp_dir/4.evidence_gene_models/homolog_prediction.AB.gff3\n\t$tmp_dir/4.evidence_gene_models/homolog_prediction.CD.gff3\n";
     }
 }
 
-# 4.2 合并NGS reads和homolog预测的基因模型
+# 4.3 合并NGS reads和homolog预测的基因模型
 my $GFF3Cler_input = "NGSReads_prediction.ABC.gff3 homolog_prediction.AB.gff3 NGSReads_prediction.D.gff3 homolog_prediction.CD.gff3";
 unless ( ($pe1 && $pe2) or $single_end or $sam ) {
     $GFF3Cler_input =~ s/NGSReads_prediction\S+//g;
@@ -435,16 +415,10 @@ unless ( $protein ) {
     $GFF3Cler_input =~ s/homolog_prediction\S+//g;
 }
 $cmdString = "$bin_path/GFF3Clear --genome $genome $GFF3Cler_input > evidence_gene_models.gff3 2> GFF3Clear.log";
-unless ( -e "GFF3Clear.ok" ) {
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-    open OUT, ">", "GFF3Clear.ok" or die $!; close OUT;
-}
-else {
-    print STDERR "CMD(Skipped): $cmdString\n";
-}
 
-# 4.3 统计基因模型数量
+&execute_cmds($cmdString, "3.GFF3Clear.ok");
+
+# 4.4 统计基因模型数量
 my $input_file = "$tmp_dir/4.evidence_gene_models/evidence_gene_models.gff3";
 open IN, $input_file or die "Error: Can not open file $input_file, $!";
 my ( $num0, $num1, $num2, $num3, $num4, $num5, $num6 ) = (0, 0, 0, 0, 0, 0, 0);
@@ -478,12 +452,11 @@ chdir "$tmp_dir/5.augustus";
 
 # 5.1 第一次 Augustus HMM Training
 mkdir "$tmp_dir/5.augustus/training" unless -e "$tmp_dir/5.augustus/training";
-chdir "$tmp_dir/5.augustus/training";
-$pwd = `pwd`; print STDERR "PWD: $pwd";
+chdir "$tmp_dir/5.augustus/training"; print STDERR "\nPWD: $tmp_dir/5.augustus/training\n";
 
 # 5.1.1 由GFF3文件得到用于AUGUSTUS Training的基因模型。
 $cmdString = "$bin_path/geneModels2AugusutsTrainingInput $config{'geneModels2AugusutsTrainingInput'} --out_prefix ati --cpu $cpu $tmp_dir/4.evidence_gene_models/evidence_gene_models.gff3 $genome &> geneModels2AugusutsTrainingInput.log";
-unless ( -e "a.geneModels2AugusutsTrainingInput.ok" ) {
+unless ( -e "geneModels2AugusutsTrainingInput.ok" ) {
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
@@ -500,7 +473,7 @@ unless ( -e "a.geneModels2AugusutsTrainingInput.ok" ) {
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
     }
 
-    open OUT, ">", "a.geneModels2AugusutsTrainingInput.ok" or die $!; close OUT;
+    open OUT, ">", "geneModels2AugusutsTrainingInput.ok" or die $!; close OUT;
 }
 else {
     print STDERR "CMD(Skipped): $cmdString\n";
@@ -508,7 +481,7 @@ else {
 
 # 5.1.2 分析基因长度和基因间区长度信息，从而确定Trainig时选择基因模型两侧翼序列长度。
 my $flanking_length;
-unless ( -e "b.get_flanking_length.ok" ) {
+unless ( -e "get_flanking_length.ok" ) {
     my (%gene_info, @intergenic_length, @gene_length);
     # 读取基因模型信息
     my $input_file = "$tmp_dir/4.evidence_gene_models/evidence_gene_models.gff3";
@@ -547,7 +520,7 @@ unless ( -e "b.get_flanking_length.ok" ) {
     print OUT $flanking_length;
     close OUT;
 
-    open OUT, ">", "b.get_flanking_length.ok" or die $!; close OUT;
+    open OUT, ">", "get_flanking_length.ok" or die $!; close OUT;
     print STDERR (localtime) . ": The flanking length was set to $flanking_length for AUGUSTUS Training.\n";
 }
 else {
@@ -564,29 +537,15 @@ my $augustus_species_start_from = "";
 if ( -e "$ENV{'AUGUSTUS_CONFIG_PATH'}/species/$augustus_species/${augustus_species}_parameters.cfg" ) {
     $augustus_species_start_from = "--augustus_species_start_from $augustus_species";
 }
-$cmdString = "$bin_path/BGM2AT $config{'BGM2AT'} --AUGUSTUS_CONFIG_PATH $out_prefix.tmp/5.augustus/config $augustus_species_start_from --flanking_length $flanking_length --CPU $cpu --onlytrain_GFF3 ati.filter1.gff3 ati.filter2.gff3 $genome $augustus_species &> BGM2AT.log";
+$cmdString = "$bin_path/BGM2AT $config{'BGM2AT'} --AUGUSTUS_CONFIG_PATH $tmp_dir/5.augustus/config $augustus_species_start_from --flanking_length $flanking_length --CPU $cpu --onlytrain_GFF3 ati.filter1.gff3 ati.filter2.gff3 $genome $augustus_species &> BGM2AT.log";
 
-unless ( -e "c.training.ok" ) {
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-    open OUT, ">", "c.training.ok" or die $!; close OUT;
-}
-else {
-    print STDERR "CMD(Skipped): $cmdString\n";
-}
+&execute_cmds($cmdString, "$tmp_dir/5.augustus/training.ok");
 
 # 5.2 准备Hints信息
-chdir "$tmp_dir/5.augustus";
-$pwd = `pwd`; print STDERR "PWD: $pwd";
+chdir "$tmp_dir/5.augustus"; print STDERR "\nPWD: $tmp_dir/5.augustus\n";
 $cmdString = "$bin_path/prepareAugusutusHints $config{'prepareAugusutusHints'} $tmp_dir/2.NGSReads_prediction/c.transcript/intron.txt $tmp_dir/2.NGSReads_prediction/c.transcript/transfrag.genome.gff3 $tmp_dir/3.homolog_prediction/homolog_prediction.gff3 > hints.gff";
-unless (-e "prepareAugusutusHints.ok") {
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-    open OUT, ">", "prepareAugusutusHints.ok" or die $!; close OUT;
-}
-else {
-    print STDERR "CMD(Skipped): $cmdString\n";
-}
+
+&execute_cmds($cmdString, "prepareAugusutusHints.ok");
 
 # 5.3 进行Augustus基因预测
 # 5.3.1 先分析基因长度信息，从而计算基因组序列打断的长度，以利于并行化运行augustus命令。
@@ -629,26 +588,10 @@ else {
 }
 
 # 5.3.2 Augustus gene prediction
-$cmdString = "$bin_path/paraAugusutusWithHints $config{'paraAugusutusWithHints'} --species $augustus_species --AUGUSTUS_CONFIG_PATH $tmp_dir/5.augustus/config --cpu $cpu --segmentSize $segmentSize --overlapSize $overlapSize --tmp_dir aug_para_with_hints $tmp_dir/1.RepeatMasker/genome.masked.fasta hints.gff > augustusraw.gff3";
-unless ( -e "augustus.ok" ) {
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-    open OUT, ">", "augustus.ok" or die $!; close OUT;
-}
-else {
-    print STDERR "CMD(Skipped): $cmdString\n";
-}
+$cmdString1 = "$bin_path/paraAugusutusWithHints $config{'paraAugusutusWithHints'} --species $augustus_species --AUGUSTUS_CONFIG_PATH $tmp_dir/5.augustus/config --cpu $cpu --segmentSize $segmentSize --overlapSize $overlapSize --tmp_dir aug_para_with_hints $tmp_dir/1.RepeatMasker/genome.masked.fasta hints.gff > augustusraw.gff3";
+$cmdString2 = "$bin_path/addHintRatioToAugustusResult $tmp_dir/4.evidence_gene_models/evidence_gene_models.gff3 hints.gff augustus.raw.gff3 > augustus.gff3";
 
-$cmdString = "$bin_path/addHintRatioToAugustusResult $tmp_dir/4.evidence_gene_models/evidence_gene_models.gff3 hints.gff augustus.raw.gff3 > augustus.gff3";
-unless ( -e "addHintRatioToAugustusResult.ok" ) {
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-    open OUT, ">", "addHintRatioToAugustusResult.ok" or die $!; close OUT;
-}
-
-unless ( -e "$tmp_dir/5.augustus.ok" ) {
-    open OUT, ">", "5.augustus.ok" or die $!; close OUT;
-}
+&execute_cmds($cmdString, "$tmp_dir/5.augustus.ok");
 
 
 # Step 6: CombineGeneModels
@@ -656,7 +599,7 @@ print STDERR "\n============================================\n";
 print STDERR "Step 6: CombineGeneModels " . "(" . (localtime) . ")" . "\n";
 mkdir "$tmp_dir/6.combineGeneModels" unless -e "$tmp_dir/6.combineGeneModels";
 chdir "6.combineGeneModels";
-$pwd = `pwd`; print STDERR "PWD: $pwd";
+$pwd = `pwd`; print STDERR "\nPWD: $pwd";
 
 open OUT, ">", "geneModels.Readme" or die "Can not create file geneModels.Readme, $!";
 print OUT "geneModels.a.gff3\t第一轮整合后获得的以AUGUSTUS结果为主的有足够证据支持的基因模型。
@@ -683,99 +626,35 @@ my $cmdString1 = "$bin_path/paraCombineGeneModels $config{'paraCombineGeneModels
 my $cmdString2 = "$bin_path/GFF3Clear --genome $genome --no_attr_add --coverage 0.8 combine.1.gff3 > geneModels.a.gff3 2> /dev/null";
 my $cmdString3 = "$bin_path/GFF3Clear --genome $genome --no_attr_add --coverage 0.8 combine.2.gff3 > geneModels.b.gff3 2> /dev/null";
 my $cmdString4 = "perl -p -i -e 's/(=[^;]+)\.t1/\$1.t01/g' geneModels.a.gff3 geneModels.b.gff3";
-unless (-e "01.paraCombineGeneModels.ok") {
-    print STDERR (localtime) . ": CMD: $cmdString1\n";
-    system("$cmdString1") == 0 or die "failed to execute: $cmdString1\n";
-    print STDERR (localtime) . ": CMD: $cmdString2\n";
-    system("$cmdString2") == 0 or die "failed to execute: $cmdString2\n";
-    print STDERR (localtime) . ": CMD: $cmdString3\n";
-    system("$cmdString3") == 0 or die "failed to execute: $cmdString3\n";
-    print STDERR (localtime) . ": CMD: $cmdString4\n";
-    system("$cmdString4") == 0 or die "failed to execute: $cmdString4\n";
-    open OUT, ">", "01.paraCombineGeneModels.ok" or die $!; close OUT;
-}
-else {
-    print STDERR "CMD(Skipped): $cmdString1\n";
-    print STDERR "CMD(Skipped): $cmdString2\n";
-    print STDERR "CMD(Skipped): $cmdString3\n";
-    print STDERR "CMD(Skipped): $cmdString4\n";
-}
+
+&execute_cmds($cmdString1, $cmdString2, $cmdString3, $cmdString4, "01.paraCombineGeneModels.ok");
 
 # 6.2 第二轮基因预测结果整合：以转录本和同源蛋白预测结果为准，对上一步的基因模型进行优化。
 my $cmdString1 = "perl -p -e 's/(=[^;]+)\.t1/\$1.t01/g;' $tmp_dir/4.evidence_gene_models/evidence_gene_models.gff3 > geneModels.c.gff3;";
 my $cmdString2 = "$bin_path/pickout_better_geneModels_from_evidence $config{'pickout_better_geneModels_from_evidence'} geneModels.a.gff3 geneModels.c.gff3 > picked_evidence_geneModels.gff3 2> picked_evidence_geneModels.log";
 my $cmdString3 = "$bin_path/GFF3Clear --genome $genome --no_attr_add picked_evidence_geneModels.gff3 geneModels.a.gff3 > geneModels.d.gff3 2> /dev/null";
 my $cmdString4 = "perl -p -i -e 's/Integrity=[^;]+;?//g' geneModels.d.gff3";
-unless (-e "02.pickout_better_geneModels_from_evidence.ok") {
-    # 先挑选出更优的有Evidence支持的基因模型
-    print STDERR (localtime) . ": CMD: $cmdString1\n";
-    system("$cmdString1") == 0 or die "failed to execute: $cmdString1\n";
-    # 再用更优的有Evidence支持的基因模型替换掉相应的基因模型
-    print STDERR (localtime) . ": CMD: $cmdString2\n";
-    system("$cmdString2") == 0 or die "failed to execute: $cmdString2\n";
-    print STDERR (localtime) . ": CMD: $cmdString3\n";
-    system("$cmdString3") == 0 or die "failed to execute: $cmdString3\n";
-    print STDERR (localtime) . ": CMD: $cmdString4\n";
-    system("$cmdString4") == 0 or die "failed to execute: $cmdString4\n";
-    open OUT, ">", "02.pickout_better_geneModels_from_evidence.ok" or die $!; close OUT;
-}
-else {
-    print STDERR "CMD(Skipped): $cmdString1\n";
-    print STDERR "CMD(Skipped): $cmdString2\n";
-    print STDERR "CMD(Skipped): $cmdString3\n";
-    print STDERR "CMD(Skipped): $cmdString4\n";
-}
+
+&execute_cmds($cmdString1, $cmdString2, $cmdString3, $cmdString4, "02.pickout_better_geneModels_from_evidence.ok");
 
 # 6.3 对不完整基因模型进行首尾补齐。
 $cmdString = "$bin_path/fillingEndsOfGeneModels $config{'fillingEndsOfGeneModels'} --filling_need_transcriptID filling_need_transcriptID.txt --nonCompletedGeneModels geneModels.f.gff3 $genome geneModels.d.gff3 > geneModels.e.gff3 2> fillingEndsOfGeneModels.1.log";
-unless ( -e "03.fillingEndsOfGeneModels.ok" ) {
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-    open OUT, ">", "03.fillingEndsOfGeneModels.ok" or die $!; close OUT;
-}
-else {
-    print STDERR "CMD(Skipped): $cmdString\n";
-}
+
+&execute_cmds($cmdString, "03.fillingEndsOfGeneModels.ok");
 
 # 6.4 分别对对基因模型 geneModels.b.gff3, geneModels.e.gff3 and geneModels.f.gff3 进行可变剪接分析
 unless ( $no_alternative_splicing_analysis ) {
     $cmdString1 = "$bin_path/paraAlternative_splicing_analysis $config{'alternative_splicing_analysis'} --tmp_dir paraAlternative_splicing_analysis.gb.tmp --cpu $cpu geneModels.b.gff3 $tmp_dir/2.NGSReads_prediction/c.transcript/intron.txt $tmp_dir/2.NGSReads_prediction/c.transcript/base_depth.txt > geneModels.gb_AS.gff3 2> alternative_splicing.gb.stats && $bin_path/GFF3_add_CDS_for_transcript $genome geneModels.gb_AS.gff3 > geneModels.gb.gff3";
     $cmdString2 = "$bin_path/paraAlternative_splicing_analysis $config{'alternative_splicing_analysis'} --tmp_dir paraAlternative_splicing_analysis.ge.tmp --cpu $cpu geneModels.e.gff3 $tmp_dir/2.NGSReads_prediction/c.transcript/intron.txt $tmp_dir/2.NGSReads_prediction/c.transcript/base_depth.txt > geneModels.ge_AS.gff3 2> alternative_splicing.ge.stats && $bin_path/GFF3_add_CDS_for_transcript $genome geneModels.ge_AS.gff3 > geneModels.ge.gff3";
     $cmdString3 = "$bin_path/paraAlternative_splicing_analysis $config{'alternative_splicing_analysis'} --tmp_dir paraAlternative_splicing_analysis.gf.tmp --cpu $cpu geneModels.f.gff3 $tmp_dir/2.NGSReads_prediction/c.transcript/intron.txt $tmp_dir/2.NGSReads_prediction/c.transcript/base_depth.txt > geneModels.gf_AS.gff3 2> alternative_splicing.gf.stats && $bin_path/GFF3_add_CDS_for_transcript $genome geneModels.gf_AS.gff3 > geneModels.gf.gff3";
-    unless ( -e "04.alternative_splicing_analysis.ok" ) {
-        print STDERR (localtime) . ": CMD: $cmdString1\n";
-        system("$cmdString1") == 0 or die "failed to execute: $cmdString1\n";
-        print STDERR (localtime) . ": CMD: $cmdString2\n";
-        system("$cmdString2") == 0 or die "failed to execute: $cmdString2\n";
-        print STDERR (localtime) . ": CMD: $cmdString3\n";
-        system("$cmdString3") == 0 or die "failed to execute: $cmdString3\n";
-        open OUT, ">", "04.alternative_splicing_analysis.ok" or die $!; close OUT;
-    }
-    else {
-        print STDERR "CMD(Skipped): $cmdString1\n";
-        print STDERR "CMD(Skipped): $cmdString2\n";
-        print STDERR "CMD(Skipped): $cmdString3\n";
-    }
 }
 else {
     $cmdString1 = "$bin_path/GFF3_add_CDS_for_transcript $genome geneModels.b.gff3 > geneModels.gb.gff3";
     $cmdString2 = "$bin_path/GFF3_add_CDS_for_transcript $genome geneModels.e.gff3 > geneModels.ge.gff3";
     $cmdString3 = "$bin_path/GFF3_add_CDS_for_transcript $genome geneModels.f.gff3 > geneModels.gf.gff3";
-    unless ( -e "04.alternative_splicing_analysis.ok" ) {
-        print STDERR (localtime) . ": CMD: $cmdString1\n";
-        system("$cmdString1") == 0 or die "failed to execute: $cmdString1\n";
-        print STDERR (localtime) . ": CMD: $cmdString2\n";
-        system("$cmdString2") == 0 or die "failed to execute: $cmdString2\n";
-        print STDERR (localtime) . ": CMD: $cmdString3\n";
-        system("$cmdString3") == 0 or die "failed to execute: $cmdString3\n";
-        open OUT, ">", "04.alternative_splicing_analysis.ok" or die $!; close OUT;
-    }
-    else {
-        print STDERR "CMD(Skipped): $cmdString1\n";
-        print STDERR "CMD(Skipped): $cmdString2\n";
-        print STDERR "CMD(Skipped): $cmdString3\n";
-    }
 }
+
+&execute_cmds($cmdString1, $cmdString2, $cmdString3, "04.alternative_splicing_analysis.ok");
 
 # 6.5 提取待过滤的转录本ID，对 geneModels.b.gff3, geneModels.e.gff3 and geneModels.f.gff3 中的基因模型进行过滤。
 #########################################################################
@@ -788,52 +667,24 @@ else {
 # 6. 通过填补而完整的基因，对应的所有转录本。
 #########################################################################
 # 提取CDS占转录本长度比例较低、CDS长度较短和CDS和重复序列区域重叠比例较高的转录本ID
-my $cmdString1 = "$bin_path/GFF3_extract_TranscriptID_for_filtering $config{'GFF3_extract_TranscriptID_for_filtering'} $tmp_dir/1.RepeatMasker/genome.repeat.gff3 geneModels.gb.gff3 geneModels.ge.gff3 geneModels.gf.gff3 > transcriptID_for_filtering.txt";
+$cmdString1 = "$bin_path/GFF3_extract_TranscriptID_for_filtering $config{'GFF3_extract_TranscriptID_for_filtering'} $tmp_dir/1.RepeatMasker/genome.repeat.gff3 geneModels.gb.gff3 geneModels.ge.gff3 geneModels.gf.gff3 > transcriptID_for_filtering.txt";
 # 提取没有足够证据基因的所有转录本ID
-my $cmdString2 = "perl -ne 'print \"\$1\\tNotEnoughEvidence\\n\" if m/ID=([^;]*\\.t\\d+);/;' geneModels.gb.gff3 >> transcriptID_for_filtering.txt";
+$cmdString2 = "perl -ne 'print \"\$1\\tNotEnoughEvidence\\n\" if m/ID=([^;]*\\.t\\d+);/;' geneModels.gb.gff3 >> transcriptID_for_filtering.txt";
 # 提取没法填补完整基因的所有转录本ID
-my $cmdString3 = "perl -ne 'print \"\$1\\tFilling2Uncomplete\\n\" if m/ID=([^;]*\\.t\\d+);/;' geneModels.gf.gff3 >> transcriptID_for_filtering.txt";
+$cmdString3 = "perl -ne 'print \"\$1\\tFilling2Uncomplete\\n\" if m/ID=([^;]*\\.t\\d+);/;' geneModels.gf.gff3 >> transcriptID_for_filtering.txt";
 # 提取通过填补而完整的基因的所有转录本ID
-my $cmdString4 = "perl -e 'open IN, \"filling_need_transcriptID.txt\"; while (<IN>) { s/.t\\d+\\n//; \$gene{\$_} = 1; } while (<>) { print \"\$1\\tFilling2Complete\\n\" if m/ID=(([^;]+)\\.t\\d+);/ && exists \$gene{\$2} }' geneModels.ge_AS.gff3 >> transcriptID_for_filtering.txt";
-unless ( -e "05.extract_TranscriptID_for_filtering.ok" ) {
-    print STDERR (localtime) . ": CMD: $cmdString1\n";
-    system("$cmdString1") == 0 or die "failed to execute: $cmdString1\n";
-    print STDERR (localtime) . ": CMD: $cmdString2\n";
-    system("$cmdString2") == 0 or die "failed to execute: $cmdString2\n";
-    print STDERR (localtime) . ": CMD: $cmdString3\n";
-    system("$cmdString3") == 0 or die "failed to execute: $cmdString3\n";
-    print STDERR (localtime) . ": CMD: $cmdString4\n";
-    system("$cmdString4") == 0 or die "failed to execute: $cmdString4\n";
-    open OUT, ">", "05.extract_TranscriptID_for_filtering.ok" or die $!; close OUT;
-}
-else {
-    print STDERR "CMD(Skipped): $cmdString1\n";
-    print STDERR "CMD(Skipped): $cmdString2\n";
-    print STDERR "CMD(Skipped): $cmdString3\n";
-    print STDERR "CMD(Skipped): $cmdString4\n";
-}
+$cmdString4 = "perl -e 'open IN, \"filling_need_transcriptID.txt\"; while (<IN>) { s/.t\\d+\\n//; \$gene{\$_} = 1; } while (<>) { print \"\$1\\tFilling2Complete\\n\" if m/ID=(([^;]+)\\.t\\d+);/ && exists \$gene{\$2} }' geneModels.ge_AS.gff3 >> transcriptID_for_filtering.txt";
+
+&execute_cmds($cmdString1, $cmdString2, $cmdString3, $cmdString4, "05.extract_TranscriptID_for_filtering.ok");
     
-    # 6.6 提取待过滤转录本的蛋白序列。
+# 6.6 提取待过滤转录本的蛋白序列。
 my $cmdString1 = "$bin_path/gff3_to_protein.pl $genome geneModels.gb.gff3 geneModels.gf.gff3 geneModels.ge.gff3 > proteins_all.fasta 2> gff3_to_protein.log";
 my $cmdString2 = "perl -p -i -e 's/\\*\$//' proteins_all.fasta";
 my $cmdString3 = "$bin_path/fasta_extract_subseqs_from_list.pl proteins_all.fasta transcriptID_for_filtering.txt > proteins_for_filtering.fasta 2> fasta_extract_subseqs_from_list.log";
-unless ( -e "06.extract_proteins_for_filtering.ok" ) {
-    print STDERR (localtime) . ": CMD: $cmdString1\n";
-    system("$cmdString1") == 0 or die "failed to execute: $cmdString1\n";
-    print STDERR (localtime) . ": CMD: $cmdString2\n";
-    system("$cmdString2") == 0 or die "failed to execute: $cmdString2\n";
-    print STDERR (localtime) . ": CMD: $cmdString3\n";
-    system("$cmdString3") == 0 or die "failed to execute: $cmdString3\n";
-    open OUT, ">", "06.extract_proteins_for_filtering.ok" or die $!; close OUT;
-}
-else {
-    print STDERR "CMD(Skipped): $cmdString1\n";
-    print STDERR "CMD(Skipped): $cmdString2\n";
-    print STDERR "CMD(Skipped): $cmdString3\n";
-}
-  
+
+&execute_cmds($cmdString1, $cmdString2, $cmdString3, "06.extract_proteins_for_filtering.ok" );
+
 # 6.7 对蛋白序列进行HMM和BLASTP验证。
-my ($cmdString1, $cmdString2, $cmdString3);
 if ( $HMM_db ) {
     my $hmmscan_cpu = 0;
     $hmmscan_cpu = $1 if $config{'para_hmmscan'} =~ m/--hmmscan_cpu\s+(\d+)/;
@@ -877,155 +728,86 @@ else {
     }
 }
 
-# 6.8 / 6.9 根据HMM和BLASTP验证结果对基因模型进行过滤。
+# 6.8 根据HMM和BLASTP验证结果对基因模型进行过滤。
 # 获得验证通过的转录本ID
-my $cmdString = "$bin_path/get_valid_transcriptID $config{'get_valid_transcriptID'} validation_hmmscan.tab validation_blastp.tab > transcriptID_validating_passed.tab 2> get_valid_transcriptID.log";
-unless ( -e "08.get_valid_transcriptID.ok" ) {
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-    open OUT, ">", "08.get_valid_transcriptID.ok" or die $!; close OUT;
-}
-else {
-    print STDERR "CMD(Skipped): $cmdString\n";
-}
-my $cmdString = "$bin_path/get_valid_geneModels $config{'get_valid_geneModels'} --out_prefix geneModels.h transcriptID_for_filtering.txt transcriptID_validating_passed.tab geneModels.gb.gff3 geneModels.ge.gff3 geneModels.gf.gff3 2> get_valid_geneModels.log";
-unless ( -e "09.get_valid_geneModels.ok" ) {
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-    open OUT, ">", "09.get_valid_geneModels.ok" or die $!; close OUT;
-}
-else {
-    print STDERR "CMD(Skipped): $cmdString\n";
-}
+$cmdString1 = "$bin_path/get_valid_transcriptID $config{'get_valid_transcriptID'} validation_hmmscan.tab validation_blastp.tab > transcriptID_validating_passed.tab 2> get_valid_transcriptID.log";
+$cmdString2 = "$bin_path/get_valid_geneModels $config{'get_valid_geneModels'} --out_prefix geneModels.h transcriptID_for_filtering.txt transcriptID_validating_passed.tab geneModels.gb.gff3 geneModels.ge.gff3 geneModels.gf.gff3 2> get_valid_geneModels.log";
 
-# 6.10 再次对基因模型进行首尾填补。
+&execute_cmds($cmdString1, $cmdString2, "08.filtering_geneModels.ok");
+
+# 6.9 再次对基因模型进行首尾填补。
 $cmdString = "$bin_path/fillingEndsOfGeneModels $config{'fillingEndsOfGeneModels'} $genome geneModels.h.coding.gff3 > geneModels.i.coding.gff3 2> fillingEndsOfGeneModels.2.log";
-unless ( -e "10.fillingEndsOfGeneModels" ) {
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-    open OUT, ">", "10.fillingEndsOfGeneModels" or die $!; close OUT;
-}
-else {
-    print STDERR "CMD(Skipped): $cmdString\n";
-}
 
-unless ( -e "$tmp_dir/6.combineGeneModels.ok" ) {
-    open OUT, ">", "6.combineGeneModels.ok" or die $!; close OUT;
-}
+&execute_cmds($cmdString, "$tmp_dir/6.combineGeneModels.ok");
 
 
 # Step 7: OutPut
 print STDERR "\n============================================\n";
 print STDERR "Step 7: OutPut " . "(" . (localtime) . ")" . "\n";
-chdir $tmp_dir;
-$pwd = `pwd`; print STDERR "PWD: $pwd";
+mkdir "$tmp_dir/7.outputResults" unless -e "$tmp_dir/7.outputResults";
+chdir "$tmp_dir/7.outputResults";
+$pwd = `pwd`; print STDERR "\nPWD: $pwd";
 
 # 7.1 输出GFF3格式文件基因结构注释信息
-$cmdString = "$bin_path/GFF3Clear --GFF3_source GETA --gene_prefix $gene_prefix --gene_code_length 6 --genome $genome $out_prefix.tmp/6.combineGeneModels/geneModels.i.coding.gff3 > $out_prefix.geneModels.gff3 2> /dev/null";
-print STDERR (localtime) . ": CMD: $cmdString\n";
-system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+$cmdString1 = "$bin_path/GFF3Clear --GFF3_source GETA --gene_prefix $gene_prefix --gene_code_length 6 --genome $genome $tmp_dir/6.combineGeneModels/geneModels.i.coding.gff3 > $out_prefix.geneModels.gff3 2> /dev/null";
+$cmdString2 = "$bin_path/GFF3_extract_bestGeneModels $out_prefix.geneModels.gff3 > $out_prefix.bestGeneModels.gff3 2> $out_prefix.AS_num_of_codingTranscripts.stats";
+$cmdString3 = "$bin_path/GFF3Clear --GFF3_source GETA --gene_prefix ${out_prefix}ncGene  --gene_code_length 6 --genome $genome --no_attr_add $tmp_dir/6.combineGeneModels/geneModels.h.lncRNA.gff3 > $out_prefix.geneModels_lncRNA.gff3 2> /dev/null";
+$cmdString4 = "$bin_path/GFF3Clear --GFF3_source GETA --gene_prefix ${out_prefix}lqGene --gene_code_length 6 --genome $genome --no_attr_add --coverage 0.6 $tmp_dir/6.combineGeneModels/geneModels.h.lowQuality.gff3 > $out_prefix.geneModels_lowQuality.gff3 2> /dev/null";
 
-$cmdString = "$bin_path/GFF3_extract_bestGeneModels $out_prefix.geneModels.gff3 > $out_prefix.bestGeneModels.gff3 2> $out_prefix.AS_num_of_codingTranscripts.stats";
-print STDERR (localtime) . ": CMD: $cmdString\n";
-system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-
-$cmdString = "$bin_path/GFF3Clear --GFF3_source GETA --gene_prefix ${out_prefix}ncGene  --gene_code_length 6 --genome $genome --no_attr_add $out_prefix.tmp/6.combineGeneModels/geneModels.h.lncRNA.gff3 > $out_prefix.geneModels_lncRNA.gff3 2> /dev/null";
-print STDERR (localtime) . ": CMD: $cmdString\n";
-system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-
-$cmdString = "$bin_path/GFF3Clear --GFF3_source GETA --gene_prefix ${out_prefix}lqGene --gene_code_length 6 --genome $genome --no_attr_add --coverage 0.6 $out_prefix.tmp/6.combineGeneModels/geneModels.h.lowQuality.gff3 > $out_prefix.geneModels_lowQuality.gff3 2> /dev/null";
-print STDERR (localtime) . ": CMD: $cmdString\n";
-system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+&execute_cmds($cmdString1, $cmdString2, $cmdString3, $cmdString4, "1.output_GFF3.ok");
 
 # 7.2 输出GTF文件和基因的序列信息
-$cmdString = "$bin_path/gff3ToGtf.pl $genome $out_prefix.geneModels.gff3 > $out_prefix.geneModels.gtf 2> /dev/null";
-print STDERR (localtime) . ": CMD: $cmdString\n";
-system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-
-$cmdString = "$bin_path/gff3ToGtf.pl $genome $out_prefix.bestGeneModels.gff3 > $out_prefix.bestGeneModels.gtf 2> /dev/null";
-print STDERR (localtime) . ": CMD: $cmdString\n";
-system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-
-#$cmdString = "$bin_path/eukaryotic_gene_model_statistics.pl $out_prefix.bestGeneModels.gtf $genome $out_prefix &> $out_prefix.geneModels.stats";
-$cmdString = "$bin_path/gff3_to_sequences.pl --out_prefix $out_prefix --only_gene_sequences --only_coding_gene_sequences --only_first_isoform --genetic_code 1 $genome $out_prefix.geneModels.gff3 > $out_prefix.geneModels.stats";
-print STDERR (localtime) . ": CMD: $cmdString\n";
-system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+$cmdString1 = "$bin_path/gff3ToGtf.pl $genome $out_prefix.geneModels.gff3 > $out_prefix.geneModels.gtf 2> /dev/null";
+$cmdString2 = "$bin_path/gff3ToGtf.pl $genome $out_prefix.bestGeneModels.gff3 > $out_prefix.bestGeneModels.gtf 2> /dev/null";
+#$cmdString3 = "$bin_path/eukaryotic_gene_model_statistics.pl $out_prefix.bestGeneModels.gtf $genome $out_prefix &> $out_prefix.geneModels.stats";
+$cmdString3 = "$bin_path/gff3_to_sequences.pl --out_prefix $out_prefix --only_gene_sequences --only_coding_gene_sequences --only_first_isoform --genetic_code 1 $genome $out_prefix.geneModels.gff3 > $out_prefix.geneModels.stats";
+&execute_cmds($cmdString1, $cmdString2, $cmdString3, "2.output_GTF.ok");
 
 # 7.3 输出重复序列信息及其统计结果、RepeatModeler软件构建的重复序列数据库和masked genome sequence
-open IN, "$out_prefix.tmp/1.RepeatMasker/genome.masked.fasta" or die "Can not open file $out_prefix.tmp/1.RepeatMasker/genome.masked.fasta, $!";
-open OUT, ">", "$out_prefix.maskedGenome.fasta" or die "Can not create file $out_prefix.maskedGenome.fasta, $!";
-print OUT <IN>;
-close IN; close OUT;
+if ( $RM_species or $RM_species_Dfam or $RM_species_RepBase or $RM_lib or (! $no_RepeatModeler) ) {
+	$cmdString1 = "cp $tmp_dir/1.RepeatMasker/genome.masked.fasta $out_prefix.maskedGenome.fasta";
+	$cmdString2 = "cp $tmp_dir/1.RepeatMasker/genome.repeat.stats $out_prefix.repeat.stats";
+	$cmdString3 = "cp $tmp_dir/1.RepeatMasker/genome.repeat.gff3 $out_prefix.repeat.gff3";
 
-open IN, "$out_prefix.tmp/1.RepeatMasker/genome.repeat.stats" or die "Can not open file $out_prefix.tmp/1.RepeatMasker/genome.repeat.stats, $!";
-open OUT, ">", "$out_prefix.repeat.stats" or die "Can not create file $out_prefix.repeat.stats, $!";
-print OUT <IN>;
-close IN; close OUT;
+	$cmdString4 = "echo NO RepeatModeler Result !";
+	if ( $RM_lib ) {
+		$cmdString4 = "ln -sf $RM_lib $out_prefix.repeat.lib";
+	}
+	elsif ( ! $no_RepeatModeler ) {
+		$cmdString4 = "cp $tmp_dir/1.RepeatMasker/RM_\*/\*.classified $out_prefix.repeat.lib";
+	}
 
-open IN, "$out_prefix.tmp/1.RepeatMasker/genome.repeat.gff3" or die "Can not open file $out_prefix.tmp/1.RepeatMasker/genome.repeat.gff3, $!";
-open OUT, ">", "$out_prefix.repeat.gff3" or die "Can not create file $out_prefix.repeat.gff3, $!";
-print OUT <IN>;
-close IN; close OUT;
-
-if ( $RM_lib ) {
-    $cmdString = "ln -sf $RM_lib $out_prefix.repeat.lib";
-    unless ( -s "$out_prefix.repeat.lib" ) {
-        print STDERR (localtime) . ": CMD: $cmdString\n";
-        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-    }
-    else {
-        print STDERR "Skipped CMD: $cmdString\n";
-    }
-}
-else {
-    open IN, "$out_prefix.tmp/1.RepeatMasker/repeatModeler/species-families.fa" or die "Can not open file $out_prefix.tmp/1.RepeatMasker/repeatModeler/species-families.fa, $!";
-    open OUT, ">", "$out_prefix.repeat.lib" or die "Can not create file $out_prefix.repeat.lib, $!";
-    print OUT <IN>;
-    close IN; close OUT;
+	&execute_cmds($cmdString1, $cmdString2, $cmdString3, $cmdString4, "4.output_repeat.ok");
 }
 
 # 7.4 输出转录本、同源蛋白和Augustus的基因预测结果
 if (($pe1 && $pe2) or $single_end) {
-    open IN, "$out_prefix.tmp/2.NGSReads_prediction/c.transcript/transfrag.alignment.gff3" or die "Can not open file $out_prefix.tmp/2.NGSReads_prediction/c.transcript/transfrag.alignment.gff3, $!";
-    open OUT, ">", "$out_prefix.transfrag_alignment.gff3" or die "Can not create file $out_prefix.transfrag_alignment.gff3, $!";
-    print OUT <IN>;
-    close IN; close OUT;
+	$cmdString1 = "cp $tmp_dir/2.NGSReads_prediction/c.transcript/transfrag.alignment.gff3 $out_prefix.transfrag_alignment.gff3";
+	$cmdString2 = "cp $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.gff3 $out_prefix.NGSReads_prediction.gff3";
+	$cmdString3 = "cp $tmp_dir/3.homolog_prediction/homolog_prediction.gff3 $out_prefix.homolog_prediction.gff3";
+	$cmdString4 = "$bin_path/GFF3Clear --genome $genome --no_attr_add $tmp_dir/5.augustus/augustus.gff3 > $out_prefix.augustus_prediction.gff3";
 
-    open IN, "$out_prefix.tmp/2.NGSReads_prediction/c.transcript/transfrag.genome.gff3" or die "Can not open file $out_prefix.tmp/2.NGSReads_prediction/c.transcript/transfrag.genome.gff3, $!";
-    open OUT, ">", "$out_prefix.transfrag_prediction.gff3" or die "Can not create file $out_prefix.transfrag_prediction.gff3, $!";
-    print OUT <IN>;
-    close IN; close OUT;
+	&execute_cmds($cmdString1, $cmdString2, $cmdString3, $cmdString4, "4.output_methods_GFF3.ok");
 }
-
-if ($protein) {
-    open IN, "$out_prefix.tmp/3.homolog_prediction/homolog_prediction.gff3" or die "Can not open file $out_prefix.tmp/2.homolog/genewise.gff3, $!";
-    open OUT, ">", "$out_prefix.homolog_prediction.gff3" or die "Can not create file $out_prefix.homolog_prediction.gff3, $!";
-    print OUT <IN>;
-    close IN; close OUT;
-}
-
-$cmdString = "$bin_path/GFF3Clear --genome $genome --no_attr_add $out_prefix.tmp/5.augustus/augustus.gff3 > $out_prefix.augustus_prediction.gff3";
-print STDERR (localtime) . ": CMD: $cmdString\n";
-system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
 # 7.5 输出GETA流程信息，用于追踪基因预测结果的可靠性
 # (1) 获取基因组重复序列统计信息
 open OUT, ">", "$out_prefix.gene_prediction.summary" or die "Can not create file $out_prefix.gene_prediction.summary, $!";
-open IN, "$out_prefix.tmp/1.RepeatMasker/genome.repeat.stats" or die "Can not open file $out_prefix.tmp/1.RepeatMasker/genome.repeat.stats, $!";
+open IN, "$tmp_dir/$out_prefix.repeat.gff3" or die "Can not open file $tmp_dir/$out_prefix.repeat.gff3, $!";
 while (<IN>) {
     print OUT $_ if m/^Genome Size/;
     print OUT "$_\n" if m/^Repeat Ratio/;
 }
 close IN;
 # (2) 获取转录组二代测序数据和基因组的匹配率
-if ( -e "$out_prefix.tmp/2.hisat2/hisat2.log" ) {
-    open IN, "$out_prefix.tmp/2.hisat2/hisat2.log" or die $!;
+if ( -e "$tmp_dir/2.NGSReads_prediction/b.hisat2/hisat2.log" ) {
+    open IN, "$tmp_dir/2.NGSReads_prediction/b.hisat2/hisat2.log" or die $!;
     while (<IN>) {
         print OUT "The alignment rate of RNA-Seq reads is: $1\n\n" if m/^(\S+) overall alignment rate/;
     }
     close IN;
 # (3) 获取转录组数据预测的基因数量的统计信息
-    open IN, "$out_prefix.tmp/2.NGSReads_prediction/c.transcript/transfrag.genome.gff3" or die "Can not open file $out_prefix.tmp/2.NGSReads_prediction/c.transcript/transfrag.genome.gff3, $!";
+    open IN, "$tmp_dir/2.NGSReads_prediction/c.transcript/transfrag.genome.gff3" or die "Can not open file $tmp_dir/2.NGSReads_prediction/c.transcript/transfrag.genome.gff3, $!";
     my ($num1, $num2, $num3, $num4, $num5);
     while (<IN>) {
         if (m/\tgene\t/) {
@@ -1048,32 +830,13 @@ if ( -e "$out_prefix.tmp/2.hisat2/hisat2.log" ) {
 }
 # (4) 获取同源蛋白预测的基因数量的统计信息
 if ( $protein ) {
-    open IN, "$out_prefix.tmp/3.homolog_prediction/homolog_prediction.gff3" or die "Can not open file $out_prefix.tmp/2.homolog/genewise.gff3, $!";
-    my ($num1, $num2, $num3, $num4, $num5);
-    while (<IN>) {
-        if (m/\tgene\t/) {
-            $num1 ++;
-            if (m/Integrity=complete/) {
-                $num2 ++;
-            }
-            elsif (m/Integrity=5prime_partial/) {
-                $num3 ++;
-            }
-            elsif (m/Integrity=3prime_partial/) {
-                $num4 ++;
-            }
-            elsif (m/Integrity=internal/) {
-                $num5 ++;
-            }
-        }
-    }
-    print OUT "$num1 genes were predicted by Homolog, including $num2 complete, $num3 5prime_partial, $num4 3prime_partial, $num5 internal genes.\n\n";
+    open IN, "$tmp_dir/3.homolog_prediction/homolog_prediction.gff3" or die "Can not open file $tmp_dir/2.homolog/genewise.gff3, $!";
 }
-if (-e "$out_prefix.tmp/5.augustus/augustus.2.gff3") {
-    open IN, "$out_prefix.tmp/5.augustus/training_again/secondtest.out" or die "Can not open file $out_prefix.tmp/5.augustus/training_again/secondtest.out, $!";
+if (-e "$tmp_dir/5.augustus/augustus.2.gff3") {
+    open IN, "$tmp_dir/5.augustus/training_again/secondtest.out" or die "Can not open file $tmp_dir/5.augustus/training_again/secondtest.out, $!";
 }
 else {
-    open IN, "$out_prefix.tmp/5.augustus/training/secondtest.out" or die "Can not open file $out_prefix.tmp/5.augustus/training/secondtest.out, $!";
+    open IN, "$tmp_dir/5.augustus/training/secondtest.out" or die "Can not open file $tmp_dir/5.augustus/training/secondtest.out, $!";
 }
 # (5) 获取AUGUSTUS Training的准确率信息和预测基因数量统计
 my ($accuary1, $accuary2, $accuary3, $accuary4, $accuary5, $accuary6, $out);
@@ -1099,7 +862,7 @@ $accuary = int($accuary * 10000) / 100;
 $out = "The accuary of AUGUSTUS Training is $accuary\%.\nLevel\tSensitivity\tSpecificity\n$out";
 print OUT $out;
 my $num_of_gene_predicted_by_AUGUSTUS = 0;
-open IN, "$out_prefix.tmp/5.augustus/augustus.gff3" or die "Can not open file $out_prefix.tmp/5.augustus/augustus.gff3, $!";
+open IN, "$tmp_dir/5.augustus/augustus.gff3" or die "Can not open file $tmp_dir/5.augustus/augustus.gff3, $!";
 while (<IN>) {
     $num_of_gene_predicted_by_AUGUSTUS ++ if m/\tgene\t/;
 }
@@ -1107,7 +870,7 @@ print OUT "$num_of_gene_predicted_by_AUGUSTUS genes were predicted by AUGUSTUS.\
 
 # (6) 获取基因预测整合过滤的统计信息
 print OUT "Statistics of the combination of 3 gene prediction methods and filtration of gene models:\n";
-open IN, "$out_prefix.tmp/6.combineGeneModels/geneModels.a.gff3" or die "Can not open file $out_prefix.tmp/6.combineGeneModels/geneModels.a.gff3, $!";
+open IN, "$tmp_dir/6.combineGeneModels/geneModels.a.gff3" or die "Can not open file $tmp_dir/6.combineGeneModels/geneModels.a.gff3, $!";
 my ($num_of_gene_a, $num_of_gene_b, $num_of_gene_c, $num_of_gene_d) = (0, 0, 0, 0);
 while (<IN>) {
     $num_of_gene_a ++ if (m/\tgene\t/ && m/augustus/);
@@ -1115,14 +878,14 @@ while (<IN>) {
     $num_of_gene_d ++ if (m/\tgene\t/ && m/genewise/);
 }
 close IN;
-open IN, "$out_prefix.tmp/6.combineGeneModels/geneModels.b.gff3" or die "Can not open file $out_prefix.tmp/6.combineGeneModels/geneModels.b.gff3, $!";
+open IN, "$tmp_dir/6.combineGeneModels/geneModels.b.gff3" or die "Can not open file $tmp_dir/6.combineGeneModels/geneModels.b.gff3, $!";
 while (<IN>) {
     $num_of_gene_b ++ if m/\tgene\t/;
 }
 close IN;
 print OUT "(1) After first round of combination in which the AUGUSTUS results were mainly used, $num_of_gene_a genes models were supported by enough evidences, $num_of_gene_c genes models were come from transcript, $num_of_gene_d genes models were come from homolog, and $num_of_gene_b genes did not supported by enough evidences.\n";
 
-open IN, "$out_prefix.tmp/6.combineGeneModels/picked_evidence_geneModels.log" or die "Can not open file $out_prefix.tmp/6.combineGeneModels/picked_evidence_geneModels.log, $!";
+open IN, "$tmp_dir/6.combineGeneModels/picked_evidence_geneModels.log" or die "Can not open file $tmp_dir/6.combineGeneModels/picked_evidence_geneModels.log, $!";
 my ($number1, $number2, $number3) = (0, 0, 0);
 $_ = <IN>; $number1 = $1 if m/(\d+)/;
 <IN>; <IN>; <IN>;
@@ -1131,14 +894,14 @@ $_ = <IN>; $number3 = $1 if m/(\d+)/;
 close IN;
 print OUT "(2) In the second round of combination, $number1 evidence gene models were processed, and $number3 accurate gene models were picked out and replaced the genes predicted by AUGUSTUS, $number2 of which had the same CDS structures with the gene models predicted by AUGUSTUS.\n";
 
-open IN, "$out_prefix.tmp/6.combineGeneModels/fillingEndsOfGeneModels.1.log" or die "Can not open file $out_prefix.tmp/6.combineGeneModels/fillingEndsOfGeneModels.1.log, $!";
+open IN, "$tmp_dir/6.combineGeneModels/fillingEndsOfGeneModels.1.log" or die "Can not open file $tmp_dir/6.combineGeneModels/fillingEndsOfGeneModels.1.log, $!";
 my @line = <IN>;
 close IN;
 my @number1 = $line[-2] =~ m/(\d+)/g;
 my @number2 = $line[-1] =~ m/(\d+)/g;
 print OUT "(3) After the two steps of combination, $number1[0] gene models with enough evidence supported were predicted. $number1[1] gene models were complete; $number1[2] gene models were uncomplete. $number2[0] uncomplete gene models can be filled to complete, and $number2[1] can not.\n";
 
-open IN, "$out_prefix.tmp/6.combineGeneModels/get_valid_geneModels.log" or die "Can not open file $out_prefix.tmp/6.combineGeneModels/get_valid_geneModels.log, $!";
+open IN, "$tmp_dir/6.combineGeneModels/get_valid_geneModels.log" or die "Can not open file $tmp_dir/6.combineGeneModels/get_valid_geneModels.log, $!";
 $_ = <IN>; 
 close IN;
 my @number = m/(\d+)/g;
@@ -1189,33 +952,33 @@ print OUT "(6) $num_of_gene3 gene models were filtered, and $num_of_gene1 of whi
 if ( $delete_unimportant_intermediate_files ) {
     print STDERR "Due to the --delete_unimportant_intermediate_files was set, so the unimportant and large intermediate files are being deleted...\n";
     # 删除 1.RepeatMasker 文件夹下的数据
-    $cmdString = "rm -rf $out_prefix.tmp/1.RepeatMasker/repeatMasker $out_prefix.tmp/1.RepeatMasker/repeatModeler";
+    $cmdString = "rm -rf $tmp_dir/1.RepeatMasker/repeatMasker $tmp_dir/1.RepeatMasker/repeatModeler";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or warn "failed to execute: $cmdString\n";
     # 删除 1.trimmomatic 文件夹下的数据
-    $cmdString = "rm -rf $out_prefix.tmp/1.trimmomatic/*.fastq $out_prefix.tmp/1.trimmomatic/command*";
+    $cmdString = "rm -rf $tmp_dir/1.trimmomatic/*.fastq $tmp_dir/1.trimmomatic/command*";
     # 删除 2.hisat2 文件夹下的数据
-       $cmdString = "rm -rf $out_prefix.tmp/2.hisat2/genome* $out_prefix.tmp/2.hisat2/*.sam $out_prefix.tmp/2.hisat2/*.bam $out_prefix.tmp/2.hisat2/*.ok $out_prefix.tmp/2.hisat2/hisat2-build.log";
+       $cmdString = "rm -rf $tmp_dir/2.hisat2/genome* $tmp_dir/2.hisat2/*.sam $tmp_dir/2.hisat2/*.bam $tmp_dir/2.hisat2/*.ok $tmp_dir/2.hisat2/hisat2-build.log";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or warn "failed to execute: $cmdString\n";
     # 删除 2.NGSReads_prediction/c.transcript 文件夹下的数据
-    $cmdString = "rm -rf $out_prefix.tmp/2.NGSReads_prediction/c.transcript/command* $out_prefix.tmp/2.NGSReads_prediction/c.transcript/*.ok $out_prefix.tmp/2.NGSReads_prediction/c.transcript/pipeliner* $out_prefix.tmp/2.NGSReads_prediction/c.transcript/proteins.fasta $out_prefix.tmp/2.NGSReads_prediction/c.transcript/split* $out_prefix.tmp/2.NGSReads_prediction/c.transcript/transdecoder2ORF.gff3 $out_prefix.tmp/2.NGSReads_prediction/c.transcript/transfrag.gff3 $out_prefix.tmp/2.NGSReads_prediction/c.transcript/transfrag.gtf $out_prefix.tmp/2.NGSReads_prediction/c.transcript/transfrag.noStrand.* $out_prefix.tmp/2.NGSReads_prediction/c.transcript/transfrag.strand.* $out_prefix.tmp/2.NGSReads_prediction/c.transcript/transfrag.stats $out_prefix.tmp/2.NGSReads_prediction/c.transcript/transfrag.transdecoder.gff3";
+    $cmdString = "rm -rf $tmp_dir/2.NGSReads_prediction/c.transcript/command* $tmp_dir/2.NGSReads_prediction/c.transcript/*.ok $tmp_dir/2.NGSReads_prediction/c.transcript/pipeliner* $tmp_dir/2.NGSReads_prediction/c.transcript/proteins.fasta $tmp_dir/2.NGSReads_prediction/c.transcript/split* $tmp_dir/2.NGSReads_prediction/c.transcript/transdecoder2ORF.gff3 $tmp_dir/2.NGSReads_prediction/c.transcript/transfrag.gff3 $tmp_dir/2.NGSReads_prediction/c.transcript/transfrag.gtf $tmp_dir/2.NGSReads_prediction/c.transcript/transfrag.noStrand.* $tmp_dir/2.NGSReads_prediction/c.transcript/transfrag.strand.* $tmp_dir/2.NGSReads_prediction/c.transcript/transfrag.stats $tmp_dir/2.NGSReads_prediction/c.transcript/transfrag.transdecoder.gff3";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or warn "failed to execute: $cmdString\n";
     # 删除 2.homolog 文件夹下的数据
-    $cmdString = "rm -rf $out_prefix.tmp/2.homolog/*.ok $out_prefix.tmp/2.homolog/blast* $out_prefix.tmp/2.homolog/command* $out_prefix.tmp/2.homolog/geneRegion_genewise.tmp $out_prefix.tmp/2.homolog/genewise.gff $out_prefix.tmp/2.homolog/genome* $out_prefix.tmp/2.homolog/homolog_gene_region.tab $out_prefix.tmp/2.homolog/makeblastdb.log $out_prefix.tmp/2.homolog/out* $out_prefix.tmp/2.homolog/tmp_for_genome_splitting_and_joining $out_prefix.tmp/2.homolog/para_blast.log";
+    $cmdString = "rm -rf $tmp_dir/2.homolog/*.ok $tmp_dir/2.homolog/blast* $tmp_dir/2.homolog/command* $tmp_dir/2.homolog/geneRegion_genewise.tmp $tmp_dir/2.homolog/genewise.gff $tmp_dir/2.homolog/genome* $tmp_dir/2.homolog/homolog_gene_region.tab $tmp_dir/2.homolog/makeblastdb.log $tmp_dir/2.homolog/out* $tmp_dir/2.homolog/tmp_for_genome_splitting_and_joining $tmp_dir/2.homolog/para_blast.log";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or warn "failed to execute: $cmdString\n";
     # 删除 5.augustus 文件夹下的数据
-    $cmdString = "rm -rf $out_prefix.tmp/5.augustus/training/ati* $out_prefix.tmp/5.augustus/training/badgenes.lst $out_prefix.tmp/5.augustus/training/blank* $out_prefix.tmp/5.augustus/training/com* $out_prefix.tmp/5.augustus/training/etraining* $out_prefix.tmp/5.augustus/training/genes.* $out_prefix.tmp/5.augustus/training/gff* $out_prefix.tmp/5.augustus/training/GFF3Clear.log $out_prefix.tmp/5.augustus/training/hmm* $out_prefix.tmp/5.augustus/training/new* $out_prefix.tmp/5.augustus/training/tmp* $out_prefix.tmp/5.augustus/training/training.gb.onlytrain $out_prefix.tmp/5.augustus/training/*.ok $out_prefix.tmp/5.augustus/aug_* $out_prefix.tmp/5.augustus/augustus.?.gff3 $out_prefix.tmp/5.augustus/hints.gff $out_prefix.tmp/5.augustus/*.ok $out_prefix.tmp/5.augustus/extrinsic.cfg";
+    $cmdString = "rm -rf $tmp_dir/5.augustus/training/ati* $tmp_dir/5.augustus/training/badgenes.lst $tmp_dir/5.augustus/training/blank* $tmp_dir/5.augustus/training/com* $tmp_dir/5.augustus/training/etraining* $tmp_dir/5.augustus/training/genes.* $tmp_dir/5.augustus/training/gff* $tmp_dir/5.augustus/training/GFF3Clear.log $tmp_dir/5.augustus/training/hmm* $tmp_dir/5.augustus/training/new* $tmp_dir/5.augustus/training/tmp* $tmp_dir/5.augustus/training/training.gb.onlytrain $tmp_dir/5.augustus/training/*.ok $tmp_dir/5.augustus/aug_* $tmp_dir/5.augustus/augustus.?.gff3 $tmp_dir/5.augustus/hints.gff $tmp_dir/5.augustus/*.ok $tmp_dir/5.augustus/extrinsic.cfg";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or warn "failed to execute: $cmdString\n";
     # 删除 6.combineGeneModels 文件夹下的数据
     if ( $keep_all_files_of_6thStep_combineGeneModels ) {
-        print STDERR "Due to the --keep_all_files_of_6thStep_combineGeneModels was set, the $out_prefix.tmp/FEN00I06.tmp/6.combineGeneModels Directory was keeped.\n";
+        print STDERR "Due to the --keep_all_files_of_6thStep_combineGeneModels was set, the $tmp_dir/FEN00I06.tmp/6.combineGeneModels Directory was keeped.\n";
     }
     else {
-        $cmdString = "rm -rf $out_prefix.tmp/FEN00I06.tmp/6.combineGeneModels*";
+        $cmdString = "rm -rf $tmp_dir/FEN00I06.tmp/6.combineGeneModels*";
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or warn "failed to execute: $cmdString\n";
     }
@@ -1339,7 +1102,7 @@ sub detecting_dependent_softwares {
 
     print STDERR "============================================\n\n";
     my $pwd = `pwd`; chomp($pwd);
-    print STDERR "PWD: $pwd\n";
+    print STDERR "\nPWD: $pwd\n";
     print STDERR (localtime) . ": CMD: $0 $command_line_geta\n\n"; 
 }
 
@@ -1550,4 +1313,24 @@ sub parsing_input_parameters {
         }
         close IN;
     }
+}
+
+# 子程序，用于执行调用的Linux命令。程序运行完毕后，生成.ok文件。
+sub execute_cmds {
+	my $ok_file = pop @_;
+
+	if ( -e $ok_file ) {
+		foreach ( @_ ) {
+			print STDERR "CMD(Skipped): $_\n";
+		}
+	}
+	else {
+		foreach ( @_ ) {
+			print STDERR (localtime) . ": CMD: $_\n";
+			system($_) == 0 or die "failed to execute: $_\n";
+		}
+		open OUT, ">", "$ok_file" or die $!; close OUT;
+	}
+
+	return 1;
 }
