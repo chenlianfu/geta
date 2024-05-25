@@ -86,6 +86,15 @@ Parameters:
     --genetic_code <int>    default: 1
     设置遗传密码。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。用于设置对基因模型强制补齐时的起始密码子和终止密码子。
 
+    --homolog_prediction_method <string>    default: all
+    设置使用同源蛋白进行基因预测的方法。其值可以设定为exonerate、genewise、gth或all。若想使用多种方法进行分析，则输入使用逗号分割的多个值；若使用所有三种方法进行分析，可以设置--method参数值为all。使用的方法越多，越消耗计算时间，但结果更好。三种方法中：exonerate和genewise的准确性结果比较一致，但gth方法预测基因模型的sensitivity下降很多，specificity提高很多。以三种方法对Oryza sativa基因组的预测为例，其预测结果的准确性如下表所示。和NCBI上标准的共28736个基因模型的注释结果进行比较，评估四个准 确性值：基因水平sensitivity、基因水平specificity、exon水平sensitivity、exon水平specificity。可以看出，使用多种方 法整合预测后再过滤，得到的基因模型数量能接近真实的基因数量，且结果较准确。使用本参数的优先级更高，能覆盖参数配置文件中homolog_prediction的参数值。
+    方法       基因数量    gene_sensitivity    gene_specificity    exon_sensitivity    exon_specificity
+    exonerate  38537       47.05%              35.09%              58.90%              73.55%
+    genewise   40455       47.32%              33.61%              62.08%              71.27%
+    gth        8888        19.80%              64.02%              30.43%              90.54%
+    all        40538       48.54%              34.41%              63.85%              71.86%
+    filtered   28184       45.62%              46.51%              61.26%              79.59%
+
     --optimize_augustus_method <int>    default: 1
     设置AUGUSTUS Training时的参数优化方法。1，表示仅调用BGM2AT.optimize_augustus进行优化，能充分利用所有CPU线程对所有参数并行化测试，速度快；2，表示BGM2AT.optimize_augustus优化完毕后，再使用AUGUSTUS软件自带的optimize_augustus.pl程序再次进行优化，此时运行速度慢，效果可能更好。使用本参数的优先级更高，能覆盖参数配置文件中BGM2AT的参数值。
     
@@ -122,7 +131,7 @@ if (@ARGV==0){die $usage_english}
 
 my ($genome, $RM_species, $RM_species_Dfam, $RM_species_RepBase, $RM_lib, $no_RepeatModeler, $pe1, $pe2, $single_end, $sam, $strand_specific, $protein, $augustus_species, $HMM_db, $BLASTP_db, $config, $BUSCO_lineage_dataset);
 my ($out_prefix, $gene_prefix, $chinese_help, $help);
-my ($cpu, $genetic_code, $optimize_augustus_method, $no_alternative_splicing_analysis, $delete_unimportant_intermediate_files);
+my ($cpu, $genetic_code, $homolog_prediction_method, $optimize_augustus_method, $no_alternative_splicing_analysis, $delete_unimportant_intermediate_files);
 my ($cmdString, $cmdString1, $cmdString2, $cmdString3, $cmdString4, $cmdString5);
 GetOptions(
     "genome:s" => \$genome,
@@ -148,6 +157,8 @@ GetOptions(
     "help!" => \$help,
     "cpu:i" => \$cpu,
     "genetic_code:i" => \$genetic_code,
+    "homolog_prediction_method:s" => \$homolog_prediction_method,
+    "optimize_augustus_method:i" => \$optimize_augustus_method,
     "no_alternative_splicing_analysis!" => \$no_alternative_splicing_analysis,
     "delete_unimportant_intermediate_files!" => \$delete_unimportant_intermediate_files,
 );
@@ -780,11 +791,11 @@ if ( $RM_species or $RM_species_Dfam or $RM_species_RepBase or $RM_lib or (! $no
 # 7.4 输出转录本、同源蛋白和Augustus的基因预测结果
 my @cmdString;
 if ( ($pe1 && $pe2) or $single_end or $sam ) {
-	push @cmdString, "cp $tmp_dir/2.NGSReads_prediction/c.transcript/transfrag.alignment.gff3 $out_prefix.transfrag_alignment.gff3";
-	push @cmdString, "cp $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.gff3 $out_prefix.NGSReads_prediction.gff3";
+    push @cmdString, "cp $tmp_dir/2.NGSReads_prediction/c.transcript/transfrag.alignment.gff3 $out_prefix.transfrag_alignment.gff3";
+    push @cmdString, "cp $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.gff3 $out_prefix.NGSReads_prediction.gff3";
 }
 if ( $protein ) {
-	push @cmdString, "cp $tmp_dir/3.homolog_prediction/homolog_prediction.gff3 $out_prefix.homolog_prediction.gff3";
+    push @cmdString, "cp $tmp_dir/3.homolog_prediction/homolog_prediction.gff3 $out_prefix.homolog_prediction.gff3";
 }
 push @cmdString, "$bin_path/GFF3Clear --genome $genome --no_attr_add $tmp_dir/5.augustus/augustus.gff3 > $out_prefix.augustus_prediction.gff3";
 push @cmdString, "4.output_methods_GFF3.ok";
@@ -1318,6 +1329,13 @@ sub choose_config_file {
     close IN;
 
     # 覆盖%config数据
+    $homolog_prediction_method ||= "all";
+    $homolog_prediction_method = "exonerate,genewise,gth" if $homolog_prediction_method eq "all";
+    foreach ( split /,/, $homolog_prediction_method ) {
+        die "Error: The supported value of --homolog_prediction_method should be exonerate, genewise or gth, you input '$_' was wrong.\n" unless ( $_ eq "exonerate" or $_ eq "genewise" or $_ eq "gth" );
+    }
+    $config{"homolog_prediction"} =~ s/--method \S+/--method $homolog_prediction_method/;
+
     $optimize_augustus_method ||= 1;
     unless ( $optimize_augustus_method == 1 or $optimize_augustus_method == 2 ) {
         die "Error: The value of --optimize_augustus_method shoud be 1 or 2\n";
