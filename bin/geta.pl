@@ -541,7 +541,7 @@ $cmdString = "$bin_path/prepareAugusutusHints $config{'prepareAugusutusHints'} $
 
 # 5.3 进行Augustus基因预测
 # 5.3.1 先分析基因长度信息，从而计算基因组序列打断的长度，以利于并行化运行augustus命令。
-my ($segmentSize, $overlapSize) = (5000000, 100000);
+my ($segmentSize, $overlapSize) = (1000000, 100000);
 unless ( -e "get_segmentSize.ok" ) {
     # 获取最长的基因长度
     my $input_file = "$tmp_dir/4.evidence_gene_models/evidence_gene_models.gff3";
@@ -553,14 +553,14 @@ unless ( -e "get_segmentSize.ok" ) {
         }
     }
     @gene_length = sort {$a <=> $b} @gene_length;
-    # 打断序列时，要求相邻序列重叠区域至少为最长基因长度的4倍，并取整百；片段长度为重叠序列长度50倍。
+    # 打断序列时，要求相邻序列重叠区域至少为最长基因长度的2倍，并取整（保留前两个数字四舍五入，后面的全为0）；片段长度为重叠序列长度10倍。
     if ($gene_length[-1] * 4 > $overlapSize) {
-        $overlapSize = $gene_length[-1] * 4;
+        $overlapSize = $gene_length[-1] * 2;
         my $overlapSize_length = length($overlapSize);
         $overlapSize_length --;
         $overlapSize_length --;
         $overlapSize = int(($overlapSize / (10 ** $overlapSize_length)) + 1) * (10 ** $overlapSize_length);
-        $segmentSize = $overlapSize * 50;
+        $segmentSize = $overlapSize * 10;
     }
     # 将overlapSize和segmentSize输出到文件segmentSize.txt文件中
     my $outpu_file = "$tmp_dir/5.augustus/segmentSize.txt";
