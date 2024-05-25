@@ -13,16 +13,15 @@ Installation
 1. unpack
 
 2. install dependencies:
-=================
-    RepeatMasker and RepeatModeler
-    Java (version: jre1.8.0_45)
-    HISAT2 (version: 2.1.0)
-    Samtools (version: 1.8)
-    genewise (version: 2.4.1)
-    NCBI-Blast+ (version: 2.6.0+)
-    AUGUSTUS (version: 3.3.1) *Note, bam2hints should be compiled correctly*
-    HMMER (version: 3.1b2)
-    ParaFly
+    RepeatMasker and RepeatModeler  
+    Java (version: jre1.8.0_45)  
+    HISAT2 (version: 2.1.0)  
+    Samtools (version: 1.8)  
+    genewise (version: 2.4.1)  
+    NCBI-Blast+ (version: 2.6.0+)  
+    AUGUSTUS (version: 3.3.1) *Note, bam2hints should be compiled correctly*  
+    HMMER (version: 3.1b2)  
+    ParaFly  
 
 3. add these directories of the executables to the PATH environment variable
 
