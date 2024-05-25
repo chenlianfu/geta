@@ -815,14 +815,17 @@ if ( $BUSCO_lineage_dataset ) {
 }
 
 # 7.6 输出GETA流程信息，用于追踪基因预测结果的可靠性
-# (1) 获取基因组重复序列统计信息
 open OUT, ">", "$out_prefix.gene_prediction.summary" or die "Can not create file $out_prefix.gene_prediction.summary, $!";
-open IN, "$out_prefix.repeat.stats" or die "Can not open file $out_prefix.repeat.stats, $!";
-while (<IN>) {
-    print OUT $_ if m/^Genome Size/;
-    print OUT "$_\n" if m/^Repeat Ratio/;
+# (1) 获取基因组重复序列统计信息
+if ( -e "$out_prefix.repeat.stats" ) {
+    my $input_file = "$out_prefix.repeat.stats";
+    open IN, $input_file or die "Error: Can not open file $input_file, $!";
+    while (<IN>) {
+        print OUT $_ if m/^Genome Size/;
+        print OUT "$_\n" if m/^Repeat Ratio/;
+    }
+    close IN;
 }
-close IN;
 # (2) 获取转录组二代测序数据和基因组的匹配率
 if ( -e "$tmp_dir/2.NGSReads_prediction/b.hisat2/hisat2.log" ) {
     my $input_file = "$tmp_dir/2.NGSReads_prediction/b.hisat2/hisat2.log";
