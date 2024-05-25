@@ -778,14 +778,18 @@ if ( $RM_species or $RM_species_Dfam or $RM_species_RepBase or $RM_lib or (! $no
 }
 
 # 7.4 输出转录本、同源蛋白和Augustus的基因预测结果
-if (($pe1 && $pe2) or $single_end) {
-    $cmdString1 = "cp $tmp_dir/2.NGSReads_prediction/c.transcript/transfrag.alignment.gff3 $out_prefix.transfrag_alignment.gff3";
-    $cmdString2 = "cp $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.gff3 $out_prefix.NGSReads_prediction.gff3";
-    $cmdString3 = "cp $tmp_dir/3.homolog_prediction/homolog_prediction.gff3 $out_prefix.homolog_prediction.gff3";
-    $cmdString4 = "$bin_path/GFF3Clear --genome $genome --no_attr_add $tmp_dir/5.augustus/augustus.gff3 > $out_prefix.augustus_prediction.gff3";
-
-    &execute_cmds($cmdString1, $cmdString2, $cmdString3, $cmdString4, "4.output_methods_GFF3.ok");
+my @cmdString;
+if ( ($pe1 && $pe2) or $single_end or $sam ) {
+	push @cmdString, "cp $tmp_dir/2.NGSReads_prediction/c.transcript/transfrag.alignment.gff3 $out_prefix.transfrag_alignment.gff3";
+	push @cmdString, "cp $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.gff3 $out_prefix.NGSReads_prediction.gff3";
 }
+if ( $protein ) {
+	push @cmdString, "cp $tmp_dir/3.homolog_prediction/homolog_prediction.gff3 $out_prefix.homolog_prediction.gff3";
+}
+push @cmdString, "$bin_path/GFF3Clear --genome $genome --no_attr_add $tmp_dir/5.augustus/augustus.gff3 > $out_prefix.augustus_prediction.gff3";
+push @cmdString, "4.output_methods_GFF3.ok";
+
+&execute_cmds(@cmdString);
 
 # 7.5 进行BUSCO分析
 my @cmdString;
