@@ -11,7 +11,9 @@ my $software_dir = $bin_path; $software_dir =~ s/\/bin$//;
 
 my $usage_chinese = <<USAGE;
 
-GETA (Genome-wide Electronic Tool for Annotation) Version 2.7.1
+GETA (Genome-wide Electronic Tool for Annotation) 是一个对全基因组序列进行基因预测的流程软件。输入基因组序列、转录组二代测序原始数据和临近物种全基因组蛋白序列，即可一个命令快速得到准确的基因组注释GFF3结果文件。本流程的两大特色：（1）预测准确，程序输出结果中基因数量正常、BUSCO检测的完整性高、基因模型的exon边界准确；（2）运行简单，一个命令全自动化运行得到最终结果。
+
+软件当前版本：2.7.1。
 
 Usage:
     perl $0 [options]
@@ -1116,7 +1118,10 @@ sub detecting_dependent_softwares {
 sub get_usage_english {
 
 my $usage_english = <<USAGE;
-GETA (Genome-wide Electronic Tool for Annotation) Version 2.7.1
+
+GETA (Genome-wide Electronic Tool for Annotation) is a pipeline software for predicting gene models from whole genome sequences. With one command, you can quickly obtain an accurate genome annotation GFF3 result file by providing the genome sequence, RNA-Seq raw data, and whole genome homologous protein sequences of closely related species. This program has two outstanding features: (1) accurate prediction, GETA outputs gene models with the normal amount, high BUSCO integrity, and accurate exon boundaries; (2) simple run, the operation is straightforward with a fully automated command that produces the final result.
+
+Current Version: 2.7.1
 
 Usage:
     perl $0 [options]
