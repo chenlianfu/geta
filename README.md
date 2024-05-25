@@ -34,9 +34,9 @@ Usage of the main script geta.pl
     GETA (Genome-wide Electronic Tool for Annotation) is a pipeline software for predicting gene models
      from whole genome sequences. With one command, you can quickly obtain an accurate genome annotation
      GFF3 result file by providing the genome sequence, RNA-Seq raw data, and whole genome homologous protein
-     sequences of closely related species. This program has two outstanding features: (1) accurate prediction
-    , GETA outputs gene models with the normal amount, high BUSCO integrity, and accurate exon boundaries
-    ; (2) simple run, the operation is straightforward with a fully automated command that produces the final
+     sequences of closely related species. This program has two outstanding features: (1) accurate prediction,
+     GETA outputs gene models with the normal amount, high BUSCO integrity, and accurate exon boundaries;
+     (2) simple run, the operation is straightforward with a fully automated command that produces the final
      result.
 
     Current Version: 2.7.1
@@ -55,29 +55,30 @@ Usage of the main script geta.pl
     [INPUT]
         --genome <string>    default: None, required
         Enter the FASTA file of the genome sequence that you want to annotate. If the input genome file
-     has repeats masked, you can skip the repeat sequence masking step by removing the --RM_species_Dfam
-    ,  --RM_species_RepBase, --RM_lib parameters and adding the --no_RepeatModeler parameter. In this instance
-    , it is advised to hard mask the transposable sequences using base N and to soft mask simple or tandem
+     has repeats masked, you can skip the repeat sequence masking step by removing the --RM_species_Dfam,
+      --RM_species_RepBase, --RM_lib parameters and adding the --no_RepeatModeler parameter. In this instance,
+     it is advised to hard mask the transposable sequences using base N and to soft mask simple or tandem
      repeats using lowercase characters.
 
         --RM_species_Dfam | --RM_species <string>    default: None
         Enter the name of a species or class for RepeatMakser to perform a repeat sequence analysis for
-     the genome using the HMM data of corresponding taxonomic species in the Dfam database. The file /opt/biosoft/geta/RepeatMasker_lineage.txt
-     has the values that can be provided for this parameter to represent the class of species. For example
-    , Eukaryota is for eukaryotes, Viridiplantae is for plants, Metazoa is for animals, and Fungi is for
-     fungi. Before attempting to enter this parameter, the RepeatMasker program needed to be installed and
-     the Dfam database needed to be configured. Note that due to its massive size, the Dfam database has
-     been split up into nine partitions. By default, RepeatMasker only contains the zero root partition of
-     the Dfam database, which is suitable for species such as mammals and fungi. If necessary, consider downloading
-     the proper Dfam database partition and configuring it to RepeatMasker. For example, the 5th partition
-     of the Dfam database is designated for Viridiplantae, while the 7th  partition is for Hymenoptera.
+     the genome using the HMM data of corresponding taxonomic species in the Dfam database. The file /opt
+    /biosoft/geta/RepeatMasker_lineage.txt has the values that can be provided for this parameter to represent
+     the class of species. For example, Eukaryota is for eukaryotes, Viridiplantae is for plants, Metazoa
+     is for animals, and Fungi is for fungi. Before attempting to enter this parameter, the RepeatMasker
+     program needed to be installed and the Dfam database needed to be configured. Note that due to its massive
+     size, the Dfam database has been split up into nine partitions. By default, RepeatMasker only contains
+     the zero root partition of the Dfam database, which is suitable for species such as mammals and fungi.
+     If necessary, consider downloading the proper Dfam database partition and configuring it to RepeatMasker.
+     For example, the 5th partition of the Dfam database is designated for Viridiplantae, while the 7th
+     partition is for Hymenoptera.
 
         --RM_species_RepBase <string>    default: None
         Enter the name of a species or class for RepeatMakser to perform a repeat sequence analysis for
-     the genome using the nucleotide sequences of corresponding taxonomic species in the RepBase database
-    . The file /opt/biosoft/geta/RepeatMasker_lineage.txt has the values that can be provided for this parameter
-     to represent the class of species. For example, Eukaryota is for eukaryotes, Viridiplantae is for plants
-    , Metazoa is for animals, and Fungi is for fungi. Before attempting to enter this parameter, the RepeatMasker
+     the genome using the nucleotide sequences of corresponding taxonomic species in the RepBase database.
+     The file /opt/biosoft/geta/RepeatMasker_lineage.txt has the values that can be provided for this parameter
+     to represent the class of species. For example, Eukaryota is for eukaryotes, Viridiplantae is for plants,
+     Metazoa is for animals, and Fungi is for fungi. Before attempting to enter this parameter, the RepeatMasker
      program needed to be installed and the RepBase database needed to be configured. Note that RepBase is
      no longer providing free downloads and that the most recent version of the database, 20181026, is older
      and contains few repetitive sequence data.
@@ -89,8 +90,8 @@ Usage of the main script geta.pl
      up the entire genome sequence and acquire the species' repetitive sequence database. RepeatMakser
      is then called to search the repeated sequences. After adding this argument, the time-consuming RepeatModler
      step is skipped, which may significantly reduce the running time of the program. Additionally, the software
-     supports the simultaneous use of the --RM_species_Dfam, --RM_species_RepBase, and --RM_lib arguments
-    , so that multiple methods can be used for repeat sequence analysis, and eventually multiple results
+     supports the simultaneous use of the --RM_species_Dfam, --RM_species_RepBase, and --RM_lib arguments,
+     so that multiple methods can be used for repeat sequence analysis, and eventually multiple results
      can be combined and the result of any method can be recognized.
 
         --no_RepeatModeler    default: None
@@ -98,8 +99,8 @@ Usage of the main script geta.pl
      suitable for cases where the repeats have been masked in the input genome file.
 
         --pe1 <string> --pe2 <string>    default: None
-        Enter one or more pairs of FASTQ format files from Paired-End next-generation sequencing technology
-    . This parameter supports the input of multiple pairs of FASTQ files, using commas to separate the FASTQ
+        Enter one or more pairs of FASTQ format files from Paired-End next-generation sequencing technology.
+     This parameter supports the input of multiple pairs of FASTQ files, using commas to separate the FASTQ
      file paths of different libraries. This parameter also accepts compressed files in .gz format.
 
         --se <string>    default: None
@@ -115,10 +116,10 @@ Usage of the main script geta.pl
      used for genome alignment to generate the transcript sequence for gene model prediction.
 
         --strand_specific    default: None
-        When this parameter is added, all input next-generation sequencing data are treated as strand-specific
-    , and the program will predict gene models only on the forward strand of the transcript. When two neighboring
-     genes overlap in the genome, strand-specific sequencing data and this parameter can help accurately
-     estimate gene borders.
+        When this parameter is added, all input next-generation sequencing data are treated as strand
+    -specific, and the program will predict gene models only on the forward strand of the transcript. When
+     two neighboring genes overlap in the genome, strand-specific sequencing data and this parameter can
+     help accurately estimate gene borders.
 
         --protein <string>    default: None
         Enter a FASTA file containing whole genome protein sequences from neighboring species. It is
@@ -134,15 +135,15 @@ Usage of the main script geta.pl
         --augustus_species <string>    default: None
         When an AUGUSTUS species name is provided, the program starts from an existing species model
      or retrains a new species model when performing AUGUSTUS Training using gene models predicted by transcripts
-     or homologous proteins. If the input AUGUSTUS species model exists, its parameters will be optimized
-    . If not, a new AUGUSTUS species HMM model will be trained and then its parameters will be optimized
-    . The AUGUSTUS Training step requires the installation of AUGUSTUS software and configuration of the $AUGUSTUS_CONFIG_PATH
-     environment variable. A species configuration folder from AUGUSTUS Training with the name provided in
-     this parameter is generated in the temporary folder following the program's successful execution. If
-     the user executing the program has write access, the produced species configuration folder can be copied
-     to the species folder specified in $AUGUSTUS_CONFIG_PATH. If you do not enter this parameter, the program
-     will automatically set the value of this parameter to "GETA + prefix of genome FASTA file name + date
-     + process ID".
+     or homologous proteins. If the input AUGUSTUS species model exists, its parameters will be optimized.
+     If not, a new AUGUSTUS species HMM model will be trained and then its parameters will be optimized.
+     The AUGUSTUS Training step requires the installation of AUGUSTUS software and configuration of the
+     $AUGUSTUS_CONFIG_PATH environment variable. A species configuration folder from AUGUSTUS Training with
+     the name provided in this parameter is generated in the temporary folder following the program's successful
+     execution. If the user executing the program has write access, the produced species configuration folder
+     can be copied to the species folder specified in $AUGUSTUS_CONFIG_PATH. If you do not enter this parameter,
+     the program will automatically set the value of this parameter to "GETA + prefix of genome FASTA file
+     name + date + process ID".
 
         --HMM_db <string>    default: None
         Enter one or more HMM databases, for filtering gene models. This parameter supports the input
@@ -152,9 +153,9 @@ Usage of the main script geta.pl
         --BLASTP_db <string>    default: None
         Enter one or more diamond databases, for filtering gene models. This parameter supports the input
      of multiple diamond databases, separated by commas. The program filters those gene models that do not
-     match in all databases when using multiple diamond databases. When this parameter is left unset, the homologous
-     proteins provided by the --protein parameter will be used to build the diamond database for filtering
-     gene models.
+     match in all databases when using multiple diamond databases. When this parameter is left unset, the
+     homologous proteins provided by the --protein parameter will be used to build the diamond database
+     for filtering gene models.
 
         --config <string>    default: None
         Enter a parameter profile path to set the detailed parameters of other commands called by this
@@ -169,9 +170,9 @@ Usage of the main script geta.pl
         --BUSCO_lineage_dataset <string>    default: None
         Enter one or more BUSCO databases, the program will additionally perform BUSCO analysis on the
      whole genome protein sequences obtained by gene prediction. This parameter supports the input of multiple
-     BUSCO databases, separated by commas. The information contained in the /opt/biosoft/geta/BUSCO_lineages_list.2021-12-14.txt
-     file can be used to choose the proper BUSCO databases. Finally, the BUSCO results are exported to the
-     7.outputResults subdirectory and to the gene_prediction.summary file.
+     BUSCO databases, separated by commas. The information contained in the /opt/biosoft/geta/BUSCO_lineages_list.2021
+    -12-14.txt file can be used to choose the proper BUSCO databases. Finally, the BUSCO results are exported
+     to the 7.outputResults subdirectory and to the gene_prediction.summary file.
 
     [OUTPUT]
         --out_prefix <string>    default: out
@@ -197,16 +198,16 @@ Usage of the main script geta.pl
      stop codon information is used for filling the end of incomplete gene models.
 
         --homolog_prediction_method <string>    default: all
-        Enter a method for gene prediction using homologous proteins. The value can be set to exonerate
-    , genewise, gth, or all. This parameter supports the input of multiple methods, separated by commas. If
+        Enter a method for gene prediction using homologous proteins. The value can be set to exonerate,
+     genewise, gth, or all. This parameter supports the input of multiple methods, separated by commas. If
      the value was set to all, it indicates all three methods were used. The more methods you use, the more
      computation time you consume, but the better the result will be. Of the three methods, exonerate and
      genewise produced similar accuracy results, but gth showed a significant decrease in sensitivity and
      a significant increase in specificity. The following table shows the accuracy of the prediction results
      for the Oryza sativa genome using three methods. We compared the annotation results of 28736 gene models
      on NCBI to assess four accuracy metrics: gene level sensitivity, gene level specificity, exon level
-     specificity, and exon level specificity. It is obvious that using multiple methods for gene prediction
-    , combining results, and then filtering can result in a closer number of gene models to the actual number
+     specificity, and exon level specificity. It is obvious that using multiple methods for gene prediction,
+     combining results, and then filtering can result in a closer number of gene models to the actual number
      of genes and more accurate results. In addition, this parameter has a higher priority and can override
      the homolog_prediction parameter value in the parameter configuration file specified by --config.
         Method     Gene_num    gene_sensitivity    gene_specificity    exon_sensitivity    exon_specificity
