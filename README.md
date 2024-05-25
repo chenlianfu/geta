@@ -10,7 +10,7 @@ Installation
 ============
 1. unpack
 
-2. install dependencies:
+2. install dependencies:  
     ParaFly  
     RepeatMasker (version: 4.1.6)  
     RepeatModeler (version: 2.0.4)  
