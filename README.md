@@ -4,24 +4,28 @@ GETA (Genome-wide Electronic Tool for Annotation) is a pipeline with improved ac
 
 Introduction
 ============
-GETA can integrate the various evidence from ab initio gene finding and experimental data, including homologous proteins and RNA-Seq data.
-
-GETA is a multi-threaded, automatic, and memory-saving GWAT, which effectively improved the accuracy and completeness of predicted annotation. The current version is v1.0 and later version will support more types of data like the single-molecular sequencing data and add other analysis modules on the basis of continuous improvement in accuracy and completeness.
+GETA (Genome-wide Electronic Tool for Annotation) is a pipeline software for predicting gene models from whole genome sequences. With one command, you can quickly obtain an accurate genome annotation GFF3 result file by providing the genome sequence, RNA-Seq raw data, and whole genome homologous protein sequences of closely related species. This program has two outstanding features: (1) accurate prediction, GETA outputs gene models with the normal amount, high BUSCO integrity, and accurate exon boundaries; (2) simple run, the operation is straightforward with a fully automated command that produces the final result.
 
 Installation
 ============
 1. unpack
 
 2. install dependencies:
-    RepeatMasker and RepeatModeler  
-    Java (version: jre1.8.0_45)  
-    HISAT2 (version: 2.1.0)  
-    Samtools (version: 1.8)  
-    genewise (version: 2.4.1)  
-    NCBI-Blast+ (version: 2.6.0+)  
-    AUGUSTUS (version: 3.3.1) *Note, bam2hints should be compiled correctly*  
-    HMMER (version: 3.1b2)  
     ParaFly  
+    RepeatMasker (version: 4.1.6)  
+    RepeatModeler (version: 2.0.4)  
+    makeblastdb/rmblastn/tblastn/blastp (Version: 2.14.1)  
+    Java (version: jre1.8.0_282)  
+    hisat2 (version: 2.1.0)  
+    samtools (version: 1.17)  
+    mmseqs (version 15-6f452)  
+    genewise (version: 2.4.1)  
+    gth (Vesion: 1.7.3)  
+    exonerate (Vesion: 2.2.0)  
+    augustus / etraining (version: 3.5.0)  
+    diamond (version 2.1.8)  
+    hmmscan (version: 3.3.2)  
+    busco (Version: 5.4.7) *required when set --BUSCO_lineage_dataset*  
 
 3. add these directories of the executables to the PATH environment variable
 
@@ -30,16 +34,6 @@ Installation
 Usage of the main script geta.pl
 =================
 <!-- 以下内容产生方法： geta.pl 2> out.txt; perl -pe 's/^/    /; s/(.{100}[\w,.;]*\s*)/$1\n    /g' out.txt -->
-
-    GETA (Genome-wide Electronic Tool for Annotation) is a pipeline software for predicting gene models
-    from whole genome sequences. With one command, you can quickly obtain an accurate genome annotation GFF3
-    result file by providing the genome sequence, RNA-Seq raw data, and whole genome homologous protein sequences
-    of closely related species. This program has two outstanding features: (1) accurate prediction, GETA
-    outputs gene models with the normal amount, high BUSCO integrity, and accurate exon boundaries; (2) simple
-    run, the operation is straightforward with a fully automated command that produces the final result.
-
-
-    Current Version: 2.7.1
 
     Usage:
         perl /opt/biosoft/geta/bin/geta.pl [options]
