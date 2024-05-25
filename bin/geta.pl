@@ -10,6 +10,7 @@ my $bin_path = dirname($0);
 my $software_dir = $bin_path; $software_dir =~ s/\/bin$//;
 
 my $usage_chinese = <<USAGE;
+
 GETA (Genome-wide Electronic Tool for Annotation) Version 2.7.1
 
 Usage:
@@ -24,13 +25,13 @@ Parameters:
     输入需要进行注释的基因组序列FASTA格式文件。当输入了屏蔽重复序列的基因组文件时，可以不使用--RM_species_Dfam、--RM_species_RepBase和--RM_lib参数，并添加--no_RepeatModeler参数，从而跳过重复序列分析与屏蔽步骤。此时，推荐再输入FASTA文件中仅对转座子序列使用碱基N进行硬屏蔽，对简单重复或串联重复使用小写字符进行软屏蔽。
 
     --RM_species_Dfam | --RM_species <string>    default: None
-    输入一个物种名称，运用Dfam数据库中相应大类物种的HMM数据信息进行重复序列分析。该参数可以设置的表示物种大类的值来自于文件$software_dir/RepeatMasker_lineage.txt。例如，设置Eukaryota适合真核生物、Viridiplantae适合植物、Metazoa适合动物、Fungi适合真菌。当输入了该参数，程序会调用RepatMasker软件基于Dfam数据库进行重复序列分析，需要安装好RepeatMasker软件并配置好Dfam数据库。较新版本RepeatMasker默认带有一个老版本Dfam数据库，推荐自行下载最新版本Dfam数据库并配置到RepeatMasker；而RepBase数据库目前不再提供免费下载。
+    输入一个物种或分类名称，以利于调用RepeatMasker程序运用Dfam数据库中相应物种分类的HMM数据信息进行重复序列分析。可以根据文件$software_dir/RepeatMasker_lineage.txt的内容查找适用于本参数的物种分类名称。例如，设置Eukaryota适合真核生物、Viridiplantae适合植物、Metazoa适合动物、Fungi适合真菌。当使用了该参数，需要先安装好RepeatMasker软件并配置好Dfam数据库。需要注意的是：Dfam数据库因为较大被分隔成了9份；而RepeatMasker默认仅带有Dfam数据库第0个root部分，适合哺乳动物或真菌等物种；若有需要，则考虑下载适合待分析物种的Dfam数据库并配置到RepeatMasker；例如，对植物物种进行分析则需要使用Dfam数据库第5个Viridiplantae部分，对膜翅目昆虫进行分析则需要使用Dfam数据库第7个Hymenoptera部分。
 
     --RM_species_RepBase <string>    default: None
-    输入一个物种名称，运用RepBase数据库中相应大类物种的重复核酸序列信息进行重复序列分析。该参数可以设置的表示物种大类的值来自于文件$software_dir/RepeatMasker_lineage.txt。例如，设置Eukaryota适合真核生物、Viridiplantae适合植物、Metazoa适合动物、Fungi适合真菌。当输入了该参数，程序会调用RepatMasker软件基于RepBase数据库进行重复序列分析，需要安装好RepeatMasker软件并配置好RepBase数据库。
+    输入一个物种名称，运用调用RepeatMasker程序运用RepBase数据库中相应物种分类的重复核酸序列信息进行重复序列分析。可以根据文件$software_dir/RepeatMasker_lineage.txt的内容查找适用于本参数的物种分类名称。例如，设置Eukaryota适合真核生物、Viridiplantae适合植物、Metazoa适合动物、Fungi适合真菌。当输入了该参数，需要先安装好RepeatMasker软件并配置好RepBase数据库。需要注意的是：RepBase数据库最后一个版本20181026已经较老，且其包含的重复序列数据量较少；RepBase也不再提供免费下载。
 
     --RM_lib <string>    default: None
-    输入一个FASTA格式文件，运用其中的重复序列数据信息进行全基因组重复序列分析。该文件往往是RepeatModeler软件对全基因组序列进行分析的结果，表示全基因组上的重复序列。程序默认会调用RepeatModeler对全基因组序列进行分析，得到物种自身的重复序列数据库后，再调用RepeatMakser进行重复序列分析。若添加该参数，则程序跳过费时的RepeatModler步骤，减少程序运行时间。程序支持--RM_species_Dfam、--RM_species_RepBase和--RM_lib参数同时使用，则依次使用三种方法进行重复序列分析，并合并三种方法的结果。
+    输入一个FASTA格式文件，运用其中的重复序列数据信息进行全基因组重复序列分析。该文件往往是RepeatModeler软件对全基因组序列进行分析的结果，表示全基因组上的重复序列。GETA软件默认会调用RepeatModeler对全基因组序列进行分析，得到物种自身的重复序列数据库后，再调用RepeatMakser进行重复序列分析。当添加该参数后，则程序跳过费时的RepeatModler步骤，能极大减少程序运行时间。此外，程序支持--RM_species_Dfam、--RM_species_RepBase和--RM_lib参数同时使用，则依次使用多种方法进行重复序列分析，最终能合并多个结果并认可任一方法的结果。
 
     --no_RepeatModeler    default: None
     添加该参数后，程序不会运行RepeatModeler步骤，适合直接输入屏蔽了重复序列基因组文件的情形。
@@ -117,7 +118,7 @@ Version of GETA: 2.7.1
 USAGE
 
 my $usage_english = &get_usage_english();
-if (@ARGV==0){die $usage_chinese}
+if (@ARGV==0){die $usage_english}
 
 my ($genome, $RM_species, $RM_species_Dfam, $RM_species_RepBase, $RM_lib, $no_RepeatModeler, $pe1, $pe2, $single_end, $sam, $strand_specific, $protein, $augustus_species, $HMM_db, $BLASTP_db, $config, $BUSCO_lineage_dataset);
 my ($out_prefix, $gene_prefix, $chinese_help, $help);
@@ -150,6 +151,9 @@ GetOptions(
     "no_alternative_splicing_analysis!" => \$no_alternative_splicing_analysis,
     "delete_unimportant_intermediate_files!" => \$delete_unimportant_intermediate_files,
 );
+
+if ( $chinese_help ) { die $usage_chinese }
+elsif ( $help ) { die $usage_english }
 
 # Step 0: 程序运行前的准备工作
 # 0.1 对输入参数进行分析，使用绝对路径。若有参数设置不正确，则程序拒绝运行。
@@ -1093,8 +1097,7 @@ sub detecting_dependent_softwares {
 # 将英文的使用方法放到尾部
 sub get_usage_english {
 
-
-my $usage_chinese = <<USAGE;
+my $usage_english = <<USAGE;
 GETA (Genome-wide Electronic Tool for Annotation) Version 2.7.1
 
 Usage:
@@ -1106,16 +1109,16 @@ For example:
 Parameters:
 [INPUT]
     --genome <string>    default: None, required
-    输入需要进行注释的基因组序列FASTA格式文件。当输入了屏蔽重复序列的基因组文件时，可以不使用--RM_species_Dfam、--RM_species_RepBase和--RM_lib参数，并添加--no_RepeatModeler参数，从而跳过重复序列分析与屏蔽步骤。此时，推荐再输入FASTA文件中仅对转座子序列使用碱基N进行硬屏蔽，对简单重复或串联重复使用小写字符进行软屏蔽。
+    Enter the FASTA file of the genome sequence that you want to annotate. If the input genome file has repeats masked, you can skip the repeat sequence masking step by removing the --RM_species_Dfam,  --RM_species_RepBase, --RM_lib parameters and adding the --no_RepeatModeler parameter. In this instance, it is advised to hard mask the transposable sequences using base N and to soft mask simple or tandem repeats using lowercase characters.
 
     --RM_species_Dfam | --RM_species <string>    default: None
-    输入一个物种名称，运用Dfam数据库中相应大类物种的HMM数据信息进行重复序列分析。该参数可以设置的表示物种大类的值来自于文件$software_dir/RepeatMasker_lineage.txt。例如，设置Eukaryota适合真核生物、Viridiplantae适合植物、Metazoa适合动物、Fungi适合真菌。当输入了该参数，程序会调用RepatMasker软件基于Dfam数据库进行重复序列分析，需要安装好RepeatMasker软件并配置好Dfam数据库。较新版本RepeatMasker默认带有一个老版本Dfam数据库，推荐自行下载最新版本Dfam数据库并配置到RepeatMasker；而RepBase数据库目前不再提供免费下载。
+    Enter the name of a species or class for RepeatMakser to perform a repeat sequence analysis for the genome using the HMM data of corresponding taxonomic species in the Dfam database. The file $software_dir/RepeatMasker_lineage.txt has the values that can be provided for this parameter to represent the class of species. For example, Eukaryota is for eukaryotes, Viridiplantae is for plants, Metazoa is for animals, and Fungi is for fungi. Before attempting to enter this parameter, the RepeatMasker program needed to be installed and the Dfam database needed to be configured. Note that due to its massive size, the Dfam database has been split up into nine partitions. By default, RepeatMasker only contains the zero root partition of the Dfam database, which is suitable for species such as mammals and fungi. If necessary, consider downloading the proper Dfam database partition and configuring it to RepeatMasker. For example, the 5th partition of the Dfam database is designated for Viridiplantae, while the 7th  partition is for Hymenoptera.
 
     --RM_species_RepBase <string>    default: None
-    输入一个物种名称，运用RepBase数据库中相应大类物种的重复核酸序列信息进行重复序列分析。该参数可以设置的表示物种大类的值来自于文件$software_dir/RepeatMasker_lineage.txt。例如，设置Eukaryota适合真核生物、Viridiplantae适合植物、Metazoa适合动物、Fungi适合真菌。当输入了该参数，程序会调用RepatMasker软件基于RepBase数据库进行重复序列分析，需要安装好RepeatMasker软件并配置好RepBase数据库。
+    Enter the name of a species or class for RepeatMakser to perform a repeat sequence analysis for the genome using the nucleotide sequences of corresponding taxonomic species in the RepBase database. The file $software_dir/RepeatMasker_lineage.txt has the values that can be provided for this parameter to represent the class of species. For example, Eukaryota is for eukaryotes, Viridiplantae is for plants, Metazoa is for animals, and Fungi is for fungi. Before attempting to enter this parameter, the RepeatMasker program needed to be installed and the RepBase database needed to be configured. Note that RepBase is no longer providing free downloads and that the most recent version of the database, 20181026, is older and contains few repetitive sequence data.
 
     --RM_lib <string>    default: None
-    输入一个FASTA格式文件，运用其中的重复序列数据信息进行全基因组重复序列分析。该文件往往是RepeatModeler软件对全基因组序列进行分析的结果，表示全基因组上的重复序列。程序默认会调用RepeatModeler对全基因组序列进行分析，得到物种自身的重复序列数据库后，再调用RepeatMakser进行重复序列分析。若添加该参数，则程序跳过费时的RepeatModler步骤，减少程序运行时间。程序支持--RM_species_Dfam、--RM_species_RepBase和--RM_lib参数同时使用，则依次使用三种方法进行重复序列分析，并合并三种方法的结果。
+    Enter a FASTA file and use the repetitive sequence to conduct genome-wide repeat analysis. This file is usually the output of RepeatModeler software's analysis of the entire genome sequence, indicating the repeated sequences across the genome. By default, the GETA program calls RepeatModeler to look up the entire genome sequence and acquire the species' repetitive sequence database. RepeatMakser is then called to search the repeated sequences. After adding this argument, the time-consuming RepeatModler step is skipped, which may significantly reduce the running time of the program. Additionally, the software supports the simultaneous use of the --RM_species_Dfam, --RM_species_RepBase, and --RM_lib arguments, so that multiple methods can be used for repeat sequence analysis, and eventually multiple results can be combined and the result of any method can be recognized.
 
     --no_RepeatModeler    default: None
     添加该参数后，程序不会运行RepeatModeler步骤，适合直接输入屏蔽了重复序列基因组文件的情形。
@@ -1198,113 +1201,6 @@ Parameters:
 15. busco (Version: 5.4.7)
 
 Version of GETA: 2.7.1
-
-USAGE
-my $usage_english = <<USAGE;
-Usage:
-    perl $0 [options] genome.fasta
-
-For example:
-    perl $0 --genome genome.fasta --RM_species Embryophyta --pe1 liba.1.fq.gz,libb.1.fq.gz --pe2 liba.2.fq.gz,libb.2.fq.gz --protein homolog.fasta --augustus_species genus_species_GETA --out_prefix out --config conf.txt --cpu 80 --gene_prefix GS01Gene --HMM_db /opt/biosoft/bioinfomatics_databases/Pfam/Pfam-A.hmm
-
-Parameters:
-[INPUT]
-    --genome <string>    default: None, required
-    输入需要进行注释的基因组序列FASTA格式文件。当输入了屏蔽重复序列的基因组文件时，可以不使用--RM_species和--RM_lib参数，并添加--no_RepeatModeler参数，从而跳过重复序列分析与屏蔽步骤。此时，推荐输入文件中仅对转座子序列使用碱基N进行硬屏蔽，对简单重复或串联重复使用小写字符进行软屏蔽。
-    input a genome fasta file for annotation. If the nucleotides of a genomic sequence area were masked by lowercase characters or N, it is considered to be repetitive at downstream analysis.
-
-    --RM_species_Dfam | --RM_species <string>    default: None
-    输入一个物种名称，运用Dfam数据库中相应大类物种的HMM数据信息进行重复序列分析。该参数可以设置的表示物种大类的值来自于文件$bin_path/RepeatMasker_lineage.txt。例如，设置Eukaryota适合真核生物、Viridiplantae适合植物、Metazoa适合动物、Fungi适合真菌。较新版本的RepeatMasker软件更推荐使用Dfam数据库进行重复序列分析，而不是从2018年至今依然不更新且收费的RepBase数据库了。较新版本RepeatMasker默认带有Dfam数据库，而很多人却往往没法下载并安装RepBase数据库。当输入了该参数，程序会调用RepatMasker软件基于Dfam数据库进行重复序列分析，需要安装好RepeatMasker软件并配置好Dfam数据库。
-
-    --RM_species_RepBase <string>    default: None
-    输入一个物种名称，运用RepBase数据库中相应大类物种的重复核酸序列信息进行重复序列分析。该参数可以设置的表示物种大类的值来自于文件$bin_path/RepeatMasker_lineage.txt。例如，设置Eukaryota适合真核生物、Viridiplantae适合植物、Metazoa适合动物、Fungi适合真菌。当输入了该参数，程序会调用RepatMasker软件基于RepBase数据库进行重复序列分析，需要安装好RepeatMasker软件并配置好RepBase数据库。
-    species identifier for RepeatMasker. The acceptable value of this parameter can be found in file $bin_path/RepeatMasker_species.txt. Such as, Eukaryota for eucaryon, Fungi for fungi, Viridiplantae for plants, Metazoa for animals. The repeats in genome sequences would be searched aganist the Repbase database when this parameter set. 
-
-    --RM_lib <string>    default: None
-    输入一个FASTA格式文件，运用其中的重复序列数据信息进行全基因组重复序列分析。该文件往往是RepeatModeler软件对全基因组序列进行分析的结果，表示全基因组上的重复序列。程序默认会调用RepeatModeler对全基因组序列进行分析，得到物种自身的重复序列数据库后，再调用RepeatMakser进行重复序列分析。若添加该参数，则程序跳过费时的RepeatModler步骤，减少程序运行时间。程序支持--RM_species_Dfam、--RM_species_RepBase和--RM_lib参数同时使用，则依次使用三种方法进行重复序列分析，并合并三种方法的结果。
-    A fasta file of repeat sequences. Generally to be the result of RepeatModeler. If not set, RepeatModeler will be used to product this file automaticly, which shall time-consuming.
-
-    --no_RepeatModeler    default: None
-    添加该参数后，程序不会运行RepeatModeler步骤，适合直接输入屏蔽了重复序列基因组文件的情形。
-
-    --pe1 <string> --pe2 <string>    default: None, Not Required but Recommened.
-    fastq format files contain of paired-end RNA-seq data. if you have data come from multi librarys, input multi fastq files separated by comma. the compress file format .gz also can be accepted.
-
-    --se <string>    default: None, Not Required.
-    fastq format file contains of single-end RNA-seq data. if you have data come from multi librarys, input multi fastq files separated by comma. the compress file format .gz also can be accepted.
-
-    --sam <string>    default: None, Not Required. --pe1/--pe2, --se, and --sam can be set together, all data will be used for analysis.
-    SAM format file contains alignments of RNA-seq data. if you have data come from multi librarys, input multi SAM files separated by comma. the compress file format .bam also can be accepted.
-
-    --strand_specific    default: False
-    enable the ability of analysing the strand-specific information provided by the tag "XS" from SAM format alignments. If this parameter was set, the paramter "--rna-strandness" of hisat2 should be set to "RF" usually.
-
-    --protein <string>    default: None, Not Required but Recommened.
-    homologous protein sequences (derived from multiple species would be recommended) file in fasta format. more protein sequences, more better.
-
-    --augustus_species <string>    Required when --use_existing_augustus_species were not provided
-    species identifier for Augustus. the relative hmm files of augustus training will be created with this prefix. if the relative hmm files of augustus training exists, the program will delete the hmm files directory firstly, and then start the augustus training steps.
-
-    --use_existing_augustus_species <string>    Required when --augustus_species were not provided
-    species identifier for Augustus. This parameter is conflict with --augustus_species. When this parameter set, the --augustus_species parameter will be invalid, and the relative hmm files of augustus training should exists, and the augustus training step will be skipped (this will save lots of runing time).
-
-    --augustus_species_start_from <string>    default: None
-    species identifier for Augustus. The optimization step of Augustus training will start from the parameter file of this species, so it may save much time when setting a close species.
-
-    --HMM_db <string>    default: None
-    the absolute path of protein family HMM database which was used for filtering of false positive gene models. multiple databases can be input, and the prefix of database files should be seperated by comma.
-
-    --BLASTP_db <string>    default: None
-    the absolute path of protein family diamond database which was used for filtering of false positive gene models. 若该参数没有设置，程序会以homologous protein构建diamond数据库，进行基因模型过滤。multiple databases can be input, and the prefix of database files should be seperated by comma.
-
-    --config <string>    default: None
-    Input a file containing the parameters of several main programs (such as trimmomatic, hisat2 and augustus) during the pipeline. If you do not input this file, the default parameters should be suitable for most situation.
-
-[OUTPUT]
-    --out_prefix <string>    default: out
-    the prefix of outputs.
-
-    --gene_prefix <string>    default: gene
-    the prefix of gene id shown in output file.
-
-    --chines_help    default: None
-    使用该参数后，程序给出中文用法并退出。
-
-    --help    default: None
-    display this help and exit.
-
-[Settings]
-    --genetic_code <int>    default: 1
-    设置遗传密码。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。用于设置对基因模型强制补齐时的起始密码子和终止密码子。
-    
-    --cpu <int>    default: 4
-    the number of threads.
-
-    --enable_augustus_training_iteration    default: False
-    开启augustus_training_iteration，运行在第一次Augustus training后，根据基因预测的结果，选择有证据支持的基因模型，再一次进行Augustus training（迭代）。此举会消耗较多计算时间，且可能对基因预测没有改进，或产生不好的影响。
-
-    --no_alternative_splicing_analysis    default: None
-    添加该参数后，程序不会进行可变剪接分析。
-
-    --delete_unimportant_intermediate_files    defaults: None
-    添加该参数后，若程序运行成功，会删除不重要的中间文件，仅保留最少的、较小的、重要的中间结果文件。删除这些中间文件后，若程序重新运行后，能继续运行GETA的第六个步骤，即合并三种预测结果并对基因模型进行过滤。
-
-
-This script was tested on Rocky 9.2 with such softwares can be run directly in terminal:
-01. ParaFly
-02. java (version: 1.8.0_282)
-03. hisat2 (version: 2.1.0)
-04. samtools (version: 1.10)
-05. hmmscan (version: 3.3.1)
-06. makeblastdb/tblastn/blastp (version: 2.6.0)
-07. RepeatMasker (version: 4.1.2-p1)
-08. RepeatModeler (version: 2.0.3)
-09. genewise (version: 2.4.1)
-10. augustus/etraining (version: 3.4.0)
-11. diamond (version 2.0.2.140)
-12. mmseqs (version 15-6f452)
-
-Version: 2.7.1
 
 USAGE
 
