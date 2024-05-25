@@ -1093,6 +1093,113 @@ sub detecting_dependent_softwares {
 # 将英文的使用方法放到尾部
 sub get_usage_english {
 
+
+my $usage_chinese = <<USAGE;
+GETA (Genome-wide Electronic Tool for Annotation) Version 2.7.1
+
+Usage:
+    perl $0 [options]
+
+For example:
+    perl $0 --genome genome.fasta --RM_species_Dfam Embryophyta --RM_species_RepBase Embryophyta --pe1 libA.1.fq.gz,libB.1.fq.gz --pe2 libA.2.fq.gz,libB.2.fq.gz --protein homolog.fasta --augustus_species GETA_genus_species --HMM_db /opt/biosoft/bioinfomatics_databases/Pfam/Pfam-A.hmm --config /opt/biosoft/geta/conf_for_big_genome.txt --out_prefix out --gene_prefix GS01Gene --cpu 120
+
+Parameters:
+[INPUT]
+    --genome <string>    default: None, required
+    输入需要进行注释的基因组序列FASTA格式文件。当输入了屏蔽重复序列的基因组文件时，可以不使用--RM_species_Dfam、--RM_species_RepBase和--RM_lib参数，并添加--no_RepeatModeler参数，从而跳过重复序列分析与屏蔽步骤。此时，推荐再输入FASTA文件中仅对转座子序列使用碱基N进行硬屏蔽，对简单重复或串联重复使用小写字符进行软屏蔽。
+
+    --RM_species_Dfam | --RM_species <string>    default: None
+    输入一个物种名称，运用Dfam数据库中相应大类物种的HMM数据信息进行重复序列分析。该参数可以设置的表示物种大类的值来自于文件$software_dir/RepeatMasker_lineage.txt。例如，设置Eukaryota适合真核生物、Viridiplantae适合植物、Metazoa适合动物、Fungi适合真菌。当输入了该参数，程序会调用RepatMasker软件基于Dfam数据库进行重复序列分析，需要安装好RepeatMasker软件并配置好Dfam数据库。较新版本RepeatMasker默认带有一个老版本Dfam数据库，推荐自行下载最新版本Dfam数据库并配置到RepeatMasker；而RepBase数据库目前不再提供免费下载。
+
+    --RM_species_RepBase <string>    default: None
+    输入一个物种名称，运用RepBase数据库中相应大类物种的重复核酸序列信息进行重复序列分析。该参数可以设置的表示物种大类的值来自于文件$software_dir/RepeatMasker_lineage.txt。例如，设置Eukaryota适合真核生物、Viridiplantae适合植物、Metazoa适合动物、Fungi适合真菌。当输入了该参数，程序会调用RepatMasker软件基于RepBase数据库进行重复序列分析，需要安装好RepeatMasker软件并配置好RepBase数据库。
+
+    --RM_lib <string>    default: None
+    输入一个FASTA格式文件，运用其中的重复序列数据信息进行全基因组重复序列分析。该文件往往是RepeatModeler软件对全基因组序列进行分析的结果，表示全基因组上的重复序列。程序默认会调用RepeatModeler对全基因组序列进行分析，得到物种自身的重复序列数据库后，再调用RepeatMakser进行重复序列分析。若添加该参数，则程序跳过费时的RepeatModler步骤，减少程序运行时间。程序支持--RM_species_Dfam、--RM_species_RepBase和--RM_lib参数同时使用，则依次使用三种方法进行重复序列分析，并合并三种方法的结果。
+
+    --no_RepeatModeler    default: None
+    添加该参数后，程序不会运行RepeatModeler步骤，适合直接输入屏蔽了重复序列基因组文件的情形。
+
+    --pe1 <string> --pe2 <string>    default: None
+    输入二代双末端测序的两个FASTQ格式文件。参数支持输入多对数据文件，使用逗号对不同文库的FASTQ文件路径进行分隔即可。参数也支持输入.gz格式的压缩文件。
+
+    --se <string>    default: None
+    输入二代单端测序的FASTQ格式文件。参数支持输入多个数据文件，使用逗号对不同文库的FASTQ文件路径进行分隔即可。参数也支持输入.gz格式的压缩文件。
+
+    --sam <string>    default: None
+    输入二代测序SAM格式数据文件。参数支持输入多个数据文件，使用逗号对不同的SAM文件路径进行分隔即可。参数也支持输入.bam格式的压缩文件。此外，程序支持--pe1/--pe2、--se和--sam这三个参数全部或部分使用，则利用所有输入的数据进行基因组比对，再获取转录本序列进行基因预测。
+
+    --strand_specific    default: None
+    添加该参数后，则认为所有输入的二代数据是链特异性测序数据，程序则仅在转录本正义链上预测基因。使用链特异性测序数据并设置本参数后，当两相邻基因有重叠时，能准确预测其边界。
+
+    --protein <string>    default: None
+    输入临近物种的全基因组蛋白序列。推荐使用多个（3~10个）物种的全基因组同源蛋白序列。使用的物种数量越多，预测的基因越多越准确，但是越消耗计算时间。同源蛋白和二代测序数据，至少需要输入其中一种数据用于有证据支持的基因预测。
+
+    --augustus_species <string>    default: None
+    输入一个AUGUSTUS物种名称，则程序在利用转录本或同源蛋白预测的基因模型进行AUGUSTUS Training时，使用已有的物种模型或训练新的物种模型。若输入的AUGUSTUS物种模型存在，则在其基础上对其进行优化；若不存在，则生成新的AUGUSTUS物种模型，并进行参数优化。程序进行AUGUSTUS Training需要安装好AUGSTUS软件，并设置好\$AUGUSTUS_CONFIG_PATH环境变量。程序运行完毕后，在临时文件夹中有生成AUGUSTUS的物种配置文件夹；若对\$AUGUSTUS_CONFIG_PATH路径中指定的species文件夹有写入权限，则将生成的物种配置文件夹拷贝过去。若不输入本参数信息，则程序自动设置本参数的值为“GETA + 基因组FASTA文件名称前缀 + 日期 + 进程ID”。
+
+    --HMM_db <string>    default: None
+    输入HMM数据库路径，用于对基因模型进行过滤。参数支持输入多个数据库路径，使用逗号进行分隔。当使用多个HMM数据库时，程序过滤在所有数据库中都没有匹配的基因模型。
+
+    --BLASTP_db <string>    default: None
+    输入diamond数据库路径，用于对基因模型进行过滤。参数支持输入多个数据库路径，使用逗号进行分隔。当使用多个diamond数据库时，程序过滤在所有数据库中都没有匹配的基因模型。若不设置该参数，则以--protein参数输入的同源蛋白序列构建diamond数据库，进行基因模型过滤。
+
+    --config <string>    default: None
+    输入一个参数配置文件路径，用于设置本程序调用的其它命令的详细参数。若不设置该参数，当基因组>1GB时，自动使用软件安装目录中的conf_for_big_genome.txt配置文件；当基因组<50MB时，自动使用软件安装目录中的conf_for_small_genome.txt配置文件；当基因组在50MB~1GB之间时，使用默认参数配置。若有特殊需求，可以自行修改软件安装目录中的conf_all_defaults.txt文件，并输入给本参数进行流程分析。
+
+    --BUSCO_lineage_dataset <string>    default: None
+    输入BUSCO数据库路径，则程序额外对基因预测得到的全基因组蛋白序列进行BUSCO分析。本参数支持输入多个BUSCO数据库路径，使用逗号进行分隔，则分别利用多个数据库进行分析。可以根据$software_dir/BUSCO_lineages_list.2021-12-14.txt文件内容选择合适的BUSCO数据库。BUSCO的结果输出到7.outputResults子目录下和gene_prediction.summary文件中。
+
+[OUTPUT]
+    --out_prefix <string>    default: out
+    设置输出文件前缀。
+
+    --gene_prefix <string>    default: gene
+    设置输出GFF3文件中的基因名称前缀。
+
+    --chinese_help    default: None
+    使用该参数后，程序给出中文用法并退出。
+
+    --help    default: None
+    display this help and exit.
+
+[Settings]
+    --cpu <int>    default: 4
+    设置程序运行使用的CPU线程数。
+
+    --genetic_code <int>    default: 1
+    设置遗传密码。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。用于设置对基因模型强制补齐时的起始密码子和终止密码子。
+
+    --optimize_augustus_method <int>    default: 1
+    设置AUGUSTUS Training时的参数优化方法。1，表示仅调用BGM2AT.optimize_augustus进行优化，能充分利用所有CPU线程对所有参数并行化测试，速度快；2，表示BGM2AT.optimize_augustus优化完毕后，再使用AUGUSTUS软件自带的optimize_augustus.pl程序再次进行优化，此时运行速度慢，效果可能更好。使用本参数的优先级更高，能覆盖参数配置文件中BGM2AT的参数值。
+    
+    --no_alternative_splicing_analysis    default: None
+    添加该参数后，程序不会进行可变剪接分析。
+
+    --delete_unimportant_intermediate_files    defaults: None
+    添加该参数后，若程序运行成功，会删除不重要的中间文件，仅保留最少的、较小的、重要的中间结果文件。
+
+
+在Rocky 9.2系统使用以下依赖的软件版本对本软件进行了测试并运行成功。
+01. ParaFly
+02. RepeatMasker (version: 4.1.5)
+03. RepeatModeler (version: 2.0.4)
+04. makeblastdb/rmblastn/tblastn/blastp (Version: 2.14.0)
+05. java (version: 1.8.0_282)
+06. hisat2 (version: 2.1.0)
+07. samtools (version: 1.17)
+08. mmseqs (version 15-6f452)
+09. genewise (version: 2.4.1)
+10. gth (Vesion: 1.7.3)
+11. exonerate (Vesion: 2.2.0)
+12. augustus/etraining (version: 3.5.0)
+13. diamond (version 2.1.8)
+14. hmmscan (version: 3.3.2)
+15. busco (Version: 5.4.7)
+
+Version of GETA: 2.7.1
+
+USAGE
 my $usage_english = <<USAGE;
 Usage:
     perl $0 [options] genome.fasta

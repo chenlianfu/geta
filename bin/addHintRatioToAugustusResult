@@ -25,8 +25,12 @@ GetOptions(
 
 if ( $help_flag ) { die $usage }
 
+my $input_file1 = abs_path($ARGV[0]);
+my $input_file2 = abs_path($ARGV[1]);
+my $input_file3 = abs_path($ARGV[2]);
+
 # 读取exon证据信息
-open IN, $ARGV[0] or die "Can not open file $ARGV[0], $!\n";
+open IN, $input_file1 or die "Error: Can not open file $input_file1, $!";
 my %evidence_exon;
 while (<IN>) {
     next unless m/\texon\t/;
@@ -40,7 +44,7 @@ while (<IN>) {
 close IN;
 
 # 读取intron证据信息
-open IN, $ARGV[1] or die "Can not open file $ARGV[1], $!\n";
+open IN, $input_file2 or die "Error: Can not open file $input_file2, $!";
 my %evidence_intron;
 while (<IN>) {
     next unless m/\tintron\t/;
@@ -50,7 +54,7 @@ while (<IN>) {
 close IN;
 
 # 读取Augustus基因信息
-open IN, $ARGV[2] or die "Can not open file $ARGV[1], $!\n";
+open IN, $input_file3 or die "Error: Can not open file $input_file3, $!";
 my (%gene, @gene_id, $gene_id);
 while (<IN>) {
     if (m/\tgene\t.*ID=([^\s;]+)/) {
