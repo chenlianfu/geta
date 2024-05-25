@@ -13,10 +13,9 @@ mkdir ~/software
 
 ## 2. Installing NCBI-Blast+ and rmblastn
 cd /home/train/
-wget http://www.repeatmasker.org/rmblast-2.10.0+-x64-linux.tar.gz -P ~/software
-tar zxf ~/software/rmblast-2.10.0+-x64-linux.tar.gz -C /opt/biosoft
-mv /opt/biosoft/rmblast-2.10.0 /opt/biosoft/ncbi-rmblast-2.10.0+
-echo 'PATH=/opt/biosoft/ncbi-rmblast-2.10.0+/bin/:$PATH' >> ~/.bashrc
+wget https://www.repeatmasker.org/rmblast/rmblast-2.14.1+-x64-linux.tar.gz -P ~/software
+tar zxf ~/software/rmblast-2.14.1+-x64-linux.tar.gz -C /opt/biosoft
+echo 'PATH=$PATH:/opt/biosoft/rmblast-2.14.1/bin' >> ~/.bashrc
 source ~/.bashrc
 
 
@@ -39,22 +38,26 @@ hmmpress Pfam-AB.hmm
 
 
 ## 4. Installing RepeatMasker
-wget http://www.repeatmasker.org/RepeatMasker-4.1.0.tar.gz -P ~/software
-wget --http-user=chenlianfu_china --http-password=u2o7rn https://www.girinst.org/server/RepBase/protected/repeatmaskerlibraries/RepBaseRepeatMaskerEdition-20181026.tar.gz -P ~/software/
+wget http://repeatmasker.org/RepeatMasker/RepeatMasker-4.1.6.tar.gz -P ~/software
+wget https://www.dfam.org/releases/Dfam_3.8/families/FamDB/dfam38_full.0.h5.gz -P ~/software
+wget https://www.dfam.org/releases/Dfam_3.8/families/FamDB/dfam38_full.5.h5.gz -P ~/software
 wget http://tandem.bu.edu/trf/downloads/trf409.linux64 -P ~/software/
 
-tar zxf ~/software/RepeatMasker-4.1.0.tar.gz -C /opt/biosoft/
-cd /opt/biosoft/RepeatMasker/
+tar zxf ~/software/RepeatMasker-4.1.6.tar.gz && mv RepeatMasker /opt/biosoft/RepeatMasker-4.1.6
+cd /opt/biosoft/RepeatMasker-4.1.6
 chmod 644 *.pm configure
-echo 'PATH=$PATH:/opt/biosoft/RepeatMasker' >> ~/.bashrc
+echo 'PATH=$PATH:/opt/biosoft/RepeatMasker-4.1.5' >> ~/.bashrc
 source ~/.bashrc
 
+mkdir /opt/biosoft/RepeatMasker-4.1.6/Libraries/famdb/
+gzip -dc ~/software/dfam38_full.0.h5.gz > /opt/biosoft/RepeatMasker-4.1.6/Libraries/famdb/dfam38_full.0.h5
+gzip -dc ~/software/dfam38_full.5.h5.gz > /opt/biosoft/RepeatMasker-4.1.6/Libraries/famdb/dfam38_full.5.h5
 tar zxf ~/software/RepBaseRepeatMaskerEdition-20181026.tar.gz -C /opt/biosoft/RepeatMasker/
 cp ~/software/trf409.linux64 /opt/biosoft/RepeatMasker/trf
 chmod 755 /opt/biosoft/RepeatMasker/trf
 
 # Configuration of RepeatMasker
-cd /opt/biosoft/RepeatMasker/
+cd /opt/biosoft/RepeatMasker-4.1.6
 perl ./configure
 # /opt/biosoft/RepeatMasker/trf           Enter
 # 2                                       Enter

@@ -13,7 +13,7 @@ Installation
 1. unpack
 
 2. install dependencies:
-
+=================
     RepeatMasker and RepeatModeler
     Java (version: jre1.8.0_45)
     HISAT2 (version: 2.1.0)
