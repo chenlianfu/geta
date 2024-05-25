@@ -129,7 +129,6 @@ Usage of the main script geta.pl
         --augustus_species <string>    default: None
         When an AUGUSTUS species name is provided, the program starts from an existing species model
     or retrains a new species model when performing AUGUSTUS Training using gene models predicted by transcripts
-
     or homologous proteins. If the input AUGUSTUS species model exists, its parameters will be optimized.
     If not, a new AUGUSTUS species HMM model will be trained and then its parameters will be optimized.
     The AUGUSTUS Training step requires the installation of AUGUSTUS software and configuration of the
