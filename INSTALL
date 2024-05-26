@@ -12,16 +12,14 @@ mkdir ~/software
 
 
 ## 2. Installing NCBI-Blast+ and rmblastn
-cd /home/train/
 wget https://www.repeatmasker.org/rmblast/rmblast-2.14.1+-x64-linux.tar.gz -P ~/software
 tar zxf ~/software/rmblast-2.14.1+-x64-linux.tar.gz -C /opt/biosoft
 echo 'PATH=$PATH:/opt/biosoft/rmblast-2.14.1/bin' >> ~/.bashrc
 source ~/.bashrc
 
 
-## 3. Installing HMMER and Pfam database
+## 3. Installing HMMER and Pfam database (http://www.hmmer.org/)
 # exit user "train", and open a new terminal to load user "train", so as to load the default GCC with old version.
-cd /home/train/
 wget http://eddylab.org/software/hmmer/hmmer-3.3.2.tar.gz -P ~/software/
 tar zxf ~/software/hmmer-3.3.2.tar.gz 
 cd hmmer-3.3.2/
@@ -29,15 +27,17 @@ cd hmmer-3.3.2/
 cd .. && rm -rf hmmer-3.3.2
 echo 'PATH=/opt/biosoft/hmmer-3.3.2/bin/:$PATH' >> ~/.bashrc
 source ~/.bashrc
-wget ftp://ftp.ebi.ac.uk/pub/databases/Pfam/releases/Pfam27.0/Pfam-A.hmm.gz -P ~/software
-wget ftp://ftp.ebi.ac.uk/pub/databases/Pfam/releases/Pfam27.0/Pfam-B.hmm.gz -P ~/software
+
+wget http://ftp.ebi.ac.uk/pub/databases/Pfam/current_release/Pfam-A.hmm.gz -P ~/software/
+wget http://ftp.ebi.ac.uk/pub/databases/Pfam/releases/Pfam27.0/Pfam-B.hmm.gz -P ~/software/
 cd /opt/biosoft/hmmer-3.3.2/
-gzip -dc ~/software/Pfam-A.hmm.gz > Pfam-AB.hmm
-gzip -dc ~/software/Pfam-B.hmm.gz >> Pfam-AB.hmm
-hmmpress Pfam-AB.hmm
+gzip -dc ~/software/Pfam-A.hmm.gz > Pfam-A.hmm
+gzip -dc ~/software/Pfam-B.hmm.gz >> Pfam-B.hmm
+hmmpress Pfam-A.hmm
+hmmpress Pfam-B.hmm
 
 
-## 4. Installing RepeatMasker
+## 4. Installing RepeatMasker (http://repeatmasker.org/RepeatMasker/)
 wget http://repeatmasker.org/RepeatMasker/RepeatMasker-4.1.6.tar.gz -P ~/software
 wget https://www.dfam.org/releases/Dfam_3.8/families/FamDB/dfam38_full.0.h5.gz -P ~/software
 wget https://www.dfam.org/releases/Dfam_3.8/families/FamDB/dfam38_full.5.h5.gz -P ~/software
@@ -46,35 +46,38 @@ wget http://tandem.bu.edu/trf/downloads/trf409.linux64 -P ~/software/
 tar zxf ~/software/RepeatMasker-4.1.6.tar.gz && mv RepeatMasker /opt/biosoft/RepeatMasker-4.1.6
 cd /opt/biosoft/RepeatMasker-4.1.6
 chmod 644 *.pm configure
-echo 'PATH=$PATH:/opt/biosoft/RepeatMasker-4.1.5' >> ~/.bashrc
+echo 'PATH=$PATH:/opt/biosoft/RepeatMasker-4.1.6' >> ~/.bashrc
 source ~/.bashrc
 
-mkdir /opt/biosoft/RepeatMasker-4.1.6/Libraries/famdb/
 gzip -dc ~/software/dfam38_full.0.h5.gz > /opt/biosoft/RepeatMasker-4.1.6/Libraries/famdb/dfam38_full.0.h5
 gzip -dc ~/software/dfam38_full.5.h5.gz > /opt/biosoft/RepeatMasker-4.1.6/Libraries/famdb/dfam38_full.5.h5
-tar zxf ~/software/RepBaseRepeatMaskerEdition-20181026.tar.gz -C /opt/biosoft/RepeatMasker/
-cp ~/software/trf409.linux64 /opt/biosoft/RepeatMasker/trf
-chmod 755 /opt/biosoft/RepeatMasker/trf
+tar zxvf ~/software/RepBaseRepeatMaskerEdition-20181026.tar.gz -C /opt/biosoft/RepeatMasker-4.1.6/
+cp ~/software/trf409.linux64 /opt/biosoft/RepeatMasker-4.1.6/trf
+chmod 755 /opt/biosoft/RepeatMasker-4.1.6/trf
 
 # Configuration of RepeatMasker
 cd /opt/biosoft/RepeatMasker-4.1.6
 perl ./configure
-# /opt/biosoft/RepeatMasker/trf           Enter
+# /opt/biosoft/RepeatMasker-4.1.6/trf     Enter
+# 3                                       Enter
+# /opt/biosoft/hmmer-3.3.2/bin            Enter
 # 2                                       Enter
-# /opt/biosoft/ncbi-rmblast-2.10.0+/bin   Enter
-# Y                                       Enter
+# /opt/biosoft/rmblast-2.14.1/bin         Enter
+# N                                       Enter
 # 5                                       Enter
 
 
-## 5. Installing RepeatModeler
-wget http://www.repeatmasker.org/RepeatModeler/RepeatModeler-2.0.1.tar.gz -P ~/software/
+## 5. Installing RepeatModeler (http://www.repeatmasker.org/RepeatModeler/ | https://github.com/Dfam-consortium/RepeatModeler)
+wget http://www.repeatmasker.org/RepeatModeler/RepeatModeler-2.0.5.tar.gz -P ~/software/
 wget http://www.repeatmasker.org/RepeatModeler/RECON-1.08.tar.gz -P ~/software/
 wget http://www.repeatmasker.org/RepeatScout-1.0.6.tar.gz -P ~/software/
 wget http://genometools.org/pub/genometools-1.5.9.tar.gz -P ~/software/
 wget https://github.com/oushujun/LTR_retriever/archive/v2.9.0.tar.gz -O ~/software/LTR_retriever-2.9.0.tar.gz
-wget https://mafft.cbrc.jp/alignment/software/mafft-7.407-without-extensions-src.tgz -P ~/software
+wget https://github.com/zhangrengang/TEsorter/archive/refs/tags/v1.4.6.tar.gz -O ~/software/TEsorter-1.4.6.tar.gz
+wget https://mafft.cbrc.jp/alignment/software/mafft-7.505-without-extensions-src.tgz -P ~/software
 wget https://github.com/weizhongli/cdhit/releases/download/V4.8.1/cd-hit-v4.8.1-2019-0228.tar.gz -P ~/software
 wget https://github.com/TravisWheelerLab/NINJA/archive/0.95-cluster_only.tar.gz -O ~/software/NINJA-0.95-cluster_only.tar.gz
+wget http://hgdownload.cse.ucsc.edu/admin/jksrc.v449.zip -P ~/software/
 
 tar zxf ~/software/RECON-1.08.tar.gz -C /opt/biosoft/
 cd /opt/biosoft/RECON-1.08/src/
@@ -92,13 +95,20 @@ cd ../ && rm -rf genometools-1.5.9
 
 tar zxf ~/software/LTR_retriever-2.9.0.tar.gz -C /opt/biosoft/
 
-tar zxf ~/software/mafft-7.407-without-extensions-src.tgz
-cd mafft-7.407-without-extensions/core/
+# install Python3
+pip3 install xopen
+unzip ~/software/TEsorter-1.4.6.zip
+cd TEsorter-1.4.6
+python setup.py install
+cd .. && rm -rf TEsorter-1.4.6
+
+tar zxf ~/software/mafft-7.505-without-extensions-src.tgz
+cd mafft-7.505-without-extensions/core/
 perl -p -i -e 's#PREFIX =.*#PREFIX = /opt/biosoft/mafft#' Makefile
 perl -p -i -e 's#BINDIR =.*#BINDIR = /opt/biosoft/mafft/bin/#' Makefile
 make -j 4
 make install
-cd ../../ && rm -rf mafft-7.407-without-extensions
+cd ../../ && rm -rf mafft-7.505-without-extensions
 echo 'PATH=$PATH:/opt/biosoft/mafft/bin/' >> ~/.bashrc
 source ~/.bashrc
 
@@ -110,95 +120,182 @@ tar zxf ~/software/NINJA-0.95-cluster_only.tar.gz -C /opt/biosoft/
 cd /opt/biosoft/NINJA-0.95-cluster_only/NINJA/
 make -j 4
 
-tar zxf ~/software/RepeatModeler-2.0.1.tar.gz -C /opt/biosoft/
-cd /opt/biosoft/RepeatModeler-2.0.1
+sudo dnf --disablerepo=* --enablerepo=media-* -y install libuuid libuuid-devel mariadb-connector-c-devel
+unzip /home/train/software/jksrc.v449.zip -d /opt/biosoft/
+cd /opt/biosoft/kent/src/
+export MACHTYPE=x86_64
+mkdir -p ~/bin/x86_64
+make CXXFLAGS=-fPIC CFLAGS=-fPIC CPPFLAGS=-fPIC -j 4
+cp ./lib/x86_64/jkweb.a ./lib/
+mv ~/bin/x86_64/ ../bin/
+mv ~/bin/scripts/ ../
+
+tar zxf ~/software/RepeatModeler-2.0.5.tar.gz -C /opt/biosoft/
+cd /opt/biosoft/RepeatModeler-2.0.5
 perl configure
 #                                             Enter
 # /usr/bin/perl                               Enter
-# /opt/biosoft/RepeatMasker                   Enter
+# /opt/biosoft/RepeatMasker-4.1.6             Enter
 # /opt/biosoft/RECON-1.08/bin                 Enter
 # /opt/biosoft/RepeatScout-1.0.6              Enter
-# /opt/biosoft/RepeatMasker/trf               Enter
-# 1                                           Enter
-# /opt/biosoft/ncbi-rmblast-2.10.0+/bin       Enter
-# 3                                           Enter
+# /opt/biosoft/RepeatMasker-4.1.6             Enter
+# /opt/biosoft/cd-hit-v4.8.1-2019-0228        Enter
+# /opt/biosoft/kent/bin/                      Enter
+# /opt/biosoft/rmblast-2.14.1/bin             Enter
 # y                                           Enter
-# /opt/biosoft/genometools-1.5.9/bin          Enter
-# /opt/biosoft/LTR_retriever-2.9.0            Enter
+# /opt/biosoft/genometools-1.6.2/bin          Enter
+# /opt/biosoft/LTR_retriever-2.9.4            Enter
 # /opt/biosoft/mafft/bin                      Enter
 # /opt/biosoft/NINJA-0.95-cluster_only/NINJA  Enter
-# /opt/biosoft/cd-hit-v4.8.1-2019-0228        Enter
-chmod 644 *.pm configure RepModelConfig.pm.tmpl
+chmod 644 *.pm configure
 echo 'PATH=$PATH:/opt/biosoft/RepeatModeler-2.0.1' >> ~/.bashrc
 source ~/.bashrc
 
 
-## 6. Installing Samtools
-cd /home/train/
-wget https://github.com/samtools/samtools/releases/download/1.11/samtools-1.11.tar.bz2 -P ~/software
-tar jxf ~/software/samtools-1.11.tar.bz2 -C /opt/biosoft/
-cd /opt/biosoft/samtools-1.11
-./configure --prefix=/opt/biosoft/samtools-1.11
-make -j 8 && make install
-echo 'PATH=/opt/biosoft/samtools-1.11/bin/:$PATH' >> ~/.bashrc
+## 6. Installing Samtools and HTSlib (https://github.com/samtools/samtools/releases / https://www.htslib.org)
+wget https://github.com/samtools/samtools/releases/download/1.17/samtools-1.17.tar.bz2 -P ~/software/
+tar jxf ~/software/samtools-1.17.tar.bz2
+cd samtools-1.17/
+./configure --prefix=/opt/biosoft/samtools-1.17 && make -j 4 && make install
+cd ../ && rm -rf samtools-1.17/
+echo 'PATH=$PATH:/opt/biosoft/samtools-1.17/bin/' >> ~/.bashrc
+source ~/.bashrc
+
+wget https://sourceforge.net/projects/samtools/files/samtools/0.1.19/samtools-0.1.19.tar.bz2 -P ~/software
+tar jxf ~/software/samtools-0.1.19.tar.bz2 -C /opt/biosoft
+cd /opt/biosoft/samtools-0.1.19/
+make -j 4
+
+wget https://github.com/samtools/htslib/releases/download/1.17/htslib-1.17.tar.bz2 -P ~/software/
+tar jxf ~/software/htslib-1.17.tar.bz2
+cd htslib-1.17
+./configure --prefix=/opt/biosoft/htslib-1.17 && make -j 4 && make install
+cd .. && rm -rf htslib-1.17
+echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/biosoft/htslib-1.17/lib/' >> ~/.bashrc
+echo 'export C_INCLUDE_PATH=$C_INCLUDE_PATH:/opt/biosoft/htslib-1.17/include/' >> ~/.bashrc
+echo 'PATH=$PATH:/opt/biosoft/htslib-1.17/bin/' >> ~/.bashrc
 source ~/.bashrc
 
 
-## 7. Installing HISAT2
+## 7. Installing HISAT2 (https://daehwankimlab.github.io/hisat2/download/)
 wget ftp://ftp.ccb.jhu.edu/pub/infphilo/hisat2/downloads/hisat2-2.1.0-Linux_x86_64.zip -P ~/software
 unzip ~/software/hisat2-2.1.0-Linux_x86_64.zip -d /opt/biosoft/
 echo "PATH=$PATH:/opt/biosoft/hisat2-2.1.0/" >> ~/.bashrc
 source ~/.bashrc
 
 
-## 8. Installing genewise
-wget http://www.ebi.ac.uk/~birney/wise2/wise2.4.1.tar.gz
+## 8. Installing mmseqs2 (https://github.com/soedinglab/MMseqs2)
+wget https://github.com/soedinglab/MMseqs2/releases/download/15-6f452/mmseqs-linux-avx2.tar.gz -O ~/software/MMseqs2-15-6f452.tar.gz
+tar zxf ~/software/MMseqs2-15-6f452.tar.gz
+cd MMseqs2-15-6f452
+mkdir build && cd build
+cmake -DCMAKE_BUILD_TYPE=RELEASE -DCMAKE_INSTALL_PREFIX=/opt/biosoft/MMseqs2-15-6f452 -DHAVE_AVX2=1 ../
+make -j 8
+make install
+cd ../../ && rm -rf MMseqs2-15-6f452
+echo 'PATH=$PATH:/opt/biosoft/MMseqs2-15-6f452/bin' >> ~/.bashrc
+source ~/.bashrc
+
+
+## 9. Installing genewise (https://www.ebi.ac.uk/Tools/psa/genewise/ | https://www.ebi.ac.uk/~birney/wise2/)
+wget http://www.ebi.ac.uk/~birney/wise2/wise2.4.1.tar.gz -P ~/software/
 tar zxf ~/software/wise2.4.1.tar.gz -C /opt/biosoft/
 cd /opt/biosoft/wise2.4.1/src/
-# switch user to "root"
-yum install *glib*
-# switch user to "train"
 find ./ -name makefile | xargs sed -i 's/glib-config/pkg-config --libs glib-2.0/'
-export C_INCLUDE_PATH=/usr/include/glib-2.0/:/usr/lib64/glib-2.0/include/:$C_INCLUDE_PATH
 perl -p -i -e 's/getline/get_line/g' ./HMMer2/sqio.c
 perl -p -i -e 's/isnumber/isdigit/' models/phasemodel.c
-make all
+perl -p -i -e 's/csh welcome.csh/sh welcome.csh/' makefile
+make all -j 4
 export WISECONFIGDIR=/opt/biosoft/wise2.4.1/wisecfg/
 make test
 echo 'PATH=$PATH:/opt/biosoft/wise2.4.1/src/bin/' >> ~/.bashrc
-echo 'export WISECONFIGDIR=/opt/biosoft/wise2.4.1/wisecfg/' >> ~/.bashrc 
+echo 'export WISECONFIGDIR=/opt/biosoft/wise2.4.1/wisecfg/' >> ~/.bashrc
 source ~/.bashrc
 
 
-## 9. Installing AUGUSTUS
-wget https://github.com/pezmaster31/bamtools/archive/v2.5.1.tar.gz -O ~/software/bamtools-2.5.1.tar.gz
-wget http://bioinf.uni-greifswald.de/augustus/binaries/augustus-3.3.3.tar.gz -P ~/software
+## 10. Installing exonerate (https://www.ebi.ac.uk/about/vertebrate-genomics/software/exonerate)
+wget http://ftp.ebi.ac.uk/pub/software/vertebrategenomics/exonerate/exonerate-2.2.0-x86_64.tar.gz -P ~/software/
+tar zxf ~/software/exonerate-2.2.0-x86_64.tar.gz -C /opt/biosoft/
+echo 'PATH=$PATH:/opt/biosoft/exonerate-2.2.0-x86_64/bin/' >> ~/.bashrc
+source ~/.bashrc
+# Installing SNAP (https://github.com/KorfLab/SNAP | http://korflab.ucdavis.edu/software.html)
+#wget wget http://korflab.ucdavis.edu/Software/snap-2013-11-29.tar.gz -P ~/software/
+tar zxf ~/software/snap-2013-11-29.tar.gz -C /opt/biosoft/
+cd /opt/biosoft/snap/
+perl -p -i -e 's/-Werror//g; s/Zoe; make;/Zoe;/' Makefile
+perl -p -i -e 's/CC="gcc"/CC="gcc -fcommon"/' Makefile
+make -j 4
+echo 'PATH=$PATH:/opt/biosoft/snap' >> ~/.bashrc
+source ~/.bashrc
 
-tar zxf ~/software/bamtools-2.5.1.tar.gz
-cd bamtools-2.5.1/
+
+## 11. Installing AUGUSTUS (http://bioinf.uni-greifswald.de/augustus/ | https://github.com/Gaius-Augustus/Augustus)
+wget https://github.com/pezmaster31/bamtools/archive/v2.5.2.tar.gz -O ~/software/bamtools-2.5.2.tar.gz
+wget https://boostorg.jfrog.io/artifactory/main/release/1.82.0/source/boost_1_82_0.tar.gz -P ~/software
+wget https://sourceforge.net/projects/lpsolve/files/lpsolve/5.5.2.11/lp_solve_5.5.2.11_source.tar.gz -P ~/software
+wget https://tangentsoft.com/mysqlpp/releases/mysql++-3.3.0.tar.gz -P ~/software/
+wget https://github.com/Gaius-Augustus/Augustus/archive/refs/tags/v3.5.0.tar.gz -O ~/software/Augustus-3.5.0.tar.gz
+
+# Installing bamtools (https://github.com/pezmaster31/bamtools)
+tar zxf ~/software/bamtools-2.5.2.tar.gz
+cd bamtools-2.5.2/
 mkdir build
 cd build/
-#cmake ../ -DCMAKE_INSTALL_PREFIX=/opt/biosoft/bamtools-2.5.1
-cmake ../
+cmake ../ -DCMAKE_INSTALL_PREFIX=/opt/biosoft/bamtools-2.5.2
 make -j 4
-sudo make install
-sudo cp /usr/local/include/bamtools/ /usr/include/ -rf
-cd ../../
-rm bamtools-2.5.1/ -rf
+make install
+sudo cp -a /opt/biosoft/bamtools-2.5.2/include/bamtools/ /usr/include/
+sudo cp -a /opt/biosoft/bamtools-2.5.2/lib64/* /usr/lib64/
+cd ../../ && rm bamtools-2.5.2/ -rf
 
-tar zxf ~/software/augustus-3.3.3.tar.gz -C /opt/biosoft/
-cd /opt/biosoft/augustus-3.3.3/
-make clean
-perl -p -i.bak -e 's#^SAMTOOLS=.*#SAMTOOLS=/opt/biosoft/samtools-1.11#; s#^HTSLIB=.*#HTSLIB=/opt/biosoft/samtools-1.11/htslib-1.11#;' auxprogs/bam2wig/Makefile
+# Installing boost C++ Libraries (https://www.boost.org/)
+tar zxf ~/software/boost_1_82_0.tar.gz
+cd boost_1_82_0/
+./bootstrap.sh --prefix=/opt/biosoft/boost_1_82_0
+./b2 -j 4 install
+cd .. && rm boost_1_82_0/ -rf
+sudo ln -s /opt/biosoft/boost_1_82_0/include/boost /usr/include/
+echo 'export LD_LIBRARY_PATH=/opt/biosoft/boost_1_82_0/lib:$LD_LIBRARY_PATH
+export C_INCLUDE_PATH=/opt/biosoft/boost_1_82_0/include:$C_INCLUDE_PATH' >> ~/.bashrc
+source ~/.bashrc
+
+# Installing lpsolve (https://sourceforge.net/projects/lpsolve/)
+tar zxf ~/software/lp_solve_5.5.2.11_source.tar.gz -C /opt/sysoft/
+cd /opt/sysoft/lp_solve_5.5/lpsolve55
+sh ccc
+echo 'export LD_LIBRARY_PATH=/opt/sysoft/lp_solve_5.5/lpsolve55/bin/ux64:$LD_LIBRARY_PATH' >> ~/.bashrc
+source ~/.bashrc
+
+# Installing Mysql++ (https://tangentsoft.com/mysqlpp)
+tar zxf ~/software/mysql++-3.3.0.tar.gz && cd mysql++-3.3.0
+./configure --prefi=/opt/sysoft/mysql++-3.3.0 && make -j 4 && make install
+cd .. && rm -rf mysql++-3.3.0
+echo 'export LD_LIBRARY_PATH=/opt/sysoft/mysql++-3.3.0/lib:$LD_LIBRARY_PATH' >> ~/.bashrc
+source ~/.bashrc
+
+# Installing AUGUSTUS
+sudo dnf --disablerepo=* --enablerepo=media-* -y install gsl gsl-devel sqlite sqlite-devel suitesparse mariadb mariadb-server
+sudo dnf install suitesparse-devel
+tar zxf ~/software/Augustus-3.5.0.tar.gz -C /opt/biosoft/
+cd /opt/biosoft/Augustus-3.5.0/
+perl -p -i -e 's#/usr/include/lpsolve#/opt/sysoft/lp_solve_5.5#' src/Makefile
+perl -p -i -e 's#/usr/include/mysql#/opt/sysoft/mysql++-3.3.0/include -I/usr/include/mysql/#' src/Makefile       export LIBRARY_PATH=/opt/biosoft/boost_1_82_0/lib:/opt/sysoft/lp_solve_5.5/lpsolve55/bin/ux64:/opt/sysoft/mysql++-3.3.0/lib/:/opt/biosoft/htslib-1.17/lib/:$LIBRARY_PATH
+sudo ln -s /usr/lib64/libcolamd.so.2 /usr/lib64/libcolamd.so
+make augustus -j 4
+
+ln -s /opt/biosoft/htslib-1.17/include /opt/biosoft/htslib-1.17/htslib
+ln -s /opt/biosoft/htslib-1.17/lib/* /opt/biosoft/htslib-1.17/htslib/
+export TOOLDIR=/opt/biosoft/htslib-1.17/
 make -j 4
-chmod 777 /opt/biosoft/augustus-3.3.3/config/species
-echo 'PATH=$PATH:/opt/biosoft/augustus-3.3.3/bin/' >> ~/.bashrc
-echo 'PATH=$PATH:/opt/biosoft/augustus-3.3.3/scripts/' >> ~/.bashrc
-echo "export AUGUSTUS_CONFIG_PATH=/opt/biosoft/augustus-3.3.3/config/" >> ~/.bashrc
+
+chmod 777 /opt/biosoft/Augustus-3.5.0/config/species
+echo 'PATH=$PATH:/opt/biosoft/Augustus-3.5.0/bin/' >> ~/.bashrc
+echo 'PATH=$PATH:/opt/biosoft/Augustus-3.5.0/scripts/' >> ~/.bashrc
+echo "export AUGUSTUS_CONFIG_PATH=/opt/biosoft/Augustus-3.5.0/config/" >> ~/.bashrc
 source ~/.bashrc
 
 
-## 10. Installing ParaFly
+## 12. Installing ParaFly
 wget https://sourceforge.net/projects/parafly/files/parafly-r2013-01-21.tgz -P ~/software
 tar zxf ~/software/parafly-r2013-01-21.tgz
 cd parafly-r2013-01-21
@@ -208,8 +305,7 @@ echo 'PATH=/opt/sysoft/parafly-r2013-01-21/bin/:$PATH' >> ~/.bashrc
 source ~/.bashrc
 
 
-## 11. Installing Java
-wget https://javadl.oracle.com/webapps/download/AutoDL?BundleId=244058_89d678f2be164786b292527658ca1605 -O ~/software/jre-8u281-linux-x64.tar.gz
-tar zxf ~/software/jre-8u281-linux-x64.tar.gz -C /opt/sysoft/
-echo 'PATH=/opt/sysoft/jre1.8.0_281/bin:$PATH' >> ~/.bashrc
-source ~/.bashrc
+## 13. Installing Java
+wget https://download.oracle.com/java/20/latest/jdk-20_linux-x64_bin.tar.gz -P ~/software/
+tar zxf /home/train/software/jdk-20_linux-x64_bin.tar.gz -C /opt/sysoft/
+echo 'PATH=/opt/sysoft/jdk-20.0.1/bin:$PATH' >> /home/train/.bashrc
