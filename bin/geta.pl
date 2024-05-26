@@ -108,11 +108,11 @@ Parameters:
 
 
 在Rocky 9.2系统使用以下依赖的软件版本对本软件进行了测试并运行成功。
-01. ParaFly
-02. RepeatMasker (version: 4.1.5)
-03. RepeatModeler (version: 2.0.4)
+01. ParaFly (Version 0.1.0)
+02. RepeatMasker (version: 4.1.6)
+03. RepeatModeler (version: 2.0.5)
 04. makeblastdb/rmblastn/tblastn/blastp (Version: 2.14.0)
-05. java (version: 1.8.0_282)
+05. java (version: 20.0.1)
 06. hisat2 (version: 2.1.0)
 07. samtools (version: 1.17)
 08. mmseqs (version 15-6f452)
@@ -1217,11 +1217,11 @@ Parameters:
 
 This software has been tested and successfully run on Rocky 9.2 system using the following dependent software versions:
 
-01. ParaFly
-02. RepeatMasker (version: 4.1.5)
-03. RepeatModeler (version: 2.0.4)
+01. ParaFly (Version 0.1.0)
+02. RepeatMasker (version: 4.1.6)
+03. RepeatModeler (version: 2.0.5)
 04. makeblastdb/rmblastn/tblastn/blastp (Version: 2.14.0)
-05. java (version: 1.8.0_282)
+05. java (version: 20.0.1)
 06. hisat2 (version: 2.1.0)
 07. samtools (version: 1.17)
 08. mmseqs (version 15-6f452)
