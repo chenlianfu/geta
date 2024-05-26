@@ -11,11 +11,11 @@ Installation
 1. unpack
 
 2. install dependencies:  
-    ParaFly  
+    ParaFly (Version 0.1.0)  
     RepeatMasker (version: 4.1.6)  
-    RepeatModeler (version: 2.0.4)  
+    RepeatModeler (version: 2.0.5)  
     makeblastdb/rmblastn/tblastn/blastp (Version: 2.14.1)  
-    Java (version: jre1.8.0_282)  
+    Java (version: jdk-2.1.0)  
     hisat2 (version: 2.1.0)  
     samtools (version: 1.17)  
     mmseqs (version 15-6f452)  
