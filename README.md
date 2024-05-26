@@ -15,7 +15,7 @@ Installation
     RepeatMasker (version: 4.1.6)  
     RepeatModeler (version: 2.0.5)  
     makeblastdb/rmblastn/tblastn/blastp (Version: 2.14.1)  
-    Java (version: jdk-2.1.0)  
+    Java (version: jdk-20.0.1)  
     hisat2 (version: 2.1.0)  
     samtools (version: 1.17)  
     mmseqs (version 15-6f452)  
