@@ -185,7 +185,7 @@ source ~/.bashrc
 
 
 ## 8. Installing mmseqs2 (https://github.com/soedinglab/MMseqs2)
-wget https://github.com/soedinglab/MMseqs2/releases/download/15-6f452/mmseqs-linux-avx2.tar.gz -O ~/software/MMseqs2-15-6f452.tar.gz
+wget https://github.com/soedinglab/MMseqs2/archive/refs/tags/15-6f452.tar.gz -O ~/software/MMseqs2-15-6f452.tar.gz
 tar zxf ~/software/MMseqs2-15-6f452.tar.gz
 cd MMseqs2-15-6f452
 mkdir build && cd build
@@ -229,7 +229,14 @@ echo 'PATH=$PATH:/opt/biosoft/snap' >> ~/.bashrc
 source ~/.bashrc
 
 
-## 11. Installing AUGUSTUS (http://bioinf.uni-greifswald.de/augustus/ | https://github.com/Gaius-Augustus/Augustus)
+# 11. Installing GenomeThreader (http://genomethreader.org/)
+wget http://genomethreader.org/distributions/gth-1.7.3-Linux_x86_64-64bit.tar.gz -P ~/software/
+tar zxf ~/software/gth-1.7.3-Linux_x86_64-64bit.tar.gz -C /opt/biosoft/
+echo 'PATH=$PATH:/opt/biosoft/gth-1.7.3-Linux_x86_64-64bit/bin/' >> ~/.bashrc
+source ~/.bashrc
+
+
+## 12. Installing AUGUSTUS (http://bioinf.uni-greifswald.de/augustus/ | https://github.com/Gaius-Augustus/Augustus)
 wget https://github.com/pezmaster31/bamtools/archive/v2.5.2.tar.gz -O ~/software/bamtools-2.5.2.tar.gz
 wget https://boostorg.jfrog.io/artifactory/main/release/1.82.0/source/boost_1_82_0.tar.gz -P ~/software
 wget https://sourceforge.net/projects/lpsolve/files/lpsolve/5.5.2.11/lp_solve_5.5.2.11_source.tar.gz -P ~/software
@@ -295,7 +302,7 @@ echo "export AUGUSTUS_CONFIG_PATH=/opt/biosoft/Augustus-3.5.0/config/" >> ~/.bas
 source ~/.bashrc
 
 
-## 12. Installing ParaFly
+## 13. Installing ParaFly
 wget https://sourceforge.net/projects/parafly/files/parafly-r2013-01-21.tgz -P ~/software
 tar zxf ~/software/parafly-r2013-01-21.tgz
 cd parafly-r2013-01-21
@@ -305,13 +312,13 @@ echo 'PATH=/opt/sysoft/parafly-r2013-01-21/bin/:$PATH' >> ~/.bashrc
 source ~/.bashrc
 
 
-## 13. Installing Java
+## 14. Installing Java
 wget https://download.oracle.com/java/20/latest/jdk-20_linux-x64_bin.tar.gz -P ~/software/
 tar zxf /home/train/software/jdk-20_linux-x64_bin.tar.gz -C /opt/sysoft/
 echo 'PATH=/opt/sysoft/jdk-20.0.1/bin:$PATH' >> /home/train/.bashrc
 
 
-## 14. Installing BUSCO (https://busco.ezlab.org/)
+## 15. Installing BUSCO (https://busco.ezlab.org/)
 wget https://gitlab.com/ezlab/busco/-/archive/5.4.7/busco-5.4.7.tar.gz -P ~/software/
 tar zxf ~/software/busco-5.4.7.tar.gz -C /opt/biosoft
 
