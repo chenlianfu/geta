@@ -803,6 +803,7 @@ if ( ($pe1 && $pe2) or $single_end or $sam ) {
 }
 if ( $protein ) {
     push @cmdString, "cp $tmp_dir/3.homolog_prediction/homolog_prediction.gff3 $out_prefix.homolog_prediction.gff3";
+    push @cmdString, "cp $tmp_dir/3.homolog_prediction/homolog_alignment.gff3 $out_prefix.homolog_alignment.gff3";
 }
 push @cmdString, "$bin_path/GFF3Clear --genome $genome --no_attr_add $tmp_dir/5.augustus/augustus.gff3 > $out_prefix.augustus_prediction.gff3";
 push @cmdString, "4.output_methods_GFF3.ok";

@@ -36,6 +36,12 @@ Usage:
     --no_poor_gene_models    default: None
     添加该参数后，程序不在标准输出中给出第四类poor gene models。在临时文件目录下的final_all.gff3文件中依然保留所有四种类型的基因模型。
 
+    --out_alignment_GFF3 <string>    default: None
+    让程序输出一个GFF3格式的同源蛋白比对文件，包含同源蛋白对基因组序列的比对信息。一个基因区域输出每个同源蛋白的最优比对信息。
+
+    --max_alignment_num_for_each_gene_region <int>    default: 5
+    当输出GFF3格式同源蛋白比对文件时，每个基因区域最多输出5个同源蛋白的结果。
+
     --help    default: None
     display this help and exit.
 
@@ -44,7 +50,7 @@ Usage:
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($help_flag, $threshold_homolog_coverage_good, $threshold_homolog_coverage_fair, $tmp_dir, $genetic_code, $no_fair_gene_models, $no_poor_gene_models);
+my ($help_flag, $threshold_homolog_coverage_good, $threshold_homolog_coverage_fair, $tmp_dir, $genetic_code, $no_fair_gene_models, $no_poor_gene_models, $out_alignment_GFF3, $out_alignment_num_for_each_gene_region);
 GetOptions(
     "help" => \$help_flag,
     "threshold_homolog_coverage_good:f" => \$threshold_homolog_coverage_good,
@@ -53,6 +59,8 @@ GetOptions(
     "genetic_code:i" => \$genetic_code,
     "no_fair_gene_models" => \$no_fair_gene_models,
     "no_poor_gene_models" => \$no_poor_gene_models,
+    "out_alignment_GFF3:s" => \$out_alignment_GFF3,
+    "out_alignment_num_for_each_gene_region:i" => \$out_alignment_num_for_each_gene_region,
 );
 $threshold_homolog_coverage_good ||= 0.8;
 $threshold_homolog_coverage_fair ||= 0.4;
@@ -66,6 +74,8 @@ if ( $help_flag ) { die $usage }
 
 my $input_file1 = abs_path($ARGV[0]);
 my $input_file2 = abs_path($ARGV[1]);
+$out_alignment_GFF3 = abs_path($out_alignment_GFF3) if $out_alignment_GFF3;
+$out_alignment_num_for_each_gene_region ||= 5;
 
 # 读取基因组序列信息
 open IN, $input_file1 or die "Can not open file $input_file1, $!";
@@ -76,6 +86,31 @@ while (<IN>) {
     else { $genome_seq{$id} .= uc($_); }
 }
 close IN;
+
+# 生成同源蛋白比对GFF3文件
+if ( $out_alignment_GFF3 ) {
+    open OUT, ">", $out_alignment_GFF3 or die "Can not create file $out_alignment_GFF3, $!";
+    open IN, $input_file2 or die "Can not open file $input_file2, $!";
+    <IN>;
+    $/ = "\n\n";
+    while (<IN>) {
+        s/(.*):\n//;
+        my @geneModels = split /\n/, $_;
+        my %geneModels;
+        my $out_num = 0;
+        foreach my $geneModels ( @geneModels ) {
+            @_ = split /\t/, $geneModels;
+            next if exists $geneModels{$_[6]};
+            $geneModels{$_[6]} = 1;
+            print OUT &gff3_alignment(@_);
+            $out_num ++;
+            last if $out_num >= $out_alignment_num_for_each_gene_region;
+        }
+    }
+    $/ = "\n";
+    close IN;
+    close OUT;
+}
 
 # 分析基因模型数据
 open IN, $input_file2 or die "Can not open file $input_file2, $!";
@@ -708,4 +743,56 @@ sub codon_table {
     }
 
     return (\%code, \%start_codon, \%stop_codon);
+}
+
+sub gff3_alignment {
+    my $out;
+    my ($genome_seq_name, $source, $start, $end, $intron, $strand, $homolog_name, $homolog_length) = @_;
+
+    my (@CDS, @intron);
+    # 获得intron信息
+    if ( $intron ne "NULL" ) {
+        foreach ( split /;/, $intron ) {
+            if ( m/(\d+)-(\d+)/ ) {
+                if ( $2 > $1 ) {
+                    push @intron, "$1\t$2";
+                }
+                else {
+                    push @intron, "$2\t$1";
+                }
+            }
+        }
+        @intron = sort {$a <=> $b} @intron;
+    }
+    # 获得基因起始和结束位点
+    ($start, $end) = ($end, $start) if $start > $end;
+    my ($gene_start, $gene_end) = ($start, $end);
+    # 获得CDS信息
+    foreach (@intron) {
+        @_ = split /\t/, $_;
+        my $CDS_end = $_[0] - 1;
+        my $CDS_start = $_[1] + 1;
+        push @CDS, "$start\t$CDS_end";
+        $start = $CDS_start;
+    }
+    push @CDS, "$start\t$end";
+
+    # 获得GFF3
+    my ($frame, $length, $num) = (0, 0, 0);
+    @CDS = sort{$b <=> $a} @CDS if $strand eq "-";
+    foreach ( @CDS ) {
+        $num ++;
+        @_ = split /\t/, $_;
+        $length += ($_[1] - $_[0] + 1);
+        $out .= "$genome_seq_name\t$source\tprotein_match\t$_[0]\t$_[1]\t\.\t$strand\t$frame\tID=$homolog_name;Name=$homolog_name\n";
+        $frame = $length % 3;
+        if ( $frame == 1 ) {
+            $frame = 2;
+        }
+        elsif ( $frame == 2 ) {
+            $frame = 1;
+        }
+    }
+
+    return $out;
 }

@@ -131,7 +131,7 @@ else {
 
 # 3. 同一基因区域仅取一个最优基因模型，得到GFF3文件，并对基因模型进行好坏分类。
 print STDERR "3. picking out the best geng model for classification.\n";
-$cmdString = "$binPath/homolog_prediction.03GetGeneModels --tmp_dir c.getGeneModels $input_genome out.geneModels.tab > $out_prefix.geneModels.gff3 2> c.getGeneModels.log";
+$cmdString = "$binPath/homolog_prediction.03GetGeneModels --tmp_dir c.getGeneModels --out_alignment_GFF3 homolog_alignment.gff3 $input_genome out.geneModels.tab > $out_prefix.geneModels.gff3 2> c.getGeneModels.log";
 unless (-e "c.getGeneModels.ok" && -s "$out_prefix.geneModels.gff3") {
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
