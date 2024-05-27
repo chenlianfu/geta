@@ -809,7 +809,22 @@ my @cmdString;
 if ( $BUSCO_lineage_dataset ) {
     foreach my $BUSCO_db_path ( @BUSCO_db ) {
         my $BUSCO_db_name = $BUSCO_db{$BUSCO_db_path};
-        push @cmdString, "rm -rf BUSCO_OUT_$BUSCO_db_name*; busco -i $out_prefix.protein.fasta -o BUSCO_OUT_$BUSCO_db_name -m protein -l $BUSCO_db_path -c $cpu --offline &> BUSCO_OUT_$BUSCO_db_name.log";
+
+        my $predictd_type = "GETA";
+        push @cmdString, "rm -rf BUSCO_OUT.$predictd_type.$BUSCO_db_name*; busco -i $out_prefix.protein.fasta -o BUSCO_OUT.$predictd_type.$BUSCO_db_name -m protein -l $BUSCO_db_path -c $cpu --offline &> BUSCO_OUT.$predictd_type.$BUSCO_db_name.log";
+
+        $predictd_type = "AUGUSTUS";
+        push @cmdString, "rm -rf BUSCO_OUT.$predictd_type.$BUSCO_db_name*; $bin_path/gff3_to_protein.pl $genome $out_prefix.augustus_prediction.gff3 > protein.augustus_prediction.fasta; busco -i protein.augustus_prediction.fasta -o BUSCO_OUT.$predictd_type.$BUSCO_db_name -m protein -l $BUSCO_db_path -c $cpu --offline &> BUSCO_OUT.$predictd_type.$BUSCO_db_name.log";
+
+        if ( $protein ) {
+            $predictd_type = "homolog";
+            push @cmdString, "rm -rf BUSCO_OUT.$predictd_type.$BUSCO_db_name*; $bin_path/gff3_to_protein.pl $genome $out_prefix.homolog_prediction.gff3 > protein.homolog_prediction.fasta; busco -i protein.homolog_prediction.fasta -o BUSCO_OUT.$predictd_type.$BUSCO_db_name -m protein -l $BUSCO_db_path -c $cpu --offline &> BUSCO_OUT.$predictd_type.$BUSCO_db_name.log";
+        }
+
+        if ( ($pe1 && $pe2) or $single_end or $sam ) {
+            $predictd_type = "NGSReads";
+            push @cmdString, "rm -rf BUSCO_OUT.$predictd_type.$BUSCO_db_name*; $bin_path/gff3_to_protein.pl $genome $out_prefix.NGSReads_prediction.gff3 > protein.NGSReads_prediction.fasta; busco -i protein.NGSReads_prediction.fasta -o BUSCO_OUT.$predictd_type.$BUSCO_db_name -m protein -l $BUSCO_db_path -c $cpu --offline &> BUSCO_OUT.$predictd_type.$BUSCO_db_name.log";
+        }
     }
     push @cmdString, "5.BUSCO.ok";
 
@@ -817,16 +832,27 @@ if ( $BUSCO_lineage_dataset ) {
 
     # 合并多个数据库的BUSCO结果
     unless ( -e "BUSCO_results.txt" ) {
-        open OUT, ">", "BUSCO_results.txt" or die "Error: Can not create file BUSCO_results.txt, $!";
-        print OUT "The BUSCO result of predicted whole genome proteins:\n";
-        foreach my $BUSCO_db_path ( @BUSCO_db ) {
-            my $BUSCO_db_name = $BUSCO_db{$BUSCO_db_path};
-            open IN, "BUSCO_OUT_$BUSCO_db_name.log" or die "Can not open file BUSCO_OUT_$BUSCO_db_name.log, $!";
-            while ( <IN> ) {
-                print OUT sprintf("%-25s$1\n", $BUSCO_db_name) if m/(C:\S+)/;
+        my $BUSCO_results_OUT;
+
+        my @predictd_type = ("GETA", "AUGUSTUS");
+        push @predictd_type, "homolog" if $protein;
+        push @predictd_type, "NGSReads" if ( ($pe1 && $pe2) or $single_end or $sam );
+        foreach my $predictd_type ( @predictd_type ) {
+            $BUSCO_results_OUT .= "The BUSCO result of whole genome proteins predicted by $predictd_type:\n";
+            foreach my $BUSCO_db_path ( @BUSCO_db ) {
+                my $BUSCO_db_name = $BUSCO_db{$BUSCO_db_path};
+                my $input_file = "BUSCO_OUT.$predictd_type.$BUSCO_db_name.log";
+                open IN, $input_file or die "Error: Can not open file $input_file, $!";
+                while ( <IN> ) {
+                    $BUSCO_results_OUT .= sprintf("%-25s$1\n", $BUSCO_db_name) if m/(C:\S+)/;
+                }
+                close IN;
             }
-            close IN;
+            $BUSCO_results_OUT .= "\n";
         }
+
+        open OUT, ">", "BUSCO_results.txt" or die "Error: Can not create file BUSCO_results.txt, $!";
+        print OUT $BUSCO_results_OUT;
         close OUT;
     }
 }
