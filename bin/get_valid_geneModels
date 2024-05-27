@@ -73,14 +73,12 @@ while (<IN>) {
         $candidate_lncRNA_transcript_ID{$_[0]} = $_[2];
         $candidate_lncRNA_gene_ID{$1}{$_[0]} = $_[2] if $_[0] =~ m/(.*)\.t\d+/;
     }
-    else {
-        if ( $_[0] =~ m/(.*)\.t\d+/ ) {
-            $candidate_gene{$1}{$_[0]} = 1;
-            $candidate_transcript_ID{$_[0]} = 1;
-            $filtered_reason_of_gene{$1}{$_[1]} = 1;
-            $filtered_reason_of_gene_num{$_[1]}{$1}{$_[0]} = 1;
-            #print STDERR "$1\t$_[0]\n";
-        }
+    if ( $_[0] =~ m/(.*)\.t\d+/ ) {
+        $candidate_gene{$1}{$_[0]} = 1;
+        $candidate_transcript_ID{$_[0]} = 1;
+        $filtered_reason_of_gene{$1}{$_[1]} = 1;
+        $filtered_reason_of_gene_num{$_[1]}{$1}{$_[0]} = 1;
+        #print STDERR "$1\t$_[0]\n";
     }
 }
 close IN;
@@ -112,24 +110,54 @@ close OUT;
 my %gene_info = &get_geneModels_from_GFF3("GFF3_extract_TranscriptID_for_filtering.$$.gff3");
 
 # 获取基因和转录本的对应关系
+# 统计验证成功的基因和转录本数量。gn: gene number; tn: transcript num
+my ($total_gn, $total_tn, $type1_gn, $type1_tn, $type2_gn, $type2_tn, $type2_gnOK, $type2_tnOK, $type3_gn, $type3_tn, $type3_gnOK, $type3_tnOK, $gnOK, $tnOK) = (0,0,0,0,0,0,0,0,0,0,0,0,0,0);
 my %transcriptID_of_gene;
 foreach my $gene_ID ( sort keys %gene_info ) {
+    $total_gn ++;
+    my ($transcript_num, $candidate_num, $OK_num) = (0 , 0);
     foreach my $mRNA_ID ( @{$gene_info{$gene_ID}{"mRNA_ID"}} ) {
         $transcriptID_of_gene{$gene_ID}{$mRNA_ID} = 1;
+        $total_tn ++;
+        $transcript_num ++;
+        $candidate_num ++ if exists $all_transcript_ID{$mRNA_ID};
+        $OK_num ++ if exists $valid_transcript_ID{$mRNA_ID};
+    }
+
+    if ( $candidate_num == 0 ) {
+        $type1_gn ++;
+        $type1_tn += $transcript_num;
+        $gnOK ++;
+        $tnOK ++;
+    }
+    elsif ( $transcript_num == $candidate_num ) {
+        $type3_gn ++;
+        $type3_tn += $candidate_num;
+        if ( $OK_num > 0 ) {
+            $type3_gnOK ++;
+            $type3_tnOK += $OK_num;
+            $gnOK ++;
+            $tnOK += $OK_num;
+        }
+    }
+    else {
+        $type2_gn ++;
+        $type2_tn += $candidate_num;
+        $gnOK ++;
+        $tnOK += $OK_num;
+        if ( $OK_num > 0 ) {
+            $type2_gnOK ++;
+            $type2_tnOK += $OK_num;
+        }
     }
 }
 
-# 统计有问题的基因及其转录本数量。
-my $num_of_all_gene_ID = 0; $num_of_all_gene_ID = %all_gene_ID;
-my $num_of_all_transcript_ID = 0; $num_of_all_transcript_ID = %all_transcript_ID;
-my $total_number = %gene_info;
-my $ok_gene_num = $total_number - $num_of_all_gene_ID;
-print STDERR "总共输入了 $total_number 个基因，有 $num_of_all_gene_ID 个基因的 $num_of_all_transcript_ID 个转录本可能存在问题，需要进行HMM或BLASTP验证。有 $ok_gene_num 个基因不需要验证。";
+print STDERR "总共输入了 $total_gn 个基因共 $total_tn 个转录本：\n";
+print STDERR "    有 $type1_gn 个基因的所有转录本共 $type1_tn 个都不需要进行HMM和BLASTP验证。\n";
+print STDERR "    有 $type2_gn 个基因的部分转录本共 $type2_tn 个需要进行HMM和BLASTP验证，其中 $type2_gnOK 个基因的 $type2_tnOK 个转录本通过了验证。\n";
+print STDERR "    有 $type3_gn 个基因的所有转录本共 $type3_tn 个都需要进行HMM和BLASTP验证，其中 $type3_gnOK 个基因的 $type3_tnOK 个转录本通过了验证。\n";
+print STDERR "    经过HMM或BLASTP过滤，结果中包含 $gnOK 个基因的 $tnOK 个mRNA转录本。\n\n";
 
-# 统计有比对结果的基因和转录本数量。
-my $num_of_valid_gene_ID = 0; $num_of_valid_gene_ID = %valid_gene_ID;
-my $num_of_valid_transcript_ID = 0; $num_of_valid_transcript_ID = %valid_transcript_ID;
-print STDERR "结果：有 $num_of_valid_gene_ID 个基因的 $num_of_valid_transcript_ID 转录本通过了验证。\n";
 
 ########## 4. 分析并统计需要过滤的基因 ##########
 # 统计lncRNA数量
@@ -178,7 +206,7 @@ foreach my $gene_ID ( keys %all_gene_ID ) {
 }
 my $num_of_gene_have_lncRNA = %gene_have_lncRNA;
 my $num_of_lncRNA_gene_ID_validating_failed = %lncRNA_gene_ID_validating_failed;
-print STDERR "其中，有 $num_of_candidate_lncRNA_gene_ID 个基因，其对应的 $num_of_candidate_lncRNA_transcript_ID 个转录本因 $CDS_Ratio_reason_name 原因可能属于lncRNA。对这些转录本对应的蛋白序列进行HMM或BLASTP验证。若不能比对成功，则认为是lncRNA。有 $num_of_gene_have_lncRNA 个基因包含lncRNA转录本；有 $num_of_lncRNA_gene_ID_validating_failed 个基因的问题转录本全是lncRNA且不因其它五种原因过滤。若后续分析过程中这些基因不包含其它正常mRNA，则认为这些基因是lncRNA基因，\n";
+#print STDERR "其中，有 $num_of_candidate_lncRNA_gene_ID 个基因，其对应的 $num_of_candidate_lncRNA_transcript_ID 个转录本因 $CDS_Ratio_reason_name 原因可能属于lncRNA。对这些转录本对应的蛋白序列进行HMM或BLASTP验证。若不能比对成功，则认为是lncRNA。有 $num_of_gene_have_lncRNA 个基因包含lncRNA转录本；有 $num_of_lncRNA_gene_ID_validating_failed 个基因的问题转录本全是lncRNA且不因其它五种原因过滤。若后续分析过程中这些基因不包含其它正常mRNA，则认为这些基因是lncRNA基因，\n";
 
 my $num_of_candidate_gene = 0; $num_of_candidate_gene = %candidate_gene;
 my $num_of_candidate_transcript_ID = 0; $num_of_candidate_transcript_ID = %candidate_transcript_ID;
@@ -189,22 +217,22 @@ foreach my $reason ( sort keys %filtered_reason_of_gene_num ) {
         $number1 ++;
         $number2 += keys %{$filtered_reason_of_gene_num{$reason}{$_}};
     }
-    $out_stats .= sprintf("    因 %-29s 原因对 %6s 个基因 %6s 个转录本的蛋白序列进行分析，有 %6s 个基因未能通过验证。\n", $reason, $number1, $number2, $num_of_filtered_reason{$reason});
+    $out_stats .= sprintf("    因 %-29s 原因对 %-6s个基因 %-6s个转录本的蛋白序列进行分析，有 %-6s个基因未能通过验证。\n", $reason, $number1, $number2, $num_of_filtered_reason{$reason});
 }
 my $num_of_filtered_gene_ID = 0; $num_of_filtered_gene_ID = %filtered_gene_ID;
-print STDERR "其中，有 $num_of_candidate_gene 个基因因如下原因需要考虑过滤。对其相应的 $num_of_candidate_transcript_ID 个转录本的蛋白序列进行HMM或BLASTP验证。结果：有 $num_of_filtered_gene_ID 个基因未能通过验证。\n";
+print STDERR "对 $num_of_candidate_gene 基因的 $num_of_candidate_transcript_ID 个转录本的蛋白序列进行HMM或BLASTP验证，有 $num_of_filtered_gene_ID 个基因未能通过验证：\n";
 print STDERR $out_stats;
 
 #open OUT, ">", "aa1"; foreach ( keys %valid_gene_ID ) { print OUT "$_\n"; } close OUT;
 #open OUT, ">", "aa2"; foreach ( keys %filtered_gene_ID ) { print OUT "$_\n"; } close OUT;
 #open OUT, ">", "aa3"; foreach ( keys %lncRNA_gene_ID_validating_failed ) { print OUT "$_\n"; } close OUT;
 
-print STDERR "\n########## 简洁统计 ##########\n";
-print STDERR "# 有 $num_of_all_gene_ID 个基因的 $num_of_all_transcript_ID 个转录本可能存在问题，需要进行HMM或BLASTP验证。结果表明：\n";
-print STDERR "#     有 $num_of_valid_gene_ID 个基因的 $num_of_valid_transcript_ID 转录本通过了验证，属于编码基因；\n";
-print STDERR "#     有 $num_of_filtered_gene_ID 个基因属于b-f五种原因被过滤的低质量基因；\n";
-print STDERR "#     有 $num_of_lncRNA_gene_ID_validating_failed 个基因的问题转录本全是lncRNA且不因其它五种原因过滤。\n";
-print STDERR "##############################\n";
+#print STDERR "\n########## 简洁统计 ##########\n";
+#print STDERR "# 有 $num_of_all_gene_ID 个基因的 $num_of_all_transcript_ID 个转录本可能存在问题，需要进行HMM或BLASTP验证。结果表明：\n";
+#print STDERR "#     有 $num_of_valid_gene_ID 个基因的 $num_of_valid_transcript_ID 转录本通过了验证，属于编码基因；\n";
+#print STDERR "#     有 $num_of_filtered_gene_ID 个基因属于b-f五种原因被过滤的低质量基因；\n";
+#print STDERR "#     有 $num_of_lncRNA_gene_ID_validating_failed 个基因的问题转录本全是lncRNA且不因其它五种原因过滤。\n";
+#print STDERR "##############################\n";
 
 
 ########## 5. 输出过滤后的结果 #########
@@ -213,10 +241,7 @@ my (%geneModelsID_coding, %geneModelsID_lncRNA1, %geneModelsID_lncRNA2, %geneMod
 foreach my $gene_ID ( sort keys %gene_info ) {
     # 判断基因是否属于 lncRNA 基因：（1）因五种原因被过滤且包含lncRNA的基因；（2）未因五种原因被过滤且所有转录本都属于lncRNA的基因。
     if ( exists $gene_have_lncRNA{$gene_ID} ) {
-        if ( exists $filtered_gene_ID{$gene_ID} ) {
-            $geneModelsID_lncRNA1{$gene_ID} = 1;
-        }
-        elsif ( exists $lncRNA_gene_ID_validating_failed{$gene_ID} )  {
+        if ( exists $lncRNA_gene_ID_validating_failed{$gene_ID} )  {
             my $if_lncRNA_gene = 1;
             foreach my $mRNA_ID ( @{$gene_info{$gene_ID}{"mRNA_ID"}} ) {
                 $if_lncRNA_gene = 0 unless exists $candidate_lncRNA_transcript_ID{$mRNA_ID};
@@ -227,6 +252,9 @@ foreach my $gene_ID ( sort keys %gene_info ) {
             else {
                 $geneModelsID_coding{$gene_ID} = 1;
             }
+        }
+        elsif ( exists $filtered_gene_ID{$gene_ID} ) {
+            $geneModelsID_lncRNA1{$gene_ID} = 1;
         }
         else {
             $geneModelsID_coding{$gene_ID} = 1;
@@ -322,10 +350,10 @@ my $number2 = %geneModelsID_lncRNA1;
 my $number3 = %geneModelsID_lncRNA2;
 my $number4 = %geneModelsID_lowQuality;
 my $number5 = $number2 + $number3;
-print STDERR "\n总共输入了 $total_number 个基因，其中不需要进行过滤的准确基因有 $ok_gene_num 个，对 $num_of_all_gene_ID 个基因进行过滤后，将所有基因分成了如下三类；
-编码基因有 $number1 个，保存到了 $out_prefix.coding.gff3 文件中；
-lncRNA基因有 $number5 个，保存到了 $out_prefix.lncRNA.gff3 文件中（同时因b-f五种原因过滤的有 $number2 个，所有转录本全是 lncRNA 的有 $number3  个）；
-低质量基因有 $number4 个，保存到了 $out_prefix.lowQuality.gff3 文件中。\n";
+print STDERR "\n总共输入了 $total_gn 个基因，对其中 $type3_gn 个基因进行HMM和BLASTP分析，有 $num_of_filtered_gene_ID 个基因被过滤，输出 $number1 个编码蛋白基因，$number5 个lncRNA基因， $number4 个低质量基因。
+    编码基因有 $number1 个，保存到了 $out_prefix.coding.gff3 文件中；
+    lncRNA基因有 $number5 个，保存到了 $out_prefix.lncRNA.gff3 文件中；
+    低质量基因有 $number4 个，保存到了 $out_prefix.lowQuality.gff3 文件中。\n";
 
 
 unlink "GFF3_extract_TranscriptID_for_filtering.$$.gff3";

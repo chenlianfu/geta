@@ -66,7 +66,7 @@ Parameters:
     输入一个参数配置文件路径，用于设置本程序调用的其它命令的详细参数。若不设置该参数，当基因组>1GB时，自动使用软件安装目录中的conf_for_big_genome.txt配置文件；当基因组<50MB时，自动使用软件安装目录中的conf_for_small_genome.txt配置文件；当基因组在50MB~1GB之间时，使用默认参数配置。此外，当软件预测的基因数量异常时往往要修改基因模型的过滤阈值。此时，通过修改软件安装目录中的conf_all_defaults.txt文件内容生成新的配置文件，并输入给本参来再次运行GETA流程。
 
     --BUSCO_lineage_dataset <string>    default: None
-    输入BUSCO数据库路径，则程序额外对基因预测得到的全基因组蛋白序列进行BUSCO分析。本参数支持输入多个BUSCO数据库路径，使用逗号进行分隔，则分别利用多个数据库进行分析。可以根据$software_dir/BUSCO_lineages_list.2021-12-14.txt文件内容选择合适的BUSCO数据库。BUSCO的结果输出到7.outputResults子目录下和gene_prediction.summary文件中。
+    输入BUSCO数据库路径，则程序额外对基因预测得到的全基因组蛋白序列进行BUSCO分析。本参数支持输入多个BUSCO数据库路径，使用逗号进行分隔，则分别利用多个数据库进行分析。可以根据$software_dir/BUSCO_lineages_list.2021-12-14.txt文件内容选择合适的BUSCO数据库。BUSCO的结果输出到7.output_gene_models子目录下和gene_prediction.summary文件中。
 
 [OUTPUT]
     --out_prefix <string>    default: out
@@ -606,8 +606,8 @@ $cmdString2 = "$bin_path/addHintRatioToAugustusResult $tmp_dir/4.evidence_gene_m
 # Step 6: CombineGeneModels
 print STDERR "\n============================================\n";
 print STDERR "Step 6: CombineGeneModels " . "(" . (localtime) . ")" . "\n";
-mkdir "$tmp_dir/6.combineGeneModels" unless -e "$tmp_dir/6.combineGeneModels";
-chdir "$tmp_dir/6.combineGeneModels"; print STDERR "\nPWD: $tmp_dir/6.combineGeneModels\n";
+mkdir "$tmp_dir/6.combine_gene_models" unless -e "$tmp_dir/6.combine_gene_models";
+chdir "$tmp_dir/6.combine_gene_models"; print STDERR "\nPWD: $tmp_dir/6.combine_gene_models\n";
 
 open OUT, ">", "geneModels.Readme" or die "Can not create file geneModels.Readme, $!";
 print OUT "geneModels.a.gff3\t第一轮整合后获得的以AUGUSTUS结果为主的有足够证据支持的基因模型。
@@ -749,20 +749,20 @@ $cmdString2 = "$bin_path/get_valid_geneModels $config{'get_valid_geneModels'} --
 # 6.9 再次对基因模型进行首尾填补。
 $cmdString = "$bin_path/fillingEndsOfGeneModels $config{'fillingEndsOfGeneModels'} $genome geneModels.h.coding.gff3 > geneModels.i.coding.gff3 2> fillingEndsOfGeneModels.2.log";
 
-&execute_cmds($cmdString, "$tmp_dir/6.combineGeneModels.ok");
+&execute_cmds($cmdString, "$tmp_dir/6.combine_gene_models.ok");
 
 
 # Step 7: OutPut
 print STDERR "\n============================================\n";
-print STDERR "Step 7: OutPut " . "(" . (localtime) . ")" . "\n";
-mkdir "$tmp_dir/7.outputResults" unless -e "$tmp_dir/7.outputResults";
-chdir "$tmp_dir/7.outputResults"; print STDERR "\nPWD: $tmp_dir/7.outputResults\n";
+print STDERR "Step 7: Output gene models " . "(" . (localtime) . ")" . "\n";
+mkdir "$tmp_dir/7.output_gene_models" unless -e "$tmp_dir/7.output_gene_models";
+chdir "$tmp_dir/7.output_gene_models"; print STDERR "\nPWD: $tmp_dir/7.output_gene_models\n";
 
 # 7.1 输出GFF3格式文件基因结构注释信息
-$cmdString1 = "$bin_path/GFF3Clear --GFF3_source GETA --gene_prefix $gene_prefix --gene_code_length 6 --genome $genome $tmp_dir/6.combineGeneModels/geneModels.i.coding.gff3 > $out_prefix.geneModels.gff3 2> /dev/null";
+$cmdString1 = "$bin_path/GFF3Clear --GFF3_source GETA --gene_prefix $gene_prefix --gene_code_length 6 --genome $genome $tmp_dir/6.combine_gene_models/geneModels.i.coding.gff3 > $out_prefix.geneModels.gff3 2> /dev/null";
 $cmdString2 = "$bin_path/GFF3_extract_bestGeneModels $out_prefix.geneModels.gff3 > $out_prefix.bestGeneModels.gff3 2> $out_prefix.AS_num_of_codingTranscripts.stats";
-$cmdString3 = "$bin_path/GFF3Clear --GFF3_source GETA --gene_prefix ${out_prefix}ncGene  --gene_code_length 6 --genome $genome --no_attr_add $tmp_dir/6.combineGeneModels/geneModels.h.lncRNA.gff3 > $out_prefix.geneModels_lncRNA.gff3 2> /dev/null";
-$cmdString4 = "$bin_path/GFF3Clear --GFF3_source GETA --gene_prefix ${out_prefix}lqGene --gene_code_length 6 --genome $genome --no_attr_add --coverage 0.6 $tmp_dir/6.combineGeneModels/geneModels.h.lowQuality.gff3 > $out_prefix.geneModels_lowQuality.gff3 2> /dev/null";
+$cmdString3 = "$bin_path/GFF3Clear --GFF3_source GETA --gene_prefix ${out_prefix}ncGene  --gene_code_length 6 --genome $genome --no_attr_add $tmp_dir/6.combine_gene_models/geneModels.h.lncRNA.gff3 > $out_prefix.geneModels_lncRNA.gff3 2> /dev/null";
+$cmdString4 = "$bin_path/GFF3Clear --GFF3_source GETA --gene_prefix ${out_prefix}lqGene --gene_code_length 6 --genome $genome --no_attr_add --coverage 0.6 $tmp_dir/6.combine_gene_models/geneModels.h.lowQuality.gff3 > $out_prefix.geneModels_lowQuality.gff3 2> /dev/null";
 
 &execute_cmds($cmdString1, $cmdString2, $cmdString3, $cmdString4, "1.output_GFF3.ok");
 
@@ -770,7 +770,7 @@ $cmdString4 = "$bin_path/GFF3Clear --GFF3_source GETA --gene_prefix ${out_prefix
 $cmdString1 = "$bin_path/gff3ToGtf.pl $genome $out_prefix.geneModels.gff3 > $out_prefix.geneModels.gtf 2> /dev/null";
 $cmdString2 = "$bin_path/gff3ToGtf.pl $genome $out_prefix.bestGeneModels.gff3 > $out_prefix.bestGeneModels.gtf 2> /dev/null";
 #$cmdString3 = "$bin_path/eukaryotic_gene_model_statistics.pl $out_prefix.bestGeneModels.gtf $genome $out_prefix &> $out_prefix.geneModels.stats";
-$cmdString3 = "$bin_path/gff3_to_sequences.pl --out_prefix $out_prefix --only_gene_sequences --only_coding_gene_sequences --only_first_isoform --genetic_code 1 $genome $out_prefix.geneModels.gff3 > $out_prefix.geneModels.stats";
+$cmdString3 = "$bin_path/gff3_to_sequences.pl --out_prefix $out_prefix --only_gene_sequences --only_coding_gene_sequences --only_first_isoform --genetic_code 1 $genome $out_prefix.geneModels.gff3 > $out_prefix.geneModels.stats 2> /dev/null";
 &execute_cmds($cmdString1, $cmdString2, $cmdString3, "2.output_GTF.ok");
 
 # 7.3 输出重复序列信息及其统计结果、RepeatModeler软件构建的重复序列数据库和masked genome sequence
@@ -788,6 +788,11 @@ if ( $RM_species or $RM_species_Dfam or $RM_species_RepBase or $RM_lib or (! $no
     }
 
     &execute_cmds($cmdString1, $cmdString2, $cmdString3, $cmdString4, "3.output_repeat.ok");
+}
+else {
+    unless ( -e "3.output_repeat.ok" ) {
+        open OUT, ">", "3.output_repeat.ok" or die $!; close OUT;
+    }
 }
 
 # 7.4 输出转录本、同源蛋白和Augustus的基因预测结果
@@ -857,143 +862,68 @@ if ( $BUSCO_lineage_dataset ) {
     }
 }
 
-# 7.6 输出GETA流程信息，用于追踪基因预测结果的可靠性
-open OUT, ">", "$out_prefix.gene_prediction.summary" or die "Can not create file $out_prefix.gene_prediction.summary, $!";
-# (1) 获取基因组重复序列统计信息
-if ( -e "$out_prefix.repeat.stats" ) {
-    my $input_file = "$out_prefix.repeat.stats";
-    open IN, $input_file or die "Error: Can not open file $input_file, $!";
-    while (<IN>) {
-        print OUT $_ if m/^Genome Size/;
-        print OUT "$_\n" if m/^Repeat Ratio/;
-    }
-    close IN;
-}
-# (2) 获取转录组二代测序数据和基因组的匹配率
-if ( -e "$tmp_dir/2.NGSReads_prediction/b.hisat2/hisat2.log" ) {
-    my $input_file = "$tmp_dir/2.NGSReads_prediction/b.hisat2/hisat2.log";
-    open IN, $input_file or die "Error: Can not open file $input_file, $!";
-    while (<IN>) {
-        print OUT "The alignment rate of RNA-Seq reads is: $1\n\n" if m/^(\S+) overall alignment rate/;
-    }
-    close IN;
-# (3) 获取转录组数据预测的基因数量的统计信息
-    my $input_file = "$tmp_dir/2.NGSReads_prediction/NGSReads_prediction.A.log";
-    print OUT "The statistics of gene models predicted by NGS Reads:\n";
-    print OUT `tail -n 1 $input_file`;
-    print OUT "\n";
-}
-# (4) 获取同源蛋白预测的基因数量的统计信息
-if ( $protein ) {
-    my $input_file = "$tmp_dir/3.homolog_prediction/homolog_prediction.log";
-    print OUT "The statistics of gene models predicted by homolog:\n";
-    print OUT `tail -n 3 $input_file`;
-}
-# (5) 获取AUGUSTUS基因预测数量
-if (-e "$tmp_dir/5.augustus/augustus.gff3") {
-    my $input_file = "$tmp_dir/5.augustus/augustus.gff3";
-    print OUT "The statistics of gene models predicted by AUGUSTUS:\n";
-    my $gene_num = `grep -P "\tgene" $input_file | wc -l`; chomp($gene_num);
-    print OUT "$gene_num genes were predicted by augustus.\n\n";
-}
-# (6) 获取AUGUSTUS Training的准确率信息和预测基因数量统计
-my $input_file = "$tmp_dir/5.augustus/accuary_of_AUGUSTUS_HMM_Training.txt";
-open IN, $input_file or die "Error: Can not open file $input_file, $!";
-print OUT <IN>;
-close IN;
-print OUT "\n";
-
-# (7) 获取基因预测整合过滤的统计信息
-print OUT "Statistics of the combination of 3 gene prediction methods and filtration of gene models:\n";
-open IN, "$tmp_dir/6.combineGeneModels/geneModels.a.gff3" or die "Can not open file $tmp_dir/6.combineGeneModels/geneModels.a.gff3, $!";
-my ($num_of_gene_a, $num_of_gene_b, $num_of_gene_c, $num_of_gene_d) = (0, 0, 0, 0);
-while (<IN>) {
-    $num_of_gene_a ++ if (m/\tgene\t/ && m/augustus/);
-    $num_of_gene_c ++ if (m/\tgene\t/ && m/transfrag/);
-    $num_of_gene_d ++ if (m/\tgene\t/ && m/genewise/);
-}
-close IN;
-open IN, "$tmp_dir/6.combineGeneModels/geneModels.b.gff3" or die "Can not open file $tmp_dir/6.combineGeneModels/geneModels.b.gff3, $!";
-while (<IN>) {
-    $num_of_gene_b ++ if m/\tgene\t/;
-}
-close IN;
-print OUT "(1) After first round of combination in which the AUGUSTUS results were mainly used, $num_of_gene_a genes models were supported by enough evidences, $num_of_gene_c genes models were come from transcript, $num_of_gene_d genes models were come from homolog, and $num_of_gene_b genes did not supported by enough evidences.\n";
-
-open IN, "$tmp_dir/6.combineGeneModels/picked_evidence_geneModels.log" or die "Can not open file $tmp_dir/6.combineGeneModels/picked_evidence_geneModels.log, $!";
-my ($number1, $number2, $number3) = (0, 0, 0);
-$_ = <IN>; $number1 = $1 if m/(\d+)/;
-<IN>; <IN>; <IN>;
-$_ = <IN>; $number2 = $1 if m/^.*?\d+.*?(\d+)/;
-$_ = <IN>; $number3 = $1 if m/(\d+)/;
-close IN;
-print OUT "(2) In the second round of combination, $number1 evidence gene models were processed, and $number3 accurate gene models were picked out and replaced the genes predicted by AUGUSTUS, $number2 of which had the same CDS structures with the gene models predicted by AUGUSTUS.\n";
-
-open IN, "$tmp_dir/6.combineGeneModels/fillingEndsOfGeneModels.1.log" or die "Can not open file $tmp_dir/6.combineGeneModels/fillingEndsOfGeneModels.1.log, $!";
-my @line = <IN>;
-close IN;
-my @number1 = $line[-2] =~ m/(\d+)/g;
-my @number2 = $line[-1] =~ m/(\d+)/g;
-print OUT "(3) After the two steps of combination, $number1[0] gene models with enough evidence supported were predicted. $number1[1] gene models were complete; $number1[2] gene models were uncomplete. $number2[0] uncomplete gene models can be filled to complete, and $number2[1] can not.\n";
-
-open IN, "$tmp_dir/6.combineGeneModels/get_valid_geneModels.log" or die "Can not open file $tmp_dir/6.combineGeneModels/get_valid_geneModels.log, $!";
-$_ = <IN>; 
-close IN;
-my @number = m/(\d+)/g;
-print OUT "(4) HMM and BLASTP validation were performed to $number[2] protein sequences of $number[1] genes, and $number[5] protein sequences of $number[4] genes had valid alignment results. There are $number[3] accurate gene models which did not need validation.\n";
-
-open IN, "$out_prefix.geneModels.gff3" or die "Can not open file $out_prefix.geneModels.gff3, $!";
-my (%gene_ID, %gene2transcript, $num_augustus, $num_transfrag, $num_genewise);
-while (<IN>) {
-    if (m/\tgene\t.*ID=([^;]+)/) {
-        $gene_ID{$1} = 1;
-        if (m/Source=([a-zA-Z]+)/) {
-            $num_augustus ++ if $1 eq 'augustus';
-            $num_transfrag ++ if $1 eq 'transfrag';
-            $num_genewise ++ if $1 eq 'genewise';
+# 7.6 输出GETA基因基因预测的各项流程统计信息，用于追踪基因预测结果的可靠性
+unless ( -e "$tmp_dir/7.output_gene_models.ok" ) {
+    open OUT, ">", "$out_prefix.gene_prediction.summary" or die "Can not create file $out_prefix.gene_prediction.summary, $!";
+    # (1) 获取基因组重复序列统计信息
+    if ( -e "$out_prefix.repeat.stats" ) {
+        my $input_file = "$out_prefix.repeat.stats";
+        open IN, $input_file or die "Error: Can not open file $input_file, $!";
+        while (<IN>) {
+            print OUT $_ if m/^Genome Size/;
+            print OUT "$_\n" if m/^Repeat Ratio/;
         }
+        close IN;
     }
-    elsif ( m/ID=([^;]+).*Parent=([^;]+)/ && exists $gene_ID{$2} ) {
-        $gene2transcript{$2}{$1} = 1;
+    # (2) 获取转录组二代测序数据和基因组的匹配率
+    if ( -e "$tmp_dir/2.NGSReads_prediction/b.hisat2/hisat2.log" ) {
+        my $input_file = "$tmp_dir/2.NGSReads_prediction/b.hisat2/hisat2.log";
+        open IN, $input_file or die "Error: Can not open file $input_file, $!";
+        while (<IN>) {
+            print OUT "The alignment rate of RNA-Seq reads is: $1\n\n" if m/^(\S+) overall alignment rate/;
+        }
+        close IN;
+    # (3) 获取转录组数据预测的基因数量的统计信息
+        my $input_file = "$tmp_dir/2.NGSReads_prediction/NGSReads_prediction.A.log";
+        print OUT "The statistics of gene models predicted by NGS Reads:\n";
+        print OUT `tail -n 1 $input_file`;
+        print OUT "\n";
     }
-}
-close IN;
-my $as_gene_num = 0;
-foreach ( keys %gene2transcript ) {
-    my @as_gene = keys %{$gene2transcript{$_}};
-    $as_gene_num ++ if @as_gene >= 2;
-}
-my $num_of_gene_ID = 0; $num_of_gene_ID = %gene_ID;
-print OUT "(5) Finally, $num_of_gene_ID coding gene models were obtained, $as_gene_num of which had alternative splicing, $num_augustus gene models were come from AUGUSTUS prediction, $num_transfrag gene models were come from transcript, $num_genewise gene models were come from homolog.\n";
-
-my ($num_of_gene1, $num_of_gene2, $num_of_gene3) = (0, 0, 0);
-open IN, "$out_prefix.geneModels_lncRNA.gff3" or die "Can not open file $out_prefix.geneModels_lncRNA.gff3, $!";
-while (<IN>) {
-    if (m/\tgene\t.*ID=([^;]+)/) {
-        $num_of_gene1 ++;
+    # (4) 获取同源蛋白预测的基因数量的统计信息
+    if ( $protein ) {
+        my $input_file = "$tmp_dir/3.homolog_prediction/homolog_prediction.log";
+        print OUT "The statistics of gene models predicted by homolog:\n";
+        print OUT `tail -n 3 $input_file`;
     }
-}
-close IN;
-open IN, "$out_prefix.geneModels_lowQuality.gff3" or die "Can not open file $out_prefix.geneModels_lowQuality.gff3, $!";
-while (<IN>) {
-    if (m/\tgene\t.*ID=([^;]+)/) {
-        $num_of_gene2 ++;
+    # (5) 获取AUGUSTUS基因预测数量
+    if (-e "$tmp_dir/5.augustus/augustus.gff3") {
+        my $input_file = "$tmp_dir/5.augustus/augustus.gff3";
+        print OUT "The statistics of gene models predicted by AUGUSTUS:\n";
+        my $gene_num = `grep -P "\tgene" $input_file | wc -l`; chomp($gene_num);
+        print OUT "$gene_num genes were predicted by augustus.\n\n";
     }
-}
-close IN;
-$num_of_gene3 = $num_of_gene1 + $num_of_gene2;
-print OUT "(6) $num_of_gene3 gene models were filtered, and $num_of_gene1 of which had lncRNA transcripts.\n";
-print OUT "\n";
-
-# (8) 获取BUSCO分析结果
-if ( -e "$tmp_dir/7.outputResults/BUSCO_results.txt" ) {
-    my $input_file = "$tmp_dir/7.outputResults/BUSCO_results.txt";
+    # (6) 获取AUGUSTUS Training的准确率信息和预测基因数量统计
+    my $input_file = "$tmp_dir/5.augustus/accuary_of_AUGUSTUS_HMM_Training.txt";
     open IN, $input_file or die "Error: Can not open file $input_file, $!";
     print OUT <IN>;
     close IN;
     print OUT "\n";
+    
+    # (7) 获取基因预测整合过滤的统计信息
+    print OUT &statistics_combination();
+
+    # (8) 获取BUSCO分析结果
+    if ( -e "$tmp_dir/7.output_gene_models/BUSCO_results.txt" ) {
+        my $input_file = "$tmp_dir/7.output_gene_models/BUSCO_results.txt";
+        open IN, $input_file or die "Error: Can not open file $input_file, $!";
+        print OUT <IN>;
+        close IN;
+        print OUT "\n";
+    }
+    close OUT;
+
+    open OUT, ">" , "$tmp_dir/7.output_gene_models.ok" or die $!; close OUT;
 }
-close OUT;
 
 # 7.6 删除中间文件
 if ( $delete_unimportant_intermediate_files ) {
@@ -1006,20 +936,114 @@ if ( $delete_unimportant_intermediate_files ) {
     # 删除 3.homolog_prediction 文件夹下的数据
     push @cmdString, "rm -rf $tmp_dir/3.homolog_prediction/a.MMseqs2CalHits $tmp_dir/3.homolog_prediction/b.hitToGenePrediction $tmp_dir/3.homolog_prediction/c.getGeneModels";
     # 删除 5.augustus 文件夹下的数据
-    push @cmdString, "rm -rf $tmp_dir/5.augustus/aug_para_with_hints $tmp_dir/5.augustus/training";
-    # 删除 6.combineGeneModels 文件夹下的数据
-    push @cmdString, "rm -rf $tmp_dir/6.combineGeneModels/combineGeneModels_tmp $tmp_dir/6.combineGeneModels/*tmp";
-    # 删除 7.outputResults 文件夹下的数据
-    push @cmdString, "rm -rf $tmp_dir/7.outputResults/BUSCO*";
+    push @cmdString, "rm -rf $tmp_dir/5.augustus/aug_para_with_hints";
+    # 删除 6.combine_gene_models 文件夹下的数据
+    push @cmdString, "rm -rf $tmp_dir/6.combine_gene_models/combineGeneModels_tmp $tmp_dir/6.combine_gene_models/*tmp";
+    # 删除 7.output_gene_models 文件夹下的数据
+    push @cmdString, "rm -rf $tmp_dir/7.output_gene_models/BUSCO_OUT* rm -rf $tmp_dir/7.output_gene_models/busco_downloads";
 
     push @cmdString, "6.rm_unimportant_intermediate_files.ok";
     &execute_cmds(@cmdString);
 }
 
+print "\n============================================\n";
+my $input_file = "$out_prefix.gene_prediction.summary";
+open IN, $input_file or die "Error: Can not open file $input_file, $!";
+print <IN>;
+close IN;
 
 print STDERR "\n============================================\n";
 print STDERR "GETA complete successfully! " . "(" . (localtime) . ")" . "\n\n";
 
+
+sub statistics_combination {
+    my $output;
+
+    $output .= "In the process of integrating and filtering the gene models predicted by NGS reads, homolog, and AUGUSTUS, the corresponding statistical data were shown as follows:\n";
+
+    # （1）分析NGS reads、homolog和AUGUSTUS三种方法预测的基因数量，合并后的基因数量。
+    my ($augustus_gene_num, $NGSreads_gene_num, $homolog_gene_num) = (0, 0, 0);
+    $augustus_gene_num = `grep -P "\tgene\t" $tmp_dir/5.augustus/augustus.gff3 | wc -l`;
+    $NGSreads_gene_num = `grep -P "\tgene\t" $tmp_dir/2.NGSReads_prediction/transfrag.genome.gff3 | wc -l`;
+    $homolog_gene_num = `grep -P "\tgene\t" $tmp_dir/3.homolog_prediction/homolog_prediction.gff3 | wc -l`;
+    chomp($augustus_gene_num); chomp($NGSreads_gene_num); chomp($homolog_gene_num);
+    my $input_file = "$tmp_dir/6.combine_gene_models/geneModels.a.gff3";
+    open IN, $input_file or die "Error: Can not open file $input_file, $!";
+    my ($num_of_gene_a, $num_of_gene_b, $num_of_gene_c, $num_of_gene_d, $num_of_gene_all) = (0, 0, 0, 0, 0);
+    while (<IN>) {
+        $num_of_gene_a ++ if (m/\tgene\t/ && m/augustus/);
+        $num_of_gene_c ++ if (m/\tgene\t/ && m/transfrag/);
+        $num_of_gene_d ++ if (m/\tgene\t/ && m/genewise/);
+    }
+    close IN;
+
+    $input_file = "$tmp_dir/6.combine_gene_models/geneModels.b.gff3";
+    open IN, $input_file or die "Error: Can not open file $input_file, $!";
+    while (<IN>) {
+        $num_of_gene_b ++ if m/\tgene\t/;
+    }
+    close IN;
+
+    $num_of_gene_all = $num_of_gene_a + $num_of_gene_b + $num_of_gene_c + $num_of_gene_d;
+    $output .= "(1) We combined the $NGSreads_gene_num, $homolog_gene_num, and $augustus_gene_num gene models predicted by NGS reads, homolog, and AUGUSTUS, respectively. When gene models predicted by different methods overlapped, AUGUSTUS result was retained first, followed by NGS reads, and finally homolog. After the first round of combination, a total of $num_of_gene_all gene models were obtained, including $num_of_gene_a AUGUSTUS gene models with sufficient evidence, $num_of_gene_c gene models predicted by NGS reads, $num_of_gene_d gene models predicted by homolog, and $num_of_gene_b gene models predicted by AUGUSTUS but lacking evidence.\n";
+    
+    # （2）分析NGS reads和homolog合并后的基因数量，替换AUGUSTUS基因模型的数量，。
+    $input_file = "$tmp_dir/4.evidence_gene_models/evidence_gene_models.log";
+    open IN, $input_file or die "Error: Can not open file $input_file, $!";
+    my ( $evidence_gene_models_num_all, $evidence_gene_models_num_NGSReads, $evidence_gene_models_num_homolog ) = (0, 0, 0);
+    while (<IN>) {
+        $evidence_gene_models_num_all = $1 if m/Total (\d+) gene models were divided/;
+        ($evidence_gene_models_num_NGSReads, $evidence_gene_models_num_homolog) = ($1, $2) if m/ene models predicted by NGSReads: (\d+); predicted by Homolog: (\d+)/;
+    }
+    close IN;
+
+    $input_file = "$tmp_dir/6.combine_gene_models/picked_evidence_geneModels.log";
+    open IN, $input_file or die "Error: Can not open file $input_file, $!";
+    my ($evidence_gene_models_num_picked, $evidence_gene_models_num_consistent) = (0, 0);
+    <IN>; <IN>; <IN>; <IN>;
+    $_ = <IN>; $evidence_gene_models_num_consistent = $1 if m/^.*?\d+.*?\d+.*?(\d+)/;
+    $_ = <IN>; $evidence_gene_models_num_picked = $1 if m/(\d+)/;
+    close IN;
+
+    my $gene_models_supported_by_evidence_num = `grep -P "\tgene\t" $tmp_dir/6.combine_gene_models/geneModels.d.gff3 | wc -l`;
+    chomp($gene_models_supported_by_evidence_num);
+
+    $output .= "(2) After combining the gene models predicted by NGS reads and homologs, $evidence_gene_models_num_all evidence gene models were produced, of which $evidence_gene_models_num_NGSReads came from NGS reads and $evidence_gene_models_num_homolog from homologs. In the second round of combination, $evidence_gene_models_num_picked evidence gene models with long CDS lengths were used to replace the gene models of the previous step. There were $evidence_gene_models_num_consistent evidence gene models with the same CDS structures as predicted by AUGUSTUS at the time of replacement. Finally, $gene_models_supported_by_evidence_num gene models with sufficient evidence were obtained.\n";
+    
+    # （3）分析HMM和BLASTP进行验证的基因状况
+    $input_file = "$tmp_dir/6.combine_gene_models/get_valid_geneModels.log";
+    open IN, $input_file or die "Error: Can not open file $input_file, $!";
+    $_ = join "", <IN>; 
+    close IN;
+    my @number = m/(\d+) 个/g;
+    $output .= "(3) The HMM and BLASTP algorithms were used to filter transcripts from the predicted gene models. Low confidence mRNAs, such as CDS length less than 600bp or CDSs base proportion less than 30% of exons, had their protein sequences aligned to HMM or BLASTP databases and would be retained if a match was found in any database. An analysis was conducted on $gene_models_supported_by_evidence_num gene models that had evidence support and $num_of_gene_b that did not. Of these, $number[-8] low-confidence gene models were extracted for HMM and BLASTP test, resulting in $number[-2] genes identified as lncRNA, $number[-1] genes filtered as low-quality, and $number[-6] effective gene models remaining after filtering. \n";
+    
+    open IN, "$out_prefix.geneModels.gff3" or die "Can not open file $out_prefix.geneModels.gff3, $!";
+    my (%gene_ID, %gene2transcript, $num_augustus, $num_transfrag, $num_genewise);
+    while (<IN>) {
+        if (m/\tgene\t.*ID=([^;]+)/) {
+            $gene_ID{$1} = 1;
+            if (m/Source=([a-zA-Z]+)/) {
+                $num_augustus ++ if $1 eq 'augustus';
+                $num_transfrag ++ if $1 eq 'transfrag';
+                $num_genewise ++ if $1 eq 'genewise';
+            }
+        }
+        elsif ( m/ID=([^;]+).*Parent=([^;]+)/ && exists $gene_ID{$2} ) {
+            $gene2transcript{$2}{$1} = 1;
+        }
+    }
+    close IN;
+    my $as_gene_num = 0;
+    foreach ( keys %gene2transcript ) {
+        my @as_gene = keys %{$gene2transcript{$_}};
+        $as_gene_num ++ if @as_gene >= 2;
+    }
+    my $num_of_gene_ID = 0; $num_of_gene_ID = %gene_ID;
+    $output .= "(4) Finally, the gene models overlapping in the CDS region were de-redundant, achieving $num_of_gene_ID gene models, including $num_augustus predicted by AUGUSTUS, $num_transfrag from NGS reads, and $num_genewise from homologs. In addition,  alternative splicing was found in $as_gene_num gene models.\n\n";
+    
+    return $output;
+}
 
 sub detecting_dependent_softwares {
     # 检测依赖的软件
@@ -1200,7 +1224,7 @@ Parameters:
     Enter a parameter profile path to set the detailed parameters of other commands called by this program. If this parameter is left unset, When the genome size exceeds 1GB, the software installation directory's conf_for_big_genome.txt configuration file is automatically used. conf_for_small_genome.txt for genome size < 50MB, conf_all_defaults.txt for genome size between 50MB and 1GB.  Additionally, the thresholds for filtering the gene models typically need to be adjusted when GETA predicts an abnormally high number of genes. Then, the GETA pipeline can be rerun by setting this parameter to a new configuration file that is made by modifying the contents of the conf_all_defaults.txt file in the software installation directory.
 
     --BUSCO_lineage_dataset <string>    default: None
-    Enter one or more BUSCO databases, the program will additionally perform BUSCO analysis on the whole genome protein sequences obtained by gene prediction. This parameter supports the input of multiple BUSCO databases, separated by commas. The information contained in the $software_dir/BUSCO_lineages_list.2021-12-14.txt file can be used to choose the proper BUSCO databases. Finally, the BUSCO results are exported to the 7.outputResults subdirectory and to the gene_prediction.summary file.
+    Enter one or more BUSCO databases, the program will additionally perform BUSCO analysis on the whole genome protein sequences obtained by gene prediction. This parameter supports the input of multiple BUSCO databases, separated by commas. The information contained in the $software_dir/BUSCO_lineages_list.2021-12-14.txt file can be used to choose the proper BUSCO databases. Finally, the BUSCO results are exported to the 7.output_gene_models subdirectory and to the gene_prediction.summary file.
 
 [OUTPUT]
     --out_prefix <string>    default: out

@@ -74,7 +74,7 @@ my %evidenceGeneModels = &get_geneModels_from_GFF3(\@lines);
 close IN;
 
 my %picked_genes;
-my ($total_evidence_gene_num, %pick_num1, %pick_num2, %pick_num3, %pick_num4, %pick_num5);
+my ($total_evidence_gene_num, %pick_num1, %pick_num2, %pick_num3, %pick_num4, %pick_num5, %pick_num6);
 foreach my $gene_ID ( keys %evidenceGeneModels ) {
     $total_evidence_gene_num ++;
     # 检测基因的CDS区间，得到重叠的ref基因信息
@@ -136,6 +136,7 @@ foreach my $gene_ID ( keys %evidenceGeneModels ) {
                         $picked_genes{$gene_ID} = 1;
                         $pick_num4{$gene_ID} ++;
                         $pick_num5{$gene_ID} ++ if $CDS_region eq $ref_CDS_region;
+                        $pick_num6{$gene_ID} ++ if ($CDS_region eq $ref_CDS_region && $ref_gene_ID =~ m/augustus/);
                         #print STDERR "TEST04: $gene_ID\t$ref_gene_ID\t$ratio1\t$ratio4\t$CDS_length\t$ref_CDS_length\n";
                     }
                 }
@@ -171,19 +172,20 @@ foreach my $gene_ID (keys %picked_genes) {
     print "\n";
 }
 
-my ($pick_num1, $pick_num2, $pick_num3, $pick_num4, $pick_num5) = (0, 0, 0, 0);
+my ($pick_num1, $pick_num2, $pick_num3, $pick_num4, $pick_num5, $pick_num6) = (0, 0, 0, 0, 0);
 $pick_num1 = keys %pick_num1;
 $pick_num2 = keys %pick_num2;
 $pick_num3 = keys %pick_num3;
 $pick_num4 = keys %pick_num4;
 $pick_num5 = keys %pick_num5;
+$pick_num6 = keys %pick_num6;
 my $pick_num_total = keys %picked_genes;;
 $overlap_ratio = $overlap_ratio * 100;
 print STDERR "对 $total_evidence_gene_num 个evidence基因模型进行分析，结果如下：
 有 $pick_num1 个evidence基因模型和ref基因没有任何重叠；
 有 $pick_num2 个evidence基因模型，其CDS区域低于 $overlap_ratio% 和ref基因重叠；
 有 $pick_num3 个evidence基因模型，其CDS区域不低于 $overlap_ratio% 和ref基因重叠，且其CDS范围(首尾CDS坐标差) > ref基因模型CDS范围 * $Ratio1 或 CDS总长度 > 重叠的ref基因模型CDS总长度 * $Ratio2; 
-有 $pick_num4 个完整的evidence基因模型(其中 $pick_num5 个evidnece基因模型的CDS信息和ref基因模型完全一致)，其CDS区域不低于 $overlap_ratio% 和ref基因重叠，且其CDS范围(首尾CDS坐标差) > ref基因模型CDS范围 * $Ratio3 或 CDS总长度 > 重叠的ref基因模型CDS总长度 * $Ratio4；
+有 $pick_num4 个完整的evidence基因模型(其中 $pick_num5 个evidnece基因模型的CDS信息和ref基因模型完全一致，$pick_num6 个evidnece基因模型的CDS信息和ref中AUGUSTUS预测基因模型完全一致)，其CDS区域不低于 $overlap_ratio% 和ref基因重叠，且其CDS范围(首尾CDS坐标差) > ref基因模型CDS范围 * $Ratio3 或 CDS总长度 > 重叠的ref基因模型CDS总长度 * $Ratio4；
 共计 $pick_num_total 个evidence基因模型被挑选出来。由于本程序能分析可变剪接的信息，前四个值之和可能大于最后的总数。\n";
 
 
