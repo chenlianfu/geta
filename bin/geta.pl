@@ -1364,6 +1364,20 @@ sub choose_config_file {
 
     # 程序默认使用 conf_all_defaults.txt 配置文件
     my $config_file = "$software_dir/conf_all_defaults.txt";
+    # 读取默认配置文件
+    open IN, $config_file or die "Error: Can not open file $config_file, $!\n";
+    my $tag;
+    while (<IN>) {
+        s/#.*//; next if m/^\s*$/; s/^\s+//; s/\s*$/ /;
+        if (/\[(.*)\]/) {
+            $tag = $1; delete $config{$1};
+        }
+        else {
+            $config{$tag} .= $_;
+        }
+    }
+    close IN;
+
     # 当基因组较大或较小时，自动选择相应的配置文件
     if ( $genomeSize > 1000000000 ) {
         $config_file = "$software_dir/conf_for_big_genome.txt";
@@ -1378,17 +1392,12 @@ sub choose_config_file {
     open IN, $config_file or die "Can not open file $config_file, $!\n";
     my $tag;
     while (<IN>) {
-        s/#.*//;
-        next if m/^\s*$/;
-        s/^\s+//;
-        s/\s*$/ /;
+        s/#.*//; next if m/^\s*$/; s/^\s+//; s/\s*$/ /;
         if (/\[(.*)\]/) {
-            $tag = $1;
-            delete $config{$1};
+            $tag = $1; delete $config{$1};
         }
         else {
-            if ( $config{$tag} ) { $config{$tag} .= " $_"; }
-            else { $config{$tag} = $_; }
+            $config{$tag} .= $_;
         }
     }
     close IN;

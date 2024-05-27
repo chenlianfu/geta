@@ -1,14 +1,13 @@
-## Set the detail parameters of the modules during GETA pipeline through this config file.
-# the parameters set below will rewrite the default threashold.
-# the template conf_all_defaults.txt in GETA software was the default values.
-# the anotated lines start with # will be ingnored. the blank lines will be ignored.
+# 本配置文件用于给GETA程序运行中调用的各项命令提供其详细参数。位于GETA软件目录下的conf_all_defaults.txt文件是GETA程序运行所必须的，为GETA提供了各项命令默认的参数信息，缺少则程序无法运行。
 
 [para_RepeatMasker]
 --min_coverge_ratio 0.25
+# GETA调用para_RepeatMasker命令进行并行化RepeatMasker分析，能加快对基因组的重复序列分析速度。--min_coverge_ratio参数表示当鉴定的基因组序列和目标转座子序列重叠超过指定阈值，才认可其为转座子序列并进行屏蔽。
 
 [trimmomatic]
 TruSeq3-PE-2.fa:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:50 TOPHRED33
 # In the module NGSReads_prediction, trimmomatic was invoked to process the NGS reads.
+# GETA调用NGSReads_prediction程序进行分析时，使用了trimmomatic进行转录组数据的质量控制。
 
 [hisat2]
 --min-intronlen 20 --max-intronlen 20000 --dta --score-min L,0.0,-0.4 -k 1
