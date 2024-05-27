@@ -309,3 +309,60 @@ source ~/.bashrc
 wget https://download.oracle.com/java/20/latest/jdk-20_linux-x64_bin.tar.gz -P ~/software/
 tar zxf /home/train/software/jdk-20_linux-x64_bin.tar.gz -C /opt/sysoft/
 echo 'PATH=/opt/sysoft/jdk-20.0.1/bin:$PATH' >> /home/train/.bashrc
+
+
+## 14. Installing BUSCO (https://busco.ezlab.org/)
+wget https://gitlab.com/ezlab/busco/-/archive/5.4.7/busco-5.4.7.tar.gz -P ~/software/
+tar zxf ~/software/busco-5.4.7.tar.gz -C /opt/biosoft
+
+# installing Python modules: biopython pandas
+pip3 install biopython pandas -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# installing BBTools (https://jgi.doe.gov/data-and-tools/software-tools/bbtools/)
+wget https://sourceforge.net/projects/bbmap/files/BBMap_39.01.tar.gz -P ~/software/
+tar zxf ~/software/BBMap_39.01.tar.gz -C /opt/biosoft
+echo 'PATH=$PATH:/opt/biosoft/bbmap/' >> ~/.bashrc
+source ~/.bashrc
+
+# installing NCBI-Blast+, Augustus and R (Already satisfied)
+
+# installing meaeuk (https://github.com/soedinglab/metaeuk)
+wget https://github.com/soedinglab/metaeuk/releases/download/6-a5d39d9/metaeuk-linux-avx2.tar.gz -P ~/software/
+tar zxf ~/software/metaeuk-linux-avx2.tar.gz -C /opt/biosoft/
+echo 'PATH=$PATH:/opt/biosoft/metaeuk/bin/' >> ~/.bashrc
+source ~/.bashrc
+
+# installing Prodigal (https://github.com/hyattpd/Prodigal)
+wget https://github.com/hyattpd/Prodigal/archive/refs/tags/v2.6.3.tar.gz -O ~/software/Prodigal-2.6.3.tar.gz
+tar zxf ~/software/Prodigal-2.6.3.tar.gz -C /opt/biosoft
+cd /opt/biosoft/Prodigal-2.6.3 && make -j 4
+echo 'PATH=$PATH:/opt/biosoft/Prodigal-2.6.3/' >> ~/.bashrc
+source ~/.bashrc
+
+# installing sepp (https://github.com/smirarab/sepp/)
+wget https://github.com/smirarab/sepp/archive/refs/tags/4.5.1.tar.gz -O ~/software/sepp-4.5.1.tar.gz
+tar zxf ~/software/sepp-4.5.1.tar.gz && cd sepp-4.5.1
+pip3 install dendropy
+/opt/sysoft/Python-3.11.4/bin/python3 setup.py config
+/opt/sysoft/Python-3.11.4/bin/python3 setup.py install
+cd .. && rm -rf sepp-4.5.1
+
+# configuring BUSCO
+cd /opt/biosoft/busco-5.4.7
+python3 setup.py install
+perl -i -e '$/ = "\n\n"; while (<>) { if (m/command\s*=\s*(\S+)/) { my $path = `which $1`; $path =~ s/\s*$//; if ($path) { $path =~ s/(.*\/).*/$1/; s/path\s*=.*/path = $path/; } } print; }' config/config.ini
+echo 'PATH=/opt/biosoft/busco-5.4.7/bin:$PATH
+export BUSCO_CONFIG_FILE=/opt/biosoft/busco-5.4.7/config/config.ini' >>  ~/.bashrc
+source ~/.bashrc
+
+# installing BUSCO Version 5 Databases
+mkdir -p /opt/biosoft/bioinfomatics_databases/BUSCO_V5
+cd /opt/biosoft/bioinfomatics_databases/BUSCO_V5
+wget https://busco-data.ezlab.org/v5/data/information/lineages_list.2021-12-14.txt.tar.gz -P ~/software/
+tar zxf ~/software/lineages_list.2021-12-14.txt.tar.gz
+perl -e 'open IN, $ARGV[0]; while (<IN>) { last if m/^\s*eukaryota_odb10/; } $info{"eukaryota_odb10"} = 1; while (<IN>) { $info{$1} = 1 if m/-\s*(\S+)/; } my $curl = `curl https://busco-data.ezlab.org/v5/data/lineages/`; foreach (keys %info) { print "wget -c https://busco-data.ezlab.org/v5/data/lineages/$1\n" if $curl =~ m/href=\"($_.*?.tar.gz)/;; }' lineages_list.2021-12-14.txt > command.wget.list
+ParaFly -c command.wget.list -CPU 5
+for i in `ls *.tar.gz`
+do
+    tar zxf $i
+done
