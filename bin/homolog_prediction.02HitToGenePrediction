@@ -4,11 +4,13 @@ use strict;
 use Getopt::Long;
 use Cwd qw/abs_path getcwd cwd/;
 
+my $bin_path = dirname($0);
+
 my $usage = <<USAGE;
 Usage:
     $0 [options] homolog_proteins.fasta genome.fasta out.filteredHits.tab > out.geneModels.tab
 
-    程序根据MMseqs2的结果文件out.filteredHits.tab，对各个基因区域调用exonerate/genewise/gth等软件进行基因预测(调用ParaFly程序进行并行化运算)。然后，对各个基因预测软件的结果进行过滤和排序，在标准输出中给出表格格式的基因模型信息。
+    程序根据MMseqs2的结果文件out.filteredHits.tab，对各个基因区域调用exonerate/genewise/gth等软件进行基因预测(调用parafly程序进行并行化运算)。然后，对各个基因预测软件的结果进行过滤和排序，在标准输出中给出表格格式的基因模型信息。
     本程序对输入文件out.filteredHits.tab的格式要求，相比于常规的BLAST表格12列输出结果：（1）第3列表示多个HSPs累积的Identity值；额外多出的最后一列是两个使用中划线连接的坐标数据，表示同源蛋白所在的基因区域。
     对各个基因预测软件的结果进行过滤：过滤protein长度过低，对同源蛋白覆盖过低的基因模型；过滤终止密码子过多的基因模型。
     对各个基因预测软件的结果进行排序：(1) 按对同源蛋白的匹配长度从大到小; (2) 按CDS内部的终止密码子数量从小到大；(3) 按得到的基因模型CDS总长从大到小；(4) 按对同源蛋白比对的Evalue值从小到大；(5) 按对同源蛋白比对的Score值从大到小；(6) 按对同源蛋白比对的Identity值从大到小；(7) 按基因预测软件gth/exonerate/genewise的顺序；(8) 按输出信息的ASCII字符顺序。
@@ -269,7 +271,7 @@ if ( exists $method{"exonerate"}  && ! -e "$tmp_dir/1.create_CMD_exonerate.ok" )
 # 并行化运行基因预测命令genewise/gth/exonerate
 my $cmdString;
 if ( exists $method{"genewise"} ) {
-    $cmdString = "ParaFly -c $tmp_dir/command.genewise.list -CPU $cpu &> /dev/null";
+    $cmdString = "$bin_path/parafly -c $tmp_dir/command.genewise.list -CPU $cpu &> /dev/null";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString");
     # 检测运行成功的命令超过90%，则让程序继续运行。
@@ -289,7 +291,7 @@ if ( exists $method{"genewise"} ) {
     }
 }
 if ( exists $method{"gth"} ) {
-    $cmdString = "ParaFly -c $tmp_dir/command.gth.list -CPU $cpu &> /dev/null";
+    $cmdString = "$bin_path/parafly -c $tmp_dir/command.gth.list -CPU $cpu &> /dev/null";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString");
     # 检测运行成功的命令超过90%，则让程序继续运行。
@@ -309,7 +311,7 @@ if ( exists $method{"gth"} ) {
     }
 }
 if ( exists $method{"exonerate"} ) {
-    $cmdString = "ParaFly -c $tmp_dir/command.exonerate.list -CPU $cpu &> /dev/null";
+    $cmdString = "$bin_path/parafly -c $tmp_dir/command.exonerate.list -CPU $cpu &> /dev/null";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString");
     # 检测运行成功的命令超过90%，则让程序继续运行。

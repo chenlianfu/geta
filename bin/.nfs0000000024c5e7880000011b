@@ -1118,14 +1118,14 @@ sub detecting_dependent_softwares {
 
     # 检测mmseqs / genewise / gth / exonerate
     if ( $protein ) {
-        # 检测parallel
-        $software_info = `parallel --version`;
-        if ($software_info =~ m/GNU parallel/) {
-            print STDERR "parallel:\tOK\n";
-        }
-        else {
-            die "parallel:\tFailed\n\n";
-        }
+		# 检测parallel
+		$software_info = `parallel --version`;
+		if ($software_info =~ m/GNU parallel/) {
+			print STDERR "parallel:\tOK\n";
+		}
+		else {
+			die "parallel:\tFailed\n\n";
+		}
 
         $software_info = `mmseqs -h`;
         if ($software_info =~ m/MMseqs2/) {
