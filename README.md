@@ -12,6 +12,7 @@ Installation
 
 2. install dependencies:  
     ParaFly (Version 0.1.0)  
+    GNU parallel (Version 20230722)  
     RepeatMasker (version: 4.1.6)  
     RepeatModeler (version: 2.0.5)  
     makeblastdb/rmblastn/tblastn/blastp (Version: 2.14.1)  
