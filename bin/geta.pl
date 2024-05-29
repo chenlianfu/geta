@@ -89,20 +89,13 @@ Parameters:
     设置遗传密码。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。本参数主要生效于同源蛋白进行基因预测的步骤，或对基因模型首尾进行强制补齐时使用的起始密码子和终止密码子信息的情形。
 
     --homolog_prediction_method <string>    default: all
-    设置使用同源蛋白进行基因预测的方法。其值可以设定为exonerate、genewise、gth或all。若想使用多种方法进行分析，则输入使用逗号分割的多个值；若使用所有三种方法进行分析，可以设置--method参数值为all。使用的方法越多，越消耗计算时间，但结果更好。三种方法中：exonerate和genewise的准确性结果比较一致，但gth方法预测基因模型的sensitivity下降很多，specificity提高很多。以三种方法对Oryza sativa基因组的预测为例，其预测结果的准确性如下表所示。和NCBI上标准的共28736个基因模型的注释结果进行比较，评估四个准确性值：基因水平sensitivity、基因水平specificity、exon水平sensitivity、exon水平specificity。可以看出，使用多种方法进行基因预测、合并结果后再过滤，得到的基因模型数量能接近真实的基因数量，且结果较准确。此外，使用本参数的优先级更高，能覆盖--config指定参数配置文件中homolog_prediction的参数值。
+    设置使用同源蛋白进行基因预测的方法。其值可以设定为exonerate、genewise、gth或all。若想使用多种方法进行分析，则输入使用逗号分割的多个值；若使用所有三种方法进行分析，可以设置--method参数值为all。使用的方法越多，越消耗计算时间，但结果更好。三种方法中：exonerate和genewise的准确性结果比较一致（），但gth方法预测基因模型的sensitivity下降很多，specificity提高很多。以三种方法对Oryza sativa基因组的预测为例，其预测结果的准确性如下表所示。和NCBI上标准的共28736个基因模型的注释结果进行比较，评估四个准确性值：基因水平sensitivity、基因水平specificity、exon水平sensitivity、exon水平specificity。可以看出，使用多种方法进行基因预测、合并结果后再过滤，得到的基因模型数量能接近真实的基因数量，且结果较准确。此外，使用本参数的优先级更高，能覆盖--config指定参数配置文件中homolog_prediction的参数值。
     方法       基因数量    gene_sensitivity    gene_specificity    exon_sensitivity    exon_specificity
-    exonerate  38537       47.05%              35.09%              58.90%              73.55%
-    genewise   40455       47.32%              33.61%              62.08%              71.27%
-    gth        8888        19.80%              64.02%              30.43%              90.54%
-    all        40538       48.54%              34.41%              63.85%              71.86%
-    filtered   28184       45.62%              46.51%              61.26%              79.59%
-
+	exonerate  31310       46.17%              42.37%              62.15%              78.45%
     genewise   32407       46.47%              41.21%              64.66%              77.15%
-    genewise_F 23945       43.49%              52.19%              62.42%              82.74%
     gth        9116        20.52%              64.70%              32.71%              90.87%
-    gth_F      9073        20.50%              64.93%              32.71%              90.93%
     all        32293       48.19%              42.89%              66.91%              78.00%
-    all_F      23857       45.19%              54.44%              64.44%              83.72%
+    filtered   23857       45.19%              54.44%              64.44%              83.72%
 
     --optimize_augustus_method <int>    default: 1
     设置AUGUSTUS Training时的参数优化方法。1，表示仅调用BGM2AT.optimize_augustus进行优化，能充分利用所有CPU线程对所有参数并行化测试，速度快；2，表示BGM2AT.optimize_augustus优化完毕后，再使用AUGUSTUS软件自带的optimize_augustus.pl程序接着再进行优化，此时运行速度慢，效果可能更好。使用本参数的优先级更高，能覆盖--config指定参数配置文件中BGM2AT的参数值。
@@ -1271,11 +1264,11 @@ Parameters:
     --homolog_prediction_method <string>    default: all
     Enter a method for gene prediction using homologous proteins. The value can be set to exonerate, genewise, gth, or all. This parameter supports the input of multiple methods, separated by commas. If the value was set to all, it indicates all three methods were used. The more methods you use, the more computation time you consume, but the better the result will be. Of the three methods, exonerate and genewise produced similar accuracy results, but gth showed a significant decrease in sensitivity and a significant increase in specificity. The following table shows the accuracy of the prediction results for the Oryza sativa genome using three methods. We compared the annotation results of 28736 gene models on NCBI to assess four accuracy metrics: gene level sensitivity, gene level specificity, exon level specificity, and exon level specificity. It is obvious that using multiple methods for gene prediction, combining results, and then filtering can result in a closer number of gene models to the actual number of genes and more accurate results. In addition, this parameter has a higher priority and can override the homolog_prediction parameter value in the parameter configuration file specified by --config.
     Method     Gene_num    gene_sensitivity    gene_specificity    exon_sensitivity    exon_specificity
-    exonerate  38537       47.05%              35.09%              58.90%              73.55%
-    genewise   40455       47.32%              33.61%              62.08%              71.27%
-    gth        8888        19.80%              64.02%              30.43%              90.54%
-    all        40538       48.54%              34.41%              63.85%              71.86%
-    filtered   28184       45.62%              46.51%              61.26%              79.59%
+	exonerate  31310       46.17%              42.37%              62.15%              78.45%
+    genewise   32407       46.47%              41.21%              64.66%              77.15%
+    gth        9116        20.52%              64.70%              32.71%              90.87%
+    all        32293       48.19%              42.89%              66.91%              78.00%
+    filtered   23857       45.19%              54.44%              64.44%              83.72%
 
     --optimize_augustus_method <int>    default: 1
     Enter the method for AUGUSTUS parameters optimization. 1, indicates that only BGM2AT.optimize_augustus is called for AUGUSTUS optimization, which can use all CPU threads to parallel test all parameters and is fast. 2, means that the script optimize_augustus.pl provided by the AUGUSTUS software was called sequentially for AUGUSTUS optimization after BGM2AT.optimize_augustus had finished its run. This second step is much slower, but probably more effective. This parameter has a higher priority and can override the BGM2AT parameter value in the parameter configuration file specified by --config.

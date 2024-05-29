@@ -3,6 +3,7 @@
 use strict;
 use Getopt::Long;
 use Cwd qw/abs_path getcwd cwd/;
+use File::Basename;
 
 my $bin_path = dirname($0);
 
