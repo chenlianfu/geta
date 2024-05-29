@@ -97,12 +97,12 @@ Parameters:
     all        40538       48.54%              34.41%              63.85%              71.86%
     filtered   28184       45.62%              46.51%              61.26%              79.59%
 
-	genewise   32407       46.47%              41.21%              64.66%              77.15%
-	genewise_F 23945       43.49%              52.19%              62.42%              82.74%
-	gth        9116        20.52%              64.70%              32.71%              90.87%
-	gth_F      9073        20.50%              64.93%              32.71%              90.93%
-	all        32293       48.19%              42.89%              66.91%              78.00%
-	all_F      23857       45.19%              54.44%              64.44%              83.72%
+    genewise   32407       46.47%              41.21%              64.66%              77.15%
+    genewise_F 23945       43.49%              52.19%              62.42%              82.74%
+    gth        9116        20.52%              64.70%              32.71%              90.87%
+    gth_F      9073        20.50%              64.93%              32.71%              90.93%
+    all        32293       48.19%              42.89%              66.91%              78.00%
+    all_F      23857       45.19%              54.44%              64.44%              83.72%
 
     --optimize_augustus_method <int>    default: 1
     设置AUGUSTUS Training时的参数优化方法。1，表示仅调用BGM2AT.optimize_augustus进行优化，能充分利用所有CPU线程对所有参数并行化测试，速度快；2，表示BGM2AT.optimize_augustus优化完毕后，再使用AUGUSTUS软件自带的optimize_augustus.pl程序接着再进行优化，此时运行速度慢，效果可能更好。使用本参数的优先级更高，能覆盖--config指定参数配置文件中BGM2AT的参数值。
@@ -807,12 +807,15 @@ else {
 # 7.4 输出转录本、同源蛋白和Augustus的基因预测结果
 my @cmdString;
 if ( ($pe1 && $pe2) or $single_end or $sam ) {
-    push @cmdString, "cp $tmp_dir/2.NGSReads_prediction/c.transcript/transfrag.alignment.gff3 $out_prefix.transfrag_alignment.gff3";
+    push @cmdString, "cp $tmp_dir/2.NGSReads_prediction/c.transcript/transfrag.alignment.gff3 $out_prefix.NGSReads_alignment.gff3";
     push @cmdString, "cp $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.gff3 $out_prefix.NGSReads_prediction.gff3";
 }
 if ( $protein ) {
     push @cmdString, "cp $tmp_dir/3.homolog_prediction/homolog_prediction.gff3 $out_prefix.homolog_prediction.gff3";
     push @cmdString, "cp $tmp_dir/3.homolog_prediction/homolog_alignment.gff3 $out_prefix.homolog_alignment.gff3";
+}
+if ( (($pe1 && $pe2) or $single_end or $sam) && $protein ) {
+    push @cmdString, "cp $tmp_dir/4.evidence_gene_models/evidence_gene_models.gff3 $out_prefix.evidence_prediction.gff3";
 }
 push @cmdString, "$bin_path/GFF3Clear --genome $genome --no_attr_add $tmp_dir/5.augustus/augustus.gff3 > $out_prefix.augustus_prediction.gff3";
 push @cmdString, "4.output_methods_GFF3.ok";
