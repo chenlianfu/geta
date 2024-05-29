@@ -97,6 +97,13 @@ Parameters:
     all        40538       48.54%              34.41%              63.85%              71.86%
     filtered   28184       45.62%              46.51%              61.26%              79.59%
 
+	genewise   32407       46.47%              41.21%              64.66%              77.15%
+	genewise_F 23945       43.49%              52.19%              62.42%              82.74%
+	gth        9116        20.52%              64.70%              32.71%              90.87%
+	gth_F      9073        20.50%              64.93%              32.71%              90.93%
+	all        32293       48.19%              42.89%              66.91%              78.00%
+	all_F      23857       45.19%              54.44%              64.44%              83.72%
+
     --optimize_augustus_method <int>    default: 1
     设置AUGUSTUS Training时的参数优化方法。1，表示仅调用BGM2AT.optimize_augustus进行优化，能充分利用所有CPU线程对所有参数并行化测试，速度快；2，表示BGM2AT.optimize_augustus优化完毕后，再使用AUGUSTUS软件自带的optimize_augustus.pl程序接着再进行优化，此时运行速度慢，效果可能更好。使用本参数的优先级更高，能覆盖--config指定参数配置文件中BGM2AT的参数值。
     
@@ -108,6 +115,7 @@ Parameters:
 
 
 在Rocky 9.2系统使用以下依赖的软件版本对本软件进行了测试并运行成功。
+
 01. ParaFly (Version 0.1.0)
 02. GNU parallel (Version 20230722)
 03. RepeatMasker (version: 4.1.6)
@@ -785,7 +793,7 @@ if ( $RM_species or $RM_species_Dfam or $RM_species_RepBase or $RM_lib or (! $no
         $cmdString4 = "ln -sf $RM_lib $out_prefix.repeat.lib";
     }
     elsif ( ! $no_RepeatModeler ) {
-        $cmdString4 = "cp $tmp_dir/1.RepeatMasker/RM_\*/\*.classified $out_prefix.repeat.lib";
+        $cmdString4 = "cp $tmp_dir/1.RepeatMasker/repeatModeler/RM_\*/\*.classified $out_prefix.repeat.lib";
     }
 
     &execute_cmds($cmdString1, $cmdString2, $cmdString3, $cmdString4, "3.output_repeat.ok");
