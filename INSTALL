@@ -28,14 +28,14 @@ cd .. && rm -rf hmmer-3.3.2
 echo 'PATH=/opt/biosoft/hmmer-3.3.2/bin/:$PATH' >> ~/.bashrc
 source ~/.bashrc
 
-wget http://ftp.ebi.ac.uk/pub/databases/Pfam/current_release/Pfam-A.hmm.gz -P ~/software/
-wget http://ftp.ebi.ac.uk/pub/databases/Pfam/releases/Pfam27.0/Pfam-B.hmm.gz -P ~/software/
+wget http://ftp.ebi.ac.uk/pub/databases/Pfam/releases/Pfam37.0/Pfam-A.hmm.gz -O ~/software/Pfam-A_V37.0.hmm.gz
+wget http://ftp.ebi.ac.uk/pub/databases/Pfam/releases/Pfam27.0/Pfam-B.hmm.gz -O ~/software/Pfam-B_V27.0.hmm.gz
 mkdir -p /opt/biosoft/bioinfomatics_databases/Pfam
 cd /opt/biosoft/bioinfomatics_databases/Pfam
-gzip -dc ~/software/Pfam-A.hmm.gz > Pfam-A.hmm
-gzip -dc ~/software/Pfam-B.hmm.gz >> Pfam-B.hmm
-hmmpress Pfam-A.hmm
-hmmpress Pfam-B.hmm
+gzip -dc ~/software/Pfam-A_V37.0.hmm.gz > PfamA
+gzip -dc ~/software/Pfam-B_V27.0.hmm.gz > PfamB
+hmmpress PfamA
+hmmpress PfamB
 
 
 ## 4. Installing RepeatMasker (http://repeatmasker.org/RepeatMasker/)
