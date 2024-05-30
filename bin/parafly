@@ -29,7 +29,10 @@ Usage:
     程序自动设置并行化运行任务数，以使系统的所有计算资源开销达到最大线程数的指定比例(80%)。
 
     --refresh_time <int>    default: 1
-    程序每隔指定时间(3秒)即检测任务完成情况和，并根据需要投递任务，同时输出一些信息：（1）系统CPU使用率；（2）任务
+    程序每隔指定时间(3秒)即检测任务完成情况后，并根据需要投递任务，同时输出一些信息：（1）还剩下的任务数；（2）当前正并行运行的任务数；（4）下一轮允许的最大并行任务数；（5）系统CPU使用率。
+
+    --rounds_delay <int>    default: 1
+    当自动修改了并发数后，需要再完至少指定轮数的检测后，才进行下一次并发数的修改。默认参数表示每轮都支持自动修改下一次的并发数。当任务中命令使用了多线程，且延迟一段时间才能使用到多线程时，考虑增大该参数值，以免并行初期检测到CPU利用率而增大并发数，导致提交任务过多，导致系统负载过高。
 
     --tmp_dir_prefix <string>    default: /run/user/$userID/parafly_tmp${date}_$$
     程序将任务数据，包括分隔的命令行任务、检测任务运行是否成功的提示文件等存放入到临时文件夹中。根据该参数指定的临时文件夹前缀，程序自动生成3个临时文件夹：（1）.cmds后缀文件夹存放命令行文件；（2）.Success后缀文件夹存放运行成功的命令编号；（3）.Failed后缀文件夹存放运行失败的命令编号。当运行的任务数量极大时，系统IO并行数量极大，在临时文件夹中生成的文件数量也极多，推荐将临时文件夹存放到性能较强的分区上。程序默认使用/run/user目录，即存放到了内存上。此外，还需要注意本程序没有自动删除临时文件夹的功能，程序运行完毕后需要自行手动删除。
@@ -40,13 +43,14 @@ Usage:
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($cmdline, $cpu, $max_parallel_j, $ratio_to_max_threads, $refresh_time, $tmp_dir_prefix, $help_flag, $previous_total, $previous_idle);
+my ($cmdline, $cpu, $max_parallel_j, $ratio_to_max_threads, $refresh_time, $rounds_delay, $tmp_dir_prefix, $help_flag, $previous_total, $previous_idle);
 GetOptions(
     "c:s" => \$cmdline,
     "CPU:i" => \$cpu,
     "max_parallel_j:i" => \$max_parallel_j,
     "ratio_to_max_threads:f" => \$ratio_to_max_threads,
     "refresh_time:i" => \$refresh_time,
+    "rounds_delay:i" => \$rounds_delay,
     "tmp_dir_prefix:s" => \$tmp_dir_prefix,
     "help" => \$help_flag,
 );
@@ -56,6 +60,7 @@ $cpu ||= 8;
 $max_parallel_j ||= 100;
 $ratio_to_max_threads ||= 0.8;
 $refresh_time ||= 1;
+$rounds_delay ||= 1;
 
 # 检测parallel程序
 my $version_info = `parallel --version`;
@@ -115,6 +120,7 @@ my $command_num_in_each_chunk = $parallel_j;
 
 # 设置parallel任务编号
 my $parallel_job = 0;
+my $round_num = 0;
 
 open OUT1, ">>", "$cmdline.completed";
 open OUT2, ">", "$cmdline.failed";
@@ -174,17 +180,29 @@ while ( @commands || $runing_task_num > 0 ) {
 
     sleep $refresh_time;
 
+    $round_num ++;
     # 检测CPU使用率
     my $cpu_usage = &get_cpu_usage();
+    my $cpu_usage_per = $cpu_usage / 100;
     # 调整并行任务总数
-    my $add_task_num = ($ratio_to_max_threads - $cpu_usage / 100) * $total_task_num;
-    $add_task_num = int($add_task_num);
-    $add_task_num = $total_task_num if $add_task_num > $total_task_num;
-    if ( $total_task_num + $add_task_num >= $cpu ) {
-        $total_task_num += $add_task_num;
-        $prepare_task_num += $add_task_num;
+    my $used_task = $total_task_num;
+    $used_task = $runing_task_num if $runing_task_num > $used_task;
+    my $add_task_num = ($ratio_to_max_threads - $cpu_usage_per) / $cpu_usage_per * $used_task;
+    if ( $total_task_num + $add_task_num >= $cpu && $round_num >= $rounds_delay ) {
+        $add_task_num = 1 if ($add_task_num > 0 && $add_task_num < 1);
+        $add_task_num = int($add_task_num);
+        $add_task_num = $total_task_num if $add_task_num > $total_task_num;
+        if ( $add_task_num > 0 ) {
+            $total_task_num += $add_task_num;
+            $prepare_task_num += $add_task_num;
+        }
+        else {
+            $total_task_num = $used_task + $add_task_num;
+            $prepare_task_num = 0;
+        }
+        $round_num = 0;
     }
-    print STDERR "当前并行任务总数为 $total_task_num，CPU使用率为 $cpu_usage %。\n";
+    print STDERR "下一轮允许最大并行数为 $total_task_num，CPU使用率为 $cpu_usage %。\n";
 
     # 调整parallel输入文件的命令数、parallel的并行提交数。$command_num_in_each_chunk = $parallel_j，即j值。程序运行后，若并行数不断增大，j值会增大为 int(并行数 ** 0.5) ，直至 --max_parallel_j 参数设定的最大值为止。
     my $value_j = int($total_task_num ** 0.5);

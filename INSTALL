@@ -72,7 +72,7 @@ perl ./configure
 wget http://www.repeatmasker.org/RepeatModeler/RepeatModeler-2.0.5.tar.gz -P ~/software/
 wget http://www.repeatmasker.org/RepeatModeler/RECON-1.08.tar.gz -P ~/software/
 wget http://www.repeatmasker.org/RepeatScout-1.0.6.tar.gz -P ~/software/
-wget http://genometools.org/pub/genometools-1.5.9.tar.gz -P ~/software/
+wget http://genometools.org/pub/genometools-1.6.2.tar.gz -P ~/software/
 wget https://github.com/oushujun/LTR_retriever/archive/v2.9.0.tar.gz -O ~/software/LTR_retriever-2.9.0.tar.gz
 wget https://github.com/zhangrengang/TEsorter/archive/refs/tags/v1.4.6.tar.gz -O ~/software/TEsorter-1.4.6.tar.gz
 wget https://mafft.cbrc.jp/alignment/software/mafft-7.505-without-extensions-src.tgz -P ~/software
@@ -88,11 +88,11 @@ tar zxf ~/software/RepeatScout-1.0.6.tar.gz -C /opt/biosoft/
 cd /opt/biosoft/RepeatScout-1.0.6
 make
 
-cd && tar zxf ~/software/genometools-1.5.9.tar.gz
-cd genometools-1.5.9
+cd && tar zxf ~/software/genometools-1.6.2.tar.gz
+cd genometools-1.6.2
 perl -p -i -e 's/-Werror/-Wno-error/g' Makefile
-make prefix=//opt/biosoft/genometools-1.5.9/ install -j 4
-cd ../ && rm -rf genometools-1.5.9
+make prefix=//opt/biosoft/genometools-1.6.2/ install -j 4
+cd ../ && rm -rf genometools-1.6.2
 
 tar zxf ~/software/LTR_retriever-2.9.0.tar.gz -C /opt/biosoft/
 
@@ -151,6 +151,10 @@ perl configure
 chmod 644 *.pm configure
 echo 'PATH=$PATH:/opt/biosoft/RepeatModeler-2.0.1' >> ~/.bashrc
 source ~/.bashrc
+
+# Optimize the computational performance of RepeatMasker/RepeatModeler
+perl -p -i -e 's/-num_threads \d+/-num_threads 32/' /opt/biosoft/RepeatMasker-4.1.6/NCBIBlastSearchEngine.pm
+perl -p -i -e 's#^(.*Step 1)#\$options{"threads"} = 64;\n$1#' /opt/biosoft/RepeatModeler-2.0.5/RepeatClassifier
 
 
 ## 6. Installing Samtools and HTSlib (https://github.com/samtools/samtools/releases / https://www.htslib.org)

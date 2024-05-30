@@ -29,7 +29,7 @@ Usage:
     输入一个FASTA文件作为重复序列数据库。和--species参数只能二选一；若两个参数同时进行了设置，则仅 --lib 参数生效。当 --lib 参数生效时，RepeatMasker自动使用rmblastn搜索引擎进行数据分析。
 
     --cpu <int>    default: 8
-    设置CPU线程数消耗。程序会查看 RepeatMasker/NCBIBlastSearchEngine.pm 文件中 -num_threads 参数设置单个任务运行rmblastn的线程数值。而单个任务运行运行nhmmer的线程数默认是2。然后，程序设置 RepeatMasker 的并行数 =  --cpu 参数值 * 1.5 / 单个rmblastn或nhmmer的线程数，且最终 RepeatMasker 的并行数至少为 1 。其中，乘以 1.5 是为了防止单个 rmblasn或nhmmer 程序运行效率不高，无法使用所有设定的CPU线程，从而降低整体CPU利用率。
+    设置CPU线程数消耗。程序会查看 RepeatMasker/NCBIBlastSearchEngine.pm 文件中 -num_threads 参数设置单个任务运行rmblastn的线程数值。而单个任务运行运行nhmmer的线程数默认是2。然后，程序设置单个 RepeatMasker 命令的并行数 -pa 参数值 =  --cpu 参数值 / 单个rmblastn或nhmmer的线程数 / 4，且 -pa 参数值最少为 1 。最后，再运行 parafly  程序对各染色体的 RepeatMasker 命令进行并行化运行，使消耗的计算资源达到总线程数的 80% 。
 
     --tmp_dir <string>    default: tmp_\$date_\$pid
     程序运行时临时文件夹名称。
@@ -76,16 +76,16 @@ while (<IN>) {
     if ( m/-num_threads\s+(\d+)/ ) {
         $rmblastn_cpu = $1;
         $rmblastn_cpu = 2 if $engine eq "hmmer";
-        $cpu = int($cpu * 1.5 / $rmblastn_cpu + 0.5);
+        $cpu = int($cpu / $rmblastn_cpu / 4 + 0.5);
         $cpu = 1 if $cpu < 1;
     }
 }
 close IN;
 if ( $engine eq "ncbi" ) {
-    print STDERR "将并行化运行 $cpu 个RepeatMasker任务，每个任务将调用rmblastn命令以 $rmblastn_cpu 线程运行。\n";
+    print STDERR "将运行RepeatMasker命令的 -pa 参数设置为 $cpu，其再调用rmblastn命令以 $rmblastn_cpu 线程运行。\n";
 }
 else {
-    print STDERR "将并行化运行 $cpu 个RepeatMasker任务，每个任务将调用nhmmer命令以 2 个线程运行。\n";
+    print STDERR "将运行RepeatMasker命令的 -pa 参数设置为 $cpu，其再调用nhmmer命令以 2 个线程运行。\n";
 }
 
 # 设置临时运行文件夹
@@ -108,10 +108,10 @@ while (<IN>) {
         push @split_file_name , "seq_$num";
         mkdir "$tmp_dir/seq_$num" unless -e "$tmp_dir/seq_$num";
         if ( $lib ) {
-            print CMD "RepeatMasker -no_is -pa 1 -e ncbi -lib $lib -dir $tmp_dir/seq_$num $tmp_dir/seq_$num.fasta &> $tmp_dir/seq_$num.log\n";
+            print CMD "RepeatMasker -no_is -pa $cpu -e ncbi -lib $lib -dir $tmp_dir/seq_$num $tmp_dir/seq_$num.fasta &> $tmp_dir/seq_$num.log\n";
         }
         else {
-            print CMD "RepeatMasker -no_is -pa 1 -e $engine -species $species -dir $tmp_dir/seq_$num $tmp_dir/seq_$num.fasta &> $tmp_dir/seq_$num.log\n";
+            print CMD "RepeatMasker -no_is -pa $cpu -e $engine -species $species -dir $tmp_dir/seq_$num $tmp_dir/seq_$num.fasta &> $tmp_dir/seq_$num.log\n";
 
         }
         open OUT, ">", "$tmp_dir/seq_$num.fasta" or die "Can not create file $tmp_dir/seq_$num.fasta, $!";
@@ -128,10 +128,10 @@ $num ++;
 push @split_file_name , "seq_$num";
 mkdir "$tmp_dir/seq_$num" unless -e "$tmp_dir/seq_$num";
 if ( $lib ) {
-    print CMD "RepeatMasker -no_is -pa 1 -e ncbi -lib $lib -dir $tmp_dir/seq_$num $tmp_dir/seq_$num.fasta &> $tmp_dir/seq_$num.log\n";
+    print CMD "RepeatMasker -no_is -pa $cpu -e ncbi -lib $lib -dir $tmp_dir/seq_$num $tmp_dir/seq_$num.fasta &> $tmp_dir/seq_$num.log\n";
 }
 else {
-    print CMD "RepeatMasker -no_is -pa 1 -e $engine -species $species -dir $tmp_dir/seq_$num $tmp_dir/seq_$num.fasta &> $tmp_dir/seq_$num.log\n";
+    print CMD "RepeatMasker -no_is -pa $cpu -e $engine -species $species -dir $tmp_dir/seq_$num $tmp_dir/seq_$num.fasta &> $tmp_dir/seq_$num.log\n";
 }
 open OUT, ">", "$tmp_dir/seq_$num.fasta" or die "Can not create file $tmp_dir/seq_$num.fasta, $!";
 print OUT $seq;
@@ -143,13 +143,13 @@ unless ( $lib ) {
     open OUT, ">", "$tmp_dir/seq_test.fasta";
     print OUT ">test\n" . substr($seq, 0, 1000) . "\n";
     close OUT;
-    my $cmdString = "RepeatMasker -no_is -pa 1 -e $engine -species $species -dir $tmp_dir/seq_test $tmp_dir/seq_test.fasta &> $tmp_dir/seq_test.log\n";
+    my $cmdString = "RepeatMasker -no_is -pa $cpu -e $engine -species $species -dir $tmp_dir/seq_test $tmp_dir/seq_test.fasta &> $tmp_dir/seq_test.log\n";
     print STDERR "CMD: $cmdString\n";
     system $cmdString;
 }
 
 # 运行RepeatMasker程序
-my $cmdString = "$bin_path/ParaFly -c $tmp_dir/command.RepeatMasker.list -CPU $cpu &> $tmp_dir/ParaFly.log";
+my $cmdString = "$bin_path/parafly -c $tmp_dir/command.RepeatMasker.list -CPU 1 --max_parallel_j 1 --rounds_delay 5 --refresh_time 10 &> $tmp_dir/parafly.log";
 print STDERR "CMD: $cmdString\n";
 (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 

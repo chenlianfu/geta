@@ -184,8 +184,8 @@ mkdir $tmp_dir unless -e $tmp_dir;
 chdir "$tmp_dir"; print STDERR "\nPWD: $tmp_dir\n";
 
 # 0.4 准备基因组序列：
-# 读取FASTA序列以>开始的头部时，去除第一个空及之后的字符。若序列名又重复，则仅保留先出现的序列。
-$cmdString = "$bin_path/fasta_format_revising.pl --seq_type DNA --min_length 1000 --max_unknown_character_ratio 1.0 --line_length 80 --no_change_to_UC $genome > genome.fasta 2> genome.fasta.fasta_format_revising.log";
+# 读取FASTA序列以>开始的头部时，去除第一个空及之后的字符。若序列名有重复，则仅保留先出现的序列。
+$cmdString = "$bin_path/fasta_format_revising.pl --no_change_header --seq_type DNA --min_length 1000 --max_unknown_character_ratio 1.0 --line_length 80 --no_change_to_UC $genome 2> genome.fasta.fasta_format_revising.log | perl -pe 's/(^>\S+).*/\$1/' > genome.fasta";
 unless (-s "genome.fasta") {
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
