@@ -30,7 +30,8 @@ source ~/.bashrc
 
 wget http://ftp.ebi.ac.uk/pub/databases/Pfam/current_release/Pfam-A.hmm.gz -P ~/software/
 wget http://ftp.ebi.ac.uk/pub/databases/Pfam/releases/Pfam27.0/Pfam-B.hmm.gz -P ~/software/
-cd /opt/biosoft/hmmer-3.3.2/
+mkdir -p /opt/biosoft/bioinfomatics_databases/Pfam
+cd /opt/biosoft/bioinfomatics_databases/Pfam
 gzip -dc ~/software/Pfam-A.hmm.gz > Pfam-A.hmm
 gzip -dc ~/software/Pfam-B.hmm.gz >> Pfam-B.hmm
 hmmpress Pfam-A.hmm
