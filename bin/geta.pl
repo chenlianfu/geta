@@ -85,6 +85,9 @@ Parameters:
     --cpu <int>    default: 4
     设置程序运行使用的CPU线程数。
 
+	--gene_predicted_by_unmasked_genome    default: Non
+	添加该参数后，程序在利用NGS read、homology和AUGUSTUS进行基因预测时，使用输入的基因组序列进行基因预测。而默认程序对输入的基因组序列进行重复序列屏蔽，再使用屏蔽了的基因组序列采用三种算法进行基因预测。
+
     --genetic_code <int>    default: 1
     设置遗传密码。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。本参数主要生效于同源蛋白进行基因预测的步骤，或对基因模型首尾进行强制补齐时使用的起始密码子和终止密码子信息的情形。
 
@@ -316,7 +319,7 @@ if (($pe1 && $pe2) or $single_end or $sam) {
     push @input_paramter, "--strand_specific" if defined $strand_specific;
     push @input_paramter, "--genetic_code $genetic_code" if defined $genetic_code;
     $cmdString_Step2_paramter = join " ", @input_paramter;
-    $cmdString1 = "$bin_path/NGSReads_prediction $cmdString_Step2_paramter --cpu $cpu --tmp_dir $tmp_dir/2.NGSReads_prediction $tmp_dir/1.RepeatMasker/genome.masked.fasta > $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.gff3 2> $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.A.log";
+    $cmdString1 = "$bin_path/NGSReads_prediction $cmdString_Step2_paramter --cpu $cpu --tmp_dir $tmp_dir/2.NGSReads_prediction $genome > $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.gff3 2> $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.A.log";
     $cmdString2 = "cp -a $tmp_dir/2.NGSReads_prediction/c.transcript/intron.txt $tmp_dir/2.NGSReads_prediction/c.transcript/base_depth.txt $tmp_dir/2.NGSReads_prediction/c.transcript/transfrag.genome.gff3 $tmp_dir/2.NGSReads_prediction/";
 }
 else {
@@ -334,7 +337,7 @@ chdir $tmp_dir; print STDERR "\nPWD: $tmp_dir\n";
 mkdir "$tmp_dir/3.homolog_prediction" unless -e "$tmp_dir/3.homolog_prediction";
 
 if ( $protein ) {
-    $cmdString = "$bin_path/homolog_prediction --tmp_dir $tmp_dir/3.homolog_prediction --cpu $cpu $config{'homolog_prediction'} --genetic_code $genetic_code $protein $tmp_dir/1.RepeatMasker/genome.masked.fasta > $tmp_dir/3.homolog_prediction/homolog_prediction.gff3 2> $tmp_dir/3.homolog_prediction/homolog_prediction.log";
+    $cmdString = "$bin_path/homolog_prediction --tmp_dir $tmp_dir/3.homolog_prediction --cpu $cpu $config{'homolog_prediction'} --genetic_code $genetic_code $protein $genome > $tmp_dir/3.homolog_prediction/homolog_prediction.gff3 2> $tmp_dir/3.homolog_prediction/homolog_prediction.log";
 }
 else {
     $cmdString = "touch $tmp_dir/3.homolog_prediction/homolog_prediction.gff3";
@@ -357,7 +360,7 @@ if ( ($pe1 && $pe2) or $single_end or $sam ) {
         $cmdString2 = "rm -rf $tmp_dir/2.NGSReads_prediction/c.transcript/11.fillingEndsOfGeneModels.ok";
         $cmdString3 = "rm -rf $tmp_dir/2.NGSReads_prediction/c.transcript/12.classGeneModels.ok";
         $cmdString4 = "rm -rf $tmp_dir/2.NGSReads_prediction/c.transcript/FillingGeneModelsByHomolog_tmp/command.combineGeneModels.list.completed";
-        $cmdString5 = "$bin_path/NGSReads_prediction $cmdString_Step2_paramter --cpu $cpu --tmp_dir $tmp_dir/2.NGSReads_prediction --homolog_gene_models $tmp_dir/3.homolog_prediction/homolog_prediction.gff3 $tmp_dir/1.RepeatMasker/genome.masked.fasta > $tmp_dir/4.evidence_gene_models/NGSReads_prediction_FilledByHomolog.gff3 2> $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.B.log";
+        $cmdString5 = "$bin_path/NGSReads_prediction $cmdString_Step2_paramter --cpu $cpu --tmp_dir $tmp_dir/2.NGSReads_prediction --homolog_gene_models $tmp_dir/3.homolog_prediction/homolog_prediction.gff3 $genome > $tmp_dir/4.evidence_gene_models/NGSReads_prediction_FilledByHomolog.gff3 2> $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.B.log";
 
         &execute_cmds($cmdString1, $cmdString2, $cmdString3, $cmdString4, $cmdString5, "1.NGSReads_prediction_FilledByHomolog.ok");
     }
@@ -599,7 +602,7 @@ else {
 }
 
 # 5.3.2 Augustus gene prediction
-$cmdString1 = "$bin_path/paraAugusutusWithHints $config{'paraAugusutusWithHints'} --species $augustus_species --AUGUSTUS_CONFIG_PATH $tmp_dir/5.augustus/config --cpu $cpu --segmentSize $segmentSize --overlapSize $overlapSize --tmp_dir aug_para_with_hints $tmp_dir/1.RepeatMasker/genome.masked.fasta hints.gff > augustus.raw.gff3";
+$cmdString1 = "$bin_path/paraAugusutusWithHints $config{'paraAugusutusWithHints'} --species $augustus_species --AUGUSTUS_CONFIG_PATH $tmp_dir/5.augustus/config --cpu $cpu --segmentSize $segmentSize --overlapSize $overlapSize --tmp_dir aug_para_with_hints $genome hints.gff > augustus.raw.gff3";
 $cmdString2 = "$bin_path/addHintRatioToAugustusResult $tmp_dir/4.evidence_gene_models/evidence_gene_models.gff3 hints.gff augustus.raw.gff3 > augustus.gff3";
 
 &execute_cmds($cmdString1, $cmdString2, "$tmp_dir/5.augustus.ok");
