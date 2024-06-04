@@ -125,7 +125,7 @@ sub printOUT {
     my ($header, $seq) = @_;
 
     # 修改序列头部
-    my $header_name;
+    my $header_name = $header;
     unless ( $no_change_header ) {
         $header =~ s/\s+.*//;
         $header_name = $header;
@@ -133,7 +133,7 @@ sub printOUT {
     }
     if ( exists $header{$header} ) {
         $header{$header} ++;
-        print STDERR "Warning: 检测到序列 $header 在FASTA文件中出现的第 $header{$header} 次，不输出该序列。\n";
+        print STDERR "Warning: 检测到序列 $header_name 在FASTA文件中出现的第 $header{$header} 次，不输出该序列。\n";
         $num_redundancy_ID ++;
         return;
     }
