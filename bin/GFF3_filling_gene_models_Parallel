@@ -1,0 +1,165 @@
+#!/usr/bin/env perl
+
+use strict;
+use Getopt::Long;
+use Cwd qw/abs_path getcwd cwd/;
+use File::Basename;
+
+my $bin_path = dirname($0);
+
+my $usage = <<USAGE;
+Usage:
+    $0 [options] genome.fasta target.gff3 supplementary.gff3 > target_filled.gff3
+
+    程序利用 supplementary.gff3 中的编码蛋白基因模型信息，对 target.gff3 文件中不完整编码蛋白基因模型的缺失末端进行填补。程序将 target.gff3 填补后的结果输出到标准输出，在标准错误输出中以表格形式给出填补的mRNA信息。
+    程序使用须知：（1）程序主要读取编码基因模型中的CDS信息，要求输入文件中必须有CDS信息。程序根据CDS计算出intron再进行后续分析，可以允许输入文件中没有intron信息。（2）程序并不会输出 supplementary.gff3 中特有的基因模型，若需要输出，可以考虑本程序运行完毕后使用 GFF3Clear 命令整合 target_filled.gff3 和 supplementary.gff3文件。（3）程序读取supplementary.gff3中的转录本信息，
+    程序进行填补的原理：（1）首先，通过genome.fasta信息分析target.gff3中5'或3'缺失的基因模型；（2）对于多CDS基因模型，分析5'或3'缺失末端的最临近intron和紧邻其后CDS的起始读码框，在supplementary.gff3中找具有相同信息且末端更完整的基因模型进行填补；（3）对于单CDS基因模型，则在supplementary.gff3中找和缺失末端有重叠且末端更完整的基因模型进行填补。
+    程序用途：（1）利用同源蛋白基因预测结果，对转录本预测基因模型进行填补；（2）利用ab initio基因预测，对转录本或同源蛋白预测的基因模型进行填补。
+    本程序和标准程序GFF3_filling_gene_models的结果一致。相应的，本程序多了--cpu和--tmp_dir参数，能将输入数据按染色体和正负链进行分割，然后调用同目录下的ParaFly和GFF3_filling_gene_models程序进行并行化运算，最后合并结果。此外，本程序在标准错误输出尾部额外给出统计信息。
+
+    --cpu <int>    default: 8
+    设置并行数。
+
+    --tmp_dir <string>    default: tmp_\$date\$pid
+    程序运行时临时文件夹名称。
+
+    --start_codon <string>    default: ATG
+    设置起始密码子。若有多个起始密码子，则使用逗号分割。
+
+    --stop_codon <string>    default: TAA,TAG,TGA
+    设置终止密码子。若有多个终止密码子，则使用逗号分割。
+
+    --help    default: None
+    display this help and exit.
+
+USAGE
+if (@ARGV==0){die $usage}
+
+my ($cpu, $start_codon, $stop_codon, $tmp_dir, $help_flag);
+GetOptions(
+    "cpu:i" => \$cpu,
+    "start_codon:s" => \$start_codon,
+    "stop_codon:s" => \$stop_codon,
+    "tmp_dir:s" => \$tmp_dir,
+    "help" => \$help_flag,
+);
+
+if ( $help_flag ) { die $usage }
+$start_codon ||= "ATG";
+$stop_codon ||= "TAA,TAG,TGA";
+
+my $genome = abs_path($ARGV[0]);
+my $target_GFF3 = abs_path($ARGV[1]);
+my $supplementary_GFF3 = abs_path($ARGV[2]);
+
+my $date = `date +%Y%m%d%H%M%S`; chomp($date);
+$tmp_dir ||= "tmp_$date$$";
+$tmp_dir = abs_path($tmp_dir);
+mkdir $tmp_dir unless -e $tmp_dir;
+
+my $cmdString = "$bin_path/GFF3_filling_gene_models --start_codon $start_codon --stop_codon $stop_codon";
+my (%seq, %target, %supplementary, @seq_ID, $seq_ID);
+
+# 读取 genome.fasta 文件内容
+open IN, $genome or die "Error: Can not open file $genome, $!";
+while (<IN>) {
+    chomp;
+    if ( m/^>(\S+)/ ) { $seq_ID = $1; push @seq_ID, $seq_ID unless exists $seq{$seq_ID}; }
+    else { $seq{$seq_ID} .= $_; }
+}
+close IN;
+
+# 读取 target.gff3 文件内容
+open IN, $target_GFF3 or die "Error: Can not open file $target_GFF3, $!";
+while (<IN>) {
+    next if m/^#/;
+    next if m/^\s*$/;
+    @_ = split /\t/;
+    $target{$_[0]}{$_[6]} .= $_;
+}
+close IN;
+
+# 读取 supplementary.gff3 文件内容
+open IN, $supplementary_GFF3 or die "Error: Can not open file $supplementary_GFF3, $!";
+while (<IN>) {
+    next if m/^#/;
+    next if m/^\s*$/;
+    @_ = split /\t/;
+    $supplementary{$_[0]}{$_[6]} .= $_;
+}
+close IN;
+
+open CMD, ">", "$tmp_dir/command.list" or die $!;
+my @out_name;
+foreach my $chr ( @seq_ID ) {
+    open OUT, ">", "$tmp_dir/$chr.genome.fasta" or die $!;
+    print OUT ">$chr\n$seq{$chr}\n";
+    close OUT;
+
+    open OUT, ">", "$tmp_dir/$chr.plus_target.gff3" or die $!;
+    print OUT $target{$chr}{"+"};
+    close OUT;
+    open OUT, ">", "$tmp_dir/$chr.minus_target.gff3" or die $!;
+    print OUT $target{$chr}{"-"};
+    close OUT;
+
+    open OUT, ">", "$tmp_dir/$chr.plus_supplementary.gff3" or die $!;
+    print OUT $supplementary{$chr}{"+"};
+    close OUT;
+    open OUT, ">", "$tmp_dir/$chr.minus_supplementary.gff3" or die $!;
+    print OUT $supplementary{$chr}{"-"};
+    close OUT;
+
+    print CMD "$cmdString $tmp_dir/$chr.genome.fasta $tmp_dir/$chr.plus_target.gff3 $tmp_dir/$chr.plus_supplementary.gff3 > $tmp_dir/$chr.plus.gff3 2> $tmp_dir/$chr.plus.tab\n";
+    print CMD "$cmdString $tmp_dir/$chr.genome.fasta $tmp_dir/$chr.minus_target.gff3 $tmp_dir/$chr.minus_supplementary.gff3 > $tmp_dir/$chr.minus.gff3 2> $tmp_dir/$chr.minus.tab\n";
+
+    push @out_name, "$tmp_dir/$chr.plus";
+    push @out_name, "$tmp_dir/$chr.minus";
+}
+
+$cmdString = "$bin_path/ParaFly -c $tmp_dir/command.list -CPU $cpu &> $tmp_dir/ParaFly.log";
+(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
+
+foreach (@out_name) {
+    open IN, "$_.gff3" or die "Error: Can not open file $_.gff3, $!";
+    print <IN>;
+    close IN;
+}
+
+my @info;
+foreach (@out_name) {
+    open IN, "$_.tab" or die "Error: Can not open file $_.tab, $!";
+    push @info, <IN>;
+    close IN;
+}
+print STDERR join("", @info);
+
+my (%gene, %mRNA, %Multi_CDS, %Multi_CDS_5prime_partial, %Multi_CDS_3prime_partial, %Multi_CDS_internal, %Single_CDS, %Single_CDS_5prime_partial, %Single_CDS_3prime_partial, %Single_CDS_internal);
+foreach ( @info ) {
+    @_ = split /\t/;
+    $gene{$_[0]} = 1;
+    $mRNA{$_[1]} = 1;
+    $Multi_CDS{$_[0]} = 1 if $_[2] eq "Multi_CDS";
+    $Multi_CDS_5prime_partial{$_[0]} = 1 if ($_[2] eq "Multi_CDS" && $_[3] eq "5prime_partial");
+    $Multi_CDS_3prime_partial{$_[0]} = 1 if ($_[2] eq "Multi_CDS" && $_[3] eq "3prime_partial");
+    $Multi_CDS_internal{$_[0]} = 1 if ($_[2] eq "Multi_CDS" && $_[3] eq "internal");
+    $Single_CDS{$_[0]} = 1 if $_[2] eq "Single_CDS";
+    $Single_CDS_5prime_partial{$_[0]} = 1 if ($_[2] eq "Single_CDS" && $_[3] eq "5prime_partial");
+    $Single_CDS_3prime_partial{$_[0]} = 1 if ($_[2] eq "Single_CDS" && $_[3] eq "3prime_partial");
+    $Single_CDS_internal{$_[0]} = 1 if ($_[2] eq "Single_CDS" && $_[3] eq "internal");
+}
+my ($gene, $mRNA, $Multi_CDS, $Multi_CDS_5prime_partial, $Multi_CDS_3prime_partial, $Multi_CDS_internal, $Single_CDS, $Single_CDS_5prime_partial, $Single_CDS_3prime_partial, $Single_CDS_internal) = (0,0,0,0,0,0,0,0,0,0);
+$gene = %gene;
+$mRNA= %mRNA;
+$Multi_CDS = %Multi_CDS;
+$Multi_CDS_5prime_partial = %Multi_CDS_5prime_partial;
+$Multi_CDS_3prime_partial = %Multi_CDS_3prime_partial;
+$Multi_CDS_internal = %Multi_CDS_internal;
+$Single_CDS = %Single_CDS;
+$Single_CDS_5prime_partial = %Single_CDS_5prime_partial;
+$Single_CDS_3prime_partial = %Single_CDS_3prime_partial;
+$Single_CDS_internal = %Single_CDS_internal;
+
+print STDERR "对 $gene 个基因的 $mRNA 个mRNA进行了末端填补。
+对 $Multi_CDS 个多CDS基因进行了末端填补，其中5prime_partial，3prime_partial和internal的基因数量分别为：$Multi_CDS_5prime_partial, $Multi_CDS_3prime_partial, $Multi_CDS_internal。
+对 $Single_CDS 个单CDS基因模型进行了末端填补，其中5prime_partial，3prime_partial和internal的基因数量分别为：$Single_CDS_5prime_partial，$Single_CDS_3prime_partial，$Single_CDS_internal。\n";

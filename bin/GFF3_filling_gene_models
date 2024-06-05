@@ -1,0 +1,936 @@
+#!/usr/bin/env perl
+
+use strict;
+use Getopt::Long;
+use Cwd qw/abs_path getcwd cwd/;
+use File::Basename;
+
+my $usage = <<USAGE;
+Usage:
+    $0 [options] genome.fasta target.gff3 supplementary.gff3 > target_filled.gff3
+
+    程序利用 supplementary.gff3 中的编码蛋白基因模型信息，对 target.gff3 文件中不完整编码蛋白基因模型的缺失末端进行填补。程序将 target.gff3 填补后的结果输出到标准输出，在标准错误输出中以表格形式给出填补的mRNA信息。
+    程序使用须知：（1）程序主要读取编码基因模型中的CDS信息，要求输入文件中必须有CDS信息。程序根据CDS计算出intron再进行后续分析，可以允许输入文件中没有intron信息。（2）程序并不会输出 supplementary.gff3 中特有的基因模型，若需要输出，可以考虑本程序运行完毕后使用 GFF3Clear 命令整合 target_filled.gff3 和 supplementary.gff3文件。（3）程序读取supplementary.gff3中的转录本信息，
+    程序进行填补的原理：（1）首先，通过genome.fasta信息分析target.gff3中5'或3'缺失的基因模型；（2）对于多CDS基因模型，分析5'或3'缺失末端的最临近intron和紧邻其后CDS的起始读码框，在supplementary.gff3中找具有相同信息且末端更完整的基因模型进行填补；（3）对于单CDS基因模型，则在supplementary.gff3中找和缺失末端有重叠且末端更完整的基因模型进行填补。
+    程序用途：（1）利用同源蛋白基因预测结果，对转录本预测基因模型进行填补；（2）利用ab initio基因预测，对转录本或同源蛋白预测的基因模型进行填补。
+
+    --start_codon <string>    default: ATG
+    设置起始密码子。若有多个起始密码子，则使用逗号分割。
+
+    --stop_codon <string>    default: TAA,TAG,TGA
+    设置终止密码子。若有多个终止密码子，则使用逗号分割。
+
+    --help    default: None
+    display this help and exit.
+
+USAGE
+if (@ARGV==0){die $usage}
+
+my ($start_codon, $stop_codon, $help_flag);
+GetOptions(
+    "start_codon:s" => \$start_codon,
+    "stop_codon:s" => \$stop_codon,
+    "help" => \$help_flag,
+);
+
+if ( $help_flag ) { die $usage }
+$start_codon ||= "ATG";
+$stop_codon ||= "TAA,TAG,TGA";
+my (%start_codon, %stop_codon);
+foreach (split /,/, $start_codon) { $start_codon{$_} = 1; }
+foreach (split /,/, $stop_codon) { $stop_codon{$_} = 1; }
+
+my $genome = abs_path($ARGV[0]);
+my $target_GFF3 = abs_path($ARGV[1]);
+my $supplementary_GFF3 = abs_path($ARGV[2]);
+
+# 读取基因组信息
+my ($gene_ID, %seq);
+open IN, $genome or die "Error: Can not open file $genome, $!";
+while (<IN>) {
+    chomp;
+    if (m/^>(\S+)/) { $gene_ID = $1; }
+    else { $seq{$gene_ID} .= $_; }
+}
+close IN;
+
+# 读取 supplementary.gff3 基因模型
+my %supplementary_info = &get_geneModels_from_GFF3($supplementary_GFF3);
+
+# 对 supplementary.gff3 每个基因模型进行解析，获得每个 intron + frame 上下游CDSs信息，每个 CDS 上下游信息。
+# 如下示例图所示，得到每个 intron + frame 上游和下游的 CDSs 信息。
+#
+#       partial=========++++++===========++++++============>partial
+#                       ^    ^^          ^    ^^
+#       partial<========++++++===========++++++=============partial
+#                      ^^    ^          ^^    ^
+#
+# "染色体\t正负链\tintron起始\tintron结束\t其后frame" => 上下游CDS的区间信息(制表符连接的CDS起始结束frame)。
+# 染色体 -> 正负链 -> 索引位置 -> CDS起始结束frame => 上下游CDS的区间信息(制表符连接的CDS起始结束frame，包含当前CDS)。
+my (%up_stream_of_intron, %down_stream_of_intron, %up_stream_of_CDS, %down_stream_of_CDS);
+foreach my $gene_ID ( keys %supplementary_info ) {
+    my @mRNA_ID = @{$supplementary_info{$gene_ID}{"mRNA_ID"}};
+    foreach my $mRNA_ID ( @mRNA_ID ) {
+        my $mRNA_info = $supplementary_info{$gene_ID}{"mRNA_info"}{$mRNA_ID};
+        my $mRNA_header = $supplementary_info{$gene_ID}{"mRNA_header"}{$mRNA_ID};
+        my @mRNA_header = split /\t/, $mRNA_header;
+
+        # 获得染色体名称和正负链信息
+        my ($chr, $strand) = ($mRNA_header[0], $mRNA_header[6]);
+
+        # 分析全部CDS信息
+        my @CDS;
+        foreach ( split /\n/, $mRNA_info ) {
+            @_ = split /\t/, $_;
+            push @CDS, "$_[3]\t$_[4]\t$_[7]" if $_[2] eq "CDS";
+        }
+
+        # 若是多CDS基因模型，解析每个intron上下游的CDSs。
+        if ( @CDS > 1 ) {
+            # 解析intron信息
+            my @intron = &get_intron(\@CDS, $mRNA_ID, 1);
+
+            # 结果，intron的上下游CDS信息
+            my @CDS_and_intron;
+            push @CDS_and_intron, @CDS;
+            push @CDS_and_intron, @intron;
+            # 合并CDS和intron坐标信息，按从小到大排序。CDS额外包含frame信息。后续，逐个取出数据，分析intron+frame前后的CDS信息。
+            @CDS_and_intron = sort {$a <=> $b} @CDS_and_intron;
+            @CDS_and_intron = sort {$b <=> $a} @CDS_and_intron if $strand eq "-";
+            #print "TEST01: $chr\t$strand\t$mRNA_ID\n" . join("\n", @CDS_and_intron) . "\n";
+
+            my (@upstream_CDS, $CDS_frame);
+            while ( @CDS_and_intron ) {
+                my $one = shift @CDS_and_intron;
+                my @one = split /\t/, $one;
+                # 若取出 CDS
+                if ( defined $one[2] ) {
+                    push @upstream_CDS, $one;
+                    $CDS_frame = $one[2];
+                }
+                # 若取出 intron
+                else {
+                    # 得到intron后的CDS
+                    my @left_CDS;
+                    foreach ( @CDS_and_intron ) {
+                        @_ = split /\t/;
+                        push @left_CDS, $_ if @_ >= 3;
+                    }
+
+                    # 取出一个 intron 后再取出下一个紧邻的 CDS
+                    my $next_CDS = shift @CDS_and_intron;
+                    my @CDS_info = split /\t/, $next_CDS;
+                    $CDS_frame = $CDS_info[2];
+
+                    # 获得intron上游和下游的CDS
+                    my $up_stream_of_intron_out = join "\n", ($mRNA_ID, @upstream_CDS);
+                    my $down_stream_of_intron_out = join "\n", ($mRNA_ID, @left_CDS);
+                    my $intron_out = "$chr\t$strand\t$one\t$CDS_frame";
+                    # supplementary.gff3中包含可变剪接信息时，优先选择字符数最多，相当于CDS数量最多的；否则按读入顺序。
+                    if ( exists $up_stream_of_intron{$intron_out} ) {
+                        $up_stream_of_intron{$intron_out} = $up_stream_of_intron_out 
+                            if length($up_stream_of_intron_out) > length($up_stream_of_intron{$intron_out});
+                    }
+                    else {
+                        $up_stream_of_intron{$intron_out} = $up_stream_of_intron_out;
+                    }
+                    if ( exists $down_stream_of_intron{$intron_out} ) {
+                        $down_stream_of_intron{$intron_out} = $down_stream_of_intron_out
+                            if length($down_stream_of_intron_out) > length($down_stream_of_intron{$intron_out});
+                    }
+                    else {
+                        $down_stream_of_intron{$intron_out} = $down_stream_of_intron_out;
+                    }
+                    #print "TEST: $chr\t$strand\t$one\t$CDS_frame\n===up stream====\n" . join("\n", ($mRNA_ID, @upstream_CDS)) . "\n===down stream====\n" . join("\n", ($mRNA_ID, @left_CDS)) . "\n================\n";
+
+                    push @upstream_CDS, $next_CDS;
+                }
+
+            }
+        }
+
+        # 解析 CDS 上下游CDS信息，一个CDS上游或下游的CDSs包含它自己。
+        @CDS = sort {$a <=> $b} @CDS;
+        @CDS = sort {$b <=> $a} @CDS if $strand eq "-";
+        my @upstream_CDS;
+        while ( @CDS ) {
+            # 得到当CDS上下游的CDSs
+            my @down_CDS = @CDS;
+            my $one = shift @CDS;
+            my @up_CDS = @upstream_CDS;
+            push @up_CDS, $one;
+
+            # 对CDS位置进行索引
+            @_ = split /\t/, $one;
+            my $int1 = int($_[0] / 1000);
+            my $int2 = int($_[1] / 1000);
+            ($int1, $int2) = ($int2, $int1) if $int1 > $int2;
+            foreach ( $int1 .. $int2 ) {
+                # 获得 CDS 上下游的CDSs
+                my $up_stream_of_CDS_out = join "\n", ($mRNA_ID, @up_CDS);
+                my $down_stream_of_CDS_out = join "\n", ($mRNA_ID, @down_CDS);
+                # supplementary.gff3中包含可变剪接信息时，优先选择字符数最多，相当于CDS数量最多的；否则按读入顺序。
+                if ( exists $up_stream_of_CDS{$chr}{$strand}{$_}{$one} ) {
+                    $up_stream_of_CDS{$chr}{$strand}{$_}{$one} = $up_stream_of_CDS_out
+                        if length($up_stream_of_CDS_out) > length($up_stream_of_CDS{$chr}{$strand}{$_}{$one});
+                }
+                else {
+                    $up_stream_of_CDS{$chr}{$strand}{$_}{$one} = $up_stream_of_CDS_out;
+                }
+                if ( exists $down_stream_of_CDS{$chr}{$strand}{$_}{$one} ) {
+                    $down_stream_of_CDS{$chr}{$strand}{$_}{$one} = $down_stream_of_CDS_out
+                        if length($down_stream_of_CDS_out) > length($down_stream_of_CDS{$chr}{$strand}{$_}{$one});
+                }
+                else {
+                    $down_stream_of_CDS{$chr}{$strand}{$_}{$one} = $down_stream_of_CDS_out;
+                }
+            }
+            push @upstream_CDS, $one;
+        }
+    }
+}
+
+#print STDERR "Parsing $supplementary_GFF3 Over.\n";
+#print STDERR "OK: " . $down_stream_of_CDS{"Chr1"}{"+"}{21159}{"21159829\t21159954\t0"} . "\nOK\n";
+
+# 读取 target.gff3 基因模型
+my %target_info = &get_geneModels_from_GFF3($target_GFF3);
+
+# 对其中每个 mRNA 进行分析和填补
+foreach my $gene_ID ( sort keys %target_info ) {
+    my @gene_header = split /\t/, $target_info{$gene_ID}{"header"};
+    my ($gene_start, $gene_end) = ($gene_header[3], $gene_header[4]);
+    my $mRNA_out;
+
+    foreach my $mRNA_ID ( @{$target_info{$gene_ID}{"mRNA_ID"}} ) {
+        my $mRNA_info = $target_info{$gene_ID}{"mRNA_info"}{$mRNA_ID};
+        my $mRNA_header = $target_info{$gene_ID}{"mRNA_header"}{$mRNA_ID};
+        my @mRNA_header = split /\t/, $mRNA_header;
+
+        # 获得染色体名称和正负链信息
+        my ($chr, $source, $strand, $attribute) = ($mRNA_header[0], $mRNA_header[1], $mRNA_header[6], $mRNA_header[8]);
+
+        # 分析全部CDS信息
+        my @CDS;
+        foreach ( split /\n/, $mRNA_info ) {
+            @_ = split /\t/, $_;
+            push @CDS, "$_[3]\t$_[4]\t$_[7]" if $_[2] eq "CDS";
+        }
+
+        # 解析其完整性
+        my $integrity = &analysis_geneModels_integrity(\@CDS, \%seq, $chr, $strand);
+        #print STDERR "$gene_ID\t$mRNA_ID\t$integrity\n";
+
+        # 对多 CDS 基因模型进行填补
+        if ( @CDS > 1 ) {
+            my @intron = &get_intron(\@CDS, $mRNA_ID, 1);
+            @intron = sort {$a <=> $b} @intron;
+            @intron = sort {$b <=> $a} @intron if $strand eq "-";
+            @CDS = sort {$a <=> $b} @CDS;
+            @CDS = sort {$b <=> $a} @CDS if $strand eq "-";
+
+            # 对 5' 端进行填补
+            if ( $integrity eq "5prime_partial" or $integrity eq "internal" ) {
+                @_ = split /\t/, $CDS[1];
+                my $intron = "$chr\t$strand\t$intron[0]\t$_[2]";
+                if ( exists $up_stream_of_intron{$intron} ) {
+                    # 得到用于填补的 CDSs 和相应的 mRNA_ID
+                    my @fill_CDS = split /\n/, $up_stream_of_intron{$intron};
+                    my $fill_mRNA_ID = shift @fill_CDS;
+                    # 检测填补的 CDSs 最后一个 CDS 长度是否比目标基因第一个 CDS 长度更长。若是，则填补。
+                    my ($pos1, $pos2, $len1, $len2) = (0, 0, 0, 0);
+                    ( $pos1, $pos2 ) = split /\t/, $CDS[0];
+                    $len1 = $pos2 - $pos1 + 1;
+                    ( $pos1, $pos2 ) = split /\t/, $fill_CDS[-1];
+                    $len2 = $pos2 - $pos1 + 1;
+                    if ( $len2 >= $len1 ) {
+                        shift @CDS;
+                        unshift @CDS, @fill_CDS;
+                        print STDERR "$gene_ID\t$mRNA_ID\tMulti_CDS\t$integrity\tFilled_5p\t$fill_mRNA_ID\n";
+                        #print "TEST: $fill_mRNA_ID\t$mRNA_ID\t$integrity: $intron\n====\n" . join("\n", @CDS) . "\n=====\n";
+                    }
+                    #print "TEST: $mRNA_ID\t5prime_partial: $intron\n";
+                    #print "=====\n$up_stream_of_intron{$intron}\n=====\n";
+                }
+            }
+            # 对 3' 端进行填补
+            if ( $integrity eq "3prime_partial" or $integrity eq "internal" ) {
+                @_ = split /\t/, $CDS[-1];
+                my $intron = "$chr\t$strand\t$intron[-1]\t$_[2]";
+                if ( exists $down_stream_of_intron{$intron} ) {
+                    # 得到用于填补的 CDSs 和相应的 mRNA_ID
+                    my @fill_CDS = split /\n/, $down_stream_of_intron{$intron};
+                    my $fill_mRNA_ID = shift @fill_CDS;
+                    # 检测填补的 CDSs 第一个 CDS 长度是否比目标基因最后一个 CDS 长度更长。若是，则填补。
+                    my ($pos1, $pos2, $len1, $len2) = (0, 0, 0, 0);
+                    ( $pos1, $pos2 ) = split /\t/, $CDS[-1];
+                    $len1 = $pos2 - $pos1 + 1;
+                    ( $pos1, $pos2 ) = split /\t/, $fill_CDS[0];
+                    $len2 = $pos2 - $pos1 + 1;
+                    if ( $len2 >= $len1 ) {
+                        pop @CDS;
+                        push @CDS, @fill_CDS;
+                        print STDERR "$gene_ID\t$mRNA_ID\tMulti_CDS\t$integrity\tFilled_3p\t$fill_mRNA_ID\n";
+                        #print "TEST: $fill_mRNA_ID\t$mRNA_ID\t$integrity: $intron\n====\n" . join("\n", @CDS) . "\n=====\n";
+                    }
+                    #print "TEST: $mRNA_ID\t3prime_partial: $intron\n";
+                    #print "=====\n$down_stream_of_intron{$intron}\n=====\n";
+                }
+            }
+        }
+        # 对单 CDS 基因模型进行填补
+        else {
+            # 寻找重叠CDS
+            my ($start, $end, $frame) = split /\t/, $CDS[0];
+            my @candidate_CDS;
+            my $index1 = int($start / 1000);
+            my $index2 = int($end / 1000);
+            foreach my $index ( $index1 .. $index2 ) {
+                foreach ( keys %{$up_stream_of_CDS{$chr}{$strand}{$index}} ) {
+                    push @candidate_CDS, $up_stream_of_CDS{$chr}{$strand}{$index}{$_};
+                }
+            }
+            # 若有多个重叠的mRNA，则对其按字符数从长到短进行排序。
+            my %sort_candidate_CDS;
+            foreach ( @candidate_CDS ) { $sort_candidate_CDS{$_} = length($_); }
+            @candidate_CDS = sort {$sort_candidate_CDS{$b} <=> $sort_candidate_CDS{$a}} @candidate_CDS;
+
+            # 对 5' 端进行填补
+            if ( $integrity eq "5prime_partial" or $integrity eq "internal" ) {
+                foreach ( @candidate_CDS ) {
+                    # 得到用于填补的 CDSs 和相应的 mRNA_ID
+                    my @fill_CDS = split /\n/, $_;
+                    my $fill_mRNA_ID = shift @fill_CDS;
+                    # 检测填补的 CDSs 最后一个 CDS 是否和目标 CDS 有重叠。
+                    my $test_fill_CDS = pop @fill_CDS;
+                    my ( $fill_CDS_start, $fill_CDS_end, $fill_CDS_frame ) = split /\t/, $test_fill_CDS;
+                    if ( $start <= $fill_CDS_end && $end >= $fill_CDS_start ) {
+                        # 重叠后，填补的 CDSs 最后一个 CDS，其5'端要超出目标 CDS
+                        #   ======------============>
+                        #                  ====================>
+                        if ( $strand eq "+" && $fill_CDS_start <= $start ) {
+                            # 再检测frame是否一致
+                            my $add_frame = $fill_CDS_frame;
+                            $add_frame = 1 if $add_frame == 2; $add_frame = 2 if $add_frame == 1; 
+                            my $extra_bp_num = ( $start - $fill_CDS_start + $add_frame ) % 3;
+                            $extra_bp_num = 1 if $extra_bp_num == 2; $extra_bp_num = 2 if $extra_bp_num == 1;
+                            # 当 frame 一致时进行填补
+                            if ( $extra_bp_num == $frame ) {
+                                my $first_CDS = shift @CDS;
+                                @_ = split /\t/, $first_CDS;
+                                unshift @CDS, "$fill_CDS_start\t$_[1]\t$fill_CDS_frame";
+                                unshift @CDS, @fill_CDS;
+                                print STDERR "$gene_ID\t$mRNA_ID\tSingle_CDS\t$integrity\tFilled_5p\t$fill_mRNA_ID\n";
+                                #print "TEST1: $fill_mRNA_ID\t$mRNA_ID\t$strand\t$integrity: $CDS[0]\n====\n" . join("\n", @CDS) . "\n=====\n";
+                                last;
+                            }
+                        }
+                        #                      <======------============
+                        #    <====================
+                        if ( $strand eq "-" && $fill_CDS_end >= $end ) {
+                            # 再检测frame是否一致
+                            my $add_frame = $fill_CDS_frame;
+                            $add_frame = 1 if $add_frame == 2; $add_frame = 2 if $add_frame == 1;
+                            my $extra_bp_num = ( $fill_CDS_end - $end + $add_frame ) % 3;
+                            $extra_bp_num = 1 if $extra_bp_num == 2; $extra_bp_num = 2 if $extra_bp_num == 1;
+                            # 当 frame 一致时进行填补
+                            if ( $extra_bp_num == $frame ) {
+                                my $first_CDS = shift @CDS;
+                                @_ = split /\t/, $first_CDS;
+                                unshift @CDS, "$_[0]\t$fill_CDS_end\t$fill_CDS_frame";
+                                unshift @CDS, @fill_CDS;
+                                print STDERR "$gene_ID\t$mRNA_ID\tSingle_CDS\t$integrity\tFilled_5p\t$fill_mRNA_ID\n";
+                                #print "TEST2: $fill_mRNA_ID\t$mRNA_ID\t$strand\t$integrity: $CDS[0]\n====\n" . join("\n", @CDS) . "\n=====\n";
+                                last;
+                            }
+                        }
+                    }
+
+                }
+            }
+
+            my ($start, $end, $frame) = split /\t/, $CDS[-1];
+            my @candidate_CDS;
+            my $index1 = int($start / 1000);
+            my $index2 = int($end / 1000);
+            foreach my $index ( $index1 .. $index2 ) {
+                foreach ( keys %{$down_stream_of_CDS{$chr}{$strand}{$index}} ) {
+                    push @candidate_CDS, $down_stream_of_CDS{$chr}{$strand}{$index}{$_};
+                }
+            }
+            # 若有多个重叠的mRNA，则对其按字符数从长到短进行排序。
+            my %sort_candidate_CDS;
+            foreach ( @candidate_CDS ) { $sort_candidate_CDS{$_} = length($_); }
+            @candidate_CDS = sort {$sort_candidate_CDS{$b} <=> $sort_candidate_CDS{$a}} @candidate_CDS;
+
+            # 对 3' 端进行填补
+            if ( $integrity eq "3prime_partial" or $integrity eq "internal" ) {
+                foreach ( @candidate_CDS ) {
+                    # 得到用于填补的 CDSs 和相应的 mRNA_ID
+                    my @fill_CDS = split /\n/, $_;
+                    my $fill_mRNA_ID = shift @fill_CDS;
+                    # 检测填补的 CDSs 第一个 CDS 是否和目标 CDS 有重叠。
+                    my $test_fill_CDS = shift @fill_CDS;
+                    my ( $fill_CDS_start, $fill_CDS_end, $fill_CDS_frame ) = split /\t/, $test_fill_CDS;
+                    if ( $start <= $fill_CDS_end && $end >= $fill_CDS_start ) {
+                        # 重叠后，填补的 CDSs 最后一个 CDS，其5'端要超出目标 CDS
+                        #                  ========------============>
+                        # ====================>
+                        if ( $strand eq "+" && $fill_CDS_end >= $end ) {
+                            # 再检测frame是否一致
+                            my $add_frame = $fill_CDS_frame;
+                            $add_frame = 1 if $add_frame == 2; $add_frame = 2 if $add_frame == 1;
+                            my $fill_CDS_frame_new = ( $end - $fill_CDS_start + 1 + $add_frame ) % 3;
+                            $add_frame = $frame;
+                            $add_frame = 1 if $add_frame == 2; $add_frame = 2 if $add_frame == 1;
+                            my $frame_new = ( $end - $start + 1 + $add_frame ) % 3;
+                            if ( $fill_CDS_frame_new == $frame_new ) {
+                                my $last_CDS = pop @CDS;
+                                @_ = split /\t/, $last_CDS;
+                                push @CDS, "$_[0]\t$fill_CDS_end\t$_[2]";
+                                push @CDS, @fill_CDS;
+                                print STDERR "$gene_ID\t$mRNA_ID\tSingle_CDS\t$integrity\tFilled_3p\t$fill_mRNA_ID\n";
+                                #print "TEST3: $fill_mRNA_ID\t$mRNA_ID\t$strand\t$integrity: $CDS[-1]\n====\n" . join("\n", @CDS) . "\n=====\n";
+                                last;
+                            }
+
+                        }
+                        #  <========------==========
+                        #                      <===============
+                        if ( $strand eq "-" && $fill_CDS_start <= $start ) {
+                            # 再检测frame是否一致
+                            my $add_frame = $fill_CDS_frame;
+                            $add_frame = 1 if $add_frame == 2; $add_frame = 2 if $add_frame == 1;
+                            my $fill_CDS_frame_new = ( $fill_CDS_end - $start + 1 + $add_frame ) % 3;
+                            $add_frame = $frame;
+                            $add_frame = 1 if $add_frame == 2; $add_frame = 2 if $add_frame == 1;
+                            my $frame_new = ( $end - $start + 1 + $add_frame ) % 3;
+                            if ( $fill_CDS_frame_new == $frame_new ) {
+                                my $last_CDS = pop @CDS;
+                                @_ = split /\t/, $last_CDS;
+                                push @CDS, "$fill_CDS_start\t$end\t$_[2]";
+                                push @CDS, @fill_CDS;
+                                print STDERR "$gene_ID\t$mRNA_ID\tSingle_CDS\t$integrity\tFilled_3p\t$fill_mRNA_ID\n";
+                                #print "TEST4: $fill_mRNA_ID\t$mRNA_ID\t$strand\t$integrity: $CDS[-1]\n====\n" . join("\n", @CDS) . "\n=====\n";
+                                last;
+
+                            }
+
+                        }
+
+                    }
+                }
+
+            }
+        }
+
+        # 分析mRNA的exon结果
+        my @exon;
+        foreach ( split /\n/, $mRNA_info ) {
+            @_ = split /\t/, $_;
+            push @exon, "$_[3]\t$_[4]" if $_[2] eq "exon";
+        }
+        my $mRNA_exons = join "\n", @exon;
+        my $mRNA_CDSs = join "\n", @CDS;
+
+        # 分析GFF3中CDS/exon/intron第六列score和第九列attribute信息。此处留空即可。
+        my %gff3_score_attr;
+
+        # 得到mRNA信息
+        my ($mRNA_start, $mRNA_end, $mRNA_content) = &get_mRNA_info($mRNA_CDSs, $mRNA_exons, $mRNA_ID, $chr, $strand, $source, \%gff3_score_attr);
+        $mRNA_header[3] = $mRNA_start;
+        $mRNA_header[4] = $mRNA_end;
+        $mRNA_header = join "\t", @mRNA_header;
+        $mRNA_out .= $mRNA_header;
+        $mRNA_out .= $mRNA_content;
+
+        $gene_start = $mRNA_start if $gene_start > $mRNA_start;
+        $gene_end = $mRNA_end if $mRNA_end > $gene_end;
+    }
+
+     # 若有基因进行修正后，对所有转录本的起始和结束位置进行修正，对转录本对应的首尾exon进行修正。
+     $mRNA_out = &correct_ends_of_transcript_and_exon($mRNA_out, $gene_start, $gene_end);
+
+     # 输出GFF3
+     $gene_header[3] = $gene_start;
+     $gene_header[4] = $gene_end;
+     print (join "\t", @gene_header);
+     print "$mRNA_out\n";
+}
+
+
+# 子程序，解析基因的完整性
+sub analysis_geneModels_integrity {
+    my @CDS = @{$_[0]};
+    my %seq = %{$_[1]};
+    my ($chr, $strand) = ($_[2], $_[3]);
+    my $out;
+
+    @CDS = sort {$a <=> $b} @CDS;
+    my $seq;
+    foreach ( @CDS ) {
+        @_ = split /\t/;
+        $seq .= substr($seq{$chr}, $_[0] - 1, $_[1] - $_[0] + 1);
+    }
+    if ( $strand eq "-" ) {
+        $seq = reverse $seq;
+        $seq =~ tr/ATCGatcgn/TAGCTAGCN/;
+    }
+
+    if ( $seq =~ m/^(\w{3})/ && exists $start_codon{$1} ) {
+        if ( $seq =~ m/(\w{3})$/ && exists $stop_codon{$1} ) {
+            $out = "complete";
+        }
+        else {
+            $out = "3prime_partial";
+        }
+    }
+    elsif ( $seq =~ m/(\w{3})$/ && exists $stop_codon{$1} ) {
+        $out = "5prime_partial";
+    }
+    else {
+        $out = "internal";
+    }
+
+    return $out;
+}
+
+sub get_intron {
+    my @exon = @{$_[0]};
+    my $mRNA_ID = $_[1];
+    my $intron_len = $_[2];
+    @exon = sort {$a <=> $b} @exon;
+
+    my @intron;
+    my $first_exon = shift @exon;
+    my ($last_start, $last_end) = split /\t/, $first_exon;
+    foreach ( @exon ) {
+        my ($start, $end) = split /\t/, $_;
+        if ($start > $last_end + $intron_len) {
+            my $intron_start = $last_end + 1;
+            my $intron_stop = $start - 1;
+            push @intron, "$intron_start\t$intron_stop";
+        }
+        else {
+            my $value = $start - $last_end - 1;
+            #print STDERR "Warning: a intron length (value is $value) of mRNA $mRNA_ID < $intron_len was detected:\n\tThe former CDS/Exon: $last_start - $last_end\n\tThe latter CDS/Exon: $start - $end\n";
+        }
+        ($last_start, $last_end) = ($start, $end);
+    }
+
+    return @intron;
+}
+
+sub get_geneModels_from_GFF3 {
+    my %gene_info;
+    my $input_file = $_[0];
+    # 第一轮，找gene信息
+    open IN, $input_file or die "Error: Can not open file $input_file, $!";
+    while (<IN>) {
+        if ( m/\tgene\t.*ID=([^;\s]+)/ ) {
+            $gene_info{$1}{"header"} = $_;
+        }
+    }
+    close IN;
+    # 第二轮，找Parent值是geneID的信息，包含但不限于 mRNA 信息
+    my %mRNA_ID2gene_ID;
+    open IN, $input_file or die "Error: Can not open file $input_file, $!";
+    while (<IN>) {
+        if ( m/Parent=([^;\s]+)/ ) {
+            my $parent = $1;
+            if ( exists $gene_info{$parent} ) {
+                if ( m/ID=([^;\s]+)/ ) {
+                    push @{$gene_info{$parent}{"mRNA_ID"}}, $1;
+                    $gene_info{$parent}{"mRNA_header"}{$1} = $_;
+                    $mRNA_ID2gene_ID{$1} = $parent;
+                }
+            }
+        }
+    }
+    close IN;
+    # 第三轮，找Parent值不是geneID的信息
+    open IN, $input_file or die "Error: Can not open file $input_file, $!";
+    while (<IN>) {
+        if ( m/Parent=([^;\s]+)/ && exists $mRNA_ID2gene_ID{$1} ) {
+            my $parent = $1;
+            $gene_info{$mRNA_ID2gene_ID{$1}}{"mRNA_info"}{$parent} .= $_;
+        }
+    }
+    close IN;
+
+    return %gene_info;
+}
+
+sub get_mRNA_info {
+    my ($mRNA_CDSs, $mRNA_exons, $mRNA_ID, $chr, $strand, $source) = @_;
+    my %gff3_score_attr = %{$_[-1]};
+
+    # 根据CDS边界对exon边界进行修正；得到mRNA边界；得到intron信息；得到UTR信息。
+    my (@CDS, @exon);
+    foreach ( split /\n/, $mRNA_CDSs ) { push @CDS, $_; }
+    foreach ( split /\n/, $mRNA_exons ) { push @exon, $_; }
+    @CDS = sort {$a <=> $b} @CDS;
+    @exon = sort {$a <=> $b} @exon;
+    my ($mRNA_start, $mRNA_end, $mRNA_introns, $mRNA_UTR);
+    ($mRNA_start, $mRNA_end, $mRNA_exons, $mRNA_introns) = &modify_exon(\@CDS, \@exon);
+    $mRNA_UTR = &get_UTR(\@CDS, \@exon, $strand);
+
+    # 对mRNA内容进行排序
+    my $mRNA_content = &sort_mRNA_info($chr, $strand, $mRNA_ID, $mRNA_start, $mRNA_end, $mRNA_CDSs, $mRNA_exons,$mRNA_introns, $mRNA_UTR, $source, \%gff3_score_attr);
+
+    #print "TEST: $mRNA_ID\t$mRNA_start\t$mRNA_end\n";
+    return ($mRNA_start, $mRNA_end, $mRNA_content);
+}
+
+sub sort_mRNA_info {
+    my ($chr, $strand, $mRNA_ID, $mRNA_start, $mRNA_end, $mRNA_CDSs, $mRNA_exons, $mRNA_introns, $mRNA_UTR, $source) = @_;
+    my %gff3_score_attr = %{$_[-1]};
+
+    my ($mRNA_content, %sort1, %sort2);
+    # sort1：按照位置排序； sort2：按照five_prime_UTR、exon、CDS、intron、three_prime_UTR顺序进行排序。
+
+    if ( $strand eq "+" ) {
+        my $num = 0;
+        foreach ( split /\n/, $mRNA_exons ) {
+            $num ++; @_ = split /\t/, $_; my $feature_type = "exon"; my $feature_showname = $feature_type; my $frame = '.';
+            my $out_content = &get_content($chr, $source, $feature_type, $_[0], $_[1], $strand, $frame, $mRNA_ID, $num, $feature_showname, \%gff3_score_attr);
+            $sort1{$out_content} = $_[0];
+            $sort2{$out_content} = 2;
+        }
+        my ($num, $CDS_length, $frame) = (0, 0, 0);
+        foreach ( split /\n/, $mRNA_CDSs ) {
+            $num ++; @_ = split /\t/, $_; my $feature_type = "CDS"; my $feature_showname = $feature_type;
+            $CDS_length += (abs($_[1] - $_[0]) + 1);
+            my $out_content = &get_content($chr, $source, $feature_type, $_[0], $_[1], $strand, $frame, $mRNA_ID, $num, $feature_showname, \%gff3_score_attr);
+            $sort1{$out_content} = $_[0];
+            $sort2{$out_content} = 3;
+            $frame = $CDS_length % 3; if ($frame == 1) {$frame = 2;} elsif ($frame == 2) {$frame = 1;}
+        }
+        my $num = 0;
+        foreach ( split /\n/, $mRNA_introns ) {
+            $num ++; @_ = split /\t/, $_; my $feature_type = "intron"; my $feature_showname = $feature_type; my $frame = '.';
+            my $out_content = &get_content($chr, $source, $feature_type, $_[0], $_[1], $strand, $frame, $mRNA_ID, $num, $feature_showname, \%gff3_score_attr);
+            $sort1{$out_content} = $_[0];
+            $sort2{$out_content} = 4;
+        }
+        my ($num5, $num3, $num, $sort_num)= (0, 0, 0, 0);
+        foreach ( split /\n/, $mRNA_UTR ) {
+            @_ = split /\t/, $_;
+            my ( $feature_type, $feature_showname );
+            if ( $_[0] eq "five_prime_UTR" ) {
+                $feature_type = "five_prime_UTR";
+                $feature_showname = "utr5p";
+                $num5 ++; $num = $num5; $sort_num = 1;
+            }
+            elsif ( $_[0] eq "three_prime_UTR" ) {
+                $feature_type = "three_prime_UTR";
+                $feature_showname = "utr3p";
+                $num3 ++; $num = $num3; $sort_num = 5;
+            }
+            my $frame = '.';
+            my $out_content = &get_content($chr, $source, $feature_type, $_[1], $_[2], $strand, $frame, $mRNA_ID, $num, $feature_showname, \%gff3_score_attr);
+            $sort1{$out_content} = $_[1];
+            $sort2{$out_content} = $sort_num;
+        }
+
+        foreach ( sort { $sort1{$a} <=> $sort1{$b} or $sort2{$a} cmp $sort2{$b} } keys %sort1 ) {
+            $mRNA_content .= $_;
+        }
+    }
+    elsif ( $strand eq "-" ) {
+        my $num = 0;
+        foreach ( reverse split /\n/, $mRNA_exons ) {
+            $num ++; @_ = split /\t/, $_; my $feature_type = "exon"; my $feature_showname = $feature_type; my $frame = '.';
+            my $out_content = &get_content($chr, $source, $feature_type, $_[0], $_[1], $strand, $frame, $mRNA_ID, $num, $feature_showname, \%gff3_score_attr);
+            $sort1{$out_content} = $_[0];
+            $sort2{$out_content} = 2;
+        }
+        my ($num, $CDS_length, $frame) = (0, 0, 0);
+        foreach ( reverse split /\n/, $mRNA_CDSs ) {
+            $num ++; @_ = split /\t/, $_; my $feature_type = "CDS"; my $feature_showname = $feature_type;
+            $CDS_length += (abs($_[1] - $_[0]) + 1);
+            my $out_content = &get_content($chr, $source, $feature_type, $_[0], $_[1], $strand, $frame, $mRNA_ID, $num, $feature_showname, \%gff3_score_attr);
+            $sort1{$out_content} = $_[0];
+            $sort2{$out_content} = 3;
+            $frame = $CDS_length % 3; if ($frame == 1) {$frame = 2;} elsif ($frame == 2) {$frame = 1;}
+        }
+        my $num = 0;
+        foreach ( reverse split /\n/, $mRNA_introns ) {
+            $num ++; @_ = split /\t/, $_; my $feature_type = "intron"; my $feature_showname = $feature_type; my $frame = '.';
+            my $out_content = &get_content($chr, $source, $feature_type, $_[0], $_[1], $strand, $frame, $mRNA_ID, $num, $feature_showname, \%gff3_score_attr);
+            $sort1{$out_content} = $_[0];
+            $sort2{$out_content} = 4;
+        }
+        my ($num5, $num3, $num, $sort_num)= (0, 0, 0, 0);
+        foreach ( reverse split /\n/, $mRNA_UTR ) {
+            @_ = split /\t/, $_;
+            my ( $feature_type, $feature_showname );
+            if ( $_[0] eq "five_prime_UTR" ) {
+                $feature_type = "five_prime_UTR";
+                $feature_showname = "utr5p";
+                $num5 ++; $num = $num5; $sort_num = 1;
+            }
+            elsif ( $_[0] eq "three_prime_UTR" ) {
+                $feature_type = "three_prime_UTR";
+                $feature_showname = "utr3p";
+                $num3 ++; $num = $num3; $sort_num = 5;
+            }
+            my $frame = '.';
+            my $out_content = &get_content($chr, $source, $feature_type, $_[1], $_[2], $strand, $frame, $mRNA_ID, $num, $feature_showname, \%gff3_score_attr);
+            $sort1{$out_content} = $_[1];
+            $sort2{$out_content} = $sort_num;
+        }
+        foreach ( sort { $sort1{$b} <=> $sort1{$a} or $sort2{$a} <=> $sort2{$b} } keys %sort1 ) {
+            $mRNA_content .= $_;
+        }
+    }
+
+    return $mRNA_content;
+}
+
+# 子程序，根据CDS和exon信息得到UTR
+sub get_UTR {
+    my @cds = @{$_[0]};
+    my @exon = @{$_[1]};
+    my $strand = $_[2];
+
+    my (@utr, %cds_pos);
+    foreach (@cds) {
+        @_ = split /\t/;
+        $cds_pos{$_[0]} = 1;
+        $cds_pos{$_[1]} = 1;
+    }
+
+    foreach (@exon) {
+        my ($start, $end) = split /\t/;
+        my $utr_keep = 1;
+        foreach (@cds) {
+            @_ = split /\t/;
+            if ($_[0] <= $end && $_[1] >= $start) {
+                $utr_keep = 0;
+                if ($start < $_[0] && $end == $_[1]) {
+                    my $utr_start = $start;
+                    my $utr_end = $_[0] - 1;
+                    push @utr, "$utr_start\t$utr_end";
+                }
+                elsif ($start == $_[0] && $end > $_[1]) {
+                    my $utr_start = $_[1] + 1;
+                    my $utr_end = $end;
+                    push @utr, "$utr_start\t$utr_end";
+                }
+            }
+        }
+        push @utr, $_ if $utr_keep == 1;
+    }
+
+    my @out;
+    my @cds_pos = sort {$a <=> $b} keys %cds_pos;
+    if ($strand eq "+") {
+        @utr = sort {$a <=> $b} @utr;
+        foreach (@utr) {
+            @_ = split /\t/;
+            if ($_[1] <= $cds_pos[0]) {
+                push @out, "five_prime_UTR\t$_";
+            }
+            elsif ($_[0] >= $cds_pos[1]) {
+                push @out, "three_prime_UTR\t$_";
+            }
+        }
+    }
+    elsif ($strand eq "-") {
+        @utr = sort {$b <=> $a} @utr;
+        foreach (@utr) {
+            @_ = split /\t/;
+            if ($_[0] >= $cds_pos[1]) {
+                push @out, "five_prime_UTR\t$_";
+            }
+            elsif ($_[1] <= $cds_pos[0]) {
+                push @out, "three_prime_UTR\t$_";
+            }
+        }
+    }
+
+    my $out = join "\n", @out;
+    return $out;
+}
+
+# 子程序，用于能根据一个基因模型的CDSs信息对exons信息进行修正。可以将没有exons的基因模型使用CDS信息补上；可以将错误的exons信息进行修正（比如，exons之间有重叠或exon和intron有重叠）。
+# 要求输入的CDS信息是正确的，即CDSs之间不能有重叠。
+sub modify_exon {
+    # 得到CDS和exon的信息，分别放入@cds和@exon。
+    my @cds = @{$_[0]};
+    @cds = sort {$a <=> $b} @cds;
+    my @exon = @{$_[1]};
+    @exon = sort {$a <=> $b} @exon;
+    my $mRNA_ID = $_[2];
+
+    # 获得mRNA的边界。
+    my ($mRNA_start, $mRNA_end, @pos);
+    foreach (@cds) {
+        @_ = split /\t/, $_;
+        push @pos, ($_[0], $_[1]);
+    }
+    foreach (@exon) {
+        @_ = split /\t/, $_;
+        push @pos, ($_[0], $_[1]);
+    }
+    @pos = sort {$a <=> $b} @pos;
+    ($mRNA_start, $mRNA_end) = ($pos[0], $pos[-1]);
+
+   # 根据CDSs信息鉴定introns。
+    my %intron;
+    my $first_CDS = shift @cds;
+    my ($last_start, $last_end) = split /\t/, $first_CDS;
+    foreach ( @cds ) {
+        my ($start, $end) = split /\t/, $_;
+        if ($start > $last_end) {
+            my $intron_start = $last_end + 1;
+            my $intron_stop = $start - 1;
+            $intron{"$intron_start\t$intron_stop"} = 1 if $intron_stop >= $intron_start;
+        }
+        ($last_start, $last_end) = ($start, $end);
+    }
+
+    # 根据exons信息鉴定introns。若两exons之间找到的intron和CDS的intron有冲突，则仅选择CDS来源的intron。
+    my $first_exon = shift @exon;
+    ($last_start, $last_end) = split /\t/, $first_exon;
+    foreach my $exon ( @exon ) {
+        my ($start, $end) = split /\t/, $exon;
+        if ($start > $last_end) {
+            my $intron_start = $last_end + 1;
+            my $intron_stop = $start - 1;
+            my $keep_intron = 1;
+            foreach ( keys %intron ) {
+                my ($intron1, $intron2) = split /\t/, $_;
+                if ( $intron1 <= $intron_stop && $intron2 >= $intron_start ) {
+                    $keep_intron = 0;
+                }
+            }
+            $intron{"$intron_start\t$intron_stop"} = 1 if ($keep_intron == 1 && $intron_stop >= $intron_start);
+        }
+        ($last_start, $last_end) = ($start, $end);
+    }
+
+    # 根据mRNA边界和introns信息得到准确的exons信息
+    my @exon_out;
+    my @intron = sort {$a <=> $b} keys %intron;
+    my @intron_out = sort {$a <=> $b} keys %intron;
+    if (@intron) {
+        my $first_intron = shift @intron;
+        ($last_start, $last_end) = split /\t/, $first_intron;
+        my $exon_end = $last_start - 1;
+        my $exon_start = $last_end + 1;
+        push @exon_out, "$mRNA_start\t$exon_end";
+        foreach (@intron) {
+            my ($start, $end) = split /\t/, $_;
+            $exon_end = $start - 1;
+            push @exon_out, "$exon_start\t$exon_end";
+            $exon_start = $end + 1;
+        }
+        push @exon_out, "$exon_start\t$mRNA_end";
+    }
+    else {
+        push @exon_out, "$mRNA_start\t$mRNA_end";
+    }
+
+    #print ( "$mRNA_ID: " . (join ";", @exon_out) . "\n");
+    my $exon_out = join "\n", @exon_out;
+    my $intron_out = join "\n", @intron_out;
+    return ($mRNA_start, $mRNA_end, $exon_out, $intron_out);
+}
+
+# 子程序，得到GFF3文件第9列attribute中除了ID和Parent之外的其它信息。
+sub get_attr {
+    my $attribute = $_[0];
+    my @attribute = split /;/, $attribute;
+    my @out;
+    foreach ( @attribute ) {
+        next if m/^\s*$/;
+        s/^\s*//;
+        s/\s*$//;
+        next if m/^ID/i;
+        next if m/^Parent/i;
+        push @out, $_;
+    }
+    my $out = join ";", @out;
+    $out .= ';' if $out;
+    return $out;
+}
+
+# 子程序，得到GFF3文件的一行。
+sub get_content {
+    my ($chr, $source, $feature_type, $start, $end, $strand, $frame, $mRNA_ID, $num, $feature_showname) = @_;
+    my %gff3_score_attr = %{$_[-1]};
+    my $score = '.';
+    my $add_attr = "";
+    $score = $gff3_score_attr{"$chr\t$strand\t$feature_type\t$start\t$end"}{"score"} if exists $gff3_score_attr{"$chr\t$strand\t$feature_type\t$start\t$end"};
+    $add_attr = $gff3_score_attr{"$chr\t$strand\t$feature_type\t$start\t$end"}{"attr"} if exists $gff3_score_attr{"$chr\t$strand\t$feature_type\t$start\t$end"};
+    my $out_content = "$chr\t$source\t$feature_type\t$start\t$end\t$score\t$strand\t$frame\tID=$mRNA_ID.$feature_showname$num;Parent=$mRNA_ID;$add_attr\n";
+    return $out_content;
+}
+
+
+sub correct_ends_of_transcript_and_exon {
+    my ($transcript_info, $geneStart, $geneEnd) = @_;
+    my $out;
+
+    # 解析转录本ID。有些转录本Feature Name可能不是mRNA，同时输入数据中不包含Gene Feature Name，因此使用parent信息来确定转录本ID。
+    my (%parent, %transcript_ID);
+    foreach ( split /\n/, $transcript_info ) {
+        my ($ID, $parent) = ("null", "null");
+        $ID = $1 if m/ID=([^;]+)/;
+        $parent = $1 if m/Parent=([^;]+)/;
+        $parent{$ID} = $parent if ($ID && $parent);
+    }
+    foreach ( keys %parent ) {
+        $transcript_ID{$_} = 1 unless exists $parent{$parent{$_}};
+    }
+
+    # 解析得到各个转录本的内容和头部信息
+    my (%transcript_content, %transcript_header);
+    foreach ( split /\n/, $transcript_info ) {
+        my ($ID, $parent) = ("null", "null");
+        $ID = $1 if m/ID=([^;]+)/;
+        $parent = $1 if m/Parent=([^;]+)/;
+        if ( exists $transcript_ID{$ID} ) {
+            $transcript_header{$ID} = $_;
+        }
+        elsif ( exists $transcript_ID{$parent} ) {
+            $transcript_content{$parent} .= "$_\n";
+        }
+    }
+
+    # 对各个转录本的头部和内容进行修正
+    foreach my $transcript_ID ( sort keys %transcript_ID ) {
+        # 修改头部
+        my $transcript_header = $transcript_header{$transcript_ID};
+        my @transcript_header = split /\t/, $transcript_header;
+        $transcript_header[3] = $geneStart;
+        $transcript_header[4] = $geneEnd;
+        $transcript_header = join "\t", @transcript_header;
+        $out .= "$transcript_header\n";;
+
+        # 修改exon部分。
+        # 先找到exon起始和结束位置。
+        my @exon;
+        foreach ( split /\n/, $transcript_content{$transcript_ID} ) {
+            @_ = split /\t/;
+            push @exon, "$_[3]\t$_[4]" if $_[2] eq "exon";
+        }
+        @exon = sort {$a <=> $b} @exon;
+        my @exon_first = split /\t/, $exon[0];
+        my @exon_last = split /\t/, $exon[-1];
+        my ($exon_start, $exon_end) = ($exon_first[0], $exon_last[-1]);
+        # 在对转录本内容中的exon进行修改
+        foreach ( split /\n/, $transcript_content{$transcript_ID} ) {
+            @_ = split /\t/;
+            if ( $_[2] eq "exon" ) {
+                s/\texon\t$exon_start\t/\texon\t$geneStart\t/;
+                s/\texon\t(\d+)\t$exon_end\t/\texon\t$1\t$geneEnd\t/;
+            }
+            $out .= "$_\n";
+        }
+    }
+
+    return $out;
+}
