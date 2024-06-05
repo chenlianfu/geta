@@ -187,8 +187,8 @@ mkdir $tmp_dir unless -e $tmp_dir;
 chdir "$tmp_dir"; print STDERR "\nPWD: $tmp_dir\n";
 
 # 0.4 准备基因组序列：
-# 读取FASTA序列以>开始的头部时，去除第一个空及之后的字符。若序列名有重复，则仅保留先出现的序列。
-$cmdString = "$bin_path/fasta_format_revising.pl --no_change_header --seq_type DNA --min_length 1000 --max_unknown_character_ratio 1.0 --line_length 80 --no_change_to_UC $genome 2> genome.fasta.fasta_format_revising.log | perl -pe 's/(^>\\S+).*/\$1/' > genome.fasta";
+# 读取FASTA序列以>开始的头部时，去除第一个空及之后的字符，按从长到短排序。若序列名有重复，则修正序列名并保留其序列。
+$cmdString = "$bin_path/genome_seq_clear.pl --no_rename --no_change_bp $genome > genome.fasta 2> genome.size";
 unless (-s "genome.fasta") {
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -698,6 +698,7 @@ my $cmdString3 = "$bin_path/fasta_extract_subseqs_from_list.pl proteins_all.fast
 &execute_cmds($cmdString1, $cmdString2, $cmdString3, "06.extract_proteins_for_filtering.ok" );
 
 # 6.7 对蛋白序列进行HMM和BLASTP验证。
+$cmdString1 = "";
 if ( $HMM_db ) {
     my $hmmscan_cpu = 0;
     $hmmscan_cpu = $1 if $config{'para_hmmscan'} =~ m/--hmmscan_cpu\s+(\d+)/;
@@ -705,13 +706,13 @@ if ( $HMM_db ) {
     $para_hmmscan_cpu = int($cpu / $hmmscan_cpu + 0.5) if $hmmscan_cpu;
     $para_hmmscan_cpu = 1 if $para_hmmscan_cpu < 1;
 
-    $cmdString1 = "";
     foreach ( sort keys %HMM_db ) {
         $cmdString1 .= "$bin_path/para_hmmscan $config{'para_hmmscan'} --outformat --cpu $para_hmmscan_cpu --no_cut_ga --hmm_db $_ --tmp_prefix $HMM_db{$_} proteins_for_filtering.fasta >> validation_hmmscan.tab 2>> para_hmmscan.1.log; $bin_path/para_hmmscan $config{'para_hmmscan'} --chunk 1 --outformat --cpu $para_hmmscan_cpu --no_cut_ga --hmm_db $_ --tmp_prefix $HMM_db{$_} proteins_for_filtering.fasta >> validation_hmmscan.tab 2>> para_hmmscan.2.log; ";
     }
 }
+$cmdString2 = "";
+$cmdString3 = "";
 if ( $BLASTP_db ) {
-    $cmdString2 = "";
     foreach ( sort keys %BLASTP_db ) {
         $cmdString2 .= "diamond blastp $config{'diamond'} --outfmt 5 --db $_ --query proteins_for_filtering.fasta --out validation_blastp_$BLASTP_db{$_}.xml --threads $cpu &>> diamond_blastp.log; ";
         $cmdString3 = "$bin_path/parsing_blast_result.pl $config{'parsing_blast_result.pl'} --out-hit-confidence validation_blastp_$BLASTP_db{$_}.xml >> validation_blastp.tab; ";
