@@ -36,6 +36,9 @@ Usage:
     --no_poor_gene_models    default: None
     添加该参数后，程序不在标准输出中给出第四类poor gene models。在临时文件目录下的final_all.gff3文件中依然保留所有四种类型的基因模型。
 
+    --out_unfilled_GFF3 <string>    default: None
+    让程序输出未进行强制末端填补的GFF3文件。该结果是同源蛋白预测的原始结果。
+
     --out_alignment_GFF3 <string>    default: None
     让程序输出一个GFF3格式的同源蛋白比对文件，包含同源蛋白对基因组序列的比对信息。一个基因区域输出每个同源蛋白的最优比对信息。
 
@@ -50,7 +53,7 @@ Usage:
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($help_flag, $threshold_homolog_coverage_good, $threshold_homolog_coverage_fair, $tmp_dir, $genetic_code, $no_fair_gene_models, $no_poor_gene_models, $out_alignment_GFF3, $out_alignment_num_for_each_gene_region);
+my ($help_flag, $threshold_homolog_coverage_good, $threshold_homolog_coverage_fair, $tmp_dir, $genetic_code, $no_fair_gene_models, $no_poor_gene_models, $out_unfilled_GFF3, $out_alignment_GFF3, $out_alignment_num_for_each_gene_region);
 GetOptions(
     "help" => \$help_flag,
     "threshold_homolog_coverage_good:f" => \$threshold_homolog_coverage_good,
@@ -59,6 +62,7 @@ GetOptions(
     "genetic_code:i" => \$genetic_code,
     "no_fair_gene_models" => \$no_fair_gene_models,
     "no_poor_gene_models" => \$no_poor_gene_models,
+    "out_unfilled_GFF3:s" => \$out_unfilled_GFF3,
     "out_alignment_GFF3:s" => \$out_alignment_GFF3,
     "out_alignment_num_for_each_gene_region:i" => \$out_alignment_num_for_each_gene_region,
 );
@@ -75,6 +79,7 @@ if ( $help_flag ) { die $usage }
 my $input_file1 = abs_path($ARGV[0]);
 my $input_file2 = abs_path($ARGV[1]);
 $out_alignment_GFF3 = abs_path($out_alignment_GFF3) if $out_alignment_GFF3;
+$out_unfilled_GFF3 = abs_path($out_unfilled_GFF3) if $out_unfilled_GFF3,
 $out_alignment_num_for_each_gene_region ||= 5;
 
 # 读取基因组序列信息
@@ -118,6 +123,9 @@ open OUTA, ">", "$tmp_dir/A_raw.gff3" or die "Can not create file $tmp_dir/A_raw
 open OUTB, ">", "$tmp_dir/B_raw.gff3" or die "Can not create file $tmp_dir/B_raw.gff3, $!";
 open OUTC, ">", "$tmp_dir/C_raw.gff3" or die "Can not create file $tmp_dir/C_raw.gff3, $!";
 open OUTD, ">", "$tmp_dir/D_raw.gff3" or die "Can not create file $tmp_dir/D_raw.gff3, $!";
+if ( $out_unfilled_GFF3 ) {
+    open OUTE, ">", $out_unfilled_GFF3 or die "Can not create file $out_unfilled_GFF3, $!";
+}
 <IN>;
 # 每个基因区域以两个换行符分割
 $/ = "\n\n";
@@ -151,27 +159,32 @@ while (<IN>) {
         my $coverage = 0;
         $coverage = (abs($_[9] - $_[8]) + 1) / $_[7] if $_[7];
         # 根据对homolog的覆盖率对基因模型进行分类
+        my $gff3_out;
         if ( $coverage == 1 && $_[11] == 0 ) {
-            my $gff3_out = &get_gff3(\@_, "excellent_gene_models_predicted_by_homolog", "gene$gene_num", \%intron_support_num);
+            $gff3_out = &get_gff3(\@_, "excellent_gene_models_predicted_by_homolog", "gene$gene_num", \%intron_support_num);
             print OUTA "$gff3_out\n"; $numA ++;
         }
         elsif ( $coverage >= $threshold_homolog_coverage_good ) {
-            my $gff3_out = &get_gff3(\@_, "good_gene_models_predicted_by_homolog", "gene$gene_num", \%intron_support_num);
+            $gff3_out = &get_gff3(\@_, "good_gene_models_predicted_by_homolog", "gene$gene_num", \%intron_support_num);
             print OUTB "$gff3_out\n"; $numB ++;
         }
         elsif ( $coverage >= $threshold_homolog_coverage_fair ) {
-            my $gff3_out = &get_gff3(\@_, "fair_gene_models_predicted_by_homolog", "gene$gene_num", \%intron_support_num);
+            $gff3_out = &get_gff3(\@_, "fair_gene_models_predicted_by_homolog", "gene$gene_num", \%intron_support_num);
             print OUTC "$gff3_out\n"; $numC ++;
         }
         else {
-            my $gff3_out = &get_gff3(\@_, "poor_gene_models_predicted_by_homolog", "gene$gene_num", \%intron_support_num);
+            $gff3_out = &get_gff3(\@_, "poor_gene_models_predicted_by_homolog", "gene$gene_num", \%intron_support_num);
             print OUTD "$gff3_out\n"; $numD ++;
+        }
+        if ( $out_unfilled_GFF3 ) {
+            $gff3_out =~ s/Type=[^;]+;?//;
+            print OUTE $gff3_out;
         }
     }
 }
 close IN;
 $/ = "\n";
-close OUTA; close OUTB; close OUTC; close OUTD;
+close OUTA; close OUTB; close OUTC; close OUTD; close OUTE if $out_unfilled_GFF3;
 print STDERR "第一轮生成基因模型并分类：A 类 $numA 个、B 类 $numB 个、C 类 $numC 个、D 类 $numD 个。\n";
 
 @_ = &codon_table("$tmp_dir/codon.table");
