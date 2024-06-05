@@ -52,6 +52,15 @@ Usage:
     --threshod_ratio_of_intron_Supported_times <float>    default: 0.5
     程序根据A和B类基因模型计算出所有introns的Supported_times，对这些数值按从小到大进行排序，再计算出本参数所处位置的值threshold_value。该参数设置的范围为[0, 1]，默认情况下本参数的值为0.5，即表示使用中位数值作为threshold_value。使用计算出的threshold_value值，对C和D类基因模型进行过滤。若C或D类基因模型中所有introns的Supported_times值都低于上一步计算出的threshold_value值，则过滤其基因模型。当设置本参数值为0时，强制设置threshold_value值为0，则表示保留所有的基因模型。
 
+    --output_alignment_GFF3 <string>    default: None
+    让程序输出一个GFF3格式的同源蛋白比对文件，包含同源蛋白对基因组序列的比对信息。一个基因区域输出每个同源蛋白的最优比对信息。
+
+    --max_alignment_num_for_each_gene_region <int>    default: 5
+    当输出GFF3格式同源蛋白比对文件时，每个基因区域最多输出5个同源蛋白的结果。
+
+    --out_raw_GFF3 <string>    default: None
+    让程序输出未对末端强制填补的GFF3文件，是同源蛋白预测的原始结果。
+
     --help    default: None
     display this help and exit.
 
@@ -60,7 +69,7 @@ Usage:
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($out_prefix, $max_hits_num_per_match_region, $max_hit_num_per_single_species, $cpu, $identity, $evalue, $homolog_coverage, $method, $genetic_code, $tmp_dir, $threshod_ratio_of_intron_Supported_times, $help_flag);
+my ($out_prefix, $max_hits_num_per_match_region, $max_hit_num_per_single_species, $cpu, $identity, $evalue, $homolog_coverage, $method, $genetic_code, $tmp_dir, $threshod_ratio_of_intron_Supported_times, $out_raw_GFF3, $out_alignment_GFF3, $max_alignment_num_for_each_gene_region, $help_flag);
 GetOptions(
     "out_prefix:s" => \$out_prefix,
     "max_hits_num_per_match_region:i" => \$max_hits_num_per_match_region,
@@ -73,6 +82,9 @@ GetOptions(
     "genetic_code:i" => \$genetic_code,
     "tmp_dir:s" => \$tmp_dir,
     "threshod_ratio_of_intron_Supported_times:f" => \$threshod_ratio_of_intron_Supported_times,
+    "out_raw_GFF3:s" => \$out_raw_GFF3,
+    "out_alignment_GFF3:s" => \$out_alignment_GFF3,
+    "max_alignment_num_for_each_gene_region:i" => \$max_alignment_num_for_each_gene_region,
     "help" => \$help_flag,
 );
 $out_prefix ||= "out";
@@ -93,6 +105,9 @@ $tmp_dir ||= "tmp_$date$$";
 $tmp_dir = abs_path($tmp_dir);
 mkdir $tmp_dir unless -e $tmp_dir;
 $threshod_ratio_of_intron_Supported_times = 0.5 unless defined($threshod_ratio_of_intron_Supported_times);
+$out_alignment_GFF3 = abs_path($out_alignment_GFF3) if $out_alignment_GFF3;
+$out_raw_GFF3 = abs_path($out_raw_GFF3) if $out_raw_GFF3,
+$max_alignment_num_for_each_gene_region ||= 5;
 
 if ( $help_flag ) { die $usage }
 
@@ -131,11 +146,29 @@ else {
 
 # 3. 同一基因区域仅取一个最优基因模型，得到GFF3文件，并对基因模型进行好坏分类。
 print STDERR "3. picking out the best geng model for classification.\n";
-$cmdString = "$binPath/homolog_prediction.03GetGeneModels --tmp_dir c.getGeneModels --out_unfilled_GFF3 homolog_prediction.raw.gff3 --out_alignment_GFF3 homolog_alignment.gff3 $input_genome out.geneModels.tab > $out_prefix.geneModels.gff3 2> c.getGeneModels.log";
+$cmdString = "$binPath/homolog_prediction.03GetGeneModels --tmp_dir c.getGeneModels --out_raw_GFF3 homolog_prediction.raw.gff3 --out_alignment_GFF3 homolog_alignment.gff3 --max_alignment_num_for_each_gene_region $max_alignment_num_for_each_gene_region $input_genome out.geneModels.tab > $out_prefix.geneModels.gff3 2> c.getGeneModels.log";
 unless (-e "c.getGeneModels.ok" && -s "$out_prefix.geneModels.gff3") {
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
     open OUT, ">", "c.getGeneModels.ok" or die $!; close OUT;
+
+    if ( $out_alignment_GFF3 ) {
+        open IN, "homolog_alignment.gff3" or die $!;
+        my $output = join "", <IN>;
+        close IN;
+        open OUT, ">", $out_alignment_GFF3 or die "Can not create file $out_alignment_GFF3, $!";
+        print OUT $output;
+        close OUT;
+    }
+
+    if ( $out_raw_GFF3 ) {
+        open IN, "homolog_prediction.raw.gff3" or die $!;
+        my $output = join "", <IN>;
+        close IN;
+        open OUT, ">", $out_raw_GFF3 or die "Can not create file $out_raw_GFF3, $!";
+        print OUT $output;
+        close OUT;
+    }
 }
 else {
     print STDERR "CMD(Skipped): $cmdString\n";

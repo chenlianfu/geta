@@ -568,7 +568,7 @@ else {
 # 3.10 使用同源蛋白的基因预测结果对NGSReads预测的基因模型进行补齐
 print STDERR "3.10 Filling gene models according to homolog predicted gene models.\n";
 if ( $homolog_gene_models ) {
-    $cmdString = "$dirname/bin/NGSReads_prediction.05FillingGeneModelsByHomolog --tmp_dir FillingGeneModelsByHomolog_tmp transfrag.genome.gff3 $homolog_gene_models > transfrag.genome.fill1.gff3 2> FillingGeneModelsByHomolog.log";
+    $cmdString = "$dirname/bin/NGSReads_prediction.05FillingGeneModelsByHomolog --cpu $cpu --tmp_dir FillingGeneModelsByHomolog_tmp $input_genome transfrag.genome.gff3 $homolog_gene_models > transfrag.genome.fill1.gff3 2> FillingGeneModelsByHomolog.log";
 }
 else {
     $cmdString = "/bin/cp -a transfrag.genome.gff3 transfrag.genome.fill1.gff3";

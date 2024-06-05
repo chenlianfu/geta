@@ -337,7 +337,7 @@ chdir $tmp_dir; print STDERR "\nPWD: $tmp_dir\n";
 mkdir "$tmp_dir/3.homolog_prediction" unless -e "$tmp_dir/3.homolog_prediction";
 
 if ( $protein ) {
-    $cmdString = "$bin_path/homolog_prediction --tmp_dir $tmp_dir/3.homolog_prediction --cpu $cpu $config{'homolog_prediction'} --genetic_code $genetic_code $protein $genome > $tmp_dir/3.homolog_prediction/homolog_prediction.gff3 2> $tmp_dir/3.homolog_prediction/homolog_prediction.log";
+    $cmdString = "$bin_path/homolog_prediction --tmp_dir $tmp_dir/3.homolog_prediction --cpu $cpu $config{'homolog_prediction'} --genetic_code $genetic_code --output_alignment_GFF3 $tmp_dir/3.homolog_prediction/homolog_alignment.gff3 --out_raw_GFF3 $tmp_dir/3.homolog_prediction/homolog_prediction.raw.gff3 $protein $genome > $tmp_dir/3.homolog_prediction/homolog_prediction.gff3 2> $tmp_dir/3.homolog_prediction/homolog_prediction.log";
 }
 else {
     $cmdString = "touch $tmp_dir/3.homolog_prediction/homolog_prediction.gff3";
@@ -360,7 +360,7 @@ if ( ($pe1 && $pe2) or $single_end or $sam ) {
         $cmdString2 = "rm -rf $tmp_dir/2.NGSReads_prediction/c.transcript/11.fillingEndsOfGeneModels.ok";
         $cmdString3 = "rm -rf $tmp_dir/2.NGSReads_prediction/c.transcript/12.classGeneModels.ok";
         $cmdString4 = "rm -rf $tmp_dir/2.NGSReads_prediction/c.transcript/FillingGeneModelsByHomolog_tmp/command.combineGeneModels.list.completed";
-        $cmdString5 = "$bin_path/NGSReads_prediction $cmdString_Step2_paramter --cpu $cpu --tmp_dir $tmp_dir/2.NGSReads_prediction --homolog_gene_models $tmp_dir/3.homolog_prediction/homolog_prediction.gff3 $genome > $tmp_dir/4.evidence_gene_models/NGSReads_prediction_FilledByHomolog.gff3 2> $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.B.log";
+        $cmdString5 = "$bin_path/NGSReads_prediction $cmdString_Step2_paramter --cpu $cpu --tmp_dir $tmp_dir/2.NGSReads_prediction --homolog_gene_models $tmp_dir/3.homolog_prediction/homolog_prediction.raw.gff3 $genome > $tmp_dir/4.evidence_gene_models/NGSReads_prediction_FilledByHomolog.gff3 2> $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.B.log";
 
         &execute_cmds($cmdString1, $cmdString2, $cmdString3, $cmdString4, $cmdString5, "1.NGSReads_prediction_FilledByHomolog.ok");
     }
