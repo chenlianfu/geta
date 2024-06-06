@@ -42,7 +42,7 @@ Parameters:
     --output_alignment_GFF3 <string>    default: None
     Output a transcript sequence alignment file in non-standard GFF3 format.
 
-    --out_raw_GFF3 <string>    default: None
+    --output_raw_GFF3 <string>    default: None
     Output preliminary GFF3 format of gene models predicted by transcripts. These gene models do not have forced filling of their ends, and the results are credible, but they contain more incomplete genome models.
 
 [Settings]
@@ -61,7 +61,7 @@ Parameters:
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($pe1, $pe2, $single_end, $sam, $cpu, $homolog_gene_models, $tmp_dir, $min_supported_fragment_num_in_a_split_sam_file, $strand_specific, $config, $help_flag, $cmdString, $genetic_code, $output_alignment_GFF3, $out_raw_GFF3);
+my ($pe1, $pe2, $single_end, $sam, $cpu, $homolog_gene_models, $tmp_dir, $min_supported_fragment_num_in_a_split_sam_file, $strand_specific, $config, $help_flag, $cmdString, $genetic_code, $output_alignment_GFF3, $output_raw_GFF3);
 GetOptions(
     "pe1:s" => \$pe1,
     "pe2:s" => \$pe2,
@@ -75,14 +75,14 @@ GetOptions(
     "config:s" => \$config,
     "genetic_code:i" => \$genetic_code,
     "output_alignment_GFF3:s" => \$output_alignment_GFF3,
-    "out_raw_GFF3:s" => \$out_raw_GFF3,
+    "output_raw_GFF3:s" => \$output_raw_GFF3,
     "help" => \$help_flag,
 );
 $genetic_code ||= 1;
 my $input_genome = abs_path($ARGV[0]);
 $homolog_gene_models = abs_path($homolog_gene_models) if $homolog_gene_models;
 $output_alignment_GFF3 = abs_path($output_alignment_GFF3) if $output_alignment_GFF3;
-$out_raw_GFF3 = abs_path($out_raw_GFF3) if $out_raw_GFF3;
+$output_raw_GFF3 = abs_path($output_raw_GFF3) if $output_raw_GFF3;
 
 ##########  解析参数 ##########
 $cpu ||= 8;
@@ -605,13 +605,13 @@ unless (-e "10.FillingGeneModelsByHomolog.ok") {
 else {
     print STDERR "CMD(Skipped): $cmdString\n";
 }
-if ( $out_raw_GFF3 ) {
-    my $out_raw_GFF3_info;
+if ( $output_raw_GFF3 ) {
+    my $output_raw_GFF3_info;
     open IN, "transfrag.genome.fill1.gff3" or die "Error: Can note open file transfrag.genome.fill1.gff3, !";
-    $out_raw_GFF3_info = join "", <IN>;
+    $output_raw_GFF3_info = join "", <IN>;
     close IN;
-    open OUT, ">", $out_raw_GFF3 or die "Error: Can not create file $out_raw_GFF3, $!";
-    print OUT $out_raw_GFF3_info;
+    open OUT, ">", $output_raw_GFF3 or die "Error: Can not create file $output_raw_GFF3, $!";
+    print OUT $output_raw_GFF3_info;
     close OUT;
 }
 

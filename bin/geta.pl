@@ -318,12 +318,12 @@ if (($pe1 && $pe2) or $single_end or $sam) {
     push @input_paramter, "--strand_specific" if defined $strand_specific;
     push @input_paramter, "--genetic_code $genetic_code" if defined $genetic_code;
     $cmdString_Step2_paramter = join " ", @input_paramter;
-    $cmdString1 = "$bin_path/NGSReads_prediction $cmdString_Step2_paramter --config $tmp_dir/config.txt --cpu $cpu --tmp_dir $tmp_dir/2.NGSReads_prediction $genome > $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.gff3 2> $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.A.log";
-    $cmdString2 = "cp -a $tmp_dir/2.NGSReads_prediction/c.transcript/intron.txt $tmp_dir/2.NGSReads_prediction/c.transcript/base_depth.txt $tmp_dir/2.NGSReads_prediction/c.transcript/transfrag.genome.gff3 $tmp_dir/2.NGSReads_prediction/";
+    $cmdString1 = "$bin_path/NGSReads_prediction $cmdString_Step2_paramter --config $tmp_dir/config.txt --cpu $cpu --tmp_dir $tmp_dir/2.NGSReads_prediction --output_alignment_GFF3 $tmp_dir/2.NGSReads_prediction/NGSReads_alignment.gff3 --output_raw_GFF3 $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.raw.gff3 $genome > $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.gff3 2> $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.A.log";
+    $cmdString2 = "cp -a $tmp_dir/2.NGSReads_prediction/c.transcript/intron.txt $tmp_dir/2.NGSReads_prediction/c.transcript/base_depth.txt $tmp_dir/2.NGSReads_prediction/";
 }
 else {
     $cmdString1 = "touch $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.gff3";
-    $cmdString2 = "touch $tmp_dir/2.NGSReads_prediction/intron.txt; touch $tmp_dir/2.NGSReads_prediction/base_depth.txt; touch $tmp_dir/2.NGSReads_prediction/transfrag.genome.gff3";
+    $cmdString2 = "touch $tmp_dir/2.NGSReads_prediction/intron.txt; touch $tmp_dir/2.NGSReads_prediction/base_depth.txt; touch $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.raw.gff3";
 }
 
 &execute_cmds($cmdString1, $cmdString2, "$tmp_dir/2.NGSReads_prediction.ok");
@@ -336,7 +336,7 @@ chdir $tmp_dir; print STDERR "\nPWD: $tmp_dir\n";
 mkdir "$tmp_dir/3.homolog_prediction" unless -e "$tmp_dir/3.homolog_prediction";
 
 if ( $protein ) {
-    $cmdString = "$bin_path/homolog_prediction --tmp_dir $tmp_dir/3.homolog_prediction --cpu $cpu $config{'homolog_prediction'} --genetic_code $genetic_code --output_alignment_GFF3 $tmp_dir/3.homolog_prediction/homolog_alignment.gff3 --out_raw_GFF3 $tmp_dir/3.homolog_prediction/homolog_prediction.raw.gff3 $protein $genome > $tmp_dir/3.homolog_prediction/homolog_prediction.gff3 2> $tmp_dir/3.homolog_prediction/homolog_prediction.log";
+    $cmdString = "$bin_path/homolog_prediction --tmp_dir $tmp_dir/3.homolog_prediction --cpu $cpu $config{'homolog_prediction'} --genetic_code $genetic_code --output_alignment_GFF3 $tmp_dir/3.homolog_prediction/homolog_alignment.gff3 --output_raw_GFF3 $tmp_dir/3.homolog_prediction/homolog_prediction.raw.gff3 $protein $genome > $tmp_dir/3.homolog_prediction/homolog_prediction.gff3 2> $tmp_dir/3.homolog_prediction/homolog_prediction.log";
 }
 else {
     $cmdString = "touch $tmp_dir/3.homolog_prediction/homolog_prediction.gff3";
@@ -556,7 +556,7 @@ $cmdString3 = "cp -a $tmp_dir/5.augustus/config/species/$augustus_species $ENV{'
 
 # 5.2 准备Hints信息
 chdir "$tmp_dir/5.augustus"; print STDERR "\nPWD: $tmp_dir/5.augustus\n";
-$cmdString = "$bin_path/prepareAugusutusHints $config{'prepareAugusutusHints'} $tmp_dir/2.NGSReads_prediction/intron.txt $tmp_dir/2.NGSReads_prediction/transfrag.genome.gff3 $tmp_dir/3.homolog_prediction/homolog_prediction.gff3 > hints.gff";
+$cmdString = "$bin_path/prepareAugusutusHints $config{'prepareAugusutusHints'} $tmp_dir/2.NGSReads_prediction/intron.txt $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.raw.gff3 $tmp_dir/3.homolog_prediction/homolog_prediction.gff3 > hints.gff";
 
 &execute_cmds($cmdString, "prepareAugusutusHints.ok");
 
@@ -634,7 +634,7 @@ close OUT;
 
 # 6.1 第一轮基因预测结果整合：以AUGUSTUS结果为主，进行三种基因预测结果的整合
 # 对三种基因预测结果进行第一轮整合，以Augustus结果为准。得到 combine.1.gff3 为有Evidence支持的结果，combine.2.gff3为支持不足的结果。
-my $cmdString1 = "$bin_path/paraCombineGeneModels $config{'paraCombineGeneModels'} --cpu $cpu $tmp_dir/5.augustus/augustus.gff3 $tmp_dir/2.NGSReads_prediction/transfrag.genome.gff3 $tmp_dir/3.homolog_prediction/homolog_prediction.gff3 $tmp_dir/5.augustus/hints.gff &> /dev/null";
+my $cmdString1 = "$bin_path/paraCombineGeneModels $config{'paraCombineGeneModels'} --cpu $cpu $tmp_dir/5.augustus/augustus.gff3 $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.raw.gff3 $tmp_dir/3.homolog_prediction/homolog_prediction.gff3 $tmp_dir/5.augustus/hints.gff &> /dev/null";
 my $cmdString2 = "$bin_path/GFF3Clear --genome $genome --no_attr_add --coverage 0.8 combine.1.gff3 > geneModels.a.gff3 2> /dev/null";
 my $cmdString3 = "$bin_path/GFF3Clear --genome $genome --no_attr_add --coverage 0.8 combine.2.gff3 > geneModels.b.gff3 2> /dev/null";
 my $cmdString4 = "perl -p -i -e 's/(=[^;]+)\.t1/\$1.t01/g' geneModels.a.gff3 geneModels.b.gff3";
@@ -802,12 +802,12 @@ else {
 # 7.4 输出转录本、同源蛋白和Augustus的基因预测结果
 my @cmdString;
 if ( ($pe1 && $pe2) or $single_end or $sam ) {
-    push @cmdString, "cp $tmp_dir/2.NGSReads_prediction/c.transcript/transfrag.alignment.gff3 $out_prefix.NGSReads_alignment.gff3";
+    push @cmdString, "cp $tmp_dir/2.NGSReads_prediction/NGSReads_alignment.gff3 $out_prefix.NGSReads_alignment.gff3";
     push @cmdString, "cp $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.gff3 $out_prefix.NGSReads_prediction.gff3";
 }
 if ( $protein ) {
-    push @cmdString, "cp $tmp_dir/3.homolog_prediction/homolog_prediction.gff3 $out_prefix.homolog_prediction.gff3";
     push @cmdString, "cp $tmp_dir/3.homolog_prediction/homolog_alignment.gff3 $out_prefix.homolog_alignment.gff3";
+    push @cmdString, "cp $tmp_dir/3.homolog_prediction/homolog_prediction.gff3 $out_prefix.homolog_prediction.gff3";
 }
 if ( (($pe1 && $pe2) or $single_end or $sam) && $protein ) {
     push @cmdString, "cp $tmp_dir/4.evidence_gene_models/evidence_gene_models.gff3 $out_prefix.evidence_prediction.gff3";
@@ -972,7 +972,7 @@ sub statistics_combination {
     # （1）分析NGS reads、homolog和AUGUSTUS三种方法预测的基因数量，合并后的基因数量。
     my ($augustus_gene_num, $NGSreads_gene_num, $homolog_gene_num) = (0, 0, 0);
     $augustus_gene_num = `grep -P "\tgene\t" $tmp_dir/5.augustus/augustus.gff3 | wc -l`;
-    $NGSreads_gene_num = `grep -P "\tgene\t" $tmp_dir/2.NGSReads_prediction/transfrag.genome.gff3 | wc -l`;
+    $NGSreads_gene_num = `grep -P "\tgene\t" $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.raw.gff3 | wc -l`;
     $homolog_gene_num = `grep -P "\tgene\t" $tmp_dir/3.homolog_prediction/homolog_prediction.gff3 | wc -l`;
     chomp($augustus_gene_num); chomp($NGSreads_gene_num); chomp($homolog_gene_num);
     my $input_file = "$tmp_dir/6.combine_gene_models/geneModels.a.gff3";

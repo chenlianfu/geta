@@ -22,7 +22,7 @@ Usage:
     -CPU <int>    default: 8
     设置初始的任务并行数。程序运行途中，若对CPU计算利用率没有达到阈值，则程序自动提升任务并行数。整个程序运行过程中，程序动态调节任务并行数，以维持CPU利用率保持在设定阈值。
 
-    --max_parallel_j <int>    default: 100
+    --max_parallel_j <int>    default: 200
     程序调用了parallel并行化提交任务，本参数设置调用parallel命令时其 -j 参数的最大值。程序刚开始运行时，将parallel命令 -j 参数值 j 设置为 --CPU 和 --max_parallel_j 两个参数中的较小值；程序运行后，若并行数不断增大，j值会增大为 int(并行数 ** 0.5) ，直至 --max_parallel_j 参数设定的最大值为止。此外，程序运行时，将数量为 j 的命令写入到子文件中，调用 parallel 对子文件中的程序进行批量化任务提交。
 
     --ratio_to_max_threads <float>    default: 0.8
@@ -57,7 +57,7 @@ GetOptions(
 if ( $help_flag ) { die $usage }
 
 $cpu ||= 8;
-$max_parallel_j ||= 100;
+$max_parallel_j ||= 200;
 $ratio_to_max_threads ||= 0.8;
 $refresh_time ||= 1;
 $rounds_delay ||= 1;
@@ -113,7 +113,8 @@ my $prepare_task_num = $cpu;
 my $runing_task_num = 0;
 
 # 设置每个parallel命令并行提交的任务数。
-my $parallel_j = $cpu;
+my $parallel_j = int($total_task_num ** 0.5);
+$parallel_j = 1 if $parallel_j < 1;
 $parallel_j = $max_parallel_j if $parallel_j > $max_parallel_j;
 # 设置每个子命令文件包含的任务数，在本程序中，$command_num_in_each_chunk 和 $parallel_j 是相等的。即将数量为 j 的命令写入到子文件中，调用 parallel 对子文件中的命令进行批量化任务提交。
 my $command_num_in_each_chunk = $parallel_j;
@@ -198,27 +199,27 @@ while ( @commands || $runing_task_num > 0 ) {
         $round_num = $round_num2;
         $round_num1 = 0;
     }
-    # 多轮CPU使用率同时过低或过高后，调节任务数。调节后的任务数不得低于初始并行数。
-    if ( $total_task_num + $add_task_num >= $cpu && $round_num >= $rounds_delay ) {
+    # 多轮CPU使用率同时过低或过高后，调节并行数。调节后的并行数不得低于初始并行数。
+    if ( $round_num >= $rounds_delay ) {
+        # 对要调节的并行数进行设置：（1）若增加并行数0~1，则增加1；（2）对并行数取整；（3）最高翻倍增加并行数。
         $add_task_num = 1 if ($add_task_num > 0 && $add_task_num < 1);
         $add_task_num = int($add_task_num);
         $add_task_num = $total_task_num if $add_task_num > $total_task_num;
-        if ( $add_task_num > 0 ) {
-            $total_task_num += $add_task_num;
-            $prepare_task_num += $add_task_num;
+
+        # 对最大并行数进行调节。若并行数减少，最少到初始的并行数。
+        if ( $total_task_num + $add_task_num < $cpu ) {
+            $add_task_num = $cpu - $total_task_num;
         }
-        else {
-            $total_task_num = $used_task + $add_task_num;
-            $prepare_task_num = 0;
-        }
+        $total_task_num += $add_task_num;
+        $prepare_task_num += $add_task_num;
+
         ($round_num, $round_num1, $round_num2) = (0, 0, 0);
     }
     print STDERR "下一轮允许最大并行数为 $total_task_num，CPU使用率为 $cpu_usage %。\n";
 
     # 调整parallel输入文件的命令数、parallel的并行提交数。$command_num_in_each_chunk = $parallel_j，即j值。程序运行后，若并行数不断增大，j值会增大为 int(并行数 ** 0.5) ，直至 --max_parallel_j 参数设定的最大值为止。
-    my $value_j = int($total_task_num ** 0.5);
-    $value_j = 1 if $value_j < 1;
-    $parallel_j = $value_j if $value_j > $parallel_j;
+    $parallel_j = int($total_task_num ** 0.5);
+    $parallel_j = 1 if $parallel_j < 1;
     $parallel_j = $max_parallel_j if $parallel_j > $max_parallel_j;
     $command_num_in_each_chunk = $parallel_j;
 }

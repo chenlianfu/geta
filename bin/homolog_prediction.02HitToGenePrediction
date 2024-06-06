@@ -272,7 +272,7 @@ if ( exists $method{"exonerate"}  && ! -e "$tmp_dir/1.create_CMD_exonerate.ok" )
 # 并行化运行基因预测命令genewise/gth/exonerate
 my $cmdString;
 if ( exists $method{"genewise"} ) {
-    $cmdString = "$bin_path/parafly -c $tmp_dir/command.genewise.list -CPU $cpu &> $tmp_dir/parafly.genewise.log";
+    $cmdString = "$bin_path/parafly -c $tmp_dir/command.genewise.list -CPU $cpu --refresh_time 3 --rounds_delay 3 &> $tmp_dir/parafly.genewise.log";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString");
     # 检测运行成功的命令超过90%，则让程序继续运行。
@@ -292,7 +292,7 @@ if ( exists $method{"genewise"} ) {
     }
 }
 if ( exists $method{"gth"} ) {
-    $cmdString = "$bin_path/parafly -c $tmp_dir/command.gth.list -CPU $cpu &> $tmp_dir/parafly.gth.log";
+    $cmdString = "$bin_path/parafly -c $tmp_dir/command.gth.list -CPU $cpu --refresh_time 2 --rounds_delay 2 &> $tmp_dir/parafly.gth.log";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString");
     # 检测运行成功的命令超过90%，则让程序继续运行。
@@ -312,7 +312,7 @@ if ( exists $method{"gth"} ) {
     }
 }
 if ( exists $method{"exonerate"} ) {
-    $cmdString = "$bin_path/parafly -c $tmp_dir/command.exonerate.list -CPU $cpu &> $tmp_dir/parafly.exonerate.log";
+    $cmdString = "$bin_path/parafly -c $tmp_dir/command.exonerate.list -CPU $cpu --refresh_time 2 --rounds_delay 2 &> $tmp_dir/parafly.exonerate.log";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString");
     # 检测运行成功的命令超过90%，则让程序继续运行。
