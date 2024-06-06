@@ -13,37 +13,47 @@ my $usage = <<USAGE;
 Usage:
     $0 [options] genome_seq.fasta > NGSReads_prediction.gff3
 
-    本程序能利用转录组二代测序数据（支持fastq/fq.gz/sam/bam格式）对目标物种的全基因组序列进行基因预测，并将结果以GFF3格式输出到标准输出。
+	This program can use RNA-Seq data (fastq/fq.gz/sam/bam format) to predict gene models for your species' whole genome sequence, and then output the results in GFF3 format to standard output.
 
-    --pe1 <string> --pe2 <string>    default: None, Not Required but Recommened
-    fastq format files contain of paired-end RNA-seq data. if you have data come from multi librarys, input multi fastq files separated by comma. the compress file format .gz also can be accepted.
+Parameters:
+[INPUT]
+    --pe1 <string> --pe2 <string>    default: None
+    Enter one or more pairs of FASTQ format files from Paired-End next-generation sequencing technology. This parameter supports the input of multiple pairs of FASTQ files, using commas to separate the FASTQ file paths of different libraries. This parameter also accepts compressed files in .gz format.
 
-    --se <string>    default: None, Not Required.
-    fastq format file contains of single-end RNA-seq data. if you have data come from multi librarys, input multi fastq files separated by comma. the compress file format .gz also can be accepted.
+    --se <string>    default: None
+    Enter one or more FASTQ format files from Single-End next-generation sequencing technology. This parameter supports the input of multiple Single-End FASTQ files, using commas to separate the FASTQ file paths of different libraries. This parameter also accepts compressed files in .gz format.
 
-    --sam <string>    default: None, Not Required. --pe1/--pe2, --se, and --sam can be set together, all data will be used for analysis 
-    SAM format file contains alignments of RNA-seq data. if you have data come from multi librarys, input multi SAM files separated by comma. the compress file format .bam also can be accepted.
+    --sam <string>    default: None
+    Enter one or more SAM format files from the output of alignment software such as HISTA2. This parameter supports the input of multiple SAM files, using commas to separate the SAM file paths. This parameter also accepts compressed files in .bam format. In addition, the program allows for the full or partial use of the three parameters --pe1/--pe2, --se, and --sam, then all of the input data are used for genome alignment to generate the transcript sequence for gene model prediction.
+
+    --strand_specific    default: None
+    When this parameter is added, all input next-generation sequencing data are treated as strand-specific, and the program will predict gene models only on the forward strand of the transcript. When two neighboring genes overlap in the genome, strand-specific sequencing data and this parameter can help accurately estimate gene borders.
+
+    --config <string>    default: None
+    Enter a parameter profile path to set the detailed parameters of other commands called by this program. This parameter configuration file adopts the same format as the GETA main program configuration file. It is used to set the detailed parameters of trimmomatic, hisat2, sam2transfrag, TransDecoder.LongOrfs and TransDecoder.Predict and other programs are called by this program. If you did not provide this parameter, the built-in default setting is used, which is suitable in most instances.
 
     --homolog_gene_models <string>    default: None
-    input the GFF3 file predicted by homolog prediction. if set, the gene models come from the homolog prediction will be used to fill the uncompleted gene models predicted by NGS Reads.
+    Enter a GFF3 format files from the gene prediction by homologous proteins, which can be used for filling end of gene models predicted by NGS reads.
 
-    --cpu <int>    default: 8
-    the number of CPU threads.
-
+[OUTPUT]
     --tmp_dir <string>    default: tmp_\$date\$pid
-    程序运行时临时文件夹名称。
+    Enter the path of temporary folder.
+
+    --output_alignment_GFF3 <string>    default: None
+    Output a transcript sequence alignment file in non-standard GFF3 format.
+
+    --out_raw_GFF3 <string>    default: None
+    Output preliminary GFF3 format of gene models predicted by transcripts. These gene models do not have forced filling of their ends, and the results are credible, but they contain more incomplete genome models.
+
+[Settings]
+    --cpu <int>    default: 8
+    Enter the number of CPU threads.
 
     --min_supported_fragment_num_in_a_split_sam_file <int>    default: 10
     程序将SAM文件进行分割时，每个分割后的SAM文件至少包含本参数设置的fragments数量。
 
-    --strand_specific    default: None
-    enable the ability of analysing the strand-specific information provided by the tag "XS" from SAM format alignments. If this parameter was set, the paramter "--rna-strandness" of hisat2 will be set to "RF" automaticly.
-
-    --config <string>    default: None
-    Input a file containing the parameters of several main programs (trimmomatic, hisat2, sam2transfrag, TransDecoder.LongOrfs and TransDecoder.Predict) during the pipeline. If you do not input this file, the default parameters should be suitable for most situation.
-
     --genetic_code <int>    default: 1
-    设置遗传密码。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。用于设置对基因模型强制补齐时的起始密码子和终止密码子。
+    Enter the genetic code. The values for this parameter can be found on the NCBI Genetic Codes website at: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi. This parameter is mainly effective for the gene prediction steps through homologous proteins, as well as the situation where start and stop codon information is used for filling the end of incomplete gene models.
 
     --help    default: None
     display this help and exit.
@@ -51,7 +61,7 @@ Usage:
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($pe1, $pe2, $single_end, $sam, $cpu, $homolog_gene_models, $tmp_dir, $min_supported_fragment_num_in_a_split_sam_file, $strand_specific, $config, $help_flag, $cmdString, $genetic_code);
+my ($pe1, $pe2, $single_end, $sam, $cpu, $homolog_gene_models, $tmp_dir, $min_supported_fragment_num_in_a_split_sam_file, $strand_specific, $config, $help_flag, $cmdString, $genetic_code, $output_alignment_GFF3, $out_raw_GFF3);
 GetOptions(
     "pe1:s" => \$pe1,
     "pe2:s" => \$pe2,
@@ -64,11 +74,15 @@ GetOptions(
     "strand_specific" => \$strand_specific,
     "config:s" => \$config,
     "genetic_code:i" => \$genetic_code,
+    "output_alignment_GFF3:s" => \$output_alignment_GFF3,
+    "out_raw_GFF3:s" => \$out_raw_GFF3,
     "help" => \$help_flag,
 );
 $genetic_code ||= 1;
 my $input_genome = abs_path($ARGV[0]);
 $homolog_gene_models = abs_path($homolog_gene_models) if $homolog_gene_models;
+$output_alignment_GFF3 = abs_path($output_alignment_GFF3) if $output_alignment_GFF3;
+$out_raw_GFF3 = abs_path($out_raw_GFF3) if $out_raw_GFF3;
 
 ##########  解析参数 ##########
 $cpu ||= 8;
@@ -505,6 +519,16 @@ else {
     print STDERR "CMD(Skipped): $cmdString\n";
 }
 
+if ( $output_alignment_GFF3 ) {
+    my $output_alignment_GFF3_info;
+    open IN, "transfrag.alignment.gff3" or die "Error: Can note open file transfrag.alignment.gff3, !";
+    $output_alignment_GFF3_info = join "", <IN>;
+    close IN;
+    open OUT, ">", $output_alignment_GFF3 or die "Error: Can not create file $output_alignment_GFF3, $!";
+    print OUT $output_alignment_GFF3_info;
+    close OUT;
+}
+
 # 3.7 对transcripts序列使用Transdecoder进行ORF分析
 print STDERR "3.7 use Transdecoder for ORF prediction.\n";
 my $cmdString1 = "$dirname/TransDecoder-v5.5.0/TransDecoder.LongOrfs $config{'TransDecoder.LongOrfs'} -t transfrag.strand.fasta -S &> /dev/null";
@@ -580,6 +604,15 @@ unless (-e "10.FillingGeneModelsByHomolog.ok") {
 }
 else {
     print STDERR "CMD(Skipped): $cmdString\n";
+}
+if ( $out_raw_GFF3 ) {
+    my $out_raw_GFF3_info;
+    open IN, "transfrag.genome.fill1.gff3" or die "Error: Can note open file transfrag.genome.fill1.gff3, !";
+    $out_raw_GFF3_info = join "", <IN>;
+    close IN;
+    open OUT, ">", $out_raw_GFF3 or die "Error: Can not create file $out_raw_GFF3, $!";
+    print OUT $out_raw_GFF3_info;
+    close OUT;
 }
 
 # 3.11 对基因模型进行强制补齐

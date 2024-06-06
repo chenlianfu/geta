@@ -120,7 +120,7 @@ my $command_num_in_each_chunk = $parallel_j;
 
 # 设置parallel任务编号
 my $parallel_job = 0;
-my $round_num = 0;
+my ($round_num, $round_num1, $round_num2) = (0, 0, 0);
 
 open OUT1, ">>", "$cmdline.completed";
 open OUT2, ">", "$cmdline.failed";
@@ -180,7 +180,6 @@ while ( @commands || $runing_task_num > 0 ) {
 
     sleep $refresh_time;
 
-    $round_num ++;
     # 检测CPU使用率
     my $cpu_usage = &get_cpu_usage();
     my $cpu_usage_per = $cpu_usage / 100;
@@ -188,6 +187,18 @@ while ( @commands || $runing_task_num > 0 ) {
     my $used_task = $total_task_num;
     $used_task = $runing_task_num if $runing_task_num > $used_task;
     my $add_task_num = ($ratio_to_max_threads - $cpu_usage_per) / $cpu_usage_per * $used_task;
+    # 当连续 $rounds_delay 多轮CPU使用率过低时，才增加任务数；或连续多轮CPU使用率过高时，才降低任务数。
+    if ( $add_task_num > 0 ) {
+        $round_num1 ++;
+        $round_num = $round_num1;
+        $round_num2 = 0;
+    }
+    else {
+        $round_num2 ++;
+        $round_num = $round_num2;
+        $round_num1 = 0;
+    }
+    # 多轮CPU使用率同时过低或过高后，调节任务数。调节后的任务数不得低于初始并行数。
     if ( $total_task_num + $add_task_num >= $cpu && $round_num >= $rounds_delay ) {
         $add_task_num = 1 if ($add_task_num > 0 && $add_task_num < 1);
         $add_task_num = int($add_task_num);
@@ -200,7 +211,7 @@ while ( @commands || $runing_task_num > 0 ) {
             $total_task_num = $used_task + $add_task_num;
             $prepare_task_num = 0;
         }
-        $round_num = 0;
+        ($round_num, $round_num1, $round_num2) = (0, 0, 0);
     }
     print STDERR "下一轮允许最大并行数为 $total_task_num，CPU使用率为 $cpu_usage %。\n";
 
