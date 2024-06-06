@@ -61,6 +61,9 @@ Usage:
     --max_alignment_num_for_each_gene_region <int>    default: 5
     当输出GFF3格式同源蛋白比对文件时，每个基因区域最多输出5个同源蛋白的结果。
 
+    --put_massive_temporary_data_into_memory    default: None
+    添加该参数后，程序将海量的临时文件存放到内存中，以减少对磁盘的I/O需求并加快运行速度，但消耗更多内存。本程序第二步运行homolog_prediction.02HitToGenePrediction命令时，对基因组和同源蛋白数据进行了分割，生成了海量的小文件。添加该参数后，则将该命令生成的临时文件夹放入到/dev/shm路径下，会消耗更多内存。例如，对玉米2G大小的基因组使用13万条同源蛋白序列进行分析时，需要消耗87G存储空间。
+
     --help    default: None
     display this help and exit.
 
@@ -69,7 +72,8 @@ Usage:
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($out_prefix, $max_hits_num_per_match_region, $max_hit_num_per_single_species, $cpu, $identity, $evalue, $homolog_coverage, $method, $genetic_code, $tmp_dir, $threshod_ratio_of_intron_Supported_times, $output_raw_GFF3, $output_alignment_GFF3, $max_alignment_num_for_each_gene_region, $help_flag);
+my ($out_prefix, $max_hits_num_per_match_region, $max_hit_num_per_single_species, $cpu, $identity, $evalue, $homolog_coverage, $method, $genetic_code, $tmp_dir, $threshod_ratio_of_intron_Supported_times, $output_raw_GFF3, $output_alignment_GFF3, $max_alignment_num_for_each_gene_region, $put_massive_temporary_data_into_memory, $help_flag);
+my (@cmdString, $cmdString, $cmdString1, $cmdString2, $cmdString3, $cmdString4, $cmdString5);
 GetOptions(
     "out_prefix:s" => \$out_prefix,
     "max_hits_num_per_match_region:i" => \$max_hits_num_per_match_region,
@@ -85,6 +89,7 @@ GetOptions(
     "output_raw_GFF3:s" => \$output_raw_GFF3,
     "output_alignment_GFF3:s" => \$output_alignment_GFF3,
     "max_alignment_num_for_each_gene_region:i" => \$max_alignment_num_for_each_gene_region,
+    "put_massive_temporary_data_into_memory!" => \$put_massive_temporary_data_into_memory,
     "help" => \$help_flag,
 );
 $out_prefix ||= "out";
@@ -122,57 +127,43 @@ print STDERR (localtime) . "CMD (Main Program): $0 " . join(" ", @ARGV) . "\n###
 print STDERR "1. align genome sequences against homolog proteins through MMseqs2 software.\n";
 chdir $tmp_dir;
 my $pwd = `pwd`; print STDERR "PWD: $pwd";
-my $cmdString = "$binPath/homolog_prediction.01MMseqs2CalHits --cpu $cpu --identity $identity --evalue $evalue --homolog_coverage $homolog_coverage --threshold_Hit_cover_ratio 0.9 --threshold_Hit_score_ratio 0.4 --threshold_species_num $max_hit_num_per_single_species --threshold_Hit_num $max_hits_num_per_match_region --tmp_dir a.MMseqs2CalHits $input_protein $input_genome > $out_prefix.filteredHits.tab 2> a.MMseqs2CalHits.log";
-unless (-e "a.MMseqs2CalHits.ok" && -e "$out_prefix.filteredHits.tab") {
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-    open OUT, ">", "a.MMseqs2CalHits.ok" or die $!; close OUT;
-}
-else {
-    print STDERR "CMD(Skipped): $cmdString\n";
-}
+$cmdString = "$binPath/homolog_prediction.01MMseqs2CalHits --cpu $cpu --identity $identity --evalue $evalue --homolog_coverage $homolog_coverage --threshold_Hit_cover_ratio 0.9 --threshold_Hit_score_ratio 0.4 --threshold_species_num $max_hit_num_per_single_species --threshold_Hit_num $max_hits_num_per_match_region --tmp_dir a.MMseqs2CalHits $input_protein $input_genome > $out_prefix.filteredHits.tab 2> a.MMseqs2CalHits.log";
+
+&execute_cmds($cmdString, "a.MMseqs2CalHits.ok");
 
 # 2. 进行基因预测，得到表格格式的基因模型，并对同一基因区域的基因模型进行排序。
 print STDERR "2. predicting gene models according the Hits of homologs.\n";
-$cmdString = "$binPath/homolog_prediction.02HitToGenePrediction --cpu $cpu --method $method --genetic_code $genetic_code --tmp_dir b.hitToGenePrediction $input_protein $input_genome $out_prefix.filteredHits.tab > $out_prefix.geneModels.tab 2> b.hitToGenePrediction.log";
-unless (-e "b.hitToGenePrediction.ok" && -s "$out_prefix.geneModels.tab") {
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-    open OUT, ">", "b.hitToGenePrediction.ok" or die $!; close OUT;
+my @cmdString;
+if ( $put_massive_temporary_data_into_memory ) {
+    my $tmp_dir_in_memory = "/dev/shm/homolog_prediction.02HitToGenePrediction_$date$$";;
+    if ( -s "b.hitToGenePrediction.tmp_dir" ) {
+        open IN, "b.hitToGenePrediction.tmp_dir" or die $!;
+        $tmp_dir_in_memory = <IN>;
+        close IN;
+        chomp($tmp_dir_in_memory);
+    }
+    else {
+        open OUT, ">", "b.hitToGenePrediction.tmp_dir" or die "Error: Can not create file b.hitToGenePrediction.tmp_dir, $!";
+        print OUT $tmp_dir_in_memory;
+        close OUT;
+    }
+    push @cmdString, "$binPath/homolog_prediction.02HitToGenePrediction --cpu $cpu --method $method --genetic_code $genetic_code --tmp_dir $tmp_dir_in_memory $input_protein $input_genome $out_prefix.filteredHits.tab > $out_prefix.geneModels.tab 2> b.hitToGenePrediction.log";
+    push @cmdString, "rm -rf $tmp_dir_in_memory";
 }
 else {
-    print STDERR "CMD(Skipped): $cmdString\n";
+    push @cmdString, "$binPath/homolog_prediction.02HitToGenePrediction --cpu $cpu --method $method --genetic_code $genetic_code --tmp_dir b.hitToGenePrediction $input_protein $input_genome $out_prefix.filteredHits.tab > $out_prefix.geneModels.tab 2> b.hitToGenePrediction.log";
 }
+
+&execute_cmds(@cmdString, "b.hitToGenePrediction.ok");
 
 # 3. 同一基因区域仅取一个最优基因模型，得到GFF3文件，并对基因模型进行好坏分类。
 print STDERR "3. picking out the best geng model for classification.\n";
-$cmdString = "$binPath/homolog_prediction.03GetGeneModels --tmp_dir c.getGeneModels --output_raw_GFF3 homolog_prediction.raw.gff3 --output_alignment_GFF3 homolog_alignment.gff3 --max_alignment_num_for_each_gene_region $max_alignment_num_for_each_gene_region $input_genome out.geneModels.tab > $out_prefix.geneModels.gff3 2> c.getGeneModels.log";
-unless (-e "c.getGeneModels.ok" && -s "$out_prefix.geneModels.gff3") {
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-    open OUT, ">", "c.getGeneModels.ok" or die $!; close OUT;
+my @cmdString;
+push @cmdString, "$binPath/homolog_prediction.03GetGeneModels --tmp_dir c.getGeneModels --output_raw_GFF3 c.getGeneModels/homolog_prediction.raw.gff3 --output_alignment_GFF3 c.getGeneModels/homolog_alignment.gff3 --max_alignment_num_for_each_gene_region $max_alignment_num_for_each_gene_region $input_genome out.geneModels.tab > $out_prefix.geneModels.gff3 2> c.getGeneModels.log";
+push @cmdString, "cp c.getGeneModels/homolog_prediction.raw.gff3 $output_raw_GFF3" if $output_raw_GFF3;
+push @cmdString, "cp c.getGeneModels/homolog_alignment.gff3 $output_alignment_GFF3" if $output_alignment_GFF3;
 
-    if ( $output_alignment_GFF3 ) {
-        open IN, "homolog_alignment.gff3" or die $!;
-        my $output = join "", <IN>;
-        close IN;
-        open OUT, ">", $output_alignment_GFF3 or die "Can not create file $output_alignment_GFF3, $!";
-        print OUT $output;
-        close OUT;
-    }
-
-    if ( $output_raw_GFF3 ) {
-        open IN, "homolog_prediction.raw.gff3" or die $!;
-        my $output = join "", <IN>;
-        close IN;
-        open OUT, ">", $output_raw_GFF3 or die "Can not create file $output_raw_GFF3, $!";
-        print OUT $output;
-        close OUT;
-    }
-}
-else {
-    print STDERR "CMD(Skipped): $cmdString\n";
-}
+&execute_cmds(@cmdString, "c.getGeneModels.ok");
 
 # 4. 对基因模型进行进行过滤。
 my $threshod_value = 0;
@@ -237,3 +228,23 @@ print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
 print STDERR "\nFinally, total $total gene models were divided into 4 classes : A, $numA; B, $numB; C, $numC; D, $numD. \nPredicited by gth, $num_gth; predicted by exonerate, $num_exonerate, predicted by genewise, $num_genewise\n\n";
+
+# 子程序，用于执行调用的Linux命令，同时生成.ok文件。
+sub execute_cmds {
+    my $ok_file = pop @_;
+
+    if ( -e $ok_file ) {
+        foreach ( @_ ) {
+            print STDERR "CMD(Skipped): $_\n";
+        }
+    }
+    else {
+        foreach ( @_ ) {
+            print STDERR (localtime) . ": CMD: $_\n";
+            system($_) == 0 or die "failed to execute: $_\n";
+        }
+        open OUT, ">", "$ok_file" or die $!; close OUT;
+    }
+
+    return 1;
+}

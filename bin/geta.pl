@@ -85,8 +85,11 @@ Parameters:
     --cpu <int>    default: 4
     设置程序运行使用的CPU线程数。
 
-	--gene_predicted_by_unmasked_genome    default: Non
-	添加该参数后，程序在利用NGS read、homology和AUGUSTUS进行基因预测时，使用输入的基因组序列进行基因预测。而默认程序对输入的基因组序列进行重复序列屏蔽，再使用屏蔽了的基因组序列采用三种算法进行基因预测。
+    --put_massive_temporary_data_into_memory    default: None
+    添加该参数后，程序优先将海量的临时文件存放到内存中，能减少对磁盘的I/O需求并加快运行速度，但消耗更多内存。本流程在很多步骤中对数据进行了分割，再通过并行化来加速计算，但对磁盘形成了极大的I/O负荷，磁盘性能较差时会严重影响计算速度。若系统内存充足，推荐添加本参数，从而将海量的临时数据存放到代表内存的/dev/shm文件夹下。当相关步骤运行完毕后，程序会自动删除内存文件夹/dev/shm中的临时数据。
+
+    --gene_predicted_by_unmasked_genome    default: None
+    添加该参数后，程序在利用NGS read、homology和AUGUSTUS进行基因预测时，使用输入的基因组序列进行基因预测。而默认程序对输入的基因组序列进行重复序列屏蔽，再使用屏蔽了的基因组序列采用三种算法进行基因预测。
 
     --genetic_code <int>    default: 1
     设置遗传密码。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。本参数主要生效于同源蛋白进行基因预测的步骤，或对基因模型首尾进行强制补齐时使用的起始密码子和终止密码子信息的情形。
@@ -94,7 +97,7 @@ Parameters:
     --homolog_prediction_method <string>    default: all
     设置使用同源蛋白进行基因预测的方法。其值可以设定为exonerate、genewise、gth或all。若想使用多种方法进行分析，则输入使用逗号分割的多个值；若使用所有三种方法进行分析，可以设置--method参数值为all。使用的方法越多，越消耗计算时间，但结果更好。三种方法中：exonerate和genewise的准确性结果比较一致（），但gth方法预测基因模型的sensitivity下降很多，specificity提高很多。以三种方法对Oryza sativa基因组的预测为例，其预测结果的准确性如下表所示。和NCBI上标准的共28736个基因模型的注释结果进行比较，评估四个准确性值：基因水平sensitivity、基因水平specificity、exon水平sensitivity、exon水平specificity。可以看出，使用多种方法进行基因预测、合并结果后再过滤，得到的基因模型数量能接近真实的基因数量，且结果较准确。此外，使用本参数的优先级更高，能覆盖--config指定参数配置文件中homolog_prediction的参数值。
     方法       基因数量    gene_sensitivity    gene_specificity    exon_sensitivity    exon_specificity
-	exonerate  31310       46.17%              42.37%              62.15%              78.45%
+    exonerate  31310       46.17%              42.37%              62.15%              78.45%
     genewise   32407       46.47%              41.21%              64.66%              77.15%
     gth        9116        20.52%              64.70%              32.71%              90.87%
     all        32293       48.19%              42.89%              66.91%              78.00%
@@ -138,7 +141,7 @@ if (@ARGV==0){die $usage_english}
 
 my ($genome, $RM_species, $RM_species_Dfam, $RM_species_RepBase, $RM_lib, $no_RepeatModeler, $pe1, $pe2, $single_end, $sam, $strand_specific, $protein, $augustus_species, $HMM_db, $BLASTP_db, $config, $BUSCO_lineage_dataset);
 my ($out_prefix, $gene_prefix, $chinese_help, $help);
-my ($cpu, $genetic_code, $homolog_prediction_method, $optimize_augustus_method, $no_alternative_splicing_analysis, $delete_unimportant_intermediate_files);
+my ($cpu, $put_massive_temporary_data_into_memory, $genetic_code, $homolog_prediction_method, $optimize_augustus_method, $no_alternative_splicing_analysis, $delete_unimportant_intermediate_files);
 my ($cmdString, $cmdString1, $cmdString2, $cmdString3, $cmdString4, $cmdString5);
 GetOptions(
     "genome:s" => \$genome,
@@ -163,6 +166,7 @@ GetOptions(
     "chinese_help!" => \$chinese_help,
     "help!" => \$help,
     "cpu:i" => \$cpu,
+    "put_massive_temporary_data_into_memory!" => \$put_massive_temporary_data_into_memory,
     "genetic_code:i" => \$genetic_code,
     "homolog_prediction_method:s" => \$homolog_prediction_method,
     "optimize_augustus_method:i" => \$optimize_augustus_method,
@@ -1266,7 +1270,7 @@ Parameters:
     --homolog_prediction_method <string>    default: all
     Enter a method for gene prediction using homologous proteins. The value can be set to exonerate, genewise, gth, or all. This parameter supports the input of multiple methods, separated by commas. If the value was set to all, it indicates all three methods were used. The more methods you use, the more computation time you consume, but the better the result will be. Of the three methods, exonerate and genewise produced similar accuracy results, but gth showed a significant decrease in sensitivity and a significant increase in specificity. The following table shows the accuracy of the prediction results for the Oryza sativa genome using three methods. We compared the annotation results of 28736 gene models on NCBI to assess four accuracy metrics: gene level sensitivity, gene level specificity, exon level specificity, and exon level specificity. It is obvious that using multiple methods for gene prediction, combining results, and then filtering can result in a closer number of gene models to the actual number of genes and more accurate results. In addition, this parameter has a higher priority and can override the homolog_prediction parameter value in the parameter configuration file specified by --config.
     Method     Gene_num    gene_sensitivity    gene_specificity    exon_sensitivity    exon_specificity
-	exonerate  31310       46.17%              42.37%              62.15%              78.45%
+    exonerate  31310       46.17%              42.37%              62.15%              78.45%
     genewise   32407       46.47%              41.21%              64.66%              77.15%
     gth        9116        20.52%              64.70%              32.71%              90.87%
     all        32293       48.19%              42.89%              66.91%              78.00%
@@ -1434,14 +1438,18 @@ sub choose_config_file {
     }
     $config{"BGM2AT"} =~ s/--optimize_augustus_method \d+/--optimize_augustus_method $optimize_augustus_method/;
 
-	# 生成本次程序运行的配置文件
-	unless ( -e "$tmp_dir/config.txt" ) {
-		open OUT, ">", "$tmp_dir/config.txt" or die "Error: Can not create file $tmp_dir/config.txt, $!";
-		foreach ( sort keys %config ) {
-			print OUT "[$_]\n$config{$_}\n\n";
-		}
-		close OUT;
-	}
+    if ( defined $put_massive_temporary_data_into_memory ) {
+        $config{"homolog_prediction"} =~ s/\s*$/ --put_massive_temporary_data_into_memory/;
+    }
+
+    # 生成本次程序运行的配置文件
+    unless ( -e "$tmp_dir/config.txt" ) {
+        open OUT, ">", "$tmp_dir/config.txt" or die "Error: Can not create file $tmp_dir/config.txt, $!";
+        foreach ( sort keys %config ) {
+            print OUT "[$_]\n$config{$_}\n\n";
+        }
+        close OUT;
+    }
 
     return 1;
 }
