@@ -135,6 +135,8 @@ $cmdString = "$binPath/homolog_prediction.01MMseqs2CalHits --cpu $cpu --identity
 print STDERR "2. predicting gene models according the Hits of homologs.\n";
 my @cmdString;
 if ( $put_massive_temporary_data_into_memory ) {
+	# 将海量分割的数据文件放入内存运行
+	# 首先获取临时文件夹路径，以利于程序中断后继续运行。
     my $tmp_dir_in_memory = "/dev/shm/homolog_prediction.02HitToGenePrediction_$date$$";;
     if ( -s "b.hitToGenePrediction.tmp_dir" ) {
         open IN, "b.hitToGenePrediction.tmp_dir" or die $!;
@@ -147,7 +149,9 @@ if ( $put_massive_temporary_data_into_memory ) {
         print OUT $tmp_dir_in_memory;
         close OUT;
     }
+	# 然后，得到运行的命令。
     push @cmdString, "$binPath/homolog_prediction.02HitToGenePrediction --cpu $cpu --method $method --genetic_code $genetic_code --tmp_dir $tmp_dir_in_memory $input_protein $input_genome $out_prefix.filteredHits.tab > $out_prefix.geneModels.tab 2> b.hitToGenePrediction.log";
+	# 运行完毕后，删除中间文件夹，以释放内存。
     push @cmdString, "rm -rf $tmp_dir_in_memory";
 }
 else {
