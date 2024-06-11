@@ -30,8 +30,7 @@ Usage:
     （7）对于ref introns和evidence introns中共有的intron，计算 碱基测序深度 / 基因测序深度 比值。若超过阈值0.2，则属于IR事件，将intron进行标记。
     （8）对所有的可信introns根据重叠进行聚类。
     （9）对聚类的introns进行可变剪接分析，是核心算法。
-        对有重叠的introns类进行可变剪接分析，计算各种intron剪接类型及其比例：（1）将有重叠的introns分成多套没有重叠的introns，根据各
-套introns的平均测序深度来分配其比例；（2）每套没有重叠的introns可能存在IR剪接类型，根据intron测序深度和内部碱基测序深度分配比例；（3）再进一步
+        对有重叠的introns类进行可变剪接分析，计算各种intron剪接类型及其比例：（1）将有重叠的introns分成多套没有重叠的introns，根据各套introns的平均测序深度来分配其比例；（2）每套没有重叠的introns可能存在IR剪接类型，根据intron测序深度和内部碱基测序深度分配比例；（3）再进一步
 算出所有，并得到各个intron_splicing的比例。
         没有重叠的single intron若被标记了，则进行IR分析，计算两种剪接方式的比例。
         没有重叠的single intron若未被标记，则不进行IR分析。

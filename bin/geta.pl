@@ -86,7 +86,7 @@ Parameters:
     设置程序运行使用的CPU线程数。
 
     --put_massive_temporary_data_into_memory    default: None
-    添加该参数后，程序优先将海量的临时文件存放到内存中，能减少对磁盘的I/O需求并加快运行速度，但消耗更多内存。本流程在很多步骤中对数据进行了分割，再通过并行化来加速计算，但对磁盘形成了极大的I/O负荷，磁盘性能较差时会严重影响计算速度。若系统内存充足，推荐添加本参数，从而将海量的临时数据存放到代表内存的/dev/shm文件夹下。当相关步骤运行完毕后，程序会自动删除内存文件夹/dev/shm中的临时数据。
+    设置将海量的临时文件存放到内存中。这样能避免磁盘I/O不足而造成程序运行减缓，但需要消耗更多内存。本流程在很多步骤中对数据进行了分割，再通过并行化来加速计算，但这对磁盘形成了极大的I/O负荷。因此，当磁盘性能较差时会严重影响计算速度。若系统内存充足，推荐添加本参数，从而将海量的临时数据存放到代表内存的/dev/shm文件夹下，以加速程序运行。此外，程序在数据分割和并行化步骤运行完毕后，会自动删除/dev/shm中的临时数据以释放内存。
 
     --gene_predicted_by_unmasked_genome    default: None
     添加该参数后，程序在利用NGS read、homology和AUGUSTUS进行基因预测时，使用输入的基因组序列进行基因预测。而默认程序对输入的基因组序列进行重复序列屏蔽，再使用屏蔽了的基因组序列采用三种算法进行基因预测。
@@ -321,6 +321,7 @@ if (($pe1 && $pe2) or $single_end or $sam) {
     push @input_paramter, "--sam $sam" if $sam;
     push @input_paramter, "--strand_specific" if defined $strand_specific;
     push @input_paramter, "--genetic_code $genetic_code" if defined $genetic_code;
+	push @input_paramter, "--put_massive_temporary_data_into_memory" if defined $put_massive_temporary_data_into_memory;
     $cmdString_Step2_paramter = join " ", @input_paramter;
     $cmdString1 = "$bin_path/NGSReads_prediction $cmdString_Step2_paramter --config $tmp_dir/config.txt --cpu $cpu --tmp_dir $tmp_dir/2.NGSReads_prediction --output_alignment_GFF3 $tmp_dir/2.NGSReads_prediction/NGSReads_alignment.gff3 --output_raw_GFF3 $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.raw.gff3 $genome > $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.gff3 2> $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.A.log";
     $cmdString2 = "cp -a $tmp_dir/2.NGSReads_prediction/c.transcript/intron.txt $tmp_dir/2.NGSReads_prediction/c.transcript/base_depth.txt $tmp_dir/2.NGSReads_prediction/";
@@ -1263,6 +1264,9 @@ Parameters:
 [Settings]
     --cpu <int>    default: 4
     Enter the number of CPU threads used by GETA or the called programes to run.
+
+    --put_massive_temporary_data_into_memory    default: None
+    Set up massive temporary files to be stored in memory. This prevents the program from running slowly due to insufficient disk I/O, but it requires more RAM. Many steps in this pipeline would split the input data into numerous pieces and then parallelize its command lines to speed up the computation, although this results in a significant I/O load on the disk. Therefore, low disk performance has a significant impact on computation speed. If your system memory is sufficient, you are advised to add this parameter so that massive temporary data can be stored in the /dev/shm folder, which represents the memory, to speed up program execution. In addition, the program automatically deletes temporary data in /dev/shm to free up memory after the data splitting and parallelization steps are completed.
 
     --genetic_code <int>    default: 1
     Enter the genetic code. The values for this parameter can be found on the NCBI Genetic Codes website at: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi. This parameter is mainly effective for the gene prediction steps through homologous proteins, as well as the situation where start and stop codon information is used for filling the end of incomplete gene models.

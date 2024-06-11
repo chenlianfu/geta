@@ -1,36 +1,69 @@
 #!/usr/bin/perl
 use strict;
+use Getopt::Long;
+use File::Basename;
+use Cwd qw/abs_path getcwd cwd/;
 
 my $usage = <<USAGE;
 Usage:
-    perl $0 file.sam out_dir min_fragment_per_region
+    perl $0 [options] file.sam out_dir min_fragment_per_region
 
 For example:
-    perl $0 hisat2.sam out 10 > splited_sam_files.list
+    perl $0 --min_fragment_per_region 10 --output_directory out hisat2.sam > splited_sam_files.list
 
-    输入RNA-Seq数据利用HISAT2进行比对得到的SAM文件。该SAM文件是按coordinate进行排序的数据。
-    程序能对SAM文件数据在没有read比对上的区域进行分割。分割后的sam文件最小的fragment数是10; sam文件没有header信息; 在标准输出中输出分割后的sam文件路径信息。
+    本程序输入RNA-Seq比对到基因组并按coordinate进行排序的SAM格式数据文件，能对数据按匹配区域进行分割。将分割后得到的SAM文件存放到指定文件夹中，并在标准输出中给出所有输出文件的路径。
+    程序能对SAM文件数据在没有read比对上的区域进行分割。分割后的sam文件最小的fragment数是10(--min_fragment_per_region参数设定值); sam文件没有header信息; 在标准输出中输出分割后的sam文件路径信息。
     注意: 本程序没有考虑比对的方向; 给出的sam文件结果中去除了没有比对上的reads信息；给出的sam文件结果中去除了次优的比对结果。
+
+    --min_fragment_per_region <int>    default: 10
+    对SAM文件进行分割，每个分割区域表示一个转录区域，得到一个SAM文件。本参数设置该文件中至少包含的fragment数量。
+
+    --output_directory <string>    default: out
+    设置输出文件夹路径。
 
 USAGE
 if (@ARGV==0){die $usage}
 
-mkdir $ARGV[1] unless -e $ARGV[1];
-open IN, $ARGV[0] or die $!;
+my ( $min_fragment_per_region, $output_directory, $help );
+GetOptions(
+    "min_fragment_per_region:i" => \$min_fragment_per_region,
+    "output_directory:s" => \$output_directory,
+    "help!" => \$help,
+);
+if ( defined $help ) { die $usage }
+
+$min_fragment_per_region ||= 10;
+
+# 准备临时文件夹
+$output_directory ||= "out";
+$output_directory = abs_path($output_directory) if defined $output_directory;
+unless ( -e $output_directory ) {
+    mkdir $output_directory or die "Error: Can not create directory $output_directory, $!";
+}
+
+# 准备读取输入的SAM文件
+my $input_sam = $ARGV[0];
+$input_sam = abs_path($input_sam) if defined $input_sam;
+open IN, $input_sam or die "Error: Can not open file $input_sam, $!";
+# 略过SAM文件头部
 while ($_ = <IN>) {
     @_ = split /\t/;
     my $flag = sprintf("%b",$_[1])+0;
 
     if (m/^\@/) { next; }
     elsif ($_[5] eq '*') { next; }
+    # 略过次优的比对结果
     elsif ($flag =~ m/(\d)\d\d\d\d\d\d\d\d$/ && $1 == 1) { next; }
     else { last; }
 }
 
+# 读取SAM文件第一行有效数据
 my %fragment;
 @_ = split /\t/;
+# 得到read匹配基因组染色体ID和匹配起始
 my $last_chromosome_id = $_[2];
 my $last_alignment_start = $_[3];
+# 再根据CIGAR计算read匹配结束位点
 my $cigar = $_[5];
 my @cigar = $cigar =~ m/(\d+\w)/g;
 my $last_alignment_end = $last_alignment_start;
@@ -46,17 +79,23 @@ foreach (@cigar) {
         $last_alignment_end += $1;
     }
 }
+# 收集当前一行数据
 my $sam_content = $_;
 $fragment{$_[0]} = 1;
 
+# 正式读取SAM文件主体内容
 while (<IN>) {
     @_ = split /\t/;
+
+    # 略过不能比对上和次优匹配数据
     my $flag = sprintf("%b",$_[1])+0;
     next if $_[5] eq '*';
     if ($flag =~ m/(\d)\d\d\d\d\d\d\d\d$/ && $1 == 1) { next; }
 
+    # 当前行与上一行匹配到相同染色体上，且和上一行匹配区域重叠，则收集当前一行数据
     if ($_[2] eq $last_chromosome_id && $_[3] < $last_alignment_end) {
         $sam_content .= $_;
+        # 根据CIGAR计算当前匹配区域结束位点
         my $end = $_[3];
         $cigar = $_[5];
         @cigar = $cigar =~ m/(\d+\w)/g;
@@ -75,14 +114,16 @@ while (<IN>) {
         $last_alignment_end = $end if $end > $last_alignment_end;
         $fragment{$_[0]} = 1;
     }
+    # 当前行与上一行不重叠，则输出收集的数据，要求其数据行数不少于指定值（--min_fragment_per_region参数设定值）。
     else {
         my $fragment_num = keys %fragment;
-        if ($fragment_num >= $ARGV[2]) {
+        if ($fragment_num >= $min_fragment_per_region) {
+            # read的100bp全部匹配上，其结束位点应该 = 匹配起始 + 100  - 1。所以此处要减去 1 。
             $last_alignment_end --;
-            open OUT, '>', "$ARGV[1]/$last_chromosome_id.$last_alignment_start-$last_alignment_end.sam" or die $!;
+            open OUT, '>', "$output_directory/$last_chromosome_id.$last_alignment_start-$last_alignment_end.sam" or die $!;
             print OUT $sam_content;
             close OUT;
-            print  "$ARGV[1]/$last_chromosome_id.$last_alignment_start-$last_alignment_end.sam\n";
+            print  "$output_directory/$last_chromosome_id.$last_alignment_start-$last_alignment_end.sam\n";
         }
         $sam_content = "";
         %fragment = ();
@@ -107,12 +148,13 @@ while (<IN>) {
         $sam_content = $_;
     }
 }
+# 当SAM文件读取完毕后，对最后一批数据进行分析和输出
 my $fragment_num = keys %fragment;
-if ($fragment_num >= $ARGV[2]) {
+if ($fragment_num >= $min_fragment_per_region) {
     $last_alignment_end --;
-    open OUT, '>', "$ARGV[1]/$last_chromosome_id.$last_alignment_start-$last_alignment_end.sam" or die $!;
+    open OUT, '>', "$output_directory/$last_chromosome_id.$last_alignment_start-$last_alignment_end.sam" or die $!;
     print OUT $sam_content;
     close OUT;
-    print  "$ARGV[1]/$last_chromosome_id.$last_alignment_start-$last_alignment_end.sam\n";
+    print  "$output_directory/$last_chromosome_id.$last_alignment_start-$last_alignment_end.sam\n";
 }
 close IN;
