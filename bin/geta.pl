@@ -313,17 +313,17 @@ print STDERR "Step 2: NGSReads_predcition " . "(" . (localtime) . ")" . "\n";
 chdir $tmp_dir; print STDERR "\nPWD: $tmp_dir\n";
 mkdir "$tmp_dir/2.NGSReads_prediction" unless -e "$tmp_dir/2.NGSReads_prediction";
 
-my $cmdString_Step2_paramter;
+my $cmdString_Step2_parameter;
 if (($pe1 && $pe2) or $single_end or $sam) {
-    my @input_paramter;
-    push @input_paramter, "--pe1 $pe1 --pe2 $pe2" if ($pe1 && $pe2);
-    push @input_paramter, "--se $single_end" if $single_end;
-    push @input_paramter, "--sam $sam" if $sam;
-    push @input_paramter, "--strand_specific" if defined $strand_specific;
-    push @input_paramter, "--genetic_code $genetic_code" if defined $genetic_code;
-	push @input_paramter, "--put_massive_temporary_data_into_memory" if defined $put_massive_temporary_data_into_memory;
-    $cmdString_Step2_paramter = join " ", @input_paramter;
-    $cmdString1 = "$bin_path/NGSReads_prediction $cmdString_Step2_paramter --config $tmp_dir/config.txt --cpu $cpu --tmp_dir $tmp_dir/2.NGSReads_prediction --output_alignment_GFF3 $tmp_dir/2.NGSReads_prediction/NGSReads_alignment.gff3 --output_raw_GFF3 $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.raw.gff3 $genome > $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.gff3 2> $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.A.log";
+    my @input_parameter;
+    push @input_parameter, "--pe1 $pe1 --pe2 $pe2" if ($pe1 && $pe2);
+    push @input_parameter, "--se $single_end" if $single_end;
+    push @input_parameter, "--sam $sam" if $sam;
+    push @input_parameter, "--strand_specific" if defined $strand_specific;
+    push @input_parameter, "--genetic_code $genetic_code" if defined $genetic_code;
+    push @input_parameter, "--put_massive_temporary_data_into_memory" if defined $put_massive_temporary_data_into_memory;
+    $cmdString_Step2_parameter = join " ", @input_parameter;
+    $cmdString1 = "$bin_path/NGSReads_prediction $cmdString_Step2_parameter --config $tmp_dir/config.txt --cpu $cpu --tmp_dir $tmp_dir/2.NGSReads_prediction --output_alignment_GFF3 $tmp_dir/2.NGSReads_prediction/NGSReads_alignment.gff3 --output_raw_GFF3 $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.raw.gff3 $genome > $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.gff3 2> $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.A.log";
     $cmdString2 = "cp -a $tmp_dir/2.NGSReads_prediction/c.transcript/intron.txt $tmp_dir/2.NGSReads_prediction/c.transcript/base_depth.txt $tmp_dir/2.NGSReads_prediction/";
 }
 else {
@@ -364,7 +364,7 @@ if ( ($pe1 && $pe2) or $single_end or $sam ) {
         $cmdString2 = "rm -rf $tmp_dir/2.NGSReads_prediction/c.transcript/11.fillingEndsOfGeneModels.ok";
         $cmdString3 = "rm -rf $tmp_dir/2.NGSReads_prediction/c.transcript/12.classGeneModels.ok";
         $cmdString4 = "rm -rf $tmp_dir/2.NGSReads_prediction/c.transcript/FillingGeneModelsByHomolog_tmp/command.combineGeneModels.list.completed";
-        $cmdString5 = "$bin_path/NGSReads_prediction $cmdString_Step2_paramter --cpu $cpu --tmp_dir $tmp_dir/2.NGSReads_prediction --homolog_gene_models $tmp_dir/3.homolog_prediction/homolog_prediction.raw.gff3 $genome > $tmp_dir/4.evidence_gene_models/NGSReads_prediction_FilledByHomolog.gff3 2> $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.B.log";
+        $cmdString5 = "$bin_path/NGSReads_prediction $cmdString_Step2_parameter --cpu $cpu --tmp_dir $tmp_dir/2.NGSReads_prediction --homolog_gene_models $tmp_dir/3.homolog_prediction/homolog_prediction.raw.gff3 $genome > $tmp_dir/4.evidence_gene_models/NGSReads_prediction_FilledByHomolog.gff3 2> $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.B.log";
 
         &execute_cmds($cmdString1, $cmdString2, $cmdString3, $cmdString4, $cmdString5, "1.NGSReads_prediction_FilledByHomolog.ok");
     }

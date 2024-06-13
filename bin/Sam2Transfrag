@@ -1,0 +1,558 @@
+#!/usr/bin/env perl
+
+use strict;
+use Getopt::Long;
+use Cwd qw/abs_path getcwd cwd/;
+use File::Basename;
+
+my $command_line = "$0 " . join(" ", @ARGV);
+my $bin_path = dirname($0);
+my $software_dir = $bin_path; $software_dir =~ s/\/bin$//;
+
+my $usage = <<USAGE;
+Usage:
+    $0 [options] input1.sam [input2.sam input3.sam ...] > transfrag.gff3
+    $0 [options] --input_single_sorted_BAM_file hisat2_sorted.bam > transfrag.gff3
+
+    本程序用于分析RNA-Seq数据比对到参考基因组得到的一个或多个SAM/BAM文件，得到可信的转录本信息，并输出GFF3格式。
+
+    程序流程和工作原理如下：
+    (1) 首先，程序分析第一个输入的SAM/BAM文件，得到其包含有参考基因组序列长度信息的头部内容；
+    (2) 然后，程序调用samtools merge命令将输入的多个SAM/BAM文件合并为一个SAM文件。 
+    (3) 然后，程序调用samtools sort命令对得到的SAM文件按坐标进行排序，得到BAM文件。 
+    (4) 然后，程序调用samtools index命令对BAM文件进行索引。 
+    (5) 然后，程序调用samtools view命令对BAM文件内容按染色体进行分割，得到多个SAM文件。并让每个SAM文件对应的参考基因组序列总长度不低于1 Mb。 
+    (6) 然后，调用SplitRNASeqSam程序进一步对SAM文件中未匹配区域进行打断，分割得到更多的SAM文件，以利于后续的并行化快速分析。每个SAM文件表示一>个基因的转录区域。 
+    (7) 然后，调用Sam2TransfragLite程序对每个SAM文件进行分析，得到表达量最高的转录本序列。 
+    (8) 然后，调用alternative_splicing_analysis程序对每个转录区域进行分析，鉴定出可变剪接转录本。 
+    (9) 最后，输出GFF3格式转录本，intron和exon测序深度信息，并删除中间临时文件。
+
+    程序使用须知：
+    (1) 本程序的正常使用需要在程序同目录下存在SplitRNASeqSam、Sam2TransfragLite、alternative_splicing_analysis和parafly命令。同时，也要求能直接在系统中执行samtools和parallel命令。
+    (2) 本程序输入文件可以是一个或多个SAM/BAM格式文件。当输入一个排序后的BAM文件并添加--input_single_sorted_BAM_file参数后，程序跳过步骤2-4。
+    (3) 本程序运行最后第9步骤中，会删除中间文件。在此之前的步骤运行中断后，再次运行程序使用--tmp_dir参数选择相同的临时文件夹，则程序能继续接着运行。需要注意的是，若程序运行结束后，再次运行程序使用--tmp_dir参数选择相同的临时文件夹，则不会得到结果。
+
+参数:
+[输入参数]
+    --input_single_sorted_BAM_file    default: None
+    当添加该参数，表示程序仅接受第一个输入文件，且其为按坐标排序后的BAM文件。此时，程序会跳过步骤2~4。
+
+    --strand_specific    default: None
+    当添加该参数，则认为所有输入的SAM/BAM数据是链特异性数据。此时，要求SAM/BAM文件中每行都必须有XS标签，用于表明其对应的转录本位于基因组序列的正义或负义链上。
+
+[输出参数]
+    --help    default: None
+    display this help and exit.
+
+    --chinese_help    default: None
+    使用该参数后，程序给出中文用法并退出。
+
+    --no_alternative_splicing    default: None
+    当添加该参数，程序不再输出可变剪接转录本，仅输出表达量最高的转录本信息。
+
+    --tmp_dir <string>    default: tmp_\$date\$pid
+    输入临时文件夹路径。
+
+    --intron_info_out <String>
+    设置intron信息文件的输出路径，其中包含可信的introns。
+
+    --base_depth_out <String>
+    设置exon上碱基测序深度信息文件的输出路径。
+
+[设置阈值]
+    --min_genome_length_during_segmentation <int>    default: 1000000
+    设置最小基因组序列长度。程序根据染色体将SAM文件进行分割时，让每个SAM文件对应的染色体序列总长度不小于该阈值。
+
+    --fraction <FLOAT>  default: 0.05
+    根据RNA-Seq比对数据分析转录本序列时，程序根据exon上碱基测序深度(expressed_base_depth)和intron测序深度(junction_depth)来打断匹配区域，以获得准确的转录本序列。这两个关键参数的阈值 = 转录本区域的最高碱基测序深度Dmax * 本参数设定值。
+
+    --min_expressed_base_depth <INT>  default: 2
+    --max_expressed_base_depth <INT>  default: 10
+    这两个参数和--fraction参数一起决定expressed_base_depth的阈值。对SAM文件中的连续比对区域区进行打断的时候，若位点的碱基测序深度低于expressed_base_depth阈值，则在该位点前后对比对区域进行打断。默认设置表示：对某个比对区域进行分析的时候，根据SAM文件计算出该区域的最高单碱基测序深度Dmax；D=Dmax * 0.05；若D小于2，则expressed_base_depth阈值=2；若D值大于10，则expressed_base_depth阈值=10；若D值在2和10之间，则expressed_base_depth 阈值=D。
+
+    --min_junction_depth <INT>  default:2
+    --max_junction_depth <INT>  default:10
+    这两个参数和--fraction参数一起决定junction_depth的阈值。对SAM文件中的不连续比对位点进行打断的时候，若intron的碱基测深度低于junction_depth 的阈值，则在该位点前对比对区域进行打断。默认设置表示：对某个比对区域进行分析的时候，根据SAM文件计算出该区域的最高单碱基测序深度Dmax；；D=Dmax * 0.05；若D小于取2，则junction_depth=2；若D值大于10，则junction_depth=10；若D值在2和10之间，则junction_depth=D。
+
+    --min_fragment_count_per_transfrag <INT>  default: 10
+    输出transfrags信息的时候，必须要求transfrags被支持的fragment数目大于该值。
+
+[性能参数]
+    --cpu <int>    default: 8
+    设置程序运行的CPU线程数。
+
+    --put_massive_temporary_data_into_memory    default: None
+    设置将海量的临时文件存放到内存中。这样能避免磁盘I/O不足而造成程序运行减缓，但需要消耗更多内存。本流程在很多步骤中对数据进行了分割，再通过 并行化来加速计算，但这对磁盘形成了极大的I/O负荷。因此，当磁盘性能较差时会严重影响计算速度。若系统内存充足，推荐添加本参数，从而将海量的临时数 据存放到代表内存的/dev/shm文件夹下，以加速程序运行。此外，程序在数据分割和并行化步骤运行完毕后，会自动删除/dev/shm中的临时数据以释放内存。
+    添加该参数后，程序将SplitRNASeqSam命令生成的大量小文件存放到/dev/shm文件夹中，并用于下游的数据分析。
+
+USAGE
+my $usage_english = &get_usage_english();
+if (@ARGV==0){die $usage_english}
+
+my ($input_single_sorted_BAM_file, $strand_specific, $help, $chinese_help, $no_alternative_splicing, $tmp_dir, $intron_info_out, $base_depth_out, $min_genome_length_during_segmentation, $fraction, $min_expressed_base_depth, $max_expressed_base_depth, $min_junction_depth, $max_junction_depth, $min_fragment_count_per_transfrag, $cpu, $put_massive_temporary_data_into_memory);
+my ($cmdString, @cmdString);
+GetOptions(
+    "input_single_sorted_BAM_file" => \$input_single_sorted_BAM_file,
+    "strand_specific" => \$strand_specific,
+    "chinese_help" => \$chinese_help,
+    "help" => \$help,
+    "no_alternative_splicing" => \$no_alternative_splicing,
+    "tmp_dir:s" => \$tmp_dir,
+    "intron_info_out:s" => \$intron_info_out,
+    "base_depth_out:s" => \$base_depth_out,
+    "min_genome_length_during_segmentation:i" => \$min_genome_length_during_segmentation,
+    "fraction:f" => \$fraction,
+    "min_expressed_base_depth:i" => \$min_expressed_base_depth,
+    "max_expressed_base_depth:i" => \$max_expressed_base_depth,
+    "min_junction_depth:i" => \$min_junction_depth,
+    "max_junction_depth:i" => \$max_junction_depth,
+    "min_fragment_count_per_transfrag:i" => \$min_fragment_count_per_transfrag,
+    "cpu:i" => \$cpu,
+    "put_massive_temporary_data_into_memory!" => \$put_massive_temporary_data_into_memory,
+);
+if ( $chinese_help ) { die $usage }
+if ( $help ) { die $usage_english }
+
+# 在标准错误输出中给出程序的运行命令。
+my $pwd = `pwd`;
+my $programe_name = basename($0);
+print STDERR "\n#################### $programe_name | Start ####################\n";
+print STDERR "PWD: $pwd" . (localtime) . ": CMD: " . $command_line . "\n";
+print STDERR "============================================\n";
+
+########### 解析参数 #################
+# 使用绝对路径
+my @input_SAM;
+foreach ( @ARGV ) { push @input_SAM, abs_path($_); }
+$intron_info_out = abs_path($intron_info_out) if defined $intron_info_out;
+$base_depth_out = abs_path($base_depth_out) if defined $base_depth_out;
+
+# 设置参数的默认值
+$cpu ||= 8;
+$min_genome_length_during_segmentation ||= 1000000;
+$fraction ||= 0.05;
+$min_expressed_base_depth ||= 2;
+$max_expressed_base_depth ||= 10;
+$min_junction_depth ||= 2;
+$max_junction_depth ||= 10;
+$min_fragment_count_per_transfrag ||= 10;
+
+# 准备临时文件夹路径
+my $date = `date +%Y%m%d%H%M%S`; chomp($date);
+$tmp_dir ||= "tmp_$date$$";
+$tmp_dir = abs_path($tmp_dir);
+mkdir $tmp_dir unless -e $tmp_dir;
+chdir $tmp_dir; print STDERR "PWD: $tmp_dir\n";
+###############################
+
+# 1. 分析SAM头部
+print STDERR "\n1. Using the \"samtools view\" command to obtain header of the first input SAM/BAM file. (" . (localtime) . ")\n";
+push @cmdString, "samtools view -H $input_SAM[0] > header.sam";
+
+my $alignment_BAM_file;
+# 若添加了 --input_single_sorted_BAM_file 参数，则跳过步骤1，步骤2和步骤3
+if ( defined $input_single_sorted_BAM_file ) {
+    push @cmdString, "touch 02.samtools_merge.ok 03.samtools_sort.ok 04.samtools_index.ok";
+    $alignment_BAM_file = $input_SAM[0];
+    # 若不存在bam索引文件，则构建其索引
+    unless ( -s "$alignment_BAM_file.bai" ) {
+        push @cmdString, "samtools index $alignment_BAM_file";
+    }
+}
+
+&execute_cmds(@cmdString, "$tmp_dir/01.samtools_view.ok");
+
+# 2. 调用samtools merge命令将输入的多个SAM文件合并为一个文件。
+print STDERR "\n2. Using the \"samtools merge\" command to consolidate multiple input SAM files into a single file. (" . (localtime) . ")\n";
+if ( @input_SAM > 1 ) {
+    $cmdString = "samtools merge -\@ $cpu -O SAM -o alignment.sam " . join(" ", @input_SAM);
+}
+else {
+    $cmdString = "ln -sf $input_SAM[0] alignment.sam";
+}
+
+&execute_cmds($cmdString, "$tmp_dir/02.samtools_merge.ok");
+
+
+# 3. 调用samtools sort命令对SAM文件按坐标进行排序
+print STDERR "\n3. Using the \"samtools sort\" command to perform coordinate-based sorting on the SAM file. (" . (localtime) . ")\n";
+# 检测输入文件 alignment.sam 的大小
+my $file_size = 0;
+my @stat = stat("$tmp_dir/alignment.sam");
+# 得到文件的大小，单位为KB。
+$file_size = int($stat[7] / 1024) if $stat[7];
+
+# 检测当前可用内存，单位为KB。
+my $MemAvailable = 0;
+$MemAvailable = &get_MemAvailable();
+
+# 设置samtools sort命令可以使用的内存量为剩余内存的90%，或降低为文件大小的120%。
+my $samtools_sort_memory = $MemAvailable * 0.9;
+$samtools_sort_memory = $file_size * 1.2 if $samtools_sort_memory > $file_size * 1.2;
+# 将单位转换为 MB
+$samtools_sort_memory = $samtools_sort_memory / 1024;
+# 得到samtools sort命令-M参数的值。
+my $samtools_sort_M = int($samtools_sort_memory / $cpu);
+
+$cmdString = "samtools sort -\@ $cpu -m ${samtools_sort_M}M -O BAM -o alignment.bam alignment.sam";
+
+&execute_cmds($cmdString, "$tmp_dir/03.samtools_sort.ok");
+
+
+# 4. 调用samtools index命令对SAM文件进行索引
+print STDERR "\n4. Using the \"samtools index\" command to index the SAM file. (" . (localtime) . ")\n";
+$cmdString = "samtools index -\@ $cpu alignment.bam";
+
+&execute_cmds($cmdString, "$tmp_dir/04.samtools_index.ok");
+$alignment_BAM_file = "$tmp_dir/alignment.bam" unless defined $alignment_BAM_file;
+
+
+# 5. 将SAM文件按染色体进行分割，若多条序列较短，则合并多条序列直至大小超过 1 Mb。
+print STDERR "\n5. Splitting the SAM file by chromosome and its lengtah. If there are multiple sequences that are shorter, merge them until the size exceeds $min_genome_length_during_segmentation bp. (" . (localtime) . ")\n"; 
+# 生成 samtools view 命令
+unless ( -e "$tmp_dir/command.samtools_view.list" && -e "$tmp_dir/splitSAM_byChromosome" && -e "$tmp_dir/splitSAM_byChromosome.file_path.list" ) {
+    # 先根据第一个输入的SAM文件头部信息获取参考基因组序列的长度信息
+    my %genome_seq_length;
+    open IN, "$tmp_dir/header.sam" or die "Error: Can not open file $tmp_dir/header.sam, $!";
+    while (<IN>) {
+        if ( m/^\@/ ) {
+            if ( m/^\@SQ\tSN:(\S+)\tLN:(\d+)/ ) {
+                $genome_seq_length{$1} = $2;
+                #print STDERR "$1\t$2\n";
+            }
+        }
+        else {
+            last;
+        }
+    }
+    close IN;
+
+    # 对基因组序列从长到短排序后，依次取序列，直到单份序列总长度超过 1 Mb，再取序列作为下一份。
+    # %piece存放了染色体序列分组及其编号。键是使用空格分割的染色体名称，值是分组编号。
+    # @piecece是%piece的键，按序列从长到短排列。
+    my (%piece, @piece, $piece_num, $piece_length, $piece_name);
+    foreach ( sort {$genome_seq_length{$b} <=> $genome_seq_length{$a}} keys %genome_seq_length ) {
+        $piece_name .= "$_ ";
+        $piece_length += $genome_seq_length{$_};
+        if ( $piece_length >= $min_genome_length_during_segmentation ) {
+            $piece_num ++;
+            $piece{$piece_name} = $piece_num;
+            push @piece, $piece_name;
+            $piece_name = "";
+            $piece_length = 0;
+        }
+    }
+    if ( $piece_name ) {
+        $piece_num ++;
+        $piece{$piece_name} = $piece_num;
+        push @piece, $piece_name;
+    }
+
+    mkdir "$tmp_dir/splitSAM_byChromosome" unless -e "$tmp_dir/splitSAM_byChromosome";
+    my $output1 = "$tmp_dir/command.samtools_view.list";
+    my $output2 = "$tmp_dir/splitSAM_byChromosome.file_path.list";
+    open OUT1, ">", $output1 or die "Error: Can not create file $output1, $!";
+    open OUT2, ">", $output2 or die "Error: Can not create file $output2, $!";
+    foreach ( @piece ) {
+        print OUT1 "samtools view $alignment_BAM_file $_ > $tmp_dir/splitSAM_byChromosome/piece$piece{$_}.sam\n";
+        print OUT2 "$tmp_dir/splitSAM_byChromosome/piece$piece{$_}.sam\n";
+    }
+    close OUT1; close OUT2;
+}
+
+my $parafly_CPU = $cpu; $parafly_CPU = 30 if $parafly_CPU > 30;
+$cmdString = "$bin_path/parafly -c $tmp_dir/command.samtools_view.list -CPU $parafly_CPU --max_CPU $parafly_CPU &> $tmp_dir/parafly.samtools_view.log";
+
+&execute_cmds($cmdString, "$tmp_dir/05.samtools_view.ok");
+
+
+# 6. 将SAM比对数据分成一个个匹配区域
+print STDERR "\n6. Further splitting the SAM file from unaligned region. (" . (localtime) . ")\n";
+# 生成 SplitRNASeqSam 命令
+unless (-e "$tmp_dir/command.SplitRNASeqSam.list") {
+    # 设置 SplitRNASeqSam 命令的输出文件夹路径
+    my $output_dir_of_SplitSam = "splited_sam_out";
+    if ( $put_massive_temporary_data_into_memory ) {
+        # 检测 splited_sam_out.tmp_dir 文件是否存在，若存在，则使用之前的的临时文件夹，以利于程序中断后接续运行。
+        if ( -s "splited_sam_out.tmp_dir" ) {
+            open IN, "splited_sam_out.tmp_dir" or die "Error: Can not open file splited_sam_out.tmp_dir, $!";
+            $output_dir_of_SplitSam = <IN>;
+            close IN;
+            chomp($output_dir_of_SplitSam);
+        }
+        else {
+            $output_dir_of_SplitSam = "/dev/shm/Sam2Transfrag_SplitSam_tmpDir$date$$";
+            open OUT, ">", "splited_sam_out.tmp_dir" or die "Error: Can not create file splited_sam_out.tmp_dir, $!";
+            print OUT $output_dir_of_SplitSam;
+            close OUT;
+        }
+    }
+
+    # 对每个按染色体分割的SAM文件生成 SplitRNASeqSam 命令
+    my $input = "$tmp_dir/splitSAM_byChromosome.file_path.list";
+    my $output = "$tmp_dir/command.SplitRNASeqSam.list";
+    open IN, $input or die "Error: Can not open file $input, $!";
+    open OUT, ">", $output or die "Error: Can not create file $output, $!";
+    while (<IN>) {
+        chomp; s/.sam$//;
+        print OUT "$bin_path/SplitRNASeqSam --output_directory $output_dir_of_SplitSam --min_fragment_per_region $min_fragment_count_per_transfrag $_.sam > $_.list\n";
+    }
+    close IN; close OUT;
+}
+
+# 并行化执行 SplitRNASeqSam 命令
+my $parafly_CPU = $cpu; $parafly_CPU = 100 if $parafly_CPU > 100;
+$cmdString = "$bin_path/parafly -c $tmp_dir/command.SplitRNASeqSam.list -CPU $parafly_CPU --max_CPU 100 &> $tmp_dir/parafly.SplitRNASeqSam.log";
+
+&execute_cmds($cmdString, "$tmp_dir/06.SplitRNASeqSam.ok");
+
+# 将进一步分割得到的SAM文件路径进行整合
+unless ( -e "$tmp_dir/splited_sam_files.list" ) {
+    # 获得染色体分割的数据文件路径
+    my $input = "$tmp_dir/splitSAM_byChromosome.file_path.list";
+    open IN, $input or die "Error: Can not open file $input, $!";
+    my @pieces;
+    while (<IN>) { chomp; s/.sam$//; push @pieces, $_; }
+    close IN;
+    # 输出匹配区域分割的数据文件路径
+    my $output = "$tmp_dir/splited_sam_out.file_path.list";
+    open OUT, ">", $output or die "Error: Can not create file $output, $!";
+    foreach ( @pieces ) {
+        open IN, "$_.list" or die "Error: Can not open file $_.list, $!";
+        print OUT <IN>;
+        close IN;
+    }
+    close OUT;
+
+    # 删除染色体分割的数据文件夹
+    #$cmdString = "rm -rf $tmp_dir/splitSAM_byChromosome";
+    #print STDERR (localtime) . ": CMD: $cmdString\n";
+    #system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+}
+
+
+# 7. 对每个比对区域进行transcripts计算
+print STDERR "\n7. Converting SAM into transcripts for each aligned genomic region. (" . (localtime) . ")\n";
+# 生成 Sam2TransfragLite 命令
+unless (-e "$tmp_dir/command.Sam2TransfragLite.list") { 
+    my $input = "$tmp_dir/splited_sam_out.file_path.list";
+    my $output = "$tmp_dir/command.Sam2TransfragLite.list";
+    open IN, $input or die "Error: Can not open file $input, $!";
+    open OUT, ">", $output or die "Error: Can not create file $output, $!";
+    my $no_strand_specific = "--no_strand_specific";
+    $no_strand_specific = "" if defined $strand_specific;
+    while (<IN>) {
+        s/\.sam\n//;
+        print OUT "$bin_path/Sam2TransfragLite --fraction $fraction --min_expressed_base_depth $min_expressed_base_depth --max_expressed_base_depth $max_expressed_base_depth --min_junction_depth $min_junction_depth --max_junction_depth $max_junction_depth --min_fragment_count_per_transfrag $min_fragment_count_per_transfrag --intron_info_out $_.intron --base_depth_out $_.base_depth --gff3 $no_strand_specific $_.sam > $_.gff3\n";
+    }
+    close IN; close OUT;
+}
+
+# 并行化执行 Sam2TransfragLite 命令
+$cmdString = "$bin_path/parafly -c command.Sam2TransfragLite.list -CPU $cpu &> parfly.Sam2TransfragLite.log";
+
+&execute_cmds($cmdString, "$tmp_dir/07.Sam2TransfragLite.ok");
+
+
+# 8. 每个比对区域进行可变剪接命令
+print STDERR "\n8. Performing alternative splicing analysis for each aligned genomic region. (" . (localtime) . ")\n";
+# 生成 alternative_splicing_analysis 命令
+unless (-e "$tmp_dir/command.alternative_splicing_analysis.list") {
+    my $input = "$tmp_dir/splited_sam_out.file_path.list";
+    my $output = "$tmp_dir/command.alternative_splicing_analysis.list";
+    open IN, $input or die "Error: Can not open file $input, $!";
+    open OUT, ">", $output or die "Error: Can not create file $output, $!";
+    while (<IN>) {
+        s/\.sam\n//;
+        print OUT "$bin_path/alternative_splicing_analysis $_.gff3 $_.intron $_.base_depth > $_.AS.gff3 2> $_.AS.stats\n";
+    }
+    close IN; close OUT;
+}
+
+# 并行化执行 alternative_splicing_analysis 命令
+$cmdString = "$bin_path/parafly -c $tmp_dir/command.alternative_splicing_analysis.list -CPU $cpu &> parfly.alternative_splicing_analysis.log";
+
+&execute_cmds($cmdString, "$tmp_dir/08.alternative_splicing_analysis.ok");
+
+
+# 9. 输出GFF3格式转录本信息结果文件，输出intron和base_depth结果，删除临时中间文件。
+print STDERR "\n9. Produce the output file containing transcript information in GFF3 format. Meanwhile, it outputs the sequencing depth of introns and exons as needed. Finally, delete the intermediate files. (" . (localtime) . ")\n";
+unless ( -e "$tmp_dir/09.remove_tmp_file.ok" ) {
+    # 准备分割数据的文件路径
+    my @segment;
+    my $input = "$tmp_dir/splited_sam_out.file_path.list";
+    open IN, $input or die "Error: Can not open file $input, $!";
+    while (<IN>) {
+        s/\.sam\n//;
+        push @segment, $_;
+    }
+    close IN;
+
+    # 输出GFF3结果
+    foreach ( @segment ) {
+        if ( $no_alternative_splicing ) {
+            open IN, "$_.gff3" or die "Error: Can not open file $_.gff3, $!";
+        }
+        else {
+            open IN, "$_.AS.gff3" or die "Error: Can not open file $_.gff3, $!";
+        }
+        print <IN>;
+        close IN;
+    }
+
+    # 输出 intron 和 base_depth 信息
+    if ( $intron_info_out ) {
+        open OUT, ">", $intron_info_out or die "Error: Can not create file $intron_info_out, $!";
+        print OUT "#Transcript_region\tChromosome\tStrand\tIntron_start\tIntron_end\tIntron_depth\tMedian_base_depth_in_intron\n";
+        foreach ( @segment ) {
+            open IN, "$_.intron" or die "Error: Can not open file $_.intron, $!";
+            <IN>;
+            print OUT <IN>;
+            close IN;
+        }
+        close OUT;
+    }
+    if ( $base_depth_out ) {
+        open OUT, ">", $base_depth_out or die "Error: Can not create file $base_depth_out, $!";
+        print OUT "#Chromosome\tStrand\tPosition\tDepth\n";
+        foreach ( @segment ) {
+            open IN, "$_.base_depth" or die "Error: Can not open file $_.base_depth, $!";
+            <IN>;
+            print OUT <IN>;
+            close IN;
+        }
+        close OUT;
+    }
+
+    my $output_dir_of_SplitSam = "splited_sam_out";
+    if ( $put_massive_temporary_data_into_memory ) {
+        if ( -s "splited_sam_out.tmp_dir" ) {
+            open IN, "splited_sam_out.tmp_dir" or die "Error: Can not open file splited_sam_out.tmp_dir, $!";
+            $output_dir_of_SplitSam = <IN>;
+            close IN;
+            chomp($output_dir_of_SplitSam);
+        }
+    }
+    $cmdString = "rm -rf $tmp_dir/splitSAM_byChromosome $output_dir_of_SplitSam";
+
+    &execute_cmds($cmdString, "$tmp_dir/09.remove_tmp_file.ok");
+}
+print STDERR "============================================\n";
+print STDERR "$programe_name complete successfully! " . "(" . (localtime) . ")" . "\n\n";
+print STDERR "#################### $programe_name | End ####################\n";
+
+# 检测服务器剩余可用内存容量，结果单位是 kB。
+sub get_MemAvailable {
+    open IN, "/proc/meminfo" or die "Can not open file /proc/meminfo, $!";
+    my $MemAvailable;
+    while (<IN>) {
+        if (m/MemAvailable:\s*(\d+)\s*kB/) {
+            $MemAvailable = $1;
+            next;
+        }
+    }
+    close IN;
+    return $MemAvailable;
+}
+
+sub execute_cmds {
+    my $ok_file = pop @_;
+
+    if ( -e $ok_file ) {
+        foreach ( @_ ) {
+            print STDERR "CMD(Skipped): $_\n";
+        }
+    }
+    else {
+        foreach ( @_ ) {
+            print STDERR (localtime) . ": CMD: $_\n";
+            system($_) == 0 or die "failed to execute: $_\n";
+        }
+        open OUT, ">", "$ok_file" or die $!; close OUT;
+    }
+
+    return 1;
+}
+
+# 将英文的使用方法放到尾部
+sub get_usage_english {
+my $usage = <<USAGE;
+Usage:
+    $0 [options] input1.sam [input2.sam input3.sam ...] > transfrag.gff3
+    $0 [options] --input_single_sorted_BAM_file hisat2_sorted.bam > transfrag.gff3
+
+    The program is capable of analyzing multiple SAM/BAM files resulting from HISAT2 alignment to obtain reliable transcript sequences with alternative splicing, and then save the results in GTF file format.
+
+    The program's workflow and methodology are as follows:
+    (1) First, the program checks the first SAM/BAM file and gets its header content containing the length information of the reference genome sequence;
+    (2) Then, the program uses the samtools merge command to combine the input SAM/BAM files into a single SAM file. 
+    (3) After that, it uses the samtools sort command to arrange the SAM file by coordinates and create a BAM file. 
+    (4) Next, it employs the samtools index command to index the BAM file. 
+    (5) It then utilizes the samtools view command to divide the content of the BAM file by chromosome, resulting in multiple SAM files. Each SAM file corresponds to a reference genomic sequence of at least 1 Mb. 
+    (6) Following this, it runs the SplitRNASeqSam program to further separate unmatched regions in the SAM files, generating more SAM files for subsequent parallelized fast analysis. Each SAM file represents a gene transcription region. 
+    (7) It then calls on the Sam2TransfragLite program to analyze each SAM file and obtain sequences of transcripts with highest expression levels. 
+    (8) Subsequently, it invokes the alternative_splicing_analysis program to scrutinize each transcription region and identify alternative splicing transcripts. 
+    (9) Finally, it produces GFF3 format transcripts along with intron and exon sequencing depth information while removing intermediate temporary files.
+
+    Usage instructions: 
+    (1) The program requires the SplitRNASeqSam, Sam2TransfragLite, alternative_splicing_analysis, and parafly programs to be present in the same directory as the program. Additionally, it necessitates the ability to execute the samtools and parallel command directly on the system.
+    (2) The program requires the input file to be in SAM/BAM format and allows for one or more files as input.
+    (3) In the final step of the program, which is step 9, it will delete intermediate files. If the program gets interrupted during an earlier step and you run it again using the --tmp_dir parameter to choose the same temporary folder, it can pick up where it left off. Just be aware that if you run the program again after it's finished and use the --tmp_dir parameter to select the same temporary folder, you won't get any results.
+
+Parameters:
+[INPUT]
+    --input_single_sorted_BAM_file    default: None
+    Adding this parameter means that the program will only take the first input file, which is expected to be a BAM file sorted by coordinates. At this point, the program will skip steps 2-4.
+
+    --strand_specific    default: None
+    When this parameter is added, all input SAM data are treated as strand-specific. At this stage, it is crucial that the SAM file includes an XS tag in each line of data, indicating the orientation of the transcript within the genomic sequence relative to its positive or negative strand.
+
+[OUTPUT]
+    --help    default: None
+    display this help and exit.
+
+    --chinese_help    default: None
+    display the chinese usage and exit.
+
+    --no_alternative_splicing    default: None
+    By including this parameter, the program will cease to output alternatively spliced transcripts and instead only produce the transcript with the highest expression level.
+
+    --tmp_dir <string>    default: tmp_\$date\$pid
+    Enter the path of temporary folder.
+
+    --intron_info_out <String>
+    When this parameter is set, the reliable intron information will be stored in the specified file.
+
+    --base_depth_out <String>
+    When this parameter is set, the sequencing depth information for all bases will be output to a specified file.
+
+[Settings]
+    --min_genome_length_during_segmentation <int>    default: 1000000
+    Set the minimum size of chromosome sequences in each output SAM file during the initial splitting of the input SAM files.
+
+    --fraction <FLOAT>  default: 0.05
+    When acquiring transcriptome sequences from RNA-Seq read alignment data, the program dissects matched regions based on the expressed base depth (expressed_base_depth) and junction depth (junction_depth) of exons and introns in the transcriptome to accurately derive transcript sequences. These two sequencing depth threshold values are essential for obtaining precise transcript sequences, as they are directly proportional to the highest base sequencing depth within the transcriptome region, determined by this parameter.
+
+    --min_expressed_base_depth <INT>  default: 2
+    --max_expressed_base_depth <INT>  default: 10
+    These three parameters, in conjunction with the --fraction parameter, establish the threshold for expressed_base_depth. When segmenting consecutive alignment regions within a SAM file, if the base sequencing depth at a specific site falls below the expressed_base_depth threshold, it results in segmentation of the alignment regions before and after that site. Under the default settings, when analyzing a specific alignment region from the SAM file, the program calculates the maximum single-base sequencing depth (Dmax) for that region. The threshold for expressed_base_depth is determined as follows: D = Dmax * 0.05; if D is less than 2, then expressed_base_depth threshold is set to 2; if D exceeds 10, then the threshold is set to 10; and if D falls between 2 and 10, then the threshold is set to D.
+
+    --min_junction_depth <INT>  default:2
+    --max_junction_depth <INT>  default:10
+    These three parameters, in conjunction with the --fraction parameter, establish the threshold for junction_depth. When discontinuous alignment sites are fragmented in the SAM file, if the intron sequencing depth at a site falls below the junction_depth threshold, it results in fragmentation of the alignment region before that site. Under the default settings, when analyzing a specific alignment region from the SAM file, the program calculates the maximum single-base sequencing depth (Dmax) for that region; D = 0.05 * Dmax; if D is less than 2, then junction_depth is set to 2; if D exceeds 10, then junction_depth is set to 10; and if D falls between 2 and 10, then junction_depth is set to D.
+
+    --min_fragment_count_per_transfrag <INT>  default: 10
+    When reporting transfrags information, it is essential to ensure that the number of supported fragments in transfrags exceeds this threshold.
+
+[Performance]
+    --cpu <int>    default: 8
+    Enter the number of CPU threads.
+
+    --put_massive_temporary_data_into_memory    default: None
+    Set up massive temporary files to be stored in memory. This prevents the program from running slowly due to insufficient disk I/O, but it requires more RAM. Many steps in this pipeline would split the input data into numerous pieces and then parallelize its command lines to speed up the computation, although this results in a significant I/O load on the disk. Therefore, low disk performance has a significant impact on computation speed. If your system memory is sufficient, you are advised to add this parameter so that massive temporary data can be stored in the /dev/shm folder, which represents the memory, to speed up program execution. In addition, the program automatically deletes temporary data in /dev/shm to free up memory after the data splitting and parallelization steps are completed.
+    When this parameter is enabled, the results file generated by the SplitRNASeqSam command will be saved in memory and used for subsequent analysis.
+
+USAGE
+
+return $usage;
+}

@@ -6,20 +6,27 @@ use Cwd qw/abs_path getcwd cwd/;
 
 my $usage = <<USAGE;
 Usage:
-    perl $0 [options] file.sam out_dir min_fragment_per_region
+    perl $0 [options] file.sam > output_SAM_file_paths.list
 
 For example:
     perl $0 --min_fragment_per_region 10 --output_directory out hisat2.sam > splited_sam_files.list
 
-    本程序输入RNA-Seq比对到基因组并按coordinate进行排序的SAM格式数据文件，能对数据按匹配区域进行分割。将分割后得到的SAM文件存放到指定文件夹中，并在标准输出中给出所有输出文件的路径。
-    程序能对SAM文件数据在没有read比对上的区域进行分割。分割后的sam文件最小的fragment数是10(--min_fragment_per_region参数设定值); sam文件没有header信息; 在标准输出中输出分割后的sam文件路径信息。
-    注意: 本程序没有考虑比对的方向; 给出的sam文件结果中去除了没有比对上的reads信息；给出的sam文件结果中去除了次优的比对结果。
+    This program accepts SAM format data as input, derived from RNA-Seq alignment to the genome and subsequent sorting by coordinates to produce the SAM file, enabling segmentation of the data based on matching regions. It stores the segmented SAM files in a designated folder and provides the paths of all output files through standard output.
+
+    Instructions for Use:
+    (1) The program can split SAM file data in regions where no read alignments are present;
+    (2) The path information of the split SAM file is output to standard output;
+    (3) The minimum number of fragments per region after splitting the SAM file is 10 (set by the --min_fragment_per_region parameter);
+    (4) The output SAM file has no header information;
+    (5) The read information that could not be aligned is removed from the output SAM file;
+    (6) The suboptimal alignment results are removed from the output SAM file.
+    (7) This program does not consider the alignment direction;
 
     --min_fragment_per_region <int>    default: 10
-    对SAM文件进行分割，每个分割区域表示一个转录区域，得到一个SAM文件。本参数设置该文件中至少包含的fragment数量。
+    This parameter specifies the minimum number of fragments required within each segment when dividing the SAM file, with each segment representing a distinct transcriptional region and resulting in a separate SAM file.
 
     --output_directory <string>    default: out
-    设置输出文件夹路径。
+    Set the path for the output folder.
 
 USAGE
 if (@ARGV==0){die $usage}

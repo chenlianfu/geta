@@ -1,0 +1,629 @@
+#!/usr/bin/env perl
+
+use strict;
+use Getopt::Long;
+use Cwd qw/abs_path getcwd cwd/;
+use File::Basename;
+
+my $command_line = "$0 " . join(" ", @ARGV) . "\n";
+my $bin_path = dirname($0);
+my $software_dir = $bin_path; $software_dir =~ s/\/bin$//;
+
+my $usage = <<USAGE;
+Usage:
+    $0 [options] genome.fasta transfrag.gff3 > ORF.gff3
+
+    本程序通过调用Transdecoder软件对输入的转录本序列进行ORF分析，得到编码蛋白转录本在基因组上的结构注释信息，并输出GFF3格式结果。
+
+    程序流程和工作原理如下：
+    (1) 根据输入转录本GFF3文件，转换得到转录本序列：正向的transfrag.strand.fasta文件和没有方向的transfrag.noStrand.fasta文件。若输入的GFF3文件来源于链特异性测序数据，则后者为空文件。若是非链特异性测序，则得到的single exon转录本序列是没有方向的。
+    (2) 调用Transdecoder对transcripts序列进行ORF分析。
+    (3) 将转录本序列上ORF结果转化为基因组上的基因预测结果。
+
+    程序使用须知：
+    (1) 程序接受输入的GFF3文件中包含可变剪接转录本，然后提取所有的转录本序列进行ORF分析。最终每个预测得到的ORF均获得一个基因编号。因此，程序获得的全基因组基因中有一些是冗余的，可以考虑后期使用GFF3Cler命令进行去冗余处理。
+    (2) 本程序的运行需要程序文件所在的上一级目录存在TransDecoder-v5.5.0文件夹，它是修改过代码的Transdecoder软件，给TransDecoder.Predict命令增加了--train参数。需注意本程序是不能使用原版Transdecoder软件的。
+    (3) 输出GFF3结果中，gene Feature行中最后一列attribute包含一些信息：Form标签显示了当前基因模型对应的转录本序列预测的ORF数量和当前基因模型CDS占转录本序列的百分比；Intergrity标签显示了基因模型的完整性。
+    (4) 若一个transcript序列中有多个ORF结果，则给出多个基因模型，且相邻基因模型之间共用exon，即在UTR区是有重叠的。如下图所示：
+    基因组序列    ==========================================================================================
+    转录本序列          ===========----==========---==========---===========----======---============>
+    基因模型1           ======+++++----++++++++++---++=======>
+    基因模型2                                       =======+++---+++++++====----=====>
+    基因模型3                                                                   ======--- ==+++++++==>
+
+Parameters:
+[输出参数]
+    --help    default: None
+    display this help and exit.
+
+    --chinese_help    default: None
+    使用该参数后，程序给出中文用法并退出。
+
+    --tmp_dir <string>    default: tmp_\$date\$pid
+    输入临时文件夹路径。
+
+    --output_alignment_GFF3 <string>    default: None
+    Output a transcript sequence alignment file in non-standard GFF3 format.
+
+    --gene_prefix <string>    default: transfrag
+    设置输出GFF3文件中基因名称的前缀。
+
+[阈值参数]
+    --min_protein_length <int>    default: 100
+    设置鉴定ORF时最小的protein长度。
+
+USAGE
+my $usage_english = &get_usage_english();
+if (@ARGV==0){die $usage_english}
+
+my ($help, $chinese_help, $tmp_dir, $output_alignment_GFF3, $gene_prefix, $min_protein_length);
+my ($cmdString, @cmdString);
+GetOptions(
+    "help" => \$help,
+    "chinese_help" => \$chinese_help,
+    "tmp_dir:s" => \$tmp_dir,
+    "output_alignment_GFF3:s" => \$output_alignment_GFF3,
+    "gene_prefix:s" => \$gene_prefix,
+    "min_protein_length:i" => \$min_protein_length,
+);
+if ( $chinese_help ) { die $usage }
+if ( $help ) { die $usage_english }
+
+# 在标准错误输出中给出程序的运行命令。
+my $pwd = `pwd`;
+my $programe_name = basename($0);
+print STDERR "\n#################### $programe_name | Start ####################\n";
+print STDERR "PWD: $pwd" . (localtime) . ": CMD: " . $command_line . "\n";
+print STDERR "============================================\n";
+
+########### 解析参数 #################
+$gene_prefix ||= "transfrag";
+$min_protein_length ||= 100;
+
+# 使用绝对路径
+my $input_genome = abs_path($ARGV[0]);
+my $input_GFF3 = abs_path($ARGV[1]);
+$output_alignment_GFF3 = abs_path($output_alignment_GFF3) if $output_alignment_GFF3;
+
+# 准备临时文件夹路径
+my $date = `date +%Y%m%d%H%M%S`; chomp($date);
+$tmp_dir ||= "tmp_$date$$";
+$tmp_dir = abs_path($tmp_dir);
+mkdir $tmp_dir unless -e $tmp_dir;
+chdir $tmp_dir; print STDERR "PWD: $tmp_dir\n";
+###############################
+
+
+# 1. 根据输入转录本GFF3文件，转换得到转录本序列：正向的transfrag.strand.fasta文件和没有方向的transfrag.noStrand.fasta文件。若输入的GFF3文件来源于链特异性测序数据，则后者为空文件。若是非链特异性测序，则得到的single exon转录本序列是没有方向的。
+print STDERR "\n1. Using the input transcriptome GFF3 file, we convert the transcript sequences into two files: transfrag.strand.fasta for forward direction and transfrag.noStrand.fasta without any specific direction. If the GFF3 file comes from strand-specific sequencing data, the latter file will be empty. For non-strand-specific sequencing, single exon transcript sequences do not have a specific direction. (" . (localtime) . ")\n";
+unless ( -e "01.trasfrag2Seq.ok" && -s "transfrag.strand.fasta" ) {
+    # 读取基因组序列
+    my (%seq, $seq_id);
+    open IN, $input_genome or die "Can not open file $input_genome, $!";
+    while (<IN>) {
+        chomp;
+        if (m/^>(\S+)/) { $seq_id = $1; }
+        else { tr/atcgn/ATCGN/; $seq{$seq_id} .= $_; }
+    }
+    close IN;
+
+    # 读取 transfrag.gff3 文件，得到所有转录本信息
+    open IN, $input_GFF3 or die "Can not open file $input_GFF3, $!";
+    my (%transcript_exon, %sort1, %sort2, %sort3, %sort4, @transcript_ID, %score, %source);
+    while (<IN>) {
+        next if m/^\s*$/;
+        next if m/^#/;
+        chomp;
+
+        @_ = split /\t/;
+        my $id = $1 if $_[8] =~ s/ID=([^;]+);?//;
+        if ( $_[2] eq "mRNA" ) {
+            $sort1{$id} = $_[0];
+            $sort2{$id} = $_[3];
+            $sort3{$id} = $_[4];
+            $sort4{$id} = $_[6];
+            $score{$id} = $_[5];
+            $source{$id} = $_[1];
+        }
+        elsif ( $_[2] eq "exon" ) {
+            $transcript_exon{$1}{"$_[3]\t$_[4]"} = 1 if $_[8] =~ m/Parent=([^;]+)/;
+        }
+    }
+    close IN;
+    @transcript_ID = sort { $sort1{$a} cmp $sort1{$b} or $sort2{$a} <=> $sort2{$b} or $sort3{$a} <=> $sort3{$b}  or $sort4{$b} cmp $sort4{$a} } keys %transcript_exon;
+
+    # 输出 alignment.gff3 文件
+    if ( defined $output_alignment_GFF3 ) {
+        open OUT, ">", $output_alignment_GFF3 or die "Can not create file $output_alignment_GFF3, $!";
+        foreach my $transcriptID ( @transcript_ID ) {
+            # 分析每个 transcript 的exon信息
+            my @exon = sort {$a <=> $b} keys %{$transcript_exon{$transcriptID}};
+            @exon = sort {$b <=> $a} @exon if $sort4{$transcriptID} eq "-";
+            my $map_start = 1;
+            foreach ( @exon ) {
+                @_ = split /\t/;
+                my $map_end = $_[1] - $_[0] + $map_start;
+                print OUT "$sort1{$transcriptID}\t$source{$transcriptID}\tcDNA_match\t$_[0]\t$_[1]\t$score{$transcriptID}\t$sort4{$transcriptID}\t\.\tID=$transcriptID;Target=$transcriptID $map_start $map_end \+\n";
+                $map_start = $map_end + 1;
+            }
+            print OUT "\n";
+        }
+        close OUT;
+        print STDERR "By adding the --output_alignment_GFF3 option, the program output the cDNA alignment results ($output_alignment_GFF3) in a irrgullar GFF3 file.\n";
+    }
+
+    # 输出 transfrag.strand.fasta 和 transfrag.noStrand.fasta 文件
+    open OUT1, ">", "transfrag.strand.fasta" or die "Can not create file $tmp_dir/transfrag.strand.fasta, $!";
+    open OUT2, ">", "transfrag.noStrand.fasta" or die "Can not create file $tmp_dir/transfrag.noStrand.fasta, $!";
+    foreach my $transcriptID ( @transcript_ID ) {
+        # 得到exon信息，从小到大排序
+        my @exon = sort {$a <=> $b} keys %{$transcript_exon{$transcriptID}};
+        my $transcript_seq;
+        foreach ( @exon ) {
+            @_ = split /\t/;
+            $transcript_seq .= substr($seq{$sort1{$transcriptID}}, $_[0] - 1, $_[1] - $_[0] + 1);
+        }
+        if ( $sort4{$transcriptID} eq "-" ) {
+            $transcript_seq = reverse $transcript_seq;
+            $transcript_seq =~ tr/ATCGatcgn/TAGCTAGCN/;
+        }
+        if ( @exon > 1 ) {
+            print OUT1 ">$transcriptID\n$transcript_seq\n";
+        }
+        else {
+            print OUT2 ">$transcriptID\n$transcript_seq\n";
+        }
+    }
+    close OUT1; close OUT2;
+    print STDERR "We created the transcript fragment sequences and saved them as FASTA files with the names transfrag.strand.fasta and transfrag.noStrand.fasta.\n";
+
+    open OUT, ">", "01.trasfrag2Seq.ok" or die $!; close OUT;
+}
+else {
+    print STDERR "Skip step 1 for file 01.trasfrag2Seq.ok exists.\n";
+}
+
+
+# 2. 调用Transdecoder对transcripts序列进行ORF分析
+print STDERR "\n2. Use Transdecoder to analyze the ORFs in the transcript sequence.\n";
+@cmdString = ();
+push @cmdString, "$software_dir/TransDecoder-v5.5.0/TransDecoder.LongOrfs -m $min_protein_length -t transfrag.strand.fasta -S &> /dev/null";
+push @cmdString, "$software_dir/TransDecoder-v5.5.0/TransDecoder.Predict -t transfrag.strand.fasta &> /dev/null";
+if ( -s "transfrag.noStrand.fasta" ) {
+    push @cmdString, "$software_dir/TransDecoder-v5.5.0/TransDecoder.LongOrfs -m $min_protein_length -t transfrag.noStrand.fasta &> /dev/null";
+    push @cmdString, "$software_dir/TransDecoder-v5.5.0/TransDecoder.Predict -t transfrag.noStrand.fasta --train transfrag.strand.fasta.transdecoder_dir/longest_orfs.cds.top_500_longest &> /dev/null";
+}
+push @cmdString, "cat transfrag.strand.fasta.transdecoder.gff3 transfrag.noStrand.fasta.transdecoder.gff3 > transfrag.transdecoder.gff3";
+
+&execute_cmds(@cmdString, "$tmp_dir/02.TransDecoder.ok");
+
+
+# 3. 将转录本序列上ORF结果转化为基因组上的基因预测结果。
+print STDERR "\n3. Turn the ORF results from transcript sequences into gene predictions on the genome.\n";
+# 读取基因组序列
+my (%seq, $seq_id);
+open IN, $input_genome or die "Can not open file $input_genome, $!";
+while (<IN>) {
+    chomp;
+    if (m/^>(\S+)/) { $seq_id = $1; }
+    else { tr/atcgn/ATCGN/; $seq{$seq_id} .= $_; }
+}
+close IN;
+#print STDERR "Read over genome sequence.\n";
+
+# 读取 transfrag.gff3 文件，
+open IN, $input_GFF3 or die "Can not open file $input_GFF3, $!";
+my (%transcript_exon, %sort1, %sort2, %sort3, %sort4, @transcript_ID, %score, %source, %attribute);
+while (<IN>) {
+    next if m/^\s*$/;
+    next if m/^#/;
+    chomp;
+
+    @_ = split /\t/;
+    my $id = $1 if $_[8] =~ s/ID=([^;]+);?//;
+    if ( $_[2] eq "gene" ) {
+        $attribute{$id} = $_[8];
+    }
+    elsif ( $_[2] eq "mRNA" ) {
+        $sort1{$id} = $_[0];
+        $sort2{$id} = $_[3];
+        $sort3{$id} = $_[4];
+        $sort4{$id} = $_[6];
+        $score{$id} = $_[5];
+        $source{$id} = $_[1];
+        $attribute{$id} = $attribute{$1} if $_[8] =~ m/Parent=([^;]+)/;
+    }
+    elsif ( $_[2] eq "exon" ) {
+        $transcript_exon{$1}{"$_[3]\t$_[4]"} = 1 if $_[8] =~ m/Parent=([^;]+)/;
+    }
+}
+close IN;
+#print STDERR "Read over transfrag GFF3.\n";
+@transcript_ID = sort { $sort1{$a} cmp $sort1{$b} or $sort2{$a} <=> $sort2{$b} or $sort3{$a} <=> $sort3{$b}  or $sort4{$b} cmp $sort4{$a} } keys %transcript_exon;
+
+# 读取 transfrag.transdecoder.gff3 文件
+open IN, "$tmp_dir/transfrag.transdecoder.gff3" or die "Error: Can not open file $tmp_dir/transfrag.transdecoder.gff3, $!";
+my (%cds, %transcript_length, $cds_total_number);
+while (<IN>) {
+    if (m/\tCDS\t/) {
+        @_ = split /\t/;
+        $cds{$_[0]}{"$_[3]\t$_[4]\t$_[6]"} = 1;
+        $cds_total_number ++;
+    }
+    elsif (m/\tgene\t/) {
+        @_ = split /\t/;
+        $transcript_length{$_[0]} = $_[4];
+    }
+
+}
+close IN;
+#print STDERR "Read over Transdecoder ORF GFF3\n";
+
+# 对每个转录本进行分析
+my $gene_number = 0;
+foreach my $transcript_id ( @transcript_ID ) {
+    # 获取每个转录本在基因组上的exon信息，在转录本序列上的CDS信息。
+    # 按从小到大排序后，不管转录本在那条链上，统统按从左往右方向进行分析。即以转录本比对到基因组最左端位点为1号位点。
+    my @cds = sort {$a <=> $b} keys %{$cds{$transcript_id}};
+    my @exon = sort {$a <=> $b} keys %{$transcript_exon{$transcript_id}};
+    my $align_strand = $sort4{$transcript_id};
+
+    # 若转录本位于负义链上，则将其CDS坐标进行反向，以转录本比对到基因组上的做小坐标为1。示例如下：
+    # 基因组序列  ====================================================
+    # 转录本序列         <=========-------=========         转录本长度 600 bp
+    # CDS信息                  ++++-------+++++++++         转录本上找到一个CDS，其坐标为 1-400
+    #                                                       以转录本最左端为1号位点，需要将CDS的坐标更正为201-600
+    #                                                       更正后，有利于根据统一按从小到大排序的外显子信息计算CDS的坐标。
+    # 对于noStrand转录本序列，使用Transdecoder预测ORF时未对序列进行反向互补。即使在负义链上预测到了CDS，其对应的坐标也是以最左端为1号位点，不需要进行更正。
+    if ( $align_strand eq "-" ) {
+        my @cds_new;
+        foreach (@cds) {
+            @_ = split /\t/;
+            my $start_new = $transcript_length{$transcript_id} - $_[1] + 1;
+            my $end_new = $transcript_length{$transcript_id} - $_[0] + 1;
+            push @cds_new, "$start_new\t$end_new\t$_[2]";
+        }
+        @cds = sort {$a <=> $b}  @cds_new;
+    }
+
+    # 对转录本序列上的每个Transdecoder CDS进行分析，得到其在基因组序列上的CDS和exon信息。
+    # %exon_info，该双重哈希的第一个键是：转录本序列上的CDS区间，第二个键：在基因组序列上的exon区间。
+    # %cds_info，该双重哈希的第一个键是：转录本序列上的CDS区间，第二个键：在基因组序列上的CDS区间。
+    my (%exon_info, %cds_info);
+    my $num = 0;
+    foreach my $cds (@cds) {
+        $num ++;
+        # 当前CDS的基因模型和下一个CDS的基因模型可能在UTR区重叠，需要准确分析其在基因组上的exon区间。
+        # 若一个transcript序列中有多个ORF结果，则给出多个基因模型，且相邻基因模型之间共用exon，即在UTR区是有重叠的。如下图所示：
+        # 基因组序列    ==========================================================================================
+        # 转录本序列          ===========----==========---==========---===========----======---============>
+        # 基因模型1           ======+++++----++++++++++---++=======>
+        # 基因模型2                                       =======+++---+++++++====----=====>
+        # 基因模型3                                                                   ======--- ==+++++++==>
+        my %exon_info_out = &get_cross_utr_exon($cds, $cds[$num], \@exon);
+        foreach my $cdscds (keys %exon_info_out) {
+            foreach (sort {$a <=> $b} keys %{$exon_info_out{$cdscds}}) {
+                $exon_info{$cdscds}{$_} = 1;
+            }
+        }
+        my ($start, $end) = split /\t/, $cds;
+        # 得到基因模型在基因组上的CDS区间
+        my @cds_info = &get_cds($start, $end, \@exon);
+        foreach (@cds_info) {
+            $cds_info{$cds}{$_} = 1;
+        }
+        #print STDERR "TEST: $transcript_id\nTransdecoder CDS: $cds\nexons: " . join(";", sort {$a <=> $b} keys%{$exon_info{$cds}}) . "\nCDS: " . join (";", sort {$a <=> $b} keys%{$cds_info{$cds}}) . "\n\n";
+    }
+
+    # 上一个步骤分析完毕后，得到了基因模型的CDS和exon，其数量一致。而转录本可能存在多个exon都属于UTR情况，要给基因模型的首尾增加属于UTR的exon信息。
+    my $cds_first = $cds[0];
+    my ($start, $end) = split /\t/, $cds_first;
+    my $total_length = 0;
+    foreach (@exon) {
+        @_ = split /\t/;
+        $total_length += $_[1] - $_[0] + 1;
+        $exon_info{$cds_first}{"$_[0]\t$_[1]"} = 1 if $total_length <= $start;
+    }
+    my $cds_last = $cds[-1];
+    ($start, $end) = split /\t/, $cds_last;
+    $total_length = 0;
+    foreach (@exon) {
+        @_ = split /\t/;
+        $total_length += $_[1] - $_[0] + 1;
+        $exon_info{$cds_last}{"$_[0]\t$_[1]"} = 1 if $total_length >= $end;
+    }
+
+    # 对一个转录本序列上的ORFs进行分析，并输出结果。
+    my $cds_number;
+    my $strand_type = $align_strand;
+    foreach my $cds (@cds) {
+        $cds_number ++;
+        my @exon_info = sort {$a <=> $b} keys %{$exon_info{$cds}};
+        my @cds_info = sort {$a <=> $b} keys %{$cds_info{$cds}};
+
+        # 分析基因模型在正义或负义链上。
+        @_ = split /\t/, $cds;
+        $strand_type = $_[2] if $align_strand eq '.';
+        my $integrity_type = &get_integrity(\@cds_info, $strand_type, $sort1{$transcript_id});
+
+        # 分析CDS占转录本的比例
+        my $CDS_percentage = sprintf("%.2f%", abs($_[1] - $_[0]) / $transcript_length{$transcript_id} * 100);
+
+        # 分析基因模型的全部外显子边界，从而得到基因的起始和结束位点
+        my @exon_boundary;
+        foreach (@exon_info) {
+            push @exon_boundary, split /\t/;
+        }
+        @exon_boundary = sort {$a <=> $b} @exon_boundary;
+        $gene_number ++;
+        my $gene_id = $gene_prefix . '0' x ((length $cds_total_number) - (length $gene_number)) . $gene_number;
+        my $cds_num = @cds;
+        my $form = "one_transcript_get_$cds_num\_gene_model";
+
+        # 输出GFF3中gene/mRNA信息。
+        print "$sort1{$transcript_id}\t\.\tgene\t$exon_boundary[0]\t$exon_boundary[-1]\t\.\t$strand_type\t\.\tID=$gene_id;Form=$form\_num$cds_number\_$CDS_percentage;Integrity=$integrity_type;$attribute{$transcript_id}\n";
+        print "$sort1{$transcript_id}\t\.\tmRNA\t$exon_boundary[0]\t$exon_boundary[-1]\t\.\t$strand_type\t\.\tID=$gene_id.t01;Parent=$gene_id;\n";
+
+        # 准备GFF3中exon信息
+        my %out;
+        my $exon_num = 0;
+        @exon_info = reverse @exon_info if $strand_type eq "-";
+        foreach (@exon_info) {
+            $exon_num ++;
+            my $out = "$sort1{$transcript_id}\t\.\texon\t$_\t\.\t$strand_type\t\.\tID=$gene_id.t01.exon$exon_num;Parent=$gene_id.t01;\n";
+            $out{$out} = $_;
+        }
+
+        # 准备GFF3中CDS信息
+        my $cds_num = 0;
+        @cds_info = reverse @cds_info if $strand_type eq "-";
+        my $frame = 0;
+        my $cds_bp_length = 0;
+        foreach (@cds_info) {
+            $cds_num ++;
+            my $out = "$sort1{$transcript_id}\t\.\tCDS\t$_\t\.\t$strand_type\t$frame\tID=$gene_id.t01.CDS$cds_num;Parent=$gene_id.t01;\n";
+            $out{$out} = $_;
+            @_ = split /\t/;
+            $cds_bp_length += $_[1] - $_[0] + 1;
+            $frame = $cds_bp_length % 3;
+            if ($frame != 0) {
+                $frame = 3 - $frame;
+            }
+        }
+        warn "Warning: $transcript_id: the cds length is not multiple of 3!\n" if $frame != 0;
+
+        # 输出GFF3的exon和CDS信息。
+        my @out;
+        if ( $strand_type eq "+" ) {
+            @out = sort {$out{$a} <=> $out{$b} or $b cmp $a} keys %out;
+        }
+        else {
+            @out = sort {$out{$b} <=> $out{$a} or $b cmp $a} keys %out;
+        }
+        foreach ( @out ) {
+            print;
+        }
+        print "\n";
+    }
+}
+
+print STDERR "============================================\n";
+print STDERR "$programe_name complete successfully! " . "(" . (localtime) . ")" . "\n\n";
+print STDERR "#################### $programe_name | End ####################\n";
+
+
+sub get_cross_utr_exon {
+    my @exon = @{$_[2]};
+    my $cds1 = shift @_;
+    my $cds2 = shift @_;
+    my %out;
+
+    my ($aa, $bb) = split /\t/, $cds1;
+    my $start = $bb;
+    my $total_length = 0;
+    my $start_ok = 0;
+    my $end_ok = 0;
+    foreach (@exon) {
+        @_ = split /\t/;
+        my $length = $_[1] - $_[0] + 1;
+        $total_length += $length;
+        if ($total_length >= $aa) {
+            $start_ok = 1;
+        }
+        if ($total_length >= $bb && $end_ok == 0) {
+            $end_ok = 1;
+            $out{$cds1}{"$_[0]\t$_[1]"} = 1;
+        }
+        if ($start_ok == 1 && $end_ok == 0) {
+            $out{$cds1}{"$_[0]\t$_[1]"} = 1;
+        }
+    }
+
+    if ($cds2) {
+        ($aa, $bb) = split /\t/, $cds2;
+        my $end = $aa;
+        $total_length = 0;
+        $start_ok = 0;
+        $end_ok = 0;
+        foreach (@exon) {
+            @_ = split /\t/;
+            my $length = $_[1] - $_[0] + 1;
+            $total_length += $length;
+            if ($total_length >= $aa) {
+                $start_ok = 1;
+            }
+            if ($total_length >= $bb && $end_ok == 0) {
+                $end_ok = 1;
+                $out{$cds2}{"$_[0]\t$_[1]"} = 1;
+            }
+            if ($start_ok == 1 && $end_ok == 0) {
+                $out{$cds2}{"$_[0]\t$_[1]"} = 1;
+            }
+        }
+
+        $total_length = 0;
+        $start_ok = 0;
+        $end_ok = 0;
+        foreach (@exon) {
+            @_ = split /\t/;
+            my $length = $_[1] - $_[0] + 1;
+            $total_length += $length;
+            if ($total_length >= $end) {
+                $end_ok = 1;
+            }
+            if ($total_length >= $start && $start_ok == 0) {
+                $start_ok = 1;
+                next;
+            }
+            if ($start_ok == 1 && $end_ok == 0) {
+                $out{$cds1}{"$_[0]\t$_[1]"} = 1;
+                $out{$cds2}{"$_[0]\t$_[1]"} = 1;
+            }
+        }
+    }
+
+    return %out;
+}
+
+sub get_integrity {
+    my $sequence_id = pop @_;
+    my $strand = pop @_;
+    my @cds_info = @{$_[0]};
+    my ($codon1_start) = split /\t/, $cds_info[0];
+    my ($codon2_null, $codon2_end) = split /\t/, $cds_info[-1];
+    my $codon1 = substr($seq{$sequence_id}, $codon1_start - 1, 3);
+    my $codon2 = substr($seq{$sequence_id}, $codon2_end - 3, 3);
+    my $start_codon = $codon1;
+    my $end_codon = $codon2;
+    if ($strand eq '-') {
+        $start_codon = reverse $codon2;
+        $end_codon = reverse $codon1;
+        $start_codon =~ tr/ATCGatcg/TAGCTAGC/;
+        $end_codon =~ tr/ATCGatcg/TAGCTAGC/;
+    }
+    #print "$sequence_id\t$codon1_start\t$start_codon\n$sequence_id\t$codon2_end\t$end_codon\n";
+
+    my ($start_complete, $end_complete) = (0, 0);
+    $start_complete = 1 if $start_codon eq 'ATG';
+    $end_complete = 1 if $end_codon eq 'TAG';
+    $end_complete = 1 if $end_codon eq 'TAA';
+    $end_complete = 1 if $end_codon eq 'TGA';
+    if ($start_complete == 1) {
+        if ($end_complete == 1) {
+            return "complete";
+        }
+        else {
+            return "3prime_partial";
+        }
+    }
+    else {
+        if ($end_complete == 1) {
+            return "5prime_partial";
+        }
+        else {
+            return "internal";
+        }
+    }
+}
+
+
+sub execute_cmds {
+    my $ok_file = pop @_;
+
+    if ( -e $ok_file ) {
+        foreach ( @_ ) {
+            print STDERR "CMD(Skipped): $_\n";
+        }
+    }
+    else {
+        foreach ( @_ ) {
+            print STDERR (localtime) . ": CMD: $_\n";
+            system($_) == 0 or die "failed to execute: $_\n";
+        }
+        open OUT, ">", "$ok_file" or die $!; close OUT;
+    }
+
+    return 1;
+}
+
+
+sub get_cds {
+    my $start = shift @_;
+    my $end = shift @_;
+    my @exon = @{$_[0]};
+    my @out;
+
+    my $total_length = 0;
+    my $start_ok = 0;
+    my $end_ok = 0;
+    my ($cds_start, $cds_end) = (0, 0);
+    foreach (@exon) {
+        @_ = split /\t/;
+        my $length = $_[1] - $_[0] + 1;
+        $total_length += $length;
+        if ($total_length >= $start && $start_ok == 0) {
+            $cds_start = $_[1] - ($total_length - $start);
+            $start_ok = 1;
+            $_[0] = $cds_start;
+        }
+        if ($total_length >= $end && $end_ok == 0) {
+            $cds_end = $_[1] - ($total_length - $end);
+            $end_ok = 1;
+            push @out, "$_[0]\t$cds_end";
+        }
+        if ($start_ok == 1 && $end_ok == 0) {
+            push @out, "$_[0]\t$_[1]";
+        }
+    }
+
+    return @out;
+}
+
+sub get_usage_english {
+my $usage = <<USAGE;
+Usage:
+    $0 [options] genome.fasta transfrag.gff3 > ORF.gff3
+
+    This program uses Transdecoder to analyze the ORFs in the input transcript sequence, obtaining structural annotation information for the coding protein transcript on the genome and producing the result in GFF3 format.
+
+    Here's how it works: 
+    (1) We convert the transcript sequences from the input GFF3 file to create two files, transfrag.strand.fasta for forward direction and transfrag.noStrand.fasta for no specific direction. If the GFF3 file comes from strand-specific sequencing data, the latter is empty. For non-strand-specific sequencing, single exon transcript sequences have no specific direction. 
+    (2) Then we use Transdecoder to analyze ORFs in the transcript sequences. 
+    (3) Finally, we convert the ORF results on the transcript sequences into gene predictions on the genome.
+
+    Usage instructions:
+    (1) The program can also handle GFF3 files with alternative splicing transcripts, extracting all transcript sequences for ORF analysis. Each predicted ORF is assigned a gene number, so some of the genes obtained may be repetitive and could be processed later using the GFF3Cler command to remove redundancy. 
+    (2) To run the program, you need to have the TransDecoder-v5.5.0 folder in the parent directory of your program file; this version has modifications from the original Transdecoder software and includes additional functionality in the Transdecoder.Predict command with --train parameter added. Note that it won't work with the original Transdecoder software.
+    (3) The output GFF3 results include information in the last column of attribute in gene Feature row: The Form label shows predicted ORF count and CDS percentage relative to transcript sequence; The Integrity label indicates gene model integrity.
+    (4) If a transcript sequence has multiple ORFs, there will be multiple gene models given, sharing exons between adjacent models which means there's overlap in UTR region.
+    genome sequence    ==========================================================================================
+    transcript               ===========----==========---==========---===========----======---============>
+    gene model 1             ======+++++----++++++++++---++=======>
+    gene model 2                                         =======+++---+++++++====----=====>
+    gene model 3                                                                     ======--- ==+++++++==>
+
+Parameters:
+[OUTPUT]
+    --help    default: None
+    display this help and exit.
+
+    --chinese_help    default: None
+    display the chinese usage and exit.
+
+    --tmp_dir <string>    default: tmp_\$date\$pid
+    Enter the path of temporary folder.
+
+    --output_alignment_GFF3 <string>    default: None
+    Output a transcript sequence alignment file in non-standard GFF3 format.
+
+    --gene_prefix <string>    default: transfrag
+    Set the prefix for gene names in the output GFF3 file.
+
+[Threshold]
+    --min_protein_length <int>    default: 100
+    Set the minimum protein length for identifying ORFs.
+
+USAGE
+
+return $usage;
+}

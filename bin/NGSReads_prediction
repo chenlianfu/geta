@@ -155,7 +155,7 @@ my $date = `date +%Y%m%d%H%M%S`; chomp($date);
 $tmp_dir ||= "tmp_$date$$";
 $tmp_dir = abs_path($tmp_dir);
 mkdir $tmp_dir unless -e $tmp_dir;
-chdir $tmp_dir;
+chdir $tmp_dir; print STDERR "\nPWD: $tmp_dir\n";
 ###############################
 
 # 检测剩余可用内存量
@@ -164,13 +164,11 @@ $MemAvailable = &get_MemAvailable();
 
 
 # 1. 使用Trimmomatic软件对RNA-Seq reads进行质控
-print STDERR "\n============================================\n";
-print STDERR "Step 1. Quality control of RNA-Seq reads by Trimmomatic software " . "(" . (localtime) . ")" . "\n";
+print STDERR "\nStep 1. Quality control of RNA-Seq reads by Trimmomatic software " . "(" . (localtime) . ")" . "\n";
 my (@paired_end_reads_prefix, @single_end_reads_prefix);
-unless (-e "1.trimmomatic.ok") {
-    mkdir "a.trimmomatic" unless -e "a.trimmomatic";
-    chdir "a.trimmomatic";
-    $pwd = `pwd`; print STDERR "PWD: $pwd";
+unless (-e "01.trimmomatic.ok") {
+    mkdir "$tmp_dir/a.trimmomatic" unless -e "$tmp_dir/a.trimmomatic";
+    chdir "$tmp_dir/a.trimmomatic"; print STDERR "PWD: $tmp_dir/a.trimmomatic\n";
 
     # 计算Trimmomatic并行化数，同时考虑到单个Trimmomatic命令消耗16G内存。
     my $MemAvailable = &get_MemAvailable();
@@ -235,7 +233,7 @@ unless (-e "1.trimmomatic.ok") {
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
     }
     chdir "../";
-    open OUT, ">", "1.trimmomatic.ok" or die $!; close OUT;
+    open OUT, ">", "01.trimmomatic.ok" or die $!; close OUT;
 }
 else {
     print STDERR "Skip Step 1 for the file 1.trimmomatic.ok exists\n";
@@ -266,13 +264,12 @@ else {
     }
 }
 
+
 # 2. HISAT2比对
-print STDERR "\n============================================\n";
-print STDERR "Step 2: Aligning NGS reads to genome by HISAT2 " . "(" . (localtime) . ")" . "\n";
-mkdir "b.hisat2" unless -e "b.hisat2";
-unless (-e "2.hisat2.ok") {
-    chdir "b.hisat2";
-    $pwd = `pwd`; print STDERR "PWD: $pwd";
+print STDERR "\nStep 2: Aligning NGS reads to genome by HISAT2 " . "(" . (localtime) . ")" . "\n";
+mkdir "$tmp_dir/b.hisat2" unless -e "$tmp_dir/b.hisat2";
+unless (-e "02.hisat2.ok") {
+    chdir "$tmp_dir/b.hisat2"; print STDERR "PWD: $tmp_dir/b.hisat2\n";
 
     # 构建基因组hisat2索引数据库
     my $hisat2build_cpu = $cpu;
@@ -358,264 +355,60 @@ unless (-e "2.hisat2.ok") {
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
     chdir "../";
-    open OUT, ">", "2.hisat2.ok" or die $!; close OUT;
+    open OUT, ">", "02.hisat2.ok" or die $!; close OUT;
 }
 else {
-    print STDERR "Skip Step 2 for the file 2.hisat2.ok exists\n";
+    print STDERR "Skip Step 2 for the file 02.hisat2.ok exists\n";
 }
 
-# 3. 根据SAM比对数据进行基因预测
-print STDERR "\n============================================\n";
-print STDERR "Step 3: Predicting gene models from SAM file" . "(" . (localtime) . ")" . "\n";
-mkdir "c.transcript" unless -e "c.transcript";
-chdir "c.transcript";
-my $pwd = `pwd`; print STDERR "PWD: $pwd";
 
-# 3.1 将SAM文件主要按染色体进行分割，若多条序列较短，则合并多条序列直至大小超过 1 Mb。
-print STDERR "3.1 Splitting the SAM file based on chromosome and its length.\n"; 
-# 分析基因组中各条序列大小，对基因组序列从长到短排序后，依次取序列，直到单份序列总长度超过 1 Mb，再取序列作为下一份。
-open IN, $input_genome or die "Can not open file $input_genome, $!";
-print STDERR (localtime) . ": file command.samtools_view.list was created.\n";
-my (%piece, @piece, $piece_num, $piece_length, $piece_name, %genome_seq_length, $genome_seq_ID);
-while (<IN>) {
-    if (m/^>(\S+)/) { $genome_seq_ID = $1; }
-    else {chomp; $genome_seq_length{$genome_seq_ID} += length($_); }
-}
-close IN;
-foreach ( sort {$genome_seq_length{$b} <=> $genome_seq_length{$a}} keys %genome_seq_length ) {
-    $piece_name .= "$_ ";
-    $piece_length += $genome_seq_length{$_};
-    if ( $piece_length >= 1000000 ) {
-        $piece_num ++;
-        $piece{$piece_name} = $piece_num;
-        push @piece, $piece_name;
-        $piece_name = "";
-        $piece_length = 0;
-    }
-}
-if ( $piece_name ) {
-    $piece_num ++;
-    $piece{$piece_name} = $piece_num;
-    push @piece, $piece_name;
-}
+# 3. 根据RNA-Seq比对的SAM结果转换得到转录本序列
+print STDERR "\nStep 3: We convert the transcript sequences based on the SAM results from RNA-Seq alignment." . "(" . (localtime) . ")" . "\n";
+chdir $tmp_dir; print STDERR "\nPWD: $tmp_dir\n"; 
 
-mkdir "splitSAM_byChromosome" unless -e "splitSAM_byChromosome";
-unless (-e "01.splitSAM_byChromosome.ok") {
-    open OUT, ">", "command.samtools_view.list" or die "Can not create file command.samtools_view.list, $!";
-    foreach ( @piece ) {
-        print OUT "samtools view ../b.hisat2/alignment.bam $_ > splitSAM_byChromosome/piece$piece{$_}.sam\n";
-    }
-    close OUT;
+my @input_parameter =();
+push @input_parameter, "--put_massive_temporary_data_into_memory" if defined $put_massive_temporary_data_into_memory;
+push @input_parameter, "--strand_specific" if defined $strand_specific;
+my $input_parameter = join " ", @input_parameter;
+$cmdString = "$bin_path/Sam2Transfrag $input_parameter --input_single_sorted_BAM_file --tmp_dir $tmp_dir/c.Sam2Transfrag --cpu $cpu --intron_info_out intron.txt --base_depth_out base_depth.txt $tmp_dir/b.hisat2/alignment.bam > transfrag.raw.gff3";
 
-    $cmdString = "ParaFly -c command.samtools_view.list -CPU 8 &> /dev/null";
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+&execute_cmds($cmdString, "$tmp_dir/03.Sam2Transfrag.ok");
 
-    open OUT, ">", "01.splitSAM_byChromosome.ok" or die $!; close OUT;
+
+# 4. 调用Transdecoder软件对转录本序列进行ORF分析，得到编码蛋白转录本在基因组上的结构注释信息，并输出GFF3格式结果。
+print STDERR "\nStep 4: Use the Transdecoder software to perform ORF analysis on transcript sequences, obtain structural annotation information of the coding protein transcripts on the genome, and output the results in GFF3 format. (" . (localtime) . ")\n";
+chdir $tmp_dir; print STDERR "\nPWD: $tmp_dir\n";
+
+my @input_parameter =();
+push @input_parameter, "--output_alignment_GFF3 $output_alignment_GFF3" if defined $output_alignment_GFF3;
+my $input_parameter = join " ", @input_parameter;
+$cmdString = "$bin_path/Transfrag2ORF --tmp_dir d.Transfrag2ORF $input_parameter $input_genome $tmp_dir/transfrag.raw.gff3 > transfrag.ORF.gff3";
+
+&execute_cmds($cmdString, "$tmp_dir/04.Transfrag2ORF.ok");
+
+
+# 5. 使用同源蛋白的基因预测结果对转录本预测的基因模型进行填补
+print STDERR "\nStep 5: Use the gene prediction results of homologous proteins to fill in the ends of the gene model for transcript prediction. (" . (localtime) . ")\n";
+if ( $homolog_gene_models ) {
+	$cmdString = "GFF3_filling_gene_models_Parallel --cpu $cpu --tmp_dir e.FillingGeneModelsByHomolog --ouput_filling_detail_tab e.FillingGeneModelsByHomolog.tab $input_genome $tmp_dir/transfrag.ORF.gff3 $homolog_gene_models > transfrag.ORF_fill1.gff3";
 }
 else {
-    print STDERR "Skip step 3.1 for file 01.splitSAM_byChromosome.ok exists.\n";
+	$cmdString = "/bin/cp -a $tmp_dir/transfrag.ORF.gff3 transfrag.ORF_fill1.gff3";
 }
 
-# 3.2 将SAM比对数据分成一个个匹配区域
-print STDERR "3.2 Further splitting the SAM file from unaligned region.\n";
-unless (-e "02.splitSam.ok") {
-    # 设置 NGSReads_prediction.01SplitSam 命令的输出文件夹路径
-    my $output_dir_of_SplitSam = "splited_sam_out";
-    if ( $put_massive_temporary_data_into_memory ) {
-        # 检测 splited_sam_out.tmp_dir 文件是否存在，若存在，则使用之前的的临时文件夹，以利于程序中断后接续运行。
-        if ( -s "splited_sam_out.tmp_dir" ) {
-            open IN, "splited_sam_out.tmp_dir" or die "Error: Can not open file splited_sam_out.tmp_dir, $!";
-            $output_dir_of_SplitSam = <IN>;
-            close IN;
-            chomp($output_dir_of_SplitSam);
-        }
-        else {
-            $output_dir_of_SplitSam = "/dev/shm/NGSReads_prediction.01SplitSam_tmpDir$date$$";
-            open OUT, ">", "splited_sam_out.tmp_dir" or die "Error: Can not create file splited_sam_out.tmp_dir, $!";
-            print OUT $output_dir_of_SplitSam;
-            close OUT;
-        }
-    }
+&execute_cmds($cmdString, "$tmp_dir/05.FillingGeneModelsByHomolog.ok");
 
-    open OUT, ">", "command.SplitSam.list" or die "Can not create file command.SplitSam.list, $!";
-    foreach ( @piece ) {
-        print OUT "$bin_path/NGSReads_prediction.01SplitSam $config{'NGSReads_prediction.01SplitSam'} --output_directory $output_dir_of_SplitSam splitSAM_byChromosome/piece$piece{$_}.sam > splitSAM_byChromosome/piece$piece{$_}.list\n";
-    }
-    close OUT;
-
-    $cmdString = "ParaFly -c command.SplitSam.list -CPU 8 &> /dev/null";
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-
-    open OUT, ">", "splited_sam_files.list" or die "Can not create file splited_sam_files.list, $!";
-    foreach ( @piece ) {
-        open IN, "splitSAM_byChromosome/piece$piece{$_}.list" or die "Can not open file splitSAM_byChromosome/piece$piece{$_}.list, $!";
-        print OUT <IN>;
-        close IN;
-    }
-    close OUT;
-
-    open OUT, ">", "02.splitSam.ok" or die $!; close OUT;
-}
-else {
-    print STDERR "Skip step 3.2 for file 02.splitSam.ok exists.\n";
-}
-
-# 3.3 每个比对区域生成一个sam2transfrag命令
-print STDERR "3.3 Generating command lines (NGSReads_prediction.02Sam2Transfrag) for each aligned genomic region.\n";
-unless (-e "03.create_sam2transfrag_cmdlines.ok") {
-    open IN, "splited_sam_files.list" or die $!;
-    print STDERR (localtime) . ": file splited_sam_files.list was created.\n";
-    open CMD, ">", "command.sam2transfrag.list" or die $!;
-    my $no_strand_specific = "--no_strand_specific";
-    $no_strand_specific = "" if $strand_specific;
-    while (<IN>) {
-        s/\.sam\n//;
-        print CMD "$bin_path/NGSReads_prediction.02Sam2Transfrag $config{'NGSReads_prediction.02sam2transfrag'} $no_strand_specific --intron_info_out $_.intron --base_depth_out $_.base_depth $_.sam > $_.gtf\n";
-    }
-    close CMD;
+if ( $output_raw_GFF3 ) {
+    my $output_raw_GFF3_info;
+    open IN, "transfrag.genome.fill1.gff3" or die "Error: Can note open file transfrag.genome.fill1.gff3, !";
+    $output_raw_GFF3_info = join "", <IN>;
     close IN;
-    open OUT, ">", "03.create_sam2transfrag_cmdlines.ok" or die $!; close OUT;
-}
-else {
-    print STDERR "Skip step 3.3 for file 03.create_sam2transfrag_cmdlines.ok exists.\n";
-}
-
-# 3.4 批量并行化进行transcripts计算
-print STDERR "3.4 Converting SAM into transcripts in parallel.\n";
-$cmdString = "$bin_path/parafly -c command.sam2transfrag.list -CPU $cpu &> parfly.sam2transfrag.log";
-unless (-e "04.parafly_sam2transfrag.ok") {
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-    open OUT, ">", "04.parafly_sam2transfrag.ok" or die $!; close OUT;
-}
-else {
-    print STDERR "CMD(Skipped): $cmdString\n";
-}
-
-# 3.5 整合所有并行化结果，得到GTF文件和可信的Intron信息
-print STDERR "3.5 Merging all transcript, intron, and base depth information from extensive datasets.\n";
-unless (-e "05.output_GFF.ok") {
-    open IN, "splited_sam_files.list" or die $!;
-    open OUT1, ">", "transfrag.gtf" or die $!;
-    open OUT2, ">", "intron.txt"  or die $!;
-    open OUT3, ">", "base_depth.txt" or die $!;
-    print STDERR  (localtime) . ": file transfrag.gtf, intron.txt and base_depth.txt were created.\n";
-    while (<IN>) {
-        s/\.sam\n//;
-        open IN1, "$_.gtf" or die "Cannot open file $_.gtf, $!\n";
-        print OUT1 <IN1>;
-        close IN1;
-        if (-e "$_.intron") {
-            open IN1, "$_.intron" or die $!;
-            <IN1>;
-            print OUT2 <IN1>;
-            close IN1;
-        }
-        if ( -e "$_.base_depth") {
-            open IN1, "$_.base_depth" or die "Cannot open file $_.base_depth, $!\n";
-            <IN1>;
-            print OUT3 <IN1>;
-            close IN1;
-        }
-    }
-    close OUT3; close OUT2; close OUT1; close IN;
-    open OUT, ">", "05.output_GFF.ok" or die $!; close OUT;
-
-    # 删除 NGSReads_prediction.01SplitSam 生成的临时文件夹。
-    if ( $put_massive_temporary_data_into_memory ) {
-        if ( -s "splited_sam_out.tmp_dir" ) {
-            open IN, "splited_sam_out.tmp_dir" or die "Error: Can not open file splited_sam_out.tmp_dir, $!";
-            my $output_dir_of_SplitSam = <IN>;
-            close IN;
-            chomp($output_dir_of_SplitSam);
-            $cmdString = "rm -rf $output_dir_of_SplitSam";
-            print STDERR (localtime) . ": CMD: $cmdString\n";
-            system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-        }
-    }
-}
-else {
-    print STDERR "Skip step 3.5 for file 05.output_GFF.ok exists.\n";
-}
-
-# 3.6 进行可变剪接分析
-print STDERR "3.6 Acquiring alternatively spliced transcripts.\n";
-$cmdString = "$bin_path/paraAlternative_splicing_analysis ";
-
-# 3.6 将GTF文件转换成transcripts序列
-# 若是非链特异性测序，则得到的single exon转录本序列是没有方向的。
-print STDERR "3.6 transform transcript sequences from GFF to FASTA format.\n";
-$cmdString = "$bin_path/NGSReads_prediction.03TransfragDump transfrag.gtf $input_genome 2> transfrag.stats";
-unless (-e "06.transfragDump.ok") {
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-    open OUT, ">", "06.transfragDump.ok" or die $!; close OUT;
-}
-else {
-    print STDERR "CMD(Skipped): $cmdString\n";
-}
-
-if ( $output_alignment_GFF3 ) {
-    my $output_alignment_GFF3_info;
-    open IN, "transfrag.alignment.gff3" or die "Error: Can note open file transfrag.alignment.gff3, !";
-    $output_alignment_GFF3_info = join "", <IN>;
-    close IN;
-    open OUT, ">", $output_alignment_GFF3 or die "Error: Can not create file $output_alignment_GFF3, $!";
-    print OUT $output_alignment_GFF3_info;
+    open OUT, ">", $output_raw_GFF3 or die "Error: Can not create file $output_raw_GFF3, $!";
+    print OUT $output_raw_GFF3_info;
     close OUT;
 }
 
-# 3.7 对transcripts序列使用Transdecoder进行ORF分析
-print STDERR "3.7 use Transdecoder for ORF prediction.\n";
-my $cmdString1 = "$software_dir/TransDecoder-v5.5.0/TransDecoder.LongOrfs $config{'TransDecoder.LongOrfs'} -t transfrag.strand.fasta -S &> /dev/null";
-my $cmdString2 = "$software_dir/TransDecoder-v5.5.0/TransDecoder.Predict $config{'TransDecoder.Predict'}  -t transfrag.strand.fasta &> /dev/null";
-my $cmdString3 = "$software_dir/TransDecoder-v5.5.0/TransDecoder.LongOrfs $config{'TransDecoder.LongOrfs'} -t transfrag.noStrand.fasta &> /dev/null";
-#$cmdString3 = "$software_dir/TransDecoder-v5.5.0/TransDecoder.LongOrfs $config{'TransDecoder.LongOrfs'} -t transfrag.noStrand.fasta -S &> /dev/null" if $strand_specific;
-my $cmdString4 = "$software_dir/TransDecoder-v5.5.0/TransDecoder.Predict $config{'TransDecoder.Predict'} -t transfrag.noStrand.fasta --train transfrag.strand.fasta.transdecoder_dir/longest_orfs.cds.top_500_longest &> /dev/null";
-my $cmdString5 = "cp transfrag.strand.fasta.transdecoder.gff3 transfrag.transdecoder.gff3";
-my $cmdString6 = "cat transfrag.noStrand.fasta.transdecoder.gff3 >> transfrag.transdecoder.gff3";
-unless (-e "07.TransDecoder.ok") {
-    print STDERR (localtime) . ": CMD: $cmdString1\n";
-    system("$cmdString1") == 0 or die "failed to execute: $cmdString1\n";
-    print STDERR (localtime) . ": CMD: $cmdString2\n";
-    system("$cmdString2") == 0 or die "failed to execute: $cmdString2\n";
-    if ( -s "transfrag.noStrand.fasta" ) {
-        print STDERR (localtime) . ": CMD: $cmdString3\n";
-        system("$cmdString3") == 0 or die "failed to execute: $cmdString3\n";
-        print STDERR (localtime) . ": CMD: $cmdString4\n";
-        system("$cmdString4") == 0 or die "failed to execute: $cmdString4\n";
-    }
-    print STDERR (localtime) . ": CMD: $cmdString5\n";
-    system("$cmdString5") == 0 or die "failed to execute: $cmdString5\n";
-    print STDERR (localtime) . ": CMD: $cmdString6\n";
-    system("$cmdString6") == 0 or die "failed to execute: $cmdString6\n";
-
-    open OUT, ">", "07.TransDecoder.ok" or die $!; close OUT;
-}
-else {
-    print STDERR "CMD(Skipped): $cmdString1\n";
-    print STDERR "CMD(Skipped): $cmdString2\n";
-    print STDERR "CMD(Skipped): $cmdString3\n";
-    print STDERR "CMD(Skipped): $cmdString4\n";
-    print STDERR "CMD(Skipped): $cmdString5\n";
-    print STDERR "CMD(Skipped): $cmdString6\n";
-}
-
-# 3.8 将ORF结果转化为基因组上的基因预测结果。
-print STDERR "3.8 transform the ORF results to gene models.\n";
-$cmdString = "$bin_path/NGSReads_prediction.04Transdecoder2ORF --out_protein proteins.fasta transfrag.gtf transfrag.transdecoder.gff3 $input_genome > transdecoder2ORF.gff3";
-unless (-e "08.Transdecoder2ORF.ok") {
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-    open OUT, ">", "08.Transdecoder2ORF.ok" or die $!; close OUT;
-}
-else {
-    print STDERR "CMD(Skipped): $cmdString\n";
-}
-
-# 3.9 对预测的基因模型去冗余。
+# 6 对预测的基因模型去冗余。
 print STDERR "3.9 remove the redundancy gene models.\n";
 $cmdString = "$bin_path/GFF3Clear --GFF3_source NGSReads --genome $input_genome --gene_prefix transfrag --no_attr_add transdecoder2ORF.gff3 > transfrag.genome.gff3 2> /dev/null";
 unless (-e "09.remove_redundancy.ok") {
@@ -627,31 +420,6 @@ else {
     print STDERR "CMD(Skipped): $cmdString\n";
 }
 
-# 3.10 使用同源蛋白的基因预测结果对NGSReads预测的基因模型进行补齐
-print STDERR "3.10 Filling gene models according to homolog predicted gene models.\n";
-if ( $homolog_gene_models ) {
-    $cmdString = "$bin_path/NGSReads_prediction.05FillingGeneModelsByHomolog --cpu $cpu --tmp_dir FillingGeneModelsByHomolog_tmp $input_genome transfrag.genome.gff3 $homolog_gene_models > transfrag.genome.fill1.gff3 2> FillingGeneModelsByHomolog.log";
-}
-else {
-    $cmdString = "/bin/cp -a transfrag.genome.gff3 transfrag.genome.fill1.gff3";
-}
-unless (-e "10.FillingGeneModelsByHomolog.ok") {
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-    open OUT, ">", "10.FillingGeneModelsByHomolog.ok" or die $!; close OUT;
-}
-else {
-    print STDERR "CMD(Skipped): $cmdString\n";
-}
-if ( $output_raw_GFF3 ) {
-    my $output_raw_GFF3_info;
-    open IN, "transfrag.genome.fill1.gff3" or die "Error: Can note open file transfrag.genome.fill1.gff3, !";
-    $output_raw_GFF3_info = join "", <IN>;
-    close IN;
-    open OUT, ">", $output_raw_GFF3 or die "Error: Can not create file $output_raw_GFF3, $!";
-    print OUT $output_raw_GFF3_info;
-    close OUT;
-}
 
 # 3.11 对基因模型进行强制补齐
 @_ = &codon_table("$tmp_dir/codon.table");
@@ -975,3 +743,23 @@ sub codon_table {
     return (\%code, \%start_codon, \%stop_codon);
 }
 
+
+# 子程序，用于执行调用的Linux命令，同时生成.ok文件。
+sub execute_cmds {
+    my $ok_file = pop @_;
+
+    if ( -e $ok_file ) {
+        foreach ( @_ ) {
+            print STDERR "CMD(Skipped): $_\n";
+        }
+    }
+    else {
+        foreach ( @_ ) {
+            print STDERR (localtime) . ": CMD: $_\n";
+            system($_) == 0 or die "failed to execute: $_\n";
+        }
+        open OUT, ">", "$ok_file" or die $!; close OUT;
+    }
+
+    return 1;
+}

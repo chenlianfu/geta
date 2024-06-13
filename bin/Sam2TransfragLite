@@ -4,61 +4,60 @@ use Getopt::Long;
 
 my $usage = <<USAGE;
 Usage:
-    perl $0 --intron_info_out intron_info.txt scaffold_1.10000-15000.sam > scaffold_1.10000-15000.gtf
+    perl $0 [options] input.sam > output.gtf
 
-    程序能分析HISAT2比对得到的SAM文件，得到每个reads匹配区域覆盖度最高的转录本序列，以GTF文件格式为其结果文件。推荐进行HISAT2分析的时候，其允许的最大intron长度要设置得小些，比如1000bp。
-    本程序输入split_sam_from_non_aligned_region.pl的结果文件，从而实现并行化运行。
+For example
+    perl $0 --intron_info_out intron_info.txt --base_depth_out base_depth.txt scaffold_1.10000-15000.sam > scaffold_1.10000-15000.gtf
+
+    程序能分析HISAT2比对得到的SAM文件，得到每个reads匹配区域覆盖度最高的转录本序列，以GTF文件格式为其结果文件。虽然本程序支持输入比对到全基因组序列的SAM文件，但运行速度会会较慢。推荐输入NGSReads_prediction.01SplitSam的结果文件，从而实现并行化运行。
     此外，本程序能同时支持链特异性测序或非连特异性测序的HISAT2比对结果。推荐使用链特异性测序数据进行Hisat2分析后，再使用本程序进行转录本搜索。
     程序分两步走：（1）首先，程序根据碱基和intron的测序深度来对有基因表达的区域进行打断，打断后的每个区域相当于一个基因表达区域；（2）然后，对各个区域进行转录本序列搜索，输出覆盖度最高的转录本序列。
+    程序通过分析SAM第二列Flag值，检测到是双末端测序数据，则要求第七列是=符号(表示双端数据比对到不同的染色体上)时，否则忽略该比对结果。
 
     --fraction <FLOAT>  default: 0.05
-        对下面两类参数expressed_base_depth和junction_depth取阈值的时候，其阈值与SAM文件比对区域的最高碱基测序深度Dmax相关。Dmax乘以该系数得到阈值D。D值和下面4个参数一起决定参数expressed_base_depth和junction_depth的设定。
+    对下面两类参数expressed_base_depth和junction_depth取阈值的时候，其阈值与SAM文件比对区域的最高碱基测序深度Dmax相关。Dmax乘以该系数得到阈值D。D值和下面4个参数一起决定参数expressed_base_depth和junction_depth的设定。
 
     --min_expressed_base_depth <INT>  default: 2
     --max_expressed_base_depth <INT>  default: 10
-        这两个参数和--fraction参数一起决定expressed_base_depth的阈值。对SAM文件中的连续比对区域区进行打断的时候，若位点的碱基测序深度低于expressed_base_depth阈值，则在该位点前后对比对区域进行打断。默认设置表示：对某个比对区域进行分析的时候，根据SAM文件计算出该区域的最高单碱基测序深度Dmax；D=Dmax * 0.05；若D小于2，则expressed_base_depth阈值=2；若D值大于10，则expressed_base_depth阈值=10；若D值在2和10之间，则expressed_base_depth阈值=D。
+    这两个参数和--fraction参数一起决定expressed_base_depth的阈值。对SAM文件中的连续比对区域区进行打断的时候，若位点的碱基测序深度低于expressed_base_depth阈值，则在该位点前后对比对区域进行打断。默认设置表示：对某个比对区域进行分析的时候，根据SAM文件计算出该区域的最高单碱基测序深度Dmax；D=Dmax * 0.05；若D小于2，则expressed_base_depth阈值=2；若D值大于10，则expressed_base_depth阈值=10；若D值在2和10之间，则expressed_base_depth阈值=D。
 
     --min_junction_depth <INT>  default:2
     --max_junction_depth <INT>  default:10
-        这两个参数和--fraction参数一起决定junction_depth的阈值。对SAM文件中的不连续比对位点进行打断的时候，若位点的碱基测深度低于junction_depth的阈值，则在该位点前对比对区域进行打断。默认设置表示：对某个比对区域进行分析的时候，根据SAM文件计算出该区域的最高单碱基测序深度Dmax；；D=Dmax * 0.05；若D小于取2，则junction_depth=2；若D值大于10，则junction_depth=10；若D值在2和10之间，则junction_depth=D。
+    这两个参数和--fraction参数一起决定junction_depth的阈值。对SAM文件中的不连续比对位点进行打断的时候，若intron的碱基测深度低于junction_depth的阈值，则在该位点前对比对区域进行打断。默认设置表示：对某个比对区域进行分析的时候，根据SAM文件计算出该区域的最高单碱基测序深度Dmax；；D=Dmax * 0.05；若D小于取2，则junction_depth=2；若D值大于10，则junction_depth=10；若D值在2和10之间，则junction_depth=D。
 
-    --min_fragment_count_per_transfrags <INT>  default: 10
-        输出transfrags信息的时候，必须要求transfrags被支持的fragment数目大于该值。
+    --min_fragment_count_per_transfrag <INT>  default: 10
+    输出transfrags信息的时候，必须要求transfrags被支持的fragment数目大于该值。
     
     --intron_info_out <String>
-        若设定此参数，则会输出intron信息到指定的文件中，否则不会输出intron信息。虽然程序仅输出覆盖度最高的转录本，但是输出的intron信息是包含可变剪接信息的。且intron是经过一定阈值过滤后的结果。该文件有利于后续可变剪接分析。
+    若设定此参数，则会输出intron信息到指定的文件中，否则不会输出intron信息。虽然程序仅输出覆盖度最高的转录本，但是输出的intron信息是包含可变剪接信息的。且intron是经过一定阈值过滤后的结果。该文件有利于后续可变剪接分析。
 
     --base_depth_out <String>
-        若设定此参数，则会输出所有碱基的测序深度信息到指定的文件中。该文件有利于后续可变剪接分析。
+    若设定此参数，则会输出所有碱基的测序深度信息到指定的文件中。该文件有利于后续可变剪接分析。
 
     --genome_fasta <String>
-        输入基因组序列Fasta文件。若输入的SAM文件不是使用Hisat2得到的时候，其剪接性比对结果的剪接位点可能不是常规的GT-AG,GC-AG或AT-AC，因此，需要删除不属于常规剪接位点的intron信息。例如，当SAM文件是由PacBio数据得到的，由于PacBio数据有较多的Indel错误，极易导致错误的剪接位点，这时需要加上该参数。而Hisat2比对结果的剪接位点符合常规，不建议加上此参数（特别是当Hisat2数据库中添加有SNP/INDEL信息时，其比对结果可能在参考基因组序列上不符和常规剪接位点，但实际上是符合的）。
-        程序会调用samtools faidx命令来得到donor和acceptor信息。因此需要安装有samtools，加入此参数的时候，程序才能正常运行。
+    输入基因组序列Fasta文件。若输入的SAM文件不是使用Hisat2得到的时候，其剪接性比对结果的剪接位点可能不是常规的GT-AG,GC-AG或AT-AC，因此，需要删除不属于常规剪接位点的intron信息。例如，当SAM文件是由PacBio数据得到的，由于PacBio数据有较多的Indel错误，极易导致错误的剪接位点，这时需要加上该参数。而Hisat2比对结果的剪接位点符合常规，不建议加上此参数（特别是当Hisat2数据库中添加有SNP/INDEL信息时，其比对结果可能在参考基因组序列上不符和常规剪接位点，但实际上是符合的）。
+    程序会调用samtools faidx命令来得到donor和acceptor信息。因此需要安装有samtools，加入此参数的时候，程序才能正常运行。
 
     --min_intron_length <INT>
-        设置所允许的最小intron长度。若设置了此参数，则会根据此参数对intron进行过滤。若使用Hisat2的结果进行分析，由于Hisat2是有相应的参数的（默认20），可以不用在此设置此参数。
+    设置所允许的最小intron长度。若设置了此参数，则会根据此参数对intron进行过滤。若使用Hisat2的结果进行分析，由于Hisat2是有相应的参数的（默认20），可以不用在此设置此参数。
 
     --gff3
-        程序默认输出结果为GTF文件，若加入此参数，则输出gff3结果。
+    程序默认输出结果为GTF文件，若加入此参数，则输出gff3结果。
     
     --no_strand_specific
-        程序默认是对链特异性测序的数据进行分析，要求输入的SAM文件中每行的比对信息都必须包含XS标签信息。若是非链特异性测序，则需要加入此参数来保证程序的正常运行，同时要求输入的SAM文件中有剪接性比对的Reds必须含有XS标签信息。相比于链特异性测序，分析非连特异性测序数据时，程序在两条链上分别进行转录本序列搜索后，排除掉有Intron的转录本区域后，再对剩下的比对区域进行单exon的转录本搜索。
-
-    --no_PE_sequencing
-        程序默认是对双末端测序数据进行分析（为了结果更加准确），若SAM文件第七列不是=符号(表示双端数据比对到不同的染色体上)时，则忽略该比对结果。若是单端测序数据，则要加入此参数，表示不会对SAM文件第七列进行检查。
-
+    程序默认是对链特异性测序的数据进行分析，要求输入的SAM文件中每行的比对信息都必须包含XS标签信息。若是非链特异性测序，则需要加入此参数来保证程序的正常运行，同时要求输入的SAM文件中有剪接性比对的Reds必须含有XS标签信息。相比于链特异性测序，分析非连特异性测序数据时，程序在两条链上分别进行转录本序列搜索后，排除掉有Intron的转录本区域后，再对剩下的比对区域进行单exon的转录本搜索。
 
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($fraction, $min_expressed_base_depth, $max_expressed_base_depth, $min_junction_depth, $max_junction_depth, $min_fragment_count_per_transfrags, $filter_transcript, $gff3, $intron_info_out, $base_depth_out, $genome_fasta, $min_intron_length, $no_strand_specific, $no_PE_sequencing);
+my ($fraction, $min_expressed_base_depth, $max_expressed_base_depth, $min_junction_depth, $max_junction_depth, $min_fragment_count_per_transfrag, $filter_transcript, $gff3, $intron_info_out, $base_depth_out, $genome_fasta, $min_intron_length, $no_strand_specific);
 GetOptions(
     "fraction:s" => \$fraction,
     "min_expressed_base_depth:s" => \$min_expressed_base_depth,
     "max_expressed_base_depth:s" => \$max_expressed_base_depth,
     "min_junction_depth:s" => \$min_junction_depth,
     "max_junction_depth:s" => \$max_junction_depth,
-    "min_fragment_count_per_transfrags:s" => \$min_fragment_count_per_transfrags,
+    "min_fragment_count_per_transfrag:s" => \$min_fragment_count_per_transfrag,
     "filter_transcript:s" => \$filter_transcript,
     "intron_info_out:s" => \$intron_info_out,
     "base_depth_out:s" => \$base_depth_out,
@@ -66,7 +65,6 @@ GetOptions(
     "min_intron_length:i" => \$min_intron_length,
     "gff3!" => \$gff3,
     "no_strand_specific!" => \$no_strand_specific,
-    "no_PE_sequencing!" => \$no_PE_sequencing,
 );
 
 $fraction ||= 0.05;
@@ -74,7 +72,7 @@ $min_expressed_base_depth ||= 2;
 $max_expressed_base_depth ||= 10;
 $min_junction_depth ||= 2;
 $max_junction_depth ||= 10;
-$min_fragment_count_per_transfrags ||= 10;
+$min_fragment_count_per_transfrag ||= 10;
 $filter_transcript ||= "0.25 150";
 
 my ($filter_transcript_1, $filter_transcript_2);
@@ -115,8 +113,14 @@ while (<IN>) {
             die "Read $_[0] 的比对信息中没有XS标签信息，您的RNA-Seq数据可能是非链特异性测序，请设置--no_strand_specific参数后再运行本程序!\n";
         }
     }
-    my ($read_name, $scaffold_id, $site, $cigar) = ($_[0], $_[2], $_[3], $_[5]);
-    if (! $no_PE_sequencing) {
+    my ($read_name, $flag, $scaffold_id, $site, $cigar) = ($_[0], $_[1], $_[2], $_[3], $_[5]);
+    # 分析read是否双端测序数据，若是的话，则要求第7行值必须是 = 。否则忽略该行。
+    my $flag_binary = "";
+    while ( $flag > 0 ) {
+        $flag_binary = ($flag % 2) . $flag_binary;
+        $flag = int($flag / 2);
+    }
+    if ( $flag =~ m/(\d)$/ && $1 eq "1" ) {
         next if $_[6] ne '=';
     }
 
@@ -349,7 +353,7 @@ foreach my $scaffold_id (sort {$a cmp $b} keys %transfrags) {
             my $fragment = keys %fragment;
             #print STDERR "$scaffold_id\t$strand\t$region\t$fragment\n";
 
-            if ($fragment >= $min_fragment_count_per_transfrags) {
+            if ($fragment >= $min_fragment_count_per_transfrag) {
                 my $strand_name;
                 if ($strand eq "+") { $strand_name = "plus"; }
                 elsif ($strand eq "-") { $strand_name = "minus"; }
@@ -395,13 +399,13 @@ foreach my $scaffold_id (sort {$a cmp $b} keys %transfrags) {
                         $last_end = $3; $last_start = $2;
                         if ($1 eq "intron") {
                             my $intron_supported_reads_number = $intron{$scaffold_id}{$strand}{$2}{$3};
-                            $feature_out_gff3 .= "$scaffold_id\tChenLianfu\tintron\t$2\t$3\t$intron_supported_reads_number\t$strand\t\.\tID=$scaffold_id\_$strand_name\_$region[0]\_$region[1].mRNA$mRNA_number.intron$intron_number;Parent=$scaffold_id\_$strand_name\_$region[0]\_$region[1].mRNA$mRNA_number;\n";
-                            $feature_out_gtf .= "$scaffold_id\tChenLianfu\tintron\t$2\t$3\t$intron_supported_reads_number\t$strand\t\.\tgene_id \"$scaffold_id\_$strand_name\_$region[0]\_$region[1]\"; transcript_id \"$scaffold_id\_$strand_name\_$region[0]\_$region[1].mRNA$mRNA_number\";\n";
+                            $feature_out_gff3 .= "$scaffold_id\tChenLianfu\tintron\t$2\t$3\t$intron_supported_reads_number\t$strand\t\.\tID=$scaffold_id\_$strand_name\_$region[0]\_$region[1].t0$mRNA_number.intron$intron_number;Parent=$scaffold_id\_$strand_name\_$region[0]\_$region[1].t0$mRNA_number;\n";
+                            $feature_out_gtf .= "$scaffold_id\tChenLianfu\tintron\t$2\t$3\t$intron_supported_reads_number\t$strand\t\.\tgene_id \"$scaffold_id\_$strand_name\_$region[0]\_$region[1]\"; transcript_id \"$scaffold_id\_$strand_name\_$region[0]\_$region[1].t0$mRNA_number\";\n";
                         }
                         elsif ($1 eq "exon") {
                             $exon_number ++;
-                            $feature_out_gff3 .= "$scaffold_id\tChenLianfu\texon\t$2\t$3\t\.\t$strand\t\.\tID=$scaffold_id\_$strand_name\_$region[0]\_$region[1].mRNA$mRNA_number.exon$exon_number;Parent=$scaffold_id\_$strand_name\_$region[0]\_$region[1].mRNA$mRNA_number;\n";
-                            $feature_out_gtf .= "$scaffold_id\tChenLianfu\texon\t$2\t$3\t\.\t$strand\t\.\tgene_id \"$scaffold_id\_$strand_name\_$region[0]\_$region[1]\"; transcript_id \"$scaffold_id\_$strand_name\_$region[0]\_$region[1].mRNA$mRNA_number\";\n";
+                            $feature_out_gff3 .= "$scaffold_id\tChenLianfu\texon\t$2\t$3\t\.\t$strand\t\.\tID=$scaffold_id\_$strand_name\_$region[0]\_$region[1].t0$mRNA_number.exon$exon_number;Parent=$scaffold_id\_$strand_name\_$region[0]\_$region[1].t0$mRNA_number;\n";
+                            $feature_out_gtf .= "$scaffold_id\tChenLianfu\texon\t$2\t$3\t\.\t$strand\t\.\tgene_id \"$scaffold_id\_$strand_name\_$region[0]\_$region[1]\"; transcript_id \"$scaffold_id\_$strand_name\_$region[0]\_$region[1].t0$mRNA_number\";\n";
                         }
                         else {
                             print STDERR "Warning: $ARGV[0]\t$scaffold_id\t$strand\t$region\t$_\n";
@@ -412,11 +416,11 @@ foreach my $scaffold_id (sort {$a cmp $b} keys %transfrags) {
                     }
                 }
                 my @mRNA_start_end = sort {$a <=> $b} keys %mRNA_start_end;
-                $gff3_out .= "$scaffold_id\tChenLianfu\tmRNA\t$mRNA_start_end[0]\t$mRNA_start_end[-1]\t\.\t$strand\t\.\tID=$scaffold_id\_$strand_name\_$region[0]\_$region[1].mRNA$mRNA_number;Parent=$scaffold_id\_$strand_name\_$region[0]\_$region[1];\n$feature_out_gff3" if $feature_out_gff3;
-                $gtf_out .= "$scaffold_id\tChenLianfu\ttranscript\t$mRNA_start_end[0]\t$mRNA_start_end[-1]\t\.\t$strand\t\.\tgene_id \"$scaffold_id\_$strand_name\_$region[0]\_$region[1]\"; transcript_id \"$scaffold_id\_$strand_name\_$region[0]\_$region[1].mRNA$mRNA_number\";\n$feature_out_gtf" if $feature_out_gtf;
+                $gff3_out .= "$scaffold_id\tChenLianfu\tmRNA\t$mRNA_start_end[0]\t$mRNA_start_end[-1]\t\.\t$strand\t\.\tID=$scaffold_id\_$strand_name\_$region[0]\_$region[1].t0$mRNA_number;Parent=$scaffold_id\_$strand_name\_$region[0]\_$region[1];\n$feature_out_gff3" if $feature_out_gff3;
+                $gtf_out .= "$scaffold_id\tChenLianfu\ttranscript\t$mRNA_start_end[0]\t$mRNA_start_end[-1]\t\.\t$strand\t\.\tgene_id \"$scaffold_id\_$strand_name\_$region[0]\_$region[1]\"; transcript_id \"$scaffold_id\_$strand_name\_$region[0]\_$region[1].t0$mRNA_number\";\n$feature_out_gtf" if $feature_out_gtf;
 
                 if ($gff3 && $gff3_out) {
-                    print "$scaffold_id\tChenLianfu\tgene\t$region\t\.\t$strand\t\.\tID=$scaffold_id\_$strand_name\_$region[0]\_$region[1]; FragmentCount=$fragment; JunctionThreshold=$junction_threshold{$scaffold_id}{$strand}{$region}; BaseDepthThreshold=$expressed_base_depth_threshold{$scaffold_id}{$strand}{$region}; MaxDepth=$max_depth{$scaffold_id}{$strand}{$region};\n$gff3_out\n";
+                    print "$scaffold_id\tChenLianfu\tgene\t$region\t\.\t$strand\t\.\tID=$scaffold_id\_$strand_name\_$region[0]\_$region[1];FragmentCount=$fragment;JunctionThreshold=$junction_threshold{$scaffold_id}{$strand}{$region};BaseDepthThreshold=$expressed_base_depth_threshold{$scaffold_id}{$strand}{$region};MaxDepth=$max_depth{$scaffold_id}{$strand}{$region};\n$gff3_out\n";
                 }
                 elsif ($gtf_out) {
                     print "$scaffold_id\tChenLianfu\tgene\t$region\t\.\t$strand\t\.\tgene_id \"$scaffold_id\_$strand_name\_$region[0]\_$region[1]\"; FragmentCount \"$fragment\"; JunctionThreshold \"$junction_threshold{$scaffold_id}{$strand}{$region}\"; BaseDepthThreshold \"$expressed_base_depth_threshold{$scaffold_id}{$strand}{$region}\"; MaxDepth \"$max_depth{$scaffold_id}{$strand}{$region}\";\n$gtf_out\n";

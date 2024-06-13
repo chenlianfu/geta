@@ -68,9 +68,9 @@ my %supplementary_info = &get_geneModels_from_GFF3($supplementary_GFF3);
 # "染色体\t正负链\tintron起始\tintron结束\t其后frame" => 上下游CDS的区间信息(制表符连接的CDS起始结束frame)。
 # 染色体 -> 正负链 -> 索引位置 -> CDS起始结束frame => 上下游CDS的区间信息(制表符连接的CDS起始结束frame，包含当前CDS)。
 my (%up_stream_of_intron, %down_stream_of_intron, %up_stream_of_CDS, %down_stream_of_CDS);
-foreach my $gene_ID ( keys %supplementary_info ) {
+foreach my $gene_ID ( sort keys %supplementary_info ) {
     my @mRNA_ID = @{$supplementary_info{$gene_ID}{"mRNA_ID"}};
-    foreach my $mRNA_ID ( @mRNA_ID ) {
+    foreach my $mRNA_ID ( sort @mRNA_ID ) {
         my $mRNA_info = $supplementary_info{$gene_ID}{"mRNA_info"}{$mRNA_ID};
         my $mRNA_header = $supplementary_info{$gene_ID}{"mRNA_header"}{$mRNA_ID};
         my @mRNA_header = split /\t/, $mRNA_header;
@@ -202,7 +202,7 @@ foreach my $gene_ID ( sort keys %target_info ) {
     my ($gene_start, $gene_end) = ($gene_header[3], $gene_header[4]);
     my $mRNA_out;
 
-    foreach my $mRNA_ID ( @{$target_info{$gene_ID}{"mRNA_ID"}} ) {
+    foreach my $mRNA_ID ( sort @{$target_info{$gene_ID}{"mRNA_ID"}} ) {
         my $mRNA_info = $target_info{$gene_ID}{"mRNA_info"}{$mRNA_ID};
         my $mRNA_header = $target_info{$gene_ID}{"mRNA_header"}{$mRNA_ID};
         my @mRNA_header = split /\t/, $mRNA_header;
@@ -293,7 +293,7 @@ foreach my $gene_ID ( sort keys %target_info ) {
             # 若有多个重叠的mRNA，则对其按字符数从长到短进行排序。
             my %sort_candidate_CDS;
             foreach ( @candidate_CDS ) { $sort_candidate_CDS{$_} = length($_); }
-            @candidate_CDS = sort {$sort_candidate_CDS{$b} <=> $sort_candidate_CDS{$a}} @candidate_CDS;
+            @candidate_CDS = sort {$sort_candidate_CDS{$b} <=> $sort_candidate_CDS{$a} or $a cmp $b} @candidate_CDS;
 
             # 对 5' 端进行填补
             if ( $integrity eq "5prime_partial" or $integrity eq "internal" ) {
@@ -361,7 +361,7 @@ foreach my $gene_ID ( sort keys %target_info ) {
             # 若有多个重叠的mRNA，则对其按字符数从长到短进行排序。
             my %sort_candidate_CDS;
             foreach ( @candidate_CDS ) { $sort_candidate_CDS{$_} = length($_); }
-            @candidate_CDS = sort {$sort_candidate_CDS{$b} <=> $sort_candidate_CDS{$a}} @candidate_CDS;
+            @candidate_CDS = sort {$sort_candidate_CDS{$b} <=> $sort_candidate_CDS{$a} or $a cmp $b} @candidate_CDS;
 
             # 对 3' 端进行填补
             if ( $integrity eq "3prime_partial" or $integrity eq "internal" ) {
