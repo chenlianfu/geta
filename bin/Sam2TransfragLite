@@ -38,7 +38,7 @@ For example
     输入基因组序列Fasta文件。若输入的SAM文件不是使用Hisat2得到的时候，其剪接性比对结果的剪接位点可能不是常规的GT-AG,GC-AG或AT-AC，因此，需要删除不属于常规剪接位点的intron信息。例如，当SAM文件是由PacBio数据得到的，由于PacBio数据有较多的Indel错误，极易导致错误的剪接位点，这时需要加上该参数。而Hisat2比对结果的剪接位点符合常规，不建议加上此参数（特别是当Hisat2数据库中添加有SNP/INDEL信息时，其比对结果可能在参考基因组序列上不符和常规剪接位点，但实际上是符合的）。
     程序会调用samtools faidx命令来得到donor和acceptor信息。因此需要安装有samtools，加入此参数的时候，程序才能正常运行。
 
-    --min_intron_length <INT>
+    --min_intron_length <INT>    default: None
     设置所允许的最小intron长度。若设置了此参数，则会根据此参数对intron进行过滤。若使用Hisat2的结果进行分析，由于Hisat2是有相应的参数的（默认20），可以不用在此设置此参数。
 
     --gff3

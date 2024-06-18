@@ -13,19 +13,14 @@ TruSeq3-PE-2.fa:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:50 TOPHRE
 --min-intronlen 20 --max-intronlen 20000 --dta --score-min L,0.0,-0.4 -k 1
 # In the module NGSReads_prediction, hisat2 was invoked to align NGS reads to genome sequences. During the step of hisat2: -x was set to "genome"; -p was passed by --cpu; --rna-strandness RF was passed by --strand_specific.
 
-[sam2transfrag]
---fraction 0.05 --min_expressed_base_depth 2 --max_expressed_base_depth 50 --min_junction_depth 2 --max_junction_depth 50 --min_fragment_count_per_transfrags 10 --min_intron_length 20
+[Sam2Transfrag]
+--fraction 0.05 --min_expressed_base_depth 2 --max_expressed_base_depth 50 --min_junction_depth 2 --max_junction_depth 50 --min_fragment_count_per_transfrag 10
 # In the module NGSReads_prediction, NGSReads_prediction.02Sam2Transfrag was invoked to get transcripts from SAM file.
 # During the step of sam2transfrag: --no_strand_specific was passed reversely by --strand_specific; 
 # The defalut value means: the dynamic coverage threshold of mapping regions (come frome SAM file) was determinated by the maximum base depth of each region * 0.05, as well as this threshold should between 2 and 50.
 
-[TransDecoder.LongOrfs]
--m 100 -G universal
-# note: the strand specific parameter -S will be set automatically if transcripts had introns which could determinated the direction.
-
-[TransDecoder.Predict]
---retain_long_orfs_mode dynamic
-# note: when predicting the ORF of transfrag with single exon, the parameter --train will be set automatically to the result of transfrag with multi exons.
+[NGSReads_prediction]
+--min_protein_length 100 --genetic_code 1
 
 [homolog_prediction]
 --identity 0.2 --evalue 1e-9 --homolog_coverage 0.3 --max_hits_num_per_match_region 10 --max_hit_num_per_single_species 2 --method all --threshod_ratio_of_intron_Supported_times 0.5

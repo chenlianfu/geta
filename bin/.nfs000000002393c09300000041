@@ -180,7 +180,7 @@ unless (($pe1 && $pe2) or $single_end or $sam) {
 my %config = (
     'trimmomatic' => 'TruSeq3-PE-2.fa:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:50 TOPHRED33',
     'hisat2' => '--min-intronlen 20 --max-intronlen 20000 --dta --score-min L,0.0,-0.4 -k 1',
-    'Sam2Transfrag' => '--fraction 0.05 --min_expressed_base_depth 2 --max_expressed_base_depth 50 --min_junction_depth 2 --max_junction_depth 50 --min_fragment_count_per_transfrag 10',
+    'Sam2Transfrag' => '--fraction 0.05 --min_expressed_base_depth 2 --max_expressed_base_depth 50 --min_junction_depth 2 --max_junction_depth 50 --min_fragment_count_per_transfrags 10 --min_intron_length 20',
 );
 if ($config) {
     open IN, $config or die "Can not open file $config, $!\n";
@@ -452,7 +452,7 @@ if ( $homolog_gene_models ) {
     $cmdString = "GFF3_filling_gene_models_Parallel --cpu $cpu --tmp_dir e.FillingGeneModelsByHomolog --ouput_filling_detail_tab e.FillingGeneModelsByHomolog.tab --start_codon $start_codon --stop_codon $stop_codon --attribute_for_filling_complete Filled_by_homolog=True $input_genome $tmp_dir/transfrag.ORF.gff3 $homolog_gene_models > transfrag.ORF_filledByHomolog.gff3";
 }
 else {
-    $cmdString = "cp -a $tmp_dir/transfrag.ORF.gff3 transfrag.ORF_filledByHomolog.gff3";
+    $cmdString = "ln -sf $tmp_dir/transfrag.ORF.gff3 transfrag.ORF_filledByHomolog.gff3";
 }
 
 &execute_cmds($cmdString, "$tmp_dir/05.FillingGeneModelsByHomolog.ok");

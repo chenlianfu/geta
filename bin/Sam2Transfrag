@@ -349,7 +349,7 @@ unless (-e "$tmp_dir/command.Sam2TransfragLite.list") {
 }
 
 # 并行化执行 Sam2TransfragLite 命令
-$cmdString = "$bin_path/parafly -c command.Sam2TransfragLite.list -CPU $cpu &> parfly.Sam2TransfragLite.log";
+$cmdString = "$bin_path/parafly -c command.Sam2TransfragLite.list -CPU $cpu &> parafly.Sam2TransfragLite.log";
 
 &execute_cmds($cmdString, "$tmp_dir/07.Sam2TransfragLite.ok");
 
@@ -370,7 +370,7 @@ unless (-e "$tmp_dir/command.alternative_splicing_analysis.list") {
 }
 
 # 并行化执行 alternative_splicing_analysis 命令
-$cmdString = "$bin_path/parafly -c $tmp_dir/command.alternative_splicing_analysis.list -CPU $cpu &> parfly.alternative_splicing_analysis.log";
+$cmdString = "$bin_path/parafly -c $tmp_dir/command.alternative_splicing_analysis.list -CPU $cpu &> parafly.alternative_splicing_analysis.log";
 
 &execute_cmds($cmdString, "$tmp_dir/08.alternative_splicing_analysis.ok");
 

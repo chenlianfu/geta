@@ -32,19 +32,23 @@ Usage:
     --stop_codon <string>    default: TAA,TAG,TGA
     设置终止密码子。若有多个终止密码子，则使用逗号分割。
 
+    --attribute_for_filling_complete <string>    default: None
+    添加该参数，用于给补齐mRNA在GFF3第9列添加attribute标签信息。例如，使用同源蛋白进行补齐，设置Filled_by_homolog=True。
+
     --help    default: None
     display this help and exit.
 
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($cpu, $start_codon, $stop_codon, $tmp_dir, $ouput_filling_detail_tab, $help_flag);
+my ($cpu, $start_codon, $stop_codon, $tmp_dir, $ouput_filling_detail_tab, $attribute_for_filling_complete, $help_flag);
 GetOptions(
     "cpu:i" => \$cpu,
     "start_codon:s" => \$start_codon,
     "stop_codon:s" => \$stop_codon,
     "tmp_dir:s" => \$tmp_dir,
     "ouput_filling_detail_tab:s" => \$ouput_filling_detail_tab,
+    "attribute_for_filling_complete:s" => \$attribute_for_filling_complete,
     "help" => \$help_flag,
 );
 
@@ -62,7 +66,8 @@ $tmp_dir ||= "tmp_$date$$";
 $tmp_dir = abs_path($tmp_dir);
 mkdir $tmp_dir unless -e $tmp_dir;
 
-my $cmdString = "$bin_path/GFF3_filling_gene_models --start_codon $start_codon --stop_codon $stop_codon";
+my $parameter = "--attribute_for_filling_complete $attribute_for_filling_complete" if defined $attribute_for_filling_complete;
+my $cmdString = "$bin_path/GFF3_filling_gene_models --start_codon $start_codon --stop_codon $stop_codon $parameter";
 my (%seq, %target, %supplementary, @seq_ID, $seq_ID);
 
 # 读取 genome.fasta 文件内容
@@ -175,8 +180,8 @@ my $out = "对 $gene 个基因的 $mRNA 个mRNA进行了末端填补。
 对 $Single_CDS 个单CDS基因模型进行了末端填补，其中5prime_partial，3prime_partial和internal的基因数量分别为：$Single_CDS_5prime_partial，$Single_CDS_3prime_partial，$Single_CDS_internal。\n";
 
 if ( defined $ouput_filling_detail_tab ) {
-	open OUT, ">>", $ouput_filling_detail_tab or die "Error: Can not create file $ouput_filling_detail_tab, $!";
-	print OUT $out;
-	close OUT;
+    open OUT, ">>", $ouput_filling_detail_tab or die "Error: Can not create file $ouput_filling_detail_tab, $!";
+    print OUT $out;
+    close OUT;
 }
 print STDERR $out

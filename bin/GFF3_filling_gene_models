@@ -20,16 +20,20 @@ Usage:
     --stop_codon <string>    default: TAA,TAG,TGA
     设置终止密码子。若有多个终止密码子，则使用逗号分割。
 
+    --attribute_for_filling_complete <string>    default: None
+    添加该参数，用于给补齐mRNA在GFF3第9列添加attribute标签信息。例如，使用同源蛋白进行补齐，设置Filled_by_homolog=True。
+
     --help    default: None
     display this help and exit.
 
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($start_codon, $stop_codon, $help_flag);
+my ($start_codon, $stop_codon, $attribute_for_filling_complete, $help_flag);
 GetOptions(
     "start_codon:s" => \$start_codon,
     "stop_codon:s" => \$stop_codon,
+    "attribute_for_filling_complete:s" => \$attribute_for_filling_complete,
     "help" => \$help_flag,
 );
 
@@ -218,7 +222,7 @@ foreach my $gene_ID ( sort keys %target_info ) {
         }
 
         # 解析其完整性
-        my $integrity = &analysis_geneModels_integrity(\@CDS, \%seq, $chr, $strand);
+        my $integrity = &analysis_geneModels_integrity(\@CDS, $chr, $strand);
         #print STDERR "$gene_ID\t$mRNA_ID\t$integrity\n";
 
         # 对多 CDS 基因模型进行填补
@@ -424,23 +428,34 @@ foreach my $gene_ID ( sort keys %target_info ) {
             }
         }
 
+        # 分析GFF3中CDS/exon/intron第六列score和第九列attribute信息。此处留空即可。
+        my %gff3_score_attr;
+
         # 分析mRNA的exon结果
         my @exon;
         foreach ( split /\n/, $mRNA_info ) {
             @_ = split /\t/, $_;
             push @exon, "$_[3]\t$_[4]" if $_[2] eq "exon";
         }
-        my $mRNA_exons = join "\n", @exon;
-        my $mRNA_CDSs = join "\n", @CDS;
-
-        # 分析GFF3中CDS/exon/intron第六列score和第九列attribute信息。此处留空即可。
-        my %gff3_score_attr;
 
         # 得到mRNA信息
+        @exon = sort {$a <=> $b} @exon;
+        @CDS = sort {$a <=> $b} @CDS;
+        my $mRNA_exons = join "\n", @exon;
+        my $mRNA_CDSs = join "\n", @CDS;
         my ($mRNA_start, $mRNA_end, $mRNA_content) = &get_mRNA_info($mRNA_CDSs, $mRNA_exons, $mRNA_ID, $chr, $strand, $source, \%gff3_score_attr);
         $mRNA_header[3] = $mRNA_start;
         $mRNA_header[4] = $mRNA_end;
         $mRNA_header = join "\t", @mRNA_header;
+
+        # 再次检测mRNA的完整性。若mRNA经过了填补，且填补完整，则增加attribute信息
+        if ( $integrity ne "complete") {
+            my $integrity_new = &analysis_geneModels_integrity(\@CDS, $chr, $strand);
+            if ($integrity_new eq "complete") {
+                $mRNA_header =~ s/\;?\s*$/;$attribute_for_filling_complete;\n/ if defined $attribute_for_filling_complete;
+            }
+        }
+
         $mRNA_out .= $mRNA_header;
         $mRNA_out .= $mRNA_content;
 
@@ -462,8 +477,7 @@ foreach my $gene_ID ( sort keys %target_info ) {
 # 子程序，解析基因的完整性
 sub analysis_geneModels_integrity {
     my @CDS = @{$_[0]};
-    my %seq = %{$_[1]};
-    my ($chr, $strand) = ($_[2], $_[3]);
+    my ($chr, $strand) = ($_[1], $_[2]);
     my $out;
 
     @CDS = sort {$a <=> $b} @CDS;

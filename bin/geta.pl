@@ -307,13 +307,29 @@ else{
 &execute_cmds($cmdString, "$tmp_dir/1.RepeatMasker.ok");
 
 
-# Step 2: NGSReads_predcition
-print STDERR "\n============================================\n";
-print STDERR "Step 2: NGSReads_predcition " . "(" . (localtime) . ")" . "\n";
-chdir $tmp_dir; print STDERR "\nPWD: $tmp_dir\n";
-mkdir "$tmp_dir/2.NGSReads_prediction" unless -e "$tmp_dir/2.NGSReads_prediction";
 
-my $cmdString_Step2_parameter;
+# Step 2: homolog_prediction
+print STDERR "\n============================================\n";
+print STDERR "Step 2: Homolog_prediction" . "(" . (localtime) . ")" . "\n";
+chdir $tmp_dir; print STDERR "\nPWD: $tmp_dir\n";
+mkdir "$tmp_dir/2.homolog_prediction" unless -e "$tmp_dir/2.homolog_prediction";
+
+if ( $protein ) {
+    $cmdString = "$bin_path/homolog_prediction --tmp_dir $tmp_dir/2.homolog_prediction --cpu $cpu $config{'homolog_prediction'} --genetic_code $genetic_code --output_alignment_GFF3 $tmp_dir/2.homolog_prediction/homolog_alignment.gff3 --output_raw_GFF3 $tmp_dir/2.homolog_prediction/homolog_prediction.raw.gff3 $protein $genome > $tmp_dir/2.homolog_prediction/homolog_prediction.gff3 2> $tmp_dir/2.homolog_prediction/homolog_prediction.log";
+}
+else {
+    $cmdString = "touch $tmp_dir/2.homolog_prediction/homolog_prediction.gff3";
+}
+
+&execute_cmds($cmdString, "$tmp_dir/2.homolog_prediction.ok");
+
+
+# Step 3: NGSReads_predcition
+print STDERR "\n============================================\n";
+print STDERR "Step 3: NGSReads_predcition " . "(" . (localtime) . ")" . "\n";
+chdir $tmp_dir; print STDERR "\nPWD: $tmp_dir\n";
+mkdir "$tmp_dir/3.NGSReads_prediction" unless -e "$tmp_dir/3.NGSReads_prediction";
+
 if (($pe1 && $pe2) or $single_end or $sam) {
     my @input_parameter;
     push @input_parameter, "--pe1 $pe1 --pe2 $pe2" if ($pe1 && $pe2);
@@ -322,32 +338,15 @@ if (($pe1 && $pe2) or $single_end or $sam) {
     push @input_parameter, "--strand_specific" if defined $strand_specific;
     push @input_parameter, "--genetic_code $genetic_code" if defined $genetic_code;
     push @input_parameter, "--put_massive_temporary_data_into_memory" if defined $put_massive_temporary_data_into_memory;
-    $cmdString_Step2_parameter = join " ", @input_parameter;
-    $cmdString1 = "$bin_path/NGSReads_prediction $cmdString_Step2_parameter --config $tmp_dir/config.txt --cpu $cpu --tmp_dir $tmp_dir/2.NGSReads_prediction --output_alignment_GFF3 $tmp_dir/2.NGSReads_prediction/NGSReads_alignment.gff3 --output_raw_GFF3 $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.raw.gff3 $genome > $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.gff3 2> $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.A.log";
-    $cmdString2 = "cp -a $tmp_dir/2.NGSReads_prediction/c.transcript/intron.txt $tmp_dir/2.NGSReads_prediction/c.transcript/base_depth.txt $tmp_dir/2.NGSReads_prediction/";
+	push @input_parameter, "--homolog_gene_models $tmp_dir/2.homolog_prediction/homolog_prediction.raw.gff3" if defined $protein;
+    my $input_parameter = join " ", @input_parameter;
+    $cmdString = "$bin_path/NGSReads_prediction $input_parameter --config $tmp_dir/config.txt --cpu $cpu --tmp_dir $tmp_dir/3.NGSReads_prediction --output_alignment_GFF3 $tmp_dir/3.NGSReads_prediction/NGSReads_alignment.gff3 --output_raw_GFF3 $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.raw.gff3 --intron_info_out $tmp_dir/3.NGSReads_prediction/intron.txt --base_depth_out $tmp_dir/3.NGSReads_prediction/base_depth.txt $genome > $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.gff3 2> $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.log";
 }
 else {
-    $cmdString1 = "touch $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.gff3";
-    $cmdString2 = "touch $tmp_dir/2.NGSReads_prediction/intron.txt; touch $tmp_dir/2.NGSReads_prediction/base_depth.txt; touch $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.raw.gff3";
+    $cmdString = "touch $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.gff3 $tmp_dir/3.NGSReads_prediction/intron.txt; touch $tmp_dir/3.NGSReads_prediction/base_depth.txt; touch $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.raw.gff3";
 }
 
-&execute_cmds($cmdString1, $cmdString2, "$tmp_dir/2.NGSReads_prediction.ok");
-
-
-# Step 3: homolog_prediction
-print STDERR "\n============================================\n";
-print STDERR "Step 3: Homolog_prediction" . "(" . (localtime) . ")" . "\n";
-chdir $tmp_dir; print STDERR "\nPWD: $tmp_dir\n";
-mkdir "$tmp_dir/3.homolog_prediction" unless -e "$tmp_dir/3.homolog_prediction";
-
-if ( $protein ) {
-    $cmdString = "$bin_path/homolog_prediction --tmp_dir $tmp_dir/3.homolog_prediction --cpu $cpu $config{'homolog_prediction'} --genetic_code $genetic_code --output_alignment_GFF3 $tmp_dir/3.homolog_prediction/homolog_alignment.gff3 --output_raw_GFF3 $tmp_dir/3.homolog_prediction/homolog_prediction.raw.gff3 $protein $genome > $tmp_dir/3.homolog_prediction/homolog_prediction.gff3 2> $tmp_dir/3.homolog_prediction/homolog_prediction.log";
-}
-else {
-    $cmdString = "touch $tmp_dir/3.homolog_prediction/homolog_prediction.gff3";
-}
-
-&execute_cmds($cmdString, "$tmp_dir/3.homolog_prediction.ok");
+&execute_cmds($cmdString, "$tmp_dir/3.NGSReads_prediction.ok");
 
 
 # Step 4: Combine NGSReads and Homolog Predictions
@@ -356,107 +355,9 @@ print STDERR "Step 4: Combine NGSReads and Homolog Predictions" . "(" . (localti
 mkdir "$tmp_dir/4.evidence_gene_models" unless -e "$tmp_dir/4.evidence_gene_models";
 chdir "$tmp_dir/4.evidence_gene_models"; print STDERR "\nPWD: $tmp_dir/4.evidence_gene_models\n";
 
-# 4.1 准备NGS reads预测的基因模型：ABC一组，D另一组。
-if ( ($pe1 && $pe2) or $single_end or $sam ) {
-    # 若有同源蛋白预测，则利用同源蛋白对NGS reads预测结果作改进，即第二次运行NGSReads_prediction命令。
-    if ( $protein ) {
-        $cmdString1 = "rm -rf $tmp_dir/2.NGSReads_prediction/c.transcript/10.FillingGeneModelsByHomolog.ok";
-        $cmdString2 = "rm -rf $tmp_dir/2.NGSReads_prediction/c.transcript/11.fillingEndsOfGeneModels.ok";
-        $cmdString3 = "rm -rf $tmp_dir/2.NGSReads_prediction/c.transcript/12.classGeneModels.ok";
-        $cmdString4 = "rm -rf $tmp_dir/2.NGSReads_prediction/c.transcript/FillingGeneModelsByHomolog_tmp/command.combineGeneModels.list.completed";
-        $cmdString5 = "$bin_path/NGSReads_prediction $cmdString_Step2_parameter --cpu $cpu --tmp_dir $tmp_dir/2.NGSReads_prediction --homolog_gene_models $tmp_dir/3.homolog_prediction/homolog_prediction.raw.gff3 $genome > $tmp_dir/4.evidence_gene_models/NGSReads_prediction_FilledByHomolog.gff3 2> $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.B.log";
+$cmdString = "$bin_path/GFF3_merging_two_files $genome $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.gff3 $tmp_dir/2.homolog_prediction/homolog_prediction.gff3 > $tmp_dir/4.evidence_gene_models/evidence_gene_models.gff3 2> $tmp_dir/4.evidence_gene_models/GFF3_merging_two_files.log";
 
-        &execute_cmds($cmdString1, $cmdString2, $cmdString3, $cmdString4, $cmdString5, "1.NGSReads_prediction_FilledByHomolog.ok");
-    }
-
-    # 生成两组NGS reads预测的GFF3文件。
-    unless ( -e "1.NGSReads_prediction.create_two_groups.ok" ) {
-        my $outpu_file = "$tmp_dir/4.evidence_gene_models/NGSReads_prediction.ABC.gff3";
-        open OUT1, ">", $outpu_file or die "Error: Can not create file $outpu_file, $!";
-        my $outpu_file = "$tmp_dir/4.evidence_gene_models/NGSReads_prediction.D.gff3";
-        open OUT2, ">", $outpu_file or die "Error: Can not create file $outpu_file, $!";
-
-        if ( $protein ) {
-            my $input_file = "$tmp_dir/4.evidence_gene_models/NGSReads_prediction_FilledByHomolog.gff3";
-            open IN, $input_file or die "Error: Can not open file $input_file, $!";
-        }
-        else {
-            my $input_file = "$tmp_dir/2.NGSReads_prediction/NGSReads_prediction.gff3";
-            open IN, $input_file or die "Error: Can not open file $input_file, $!";
-        }
-
-        $/ = "\n\n";
-        while (<IN>) {
-            if (m/Type=excellent/ or m/Type=good/ or m/Type=fair/) { print OUT1; }
-            else { print OUT2; }
-        }
-        $/ = "\n";
-        close IN; close OUT1; close OUT2;
-
-        open OUT, ">", "1.NGSReads_prediction.create_two_groups.ok" or die $!; close OUT;
-        print STDERR (localtime) . ": Two groups of gene models predicted by NGSReads_prediction were created: \n\t$tmp_dir/4.evidence_gene_models/NGSReads_prediction.ABC.gff3\n\t$tmp_dir/4.evidence_gene_models/NGSReads_prediction.D.gff3\n";
-    }
-}
-
-# 4.2 准备 homolog 预测的基因模型：AB一组，CD另一组。
-if ( $protein ) {
-    unless ( -e "2.homolog_prediction.create_two_groups.ok" ) {
-        my $input_file = "$tmp_dir/3.homolog_prediction/homolog_prediction.gff3";
-        open IN, $input_file or die "Error: Can not open file $input_file, $!";
-        my $outpu_file = "$tmp_dir/4.evidence_gene_models/homolog_prediction.AB.gff3";
-        open OUT1, ">", $outpu_file or die "Error: Can not create file $outpu_file, $!";
-        my $outpu_file = "$tmp_dir/4.evidence_gene_models/homolog_prediction.CD.gff3";
-        open OUT2, ">", $outpu_file or die "Error: Can not create file $outpu_file, $!";
-
-        $/ = "\n\n";
-        while (<IN>) {
-            if (m/Type=excellent/ or m/Type=good/) { print OUT1; }
-            else { print OUT2; }
-        }
-        $/ = "\n";
-        close IN; close OUT1; close OUT2;
-
-        open OUT, ">", "2.homolog_prediction.create_two_groups.ok" or die $!; close OUT;
-        print STDERR (localtime) . ": Two groups of gene models predicted by homolog:\n\t$tmp_dir/4.evidence_gene_models/homolog_prediction.AB.gff3\n\t$tmp_dir/4.evidence_gene_models/homolog_prediction.CD.gff3\n";
-    }
-}
-
-# 4.3 合并NGS reads和homolog预测的基因模型
-my $GFF3Cler_input = "NGSReads_prediction.ABC.gff3 homolog_prediction.AB.gff3 NGSReads_prediction.D.gff3 homolog_prediction.CD.gff3";
-unless ( ($pe1 && $pe2) or $single_end or $sam ) {
-    $GFF3Cler_input =~ s/NGSReads_prediction\S+//g;
-}
-unless ( $protein ) {
-    $GFF3Cler_input =~ s/homolog_prediction\S+//g;
-}
-$cmdString = "$bin_path/GFF3Clear --genome $genome $GFF3Cler_input > evidence_gene_models.gff3 2> GFF3Clear.log";
-
-&execute_cmds($cmdString, "3.GFF3Clear.ok");
-
-# 4.4 统计基因模型数量
-my $input_file = "$tmp_dir/4.evidence_gene_models/evidence_gene_models.gff3";
-open IN, $input_file or die "Error: Can not open file $input_file, $!";
-my ( $num0, $num1, $num2, $num3, $num4, $num5, $num6 ) = (0, 0, 0, 0, 0, 0, 0);
-while (<IN>) {
-    if (m/\tgene\t/) {
-        $num0 ++;
-        if ( m/ID=transfrag/ ) { $num5 ++; }
-        elsif ( m/ID=homolog/ ) { $num6 ++; }
-        if ( m/Type=excellent_gene_models_predicted_by/) { $num1 ++; }
-        elsif ( m/Type=good_gene_models_predicted_by/) { $num2 ++; }
-        elsif ( m/Type=fair_gene_models_predicted_by/) { $num3 ++; }
-        elsif ( m/Type=poor_gene_models_predicted_by/) { $num4 ++; }
-    }
-}
-close IN;
-my $outpu_file = "$tmp_dir/4.evidence_gene_models/evidence_gene_models.log";
-open OUT, ">", $outpu_file or die "Error: Can not create file $outpu_file, $!";
-print OUT "Total $num0 gene models were divided into 4 classes : A, $num1; B, $num2; C, $num3; D, $num4.\ngene models predicted by NGSReads: $num5; predicted by Homolog: $num6.\n";
-print STDERR "\nFinally, total $num0 gene models were divided into 4 classes : A, $num1; B, $num2; C, $num3; D, $num4.\ngene models predicted by NGSReads: $num5; predicted by Homolog: $num6.\n";
-
-unless ( -e "$tmp_dir/4.evidence_gene_models.ok" ) {
-    open OUT, ">", "$tmp_dir/4.evidence_gene_models.ok" or die $!; close OUT;
-}
+&execute_cmds($cmdString, "$tmp_dir/4.evidence_gene_models.ok");
 
 
 # Step 5: Augustus gene prediction
@@ -470,7 +371,19 @@ mkdir "$tmp_dir/5.augustus/training" unless -e "$tmp_dir/5.augustus/training";
 chdir "$tmp_dir/5.augustus/training"; print STDERR "\nPWD: $tmp_dir/5.augustus/training\n";
 
 # 5.1.1 由GFF3文件得到用于AUGUSTUS Training的基因模型。
-$cmdString = "$bin_path/geneModels2AugusutsTrainingInput $config{'geneModels2AugusutsTrainingInput'} --out_prefix ati --cpu $cpu $tmp_dir/4.evidence_gene_models/evidence_gene_models.gff3 $genome &> geneModels2AugusutsTrainingInput.log";
+# 选择步骤4中的excellent基因模型
+unless ( -s "excellent.gff3" ) {
+	my $input = "$tmp_dir/4.evidence_gene_models/evidence_gene_models.gff3";
+	open IN, $input or die "Error: Can not open file $input, $!";
+	open OUT, ">", "excellent.gff3" or die "Error: Can not create file excellent.gff3, $!";
+	$/ = "\n\n";
+	while (<IN>) {
+		print OUT if m/excellent/;
+	}
+	close IN; close OUT;
+}
+
+$cmdString = "$bin_path/geneModels2AugusutsTrainingInput $config{'geneModels2AugusutsTrainingInput'} --out_prefix ati --cpu $cpu excellent.gff3 $genome &> geneModels2AugusutsTrainingInput.log";
 unless ( -e "geneModels2AugusutsTrainingInput.ok" ) {
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -561,7 +474,7 @@ $cmdString3 = "cp -a $tmp_dir/5.augustus/config/species/$augustus_species $ENV{'
 
 # 5.2 准备Hints信息
 chdir "$tmp_dir/5.augustus"; print STDERR "\nPWD: $tmp_dir/5.augustus\n";
-$cmdString = "$bin_path/prepareAugusutusHints $config{'prepareAugusutusHints'} $tmp_dir/2.NGSReads_prediction/intron.txt $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.raw.gff3 $tmp_dir/3.homolog_prediction/homolog_prediction.gff3 > hints.gff";
+$cmdString = "$bin_path/prepareAugusutusHints $config{'prepareAugusutusHints'} $tmp_dir/3.NGSReads_prediction/intron.txt $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.raw.gff3 $tmp_dir/2.homolog_prediction/homolog_prediction.gff3 > hints.gff";
 
 &execute_cmds($cmdString, "prepareAugusutusHints.ok");
 
@@ -639,7 +552,7 @@ close OUT;
 
 # 6.1 第一轮基因预测结果整合：以AUGUSTUS结果为主，进行三种基因预测结果的整合
 # 对三种基因预测结果进行第一轮整合，以Augustus结果为准。得到 combine.1.gff3 为有Evidence支持的结果，combine.2.gff3为支持不足的结果。
-my $cmdString1 = "$bin_path/paraCombineGeneModels $config{'paraCombineGeneModels'} --cpu $cpu $tmp_dir/5.augustus/augustus.gff3 $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.raw.gff3 $tmp_dir/3.homolog_prediction/homolog_prediction.gff3 $tmp_dir/5.augustus/hints.gff &> /dev/null";
+my $cmdString1 = "$bin_path/paraCombineGeneModels $config{'paraCombineGeneModels'} --cpu $cpu $tmp_dir/5.augustus/augustus.gff3 $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.raw.gff3 $tmp_dir/2.homolog_prediction/homolog_prediction.gff3 $tmp_dir/5.augustus/hints.gff &> /dev/null";
 my $cmdString2 = "$bin_path/GFF3Clear --genome $genome --no_attr_add --coverage 0.8 combine.1.gff3 > geneModels.a.gff3 2> /dev/null";
 my $cmdString3 = "$bin_path/GFF3Clear --genome $genome --no_attr_add --coverage 0.8 combine.2.gff3 > geneModels.b.gff3 2> /dev/null";
 my $cmdString4 = "perl -p -i -e 's/(=[^;]+)\.t1/\$1.t01/g' geneModels.a.gff3 geneModels.b.gff3";
@@ -661,9 +574,9 @@ $cmdString = "$bin_path/fillingEndsOfGeneModels $config{'fillingEndsOfGeneModels
 
 # 6.4 分别对对基因模型 geneModels.b.gff3, geneModels.e.gff3 and geneModels.f.gff3 进行可变剪接分析
 unless ( $no_alternative_splicing_analysis ) {
-    $cmdString1 = "$bin_path/paraAlternative_splicing_analysis $config{'alternative_splicing_analysis'} --tmp_dir paraAlternative_splicing_analysis.gb.tmp --cpu $cpu geneModels.b.gff3 $tmp_dir/2.NGSReads_prediction/intron.txt $tmp_dir/2.NGSReads_prediction/base_depth.txt > geneModels.gb_AS.gff3 2> alternative_splicing.gb.stats && $bin_path/GFF3_add_CDS_for_transcript $genome geneModels.gb_AS.gff3 > geneModels.gb.gff3";
-    $cmdString2 = "$bin_path/paraAlternative_splicing_analysis $config{'alternative_splicing_analysis'} --tmp_dir paraAlternative_splicing_analysis.ge.tmp --cpu $cpu geneModels.e.gff3 $tmp_dir/2.NGSReads_prediction/intron.txt $tmp_dir/2.NGSReads_prediction/base_depth.txt > geneModels.ge_AS.gff3 2> alternative_splicing.ge.stats && $bin_path/GFF3_add_CDS_for_transcript $genome geneModels.ge_AS.gff3 > geneModels.ge.gff3";
-    $cmdString3 = "$bin_path/paraAlternative_splicing_analysis $config{'alternative_splicing_analysis'} --tmp_dir paraAlternative_splicing_analysis.gf.tmp --cpu $cpu geneModels.f.gff3 $tmp_dir/2.NGSReads_prediction/intron.txt $tmp_dir/2.NGSReads_prediction/base_depth.txt > geneModels.gf_AS.gff3 2> alternative_splicing.gf.stats && $bin_path/GFF3_add_CDS_for_transcript $genome geneModels.gf_AS.gff3 > geneModels.gf.gff3";
+    $cmdString1 = "$bin_path/paraAlternative_splicing_analysis $config{'alternative_splicing_analysis'} --tmp_dir paraAlternative_splicing_analysis.gb.tmp --cpu $cpu geneModels.b.gff3 $tmp_dir/3.NGSReads_prediction/intron.txt $tmp_dir/3.NGSReads_prediction/base_depth.txt > geneModels.gb_AS.gff3 2> alternative_splicing.gb.stats && $bin_path/GFF3_add_CDS_for_transcript $genome geneModels.gb_AS.gff3 > geneModels.gb.gff3";
+    $cmdString2 = "$bin_path/paraAlternative_splicing_analysis $config{'alternative_splicing_analysis'} --tmp_dir paraAlternative_splicing_analysis.ge.tmp --cpu $cpu geneModels.e.gff3 $tmp_dir/3.NGSReads_prediction/intron.txt $tmp_dir/3.NGSReads_prediction/base_depth.txt > geneModels.ge_AS.gff3 2> alternative_splicing.ge.stats && $bin_path/GFF3_add_CDS_for_transcript $genome geneModels.ge_AS.gff3 > geneModels.ge.gff3";
+    $cmdString3 = "$bin_path/paraAlternative_splicing_analysis $config{'alternative_splicing_analysis'} --tmp_dir paraAlternative_splicing_analysis.gf.tmp --cpu $cpu geneModels.f.gff3 $tmp_dir/3.NGSReads_prediction/intron.txt $tmp_dir/3.NGSReads_prediction/base_depth.txt > geneModels.gf_AS.gff3 2> alternative_splicing.gf.stats && $bin_path/GFF3_add_CDS_for_transcript $genome geneModels.gf_AS.gff3 > geneModels.gf.gff3";
 }
 else {
     $cmdString1 = "$bin_path/GFF3_add_CDS_for_transcript $genome geneModels.b.gff3 > geneModels.gb.gff3";
@@ -807,12 +720,12 @@ else {
 # 7.4 输出转录本、同源蛋白和Augustus的基因预测结果
 my @cmdString;
 if ( ($pe1 && $pe2) or $single_end or $sam ) {
-    push @cmdString, "cp $tmp_dir/2.NGSReads_prediction/NGSReads_alignment.gff3 $out_prefix.NGSReads_alignment.gff3";
-    push @cmdString, "cp $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.gff3 $out_prefix.NGSReads_prediction.gff3";
+    push @cmdString, "cp $tmp_dir/3.NGSReads_prediction/NGSReads_alignment.gff3 $out_prefix.NGSReads_alignment.gff3";
+    push @cmdString, "cp $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.gff3 $out_prefix.NGSReads_prediction.gff3";
 }
 if ( $protein ) {
-    push @cmdString, "cp $tmp_dir/3.homolog_prediction/homolog_alignment.gff3 $out_prefix.homolog_alignment.gff3";
-    push @cmdString, "cp $tmp_dir/3.homolog_prediction/homolog_prediction.gff3 $out_prefix.homolog_prediction.gff3";
+    push @cmdString, "cp $tmp_dir/2.homolog_prediction/homolog_alignment.gff3 $out_prefix.homolog_alignment.gff3";
+    push @cmdString, "cp $tmp_dir/2.homolog_prediction/homolog_prediction.gff3 $out_prefix.homolog_prediction.gff3";
 }
 if ( (($pe1 && $pe2) or $single_end or $sam) && $protein ) {
     push @cmdString, "cp $tmp_dir/4.evidence_gene_models/evidence_gene_models.gff3 $out_prefix.evidence_prediction.gff3";
@@ -889,22 +802,22 @@ unless ( -e "$tmp_dir/7.output_gene_models.ok" ) {
         close IN;
     }
     # (2) 获取转录组二代测序数据和基因组的匹配率
-    if ( -e "$tmp_dir/2.NGSReads_prediction/b.hisat2/hisat2.log" ) {
-        my $input_file = "$tmp_dir/2.NGSReads_prediction/b.hisat2/hisat2.log";
+    if ( -e "$tmp_dir/3.NGSReads_prediction/b.hisat2/hisat2.log" ) {
+        my $input_file = "$tmp_dir/3.NGSReads_prediction/b.hisat2/hisat2.log";
         open IN, $input_file or die "Error: Can not open file $input_file, $!";
         while (<IN>) {
             print OUT "The alignment rate of RNA-Seq reads is: $1\n\n" if m/^(\S+) overall alignment rate/;
         }
         close IN;
     # (3) 获取转录组数据预测的基因数量的统计信息
-        my $input_file = "$tmp_dir/2.NGSReads_prediction/NGSReads_prediction.A.log";
+        my $input_file = "$tmp_dir/3.NGSReads_prediction/NGSReads_prediction.A.log";
         print OUT "The statistics of gene models predicted by NGS Reads:\n";
         print OUT `tail -n 1 $input_file`;
         print OUT "\n";
     }
     # (4) 获取同源蛋白预测的基因数量的统计信息
     if ( $protein ) {
-        my $input_file = "$tmp_dir/3.homolog_prediction/homolog_prediction.log";
+        my $input_file = "$tmp_dir/2.homolog_prediction/homolog_prediction.log";
         print OUT "The statistics of gene models predicted by homolog:\n";
         print OUT `tail -n 3 $input_file`;
     }
@@ -944,10 +857,10 @@ if ( $delete_unimportant_intermediate_files ) {
     print STDERR "Due to the --delete_unimportant_intermediate_files was set, so the unimportant and large intermediate files are being deleted...\n";
     # 删除 1.RepeatMasker 文件夹下的数据
     push @cmdString, "rm -rf $tmp_dir/1.RepeatMasker/repeatMasker_Dfam $tmp_dir/1.RepeatMasker/repeatMasker_RepBase $tmp_dir/1.RepeatMasker/repeatModeler";
-    # 删除 2.NGSReads_prediction 文件夹下的数据
-    push @cmdString, "rm -rf $tmp_dir/2.NGSReads_prediction/a.trimmomatic $tmp_dir/2.NGSReads_prediction/b.hisat2 $tmp_dir/2.NGSReads_prediction/c.transcript";
-    # 删除 3.homolog_prediction 文件夹下的数据
-    push @cmdString, "rm -rf $tmp_dir/3.homolog_prediction/a.MMseqs2CalHits $tmp_dir/3.homolog_prediction/b.hitToGenePrediction $tmp_dir/3.homolog_prediction/c.getGeneModels";
+    # 删除 3.NGSReads_prediction 文件夹下的数据
+    push @cmdString, "rm -rf $tmp_dir/3.NGSReads_prediction/a.trimmomatic $tmp_dir/3.NGSReads_prediction/b.hisat2 $tmp_dir/3.NGSReads_prediction/c.transcript";
+    # 删除 2.homolog_prediction 文件夹下的数据
+    push @cmdString, "rm -rf $tmp_dir/2.homolog_prediction/a.MMseqs2CalHits $tmp_dir/2.homolog_prediction/b.hitToGenePrediction $tmp_dir/2.homolog_prediction/c.getGeneModels";
     # 删除 5.augustus 文件夹下的数据
     push @cmdString, "rm -rf $tmp_dir/5.augustus/aug_para_with_hints";
     # 删除 6.combine_gene_models 文件夹下的数据
@@ -977,8 +890,8 @@ sub statistics_combination {
     # （1）分析NGS reads、homolog和AUGUSTUS三种方法预测的基因数量，合并后的基因数量。
     my ($augustus_gene_num, $NGSreads_gene_num, $homolog_gene_num) = (0, 0, 0);
     $augustus_gene_num = `grep -P "\tgene\t" $tmp_dir/5.augustus/augustus.gff3 | wc -l`;
-    $NGSreads_gene_num = `grep -P "\tgene\t" $tmp_dir/2.NGSReads_prediction/NGSReads_prediction.raw.gff3 | wc -l`;
-    $homolog_gene_num = `grep -P "\tgene\t" $tmp_dir/3.homolog_prediction/homolog_prediction.gff3 | wc -l`;
+    $NGSreads_gene_num = `grep -P "\tgene\t" $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.raw.gff3 | wc -l`;
+    $homolog_gene_num = `grep -P "\tgene\t" $tmp_dir/2.homolog_prediction/homolog_prediction.gff3 | wc -l`;
     chomp($augustus_gene_num); chomp($NGSreads_gene_num); chomp($homolog_gene_num);
     my $input_file = "$tmp_dir/6.combine_gene_models/geneModels.a.gff3";
     open IN, $input_file or die "Error: Can not open file $input_file, $!";
