@@ -70,8 +70,8 @@ if ( $help_flag ) { die $usage }
 $cpu ||= 8;
 $ratio_to_max_CPU_threads ||= 0.8;
 $max_ratio_for_job_num_change ||= 0.5;
-$refresh_time ||= 1;
-$rounds_delay ||= 1;
+$refresh_time ||= 5;
+$rounds_delay ||= 5;
 
 # 分析允许的最大并行数
 $max_CPU_ratio_to_max_CPU_threads ||= 100;

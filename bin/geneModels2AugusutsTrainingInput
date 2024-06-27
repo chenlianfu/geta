@@ -281,7 +281,8 @@ foreach my $gene_id (sort keys %gff) {
 close OUT;
 
 # 进一步进行过滤
-my (%keep, $not_complete_num, $few_cds_num, $short_cds_num, $little_cds_exon_ration_num, $total_num, $redundant_num, $long_cds_num, $keep_num);
+my ($not_complete_num, $few_cds_num, $short_cds_num, $little_cds_exon_ration_num, $total_num, $redundant_num, $long_cds_num, $keep_num) = (0,0,0,0,0,0,0,0);
+my %keep;
 foreach my $gene_id (sort keys %gff) {
     $total_num ++;
     if (exists $delete{$gene_id}) {

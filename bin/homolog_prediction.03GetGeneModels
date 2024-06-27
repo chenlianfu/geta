@@ -178,8 +178,8 @@ while (<IN>) {
             print OUTD "$gff3_out\n"; $numD ++;
         }
         if ( $output_raw_GFF3 ) {
-            $gff3_out =~ s/Type=[^;]+;?//;
-            print OUTE $gff3_out;
+            #$gff3_out =~ s/Type=[^;]+;?//g;
+            print OUTE "$gff3_out\n";
         }
     }
 }

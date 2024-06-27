@@ -21,7 +21,7 @@ For example:
 
     本程序能利用train.gb中的基因模型，对AUGUSTUS的参数进行优化。相比于AUGUSTUS的optimize_augustus.pl程序一次仅能对一个参数进行优化，本程序可以充分利用所有CPU线程资源，一次性对所有参数同时优化，能减少计算时间消耗。本程序功能上也有减配：仅支持常规的AUGUSTUS参数优化，不支持CGP(comparative gene prediction)参数优化；要求用于检测的基因模型的尾部CDS包含终止密码子。
     程序输入的Species_Directory必须是一个物种文件夹名称，配合Linux环境变量中\$AUGUSTUS_CONFIG_PATH指定的路径，或输入参数--AUGUSTUS_CONFIG_PATH(优先级更高)指定的路径。程序对\$AUGUSTUS_CONFIG_PATH/species/Species_Directory/Species_Directory_parameters.cfg配置文件中的28个参数进行优化。若该配置文件不存在，则程序无法运行。
-    程序运行原理：（1）首先解析metapars.cfg文件获得各个参数的取值范围，准备对每个参数最多取6个值，进行准确性检测，选最优值。（2）根据train.gb文件，随机挑选最多600条序列用于准确性检测。（3）对总共28个参数，每个参数约6个值，再将用于检测的600条序列分隔成多份，分别生成数据文件和命令行，调用ParaFly并行检测分析，得到nucleotide、exon和gene水平的sensitivity和specifity值，计算得到整体accuracy = (3*nucleotide_sensitivity + 2*nucleotide_specificity + 4*exon_sensitivity + 3*exon_specificity + 2*gene_sensitivity + 1*gene_specificity)/15。（4）选择28个参数的最优值，计算其准确性均值。若某个参数最优值的准确性超过了上一轮的均值，则对parameters.cfg文件内容中的参数进行修改优化。（5）程序进行多轮优化，直至没有参数能被优化，或完成指定轮数截止。在进行到第3轮优化后，若某参数值的准确性有提升，则程序额外对参数的范围也进行收缩，以利于下一轮找到更优的参数值。（6）此外，程序还会对/Constant/gc_range_min、/Constant/gc_range_max、/Constant/amberprob、/Constant/ochreprob和/Constant/opalprob这5个参数进行修正。
+    程序运行原理：（1）首先解析metapars.cfg文件获得各个参数的取值范围，准备对每个参数最多取6个值，进行准确性检测，选最优值。（2）根据train.gb文件，随机挑选最多600条序列用于准确性检测。（3）对总共28个参数，每个参数约6个值，再将用于检测的600条序列分隔成多份，分别生成数据文件和命令行，调用parafly并行检测分析，得到nucleotide、exon和gene水平的sensitivity和specifity值，计算得到整体accuracy = (3*nucleotide_sensitivity + 2*nucleotide_specificity + 4*exon_sensitivity + 3*exon_specificity + 2*gene_sensitivity + 1*gene_specificity)/15。（4）选择28个参数的最优值，计算其准确性均值。若某个参数最优值的准确性超过了上一轮的均值，则对parameters.cfg文件内容中的参数进行修改优化。（5）程序进行多轮优化，直至没有参数能被优化，或完成指定轮数截止。在进行到第3轮优化后，若某参数值的准确性有提升，则程序额外对参数的范围也进行收缩，以利于下一轮找到更优的参数值。（6）此外，程序还会对/Constant/gc_range_min、/Constant/gc_range_max、/Constant/amberprob、/Constant/ochreprob和/Constant/opalprob这5个参数进行修正。
 
     --onlytrain <string>    default: None
     输入一个genebank格式文件，包含一些仅用于etraining的基因模型。
@@ -55,13 +55,17 @@ For example:
     --min_intron_len <int>    default: 30
     设置augustus/etraining程序运行的--min_intron_len参数。augustus默认的参数值是39，对于一些小基因组来说，偏大。推荐对于较 小基因组，将该参数值设置为20。
 
+    --put_massive_temporary_data_into_memory    default: None
+    设置将海量的临时文件存放到内存中。这样能避免磁盘I/O不足而造成程序运行减缓，但需要消耗更多内存。本流程在很多步骤中对数据进行了分割，再通过并行化来加速计算，但这对磁盘形成了极大的I/O负荷。因此，当磁盘性能较差时会严重影响计算速度。若系统内存充足，推荐添加本参数，从而将海量的临时数据存放到代表内存的/dev/shm文件夹下，以加速程序运行。此外 ，程序在数据分割和并行化步骤运行完毕后，会自动删除/dev/shm中的临时数据以释放内存。
+    设置该参数后，程序会自动将每一轮优化过程中生成的临时文件夹放入到/dev/shm文件夹中。
+
     --help    default: None
     display this help and exit.
 
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($onlytrain, $cpu, $gene_models_num_per_test, $gene_models_minimum_num_for_test, $gene_models_maximum_num_for_test, $gene_models_ratio_for_test, $rounds, $tmp_dir, $AUGUSTUS_CONFIG_PATH, $pstep, $reduced_round, $help_flag, $min_intron_len, $cmdString);
+my ($onlytrain, $cpu, $gene_models_num_per_test, $gene_models_minimum_num_for_test, $gene_models_maximum_num_for_test, $gene_models_ratio_for_test, $rounds, $tmp_dir, $AUGUSTUS_CONFIG_PATH, $pstep, $reduced_round, $help_flag, $min_intron_len, $put_massive_temporary_data_into_memory, $cmdString);
 GetOptions(
     "onlytrain:s" => \$onlytrain,
     "cpu:i" => \$cpu,
@@ -75,6 +79,7 @@ GetOptions(
     "pstep:i" => \$pstep,
     "reduced_round:i" => \$reduced_round,
     "min_intron_len:i" => \$min_intron_len,
+    "put_massive_temporary_data_into_memory" => \$put_massive_temporary_data_into_memory,
     "help" => \$help_flag,
 );
 $cpu ||= 8;
@@ -83,13 +88,19 @@ $gene_models_minimum_num_for_test ||= 100;
 $gene_models_maximum_num_for_test ||= 600;
 $gene_models_ratio_for_test ||= 0.20;
 $rounds ||= 6;
+$pstep ||= 6;
+$reduced_round ||= 3;
+$min_intron_len ||= 30;
+
 my $date = `date +%Y%m%d%H%M%S`; chomp($date);
 $tmp_dir ||= "tmp_$date$$";
 $tmp_dir = abs_path($tmp_dir);
 mkdir $tmp_dir unless -e $tmp_dir;
-$pstep ||= 6;
-$reduced_round ||= 3;
-$min_intron_len ||= 30;
+my $tmp_round = $tmp_dir;
+if ( $put_massive_temporary_data_into_memory ) {
+    $tmp_round = "/dev/shm/BGM2AT.optimize_augustus_$date$$";
+    mkdir $tmp_round unless -e $tmp_round;
+}
 
 if ( $help_flag ) { die $usage }
 
@@ -189,10 +200,10 @@ while ( $round_current <= $rounds  ) {
     my %metapars = &get_metapars($file_metapars);
 
     # 准备本轮数据分析的文件夹
-    if ( ! -e "$tmp_dir/round$round_current" ) {
-        mkdir "$tmp_dir/round$round_current" or die "Error: can not create file $tmp_dir/round$round_current, $!";
+    if ( ! -e "$tmp_round/round$round_current" ) {
+        mkdir "$tmp_round/round$round_current" or die "Error: can not create file $tmp_round/round$round_current, $!";
     }
-    chdir "$tmp_dir/round$round_current";
+    chdir "$tmp_round/round$round_current";
     # 进行准确性检测
     &analysis(\%metapars, \@geneModels_test, \@geneModels_onlytrain);
 
@@ -249,11 +260,17 @@ while ( $round_current <= $rounds  ) {
     print OUT $outStats;
     close OUT;
 
-    $cmdString = "rm -rf $tmp_dir/round$round_current";
+    $cmdString = "rm -rf $tmp_round/round$round_current";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system($cmdString) == 0 or die "Error: Failed to excute: $cmdString\n";
 
     $round_current ++;
+}
+
+if ( $put_massive_temporary_data_into_memory ) {
+    $cmdString = "rm -rf $tmp_round";
+    print STDERR (localtime) . ": CMD: $cmdString\n";
+    system($cmdString) == 0 or die "Error: Failed to excute: $cmdString\n";
 }
 
 sub get_accuracy_value {
@@ -670,7 +687,7 @@ sub analysis {
     open OUT, ">", "prepare_data.ok"; close OUT;
     }
 
-    my $cmdString = "ParaFly -c command.list -CPU $cpu &> ParaFly.log";
+    my $cmdString = "parafly -c command.list -CPU $cpu &> parafly.log";
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system($cmdString) == 0 or die "Error: Failed to excute: $cmdString\n";
 }

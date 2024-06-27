@@ -3,7 +3,9 @@ use strict;
 
 my $usage = <<USAGE;
 Usage:
-    perl $0 strandard.gff3 query.gff3
+    perl $0 strandard.gff3 query.gff3 > out.txt 2> Consistent_gene_or_CDS.tab
+
+    This program compares the gene models in two GFF3 files, using the gene models from the first input GFF3 file as a reference to check the accuracy of the gene models in the second GFF3 file.
 
 USAGE
 if (@ARGV==0){die $usage}
@@ -47,11 +49,14 @@ while (<IN>) {
 close IN;
 
 # 对标准GFF3文件进行解析，得到gene的CDS信息，并进行INDEX数据库
-my (%gene_info, %CDS_info, %index, $total_gene_number, $total_CDS_number, $total_bp_number);
+my (%gene_info, %CDS_info, %index, $total_gene_number, %CDS_ref);
 foreach my $gene_id (keys %gene) {
+    # 计算ref中基因的总数
     my $gene_info = $feature{$gene_id};
     $total_gene_number ++ if $gene_info =~ m/\tmRNA\t/;
     #print "OK:\t$gene_id\n";
+    
+    # 分析基因的CDS信息，给所有可变剪接转录本的CDS去冗余获得，存放到 %CDS_info 中。
     chomp($gene_info);
     my @gene_info = split /\n/, $gene_info;
     foreach (@gene_info) {
@@ -77,45 +82,37 @@ foreach my $gene_id (keys %gene) {
         $gene_info{$gene_id}{$CDS} = 1;
     }
 
+    # 给基因位置进行索引
     my $gene_desc = $gene{$gene_id};
     @_ = split /\t/, $gene_desc;
+    my ($chr, $strand) = ($_[0], $_[6]);
     my $int1 = int($_[3] / 1000);
     my $int2 = int($_[4] / 1000);
     foreach ($int1 .. $int2) {
         $index{$_[0]}{$_[6]}{$_}{$gene_id} = 1;
     }
 
-    my @CDSs = sort {$a <=> $b} keys %{$CDS_info{$gene_id}};
-    $total_CDS_number += @CDSs;
-    my ($start, $end) = split /\t/, $CDSs[0];
-    $total_bp_number += $end - $start + 1;
-    shift @CDSs;
-    foreach (@CDSs) {
-        @_ = split /\t/, $_;
-        if ($_[0] > $end) {
-            $total_bp_number += $_[1] - $_[0] + 1;
-            ($start, $end) = @_;
-        }
-        else {
-            if ($_[1] > $end) {
-                $total_bp_number += $_[1] - $end;
-                $end = $_[1];
-            }
-        }
+    # 得到ref中所有CDS信息。
+    foreach ( keys %{$CDS_info{$gene_id}} ) {
+        $CDS_ref{$chr}{$strand}{$_} = 1;
     }
 }
+
+my ($total_CDS_number, $total_bp_number) = &cal_CDS_and_bp_num(\%CDS_ref);
 
 #print "$total_gene_number\t$total_CDS_number\t$total_bp_number\n";
 
 # 进行positive分析
-my ($query_gene_number, $positive_gene_number, $query_CDS_number, $positive_CDS_number, $query_bp_number, $positive_bp_number, $positive_bp_number_ref, %positive_gene);
+my ($query_gene_number, %positive_gene, %CDS_query, %CDS_same, %CDS_overlap);
 foreach my $gene_id (keys %gene_query) {
+    # 分析当前基因的位置
     my $gene_desc = $gene_query{$gene_id};
     @_ = split /\t/, $gene_desc;
-    my $strand = $_[6];
+    my ($chr, $strand) = ($_[0], $_[6]);
     my $int1 = int($_[3] / 1000);
     my $int2 = int($_[4] / 1000);
     #print "OK2:\t$gene_id\t$int1\t$int2\n";
+    # 寻找重叠的ref基因ID
     my (%target_gene_id, %target_CDS);
     foreach my $int ($int1 .. $int2) {
         my @id = keys %{$index{$_[0]}{$_[6]}{$int}};
@@ -129,6 +126,7 @@ foreach my $gene_id (keys %gene_query) {
     #foreach (keys %target_gene_id) { print "gene_DB:\t$_\n"; }
     #foreach (keys %target_CDS) { print "CDS_DB:\t$_\n"; }
 
+    # 检测query中基因的数量
     my $gene_info = $feature_query{$gene_id};
     if ($gene_info =~ m/\tmRNA\t/) {
         $query_gene_number ++;
@@ -137,6 +135,7 @@ foreach my $gene_id (keys %gene_query) {
         next;
     }
 
+    # 分析当前基因中所有转录本的CDS信息
     chomp($gene_info);
     my @gene_info = split /\n/, $gene_info;
     my (%CDS, %transcript_CDS);
@@ -151,6 +150,7 @@ foreach my $gene_id (keys %gene_query) {
                      @_ = split /\t/;
                      push @CDS, "$_[3]\t$_[4]";
                      $CDS{"$_[3]\t$_[4]"} = 1;
+                     $CDS_query{$chr}{$strand}{"$_[3]\t$_[4]"} = 1;
                  }
              }
              @CDS = sort {$a <=> $b} @CDS;
@@ -159,26 +159,8 @@ foreach my $gene_id (keys %gene_query) {
         }
     }
 
-    my @CDS = sort {$a <=> $b} keys %CDS;
-    $query_CDS_number += @CDS;
-    my ($start, $end) = split /\t/, $CDS[0];
-    $query_bp_number += $end - $start + 1;
-    shift @CDS;
-    foreach (@CDS) {
-        @_ = split /\t/, $_;
-        if ($_[0] > $end) {
-            $query_bp_number += $_[1] - $_[0] + 1;
-            ($start, $end) = @_;
-        }
-        else {
-            if ($_[1] > $end) {
-                $query_bp_number += $_[1] - $end;
-                $end = $_[1];
-            }
-        }
-    }
-
-    my (%positive_CDS, %positive_CDS_ref);
+    # 检测是否有转录本的CDS信息和ref中的转录本一致。
+    my $equal_ref_gene_id;
     my $same = 0;
     foreach (keys %transcript_CDS) {
         my $transcript_CDS =  $_;
@@ -193,7 +175,6 @@ foreach my $gene_id (keys %gene_query) {
         CDS_COMPARE: foreach my $target_gene_id (keys %target_gene_id) {
             my @CDS_target = keys %{$gene_info{$target_gene_id}};
             foreach my $CDS_target (@CDS_target) {
-                my $CDS_target_orig = $CDS_target;
                 if ($strand eq "+") {
                     $CDS_target =~ s/\d+//;
                 }
@@ -203,23 +184,17 @@ foreach my $gene_id (keys %gene_query) {
 
                 if ($transcript_CDS_for_validation eq $CDS_target) {
                     $same = 1;
-                    my @transcript_CDS = split /\n/, $transcript_CDS;
-                    foreach (@transcript_CDS) {
-                        $positive_CDS{$_} = 1;
-                    }
-                    foreach (split /\n/, $CDS_target_orig) {
-                        $positive_CDS_ref{$_} = 1;
-                    }
+                    $equal_ref_gene_id = $target_gene_id;
 
-                    print STDERR "$gene_id\t$target_gene_id\n";
+                    print STDERR "Same gene: $gene_id\t$target_gene_id\n";
                     last CDS_COMPARE;
                 }
             }
         }
     }
-    $positive_gene_number ++ if $same == 1;
+    $positive_gene{$equal_ref_gene_id} = 1 if $same == 1;
 
-    my %bp_cds;
+    # 寻找共同或重叠的CDS
     foreach my $cds (keys %CDS) {
         foreach (keys %target_CDS) {
             @_ = split /\t/;
@@ -229,76 +204,76 @@ foreach my $gene_id (keys %gene_query) {
                 push @cds_region, @_;
                 push @cds_region, @cds;
                 @cds_region = sort {$a <=> $b} @cds_region;
-                $bp_cds{"$cds_region[1]\t$cds_region[2]"} = 1;
+                $CDS_overlap{$chr}{$strand}{"$cds_region[1]\t$cds_region[2]"} = 1;
             }
 
             if ($_ eq $cds) {
-                $positive_CDS{$cds} = 1;
+                $CDS_same{$chr}{$strand}{$cds} = 1;
+                print STDERR "Same CDS: $chr\t$strand\t$cds\n";
                 last;
-            }
-        }
-    }
-    $positive_CDS_number += keys %positive_CDS;
-
-    my (%bp_cds_query, %bp_cds_ref);
-    foreach (keys %bp_cds) { $bp_cds_query{$_} = 1; $bp_cds_ref{$_} = 1; }
-    foreach (keys %positive_CDS) { $bp_cds_query{$_} = 1; }
-    foreach (keys %positive_CDS_ref) { $bp_cds_ref{$_} = 1; }
-
-    my @bp_cds = sort {$a <=> $b} keys %bp_cds_query;
-    my ($start, $end) = split /\t/, $bp_cds[0];
-    $positive_bp_number += $end - $start + 1;
-    shift @bp_cds;
-    foreach (@bp_cds) {
-        @_ = split /\t/, $_;
-        if ($_[0] > $end) {
-            $positive_bp_number += $_[1] - $_[0] + 1;
-            ($start, $end) = @_;
-        }
-        else { 
-            if ($_[1] > $end) {
-                $positive_bp_number += $_[1] - $end;
-                $end = $_[1];
-            }
-        }
-    }
-
-    my @bp_cds = sort {$a <=> $b} keys %bp_cds_ref;
-    my ($start, $end) = split /\t/, $bp_cds[0];
-    $positive_bp_number_ref += $end - $start + 1;
-    shift @bp_cds;
-    foreach (@bp_cds) {
-        @_ = split /\t/, $_;
-        if ($_[0] > $end) {
-            $positive_bp_number_ref += $_[1] - $_[0] + 1;
-            ($start, $end) = @_;
-        }
-        else { 
-            if ($_[1] > $end) {
-                $positive_bp_number_ref += $_[1] - $end;
-                $end = $_[1];
             }
         }
     }
 }
 
-#print "$total_gene_number\t$total_CDS_number\t$total_bp_number\n";
-#print "$query_gene_number\t$positive_gene_number\t$query_CDS_number\t$positive_CDS_number\t$query_bp_number\t$positive_bp_number\n";
+my $positive_gene_number = %positive_gene;
+my $positive_CDS_number = &cal_CDS_num(\%CDS_same);
+my ($query_CDS_number, $query_bp_number) = &cal_CDS_and_bp_num(\%CDS_query);
+my ($positive_CDS_overlap_num, $positive_bp_number) = &cal_CDS_and_bp_num(\%CDS_overlap);
 my $sensitivity_gene = $positive_gene_number  * 100 / $total_gene_number;
 my $sensitivity_CDS = $positive_CDS_number * 100 / $total_CDS_number;
-my $sensitivity_bp = $positive_bp_number_ref * 100 / $total_bp_number;
+my $sensitivity_bp = $positive_bp_number * 100 / $total_bp_number;
 my $specificity_gene = $positive_gene_number * 100 / $query_gene_number;
 my $specificity_CDS = $positive_CDS_number * 100 / $query_CDS_number;
 my $specificity_bp = $positive_bp_number * 100 / $query_bp_number;
-=cut
-print "\tTotal_number\tPredicted_number\tTrue_positive\tSensivitity\tSpecificity\n";
-printf "Gene_level\t$total_gene_number\t$query_gene_number\t$positive_gene_number\t%.2f\%\t%.2f\%\t\n", $sensitivity_gene, $specificity_gene;
-printf "CDS_level\t$total_CDS_number\t$query_CDS_number\t$positive_CDS_number\t%.2f\%\t%.2f\%\t\n", $sensitivity_CDS, $specificity_CDS;
-printf "Nucleotide\t$total_bp_number\t$query_bp_number\t$positive_bp_number\t%.2f\%\t%.2f\%\t\n", $sensitivity_bp, $specificity_bp;
-=cut
+
 print "gene_prediction_method\tgene_standard\tgene_predicted\tgene_TP\tgene_sensitivity\tgene_specificity\tCDS_standard\tCDS_predicted\tCDS_TP\tCDS_sensitivity\tCDS_specificity\tbp_standard\tbp_predicted\tbp_TP\tbp_sensitivity\tbp_specificity\n";
 printf "@ARGV[1]\t$total_gene_number\t$query_gene_number\t$positive_gene_number\t%.2f\%\t%.2f\%\t$total_CDS_number\t$query_CDS_number\t$positive_CDS_number\t%.2f\%\t%.2f\%\t$total_bp_number\t$query_bp_number\t$positive_bp_number\t%.2f\%\t%.2f\%\n", $sensitivity_gene, $specificity_gene, $sensitivity_CDS, $specificity_CDS, $sensitivity_bp, $specificity_bp;
 
-foreach (sort keys %positive_gene) {
-    print STDERR "$_\n";
+
+sub cal_CDS_and_bp_num {
+    # 输入是一个哈希：染色体 -> 正负链 -> 制表符分隔的CDS起始结束 -> 1。
+    my %CDS = %{$_[0]};
+    my ($CDS_num, $bp_num) = (0, 0);
+
+    foreach my $chr ( keys %CDS ) {
+        foreach my $strand ( keys %{$CDS{$chr}} ) {
+            my @CDS = sort { $a <=> $b } keys %{$CDS{$chr}{$strand}};
+            $CDS_num += @CDS;
+
+            my ($start, $end) = split /\t/, $CDS[0];
+            $bp_num += $end - $start + 1;
+            shift @CDS;
+            foreach ( @CDS ) {
+                @_ = split /\t/, $_;
+                if ($_[0] > $end) {
+                    $bp_num += $_[1] - $_[0] + 1;
+                    ($start, $end) = @_;
+                }
+                else {
+                    if ($_[1] > $end) {
+                        $bp_num += $_[1] - $end;
+                        $end = $_[1];
+                    }
+                }
+            }
+
+        }
+    }
+
+    return ($CDS_num, $bp_num);
+}
+
+sub cal_CDS_num {
+    my %CDS = %{$_[0]};
+    my $CDS_num = 0;
+
+    foreach my $chr ( keys %CDS ) {
+        foreach my $strand ( keys %{$CDS{$chr}} ) {
+            my @CDS = keys %{$CDS{$chr}{$strand}};
+            $CDS_num += @CDS;
+        }
+    }
+
+    return $CDS_num;
 }

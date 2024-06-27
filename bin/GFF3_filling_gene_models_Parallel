@@ -149,8 +149,12 @@ if ( defined $ouput_filling_detail_tab ) {
     close OUT;
 }
 
-my (%gene, %mRNA, %Multi_CDS, %Multi_CDS_5prime_partial, %Multi_CDS_3prime_partial, %Multi_CDS_internal, %Single_CDS, %Single_CDS_5prime_partial, %Single_CDS_3prime_partial, %Single_CDS_internal);
+my (%gene, %mRNA, %Multi_CDS, %Multi_CDS_5prime_partial, %Multi_CDS_3prime_partial, %Multi_CDS_internal, %Single_CDS, %Single_CDS_5prime_partial, %Single_CDS_3prime_partial, %Single_CDS_internal, %filled_to_complete_gene);
 foreach ( @info ) {
+    if ( m/^Filled_to_complete: (\S+)/ ) {
+        $filled_to_complete_gene{$1} = 1;
+        next;
+    }
     @_ = split /\t/;
     $gene{$_[0]} = 1;
     $mRNA{$_[1]} = 1;
@@ -163,7 +167,7 @@ foreach ( @info ) {
     $Single_CDS_3prime_partial{$_[0]} = 1 if ($_[2] eq "Single_CDS" && $_[3] eq "3prime_partial");
     $Single_CDS_internal{$_[0]} = 1 if ($_[2] eq "Single_CDS" && $_[3] eq "internal");
 }
-my ($gene, $mRNA, $Multi_CDS, $Multi_CDS_5prime_partial, $Multi_CDS_3prime_partial, $Multi_CDS_internal, $Single_CDS, $Single_CDS_5prime_partial, $Single_CDS_3prime_partial, $Single_CDS_internal) = (0,0,0,0,0,0,0,0,0,0);
+my ($gene, $mRNA, $Multi_CDS, $Multi_CDS_5prime_partial, $Multi_CDS_3prime_partial, $Multi_CDS_internal, $Single_CDS, $Single_CDS_5prime_partial, $Single_CDS_3prime_partial, $Single_CDS_internal, $filled_to_complete_gene) = (0,0,0,0,0,0,0,0,0,0,0);
 $gene = %gene;
 $mRNA= %mRNA;
 $Multi_CDS = %Multi_CDS;
@@ -174,8 +178,9 @@ $Single_CDS = %Single_CDS;
 $Single_CDS_5prime_partial = %Single_CDS_5prime_partial;
 $Single_CDS_3prime_partial = %Single_CDS_3prime_partial;
 $Single_CDS_internal = %Single_CDS_internal;
+$filled_to_complete_gene = %filled_to_complete_gene;
 
-my $out = "对 $gene 个基因的 $mRNA 个mRNA进行了末端填补。
+my $out = "对 $gene 个基因的 $mRNA 个mRNA进行了末端填补，其中有 $filled_to_complete_gene 个基因填补完整。
 对 $Multi_CDS 个多CDS基因进行了末端填补，其中5prime_partial，3prime_partial和internal的基因数量分别为：$Multi_CDS_5prime_partial, $Multi_CDS_3prime_partial, $Multi_CDS_internal。
 对 $Single_CDS 个单CDS基因模型进行了末端填补，其中5prime_partial，3prime_partial和internal的基因数量分别为：$Single_CDS_5prime_partial，$Single_CDS_3prime_partial，$Single_CDS_internal。\n";
 

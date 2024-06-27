@@ -5,7 +5,9 @@ use Getopt::Long;
 use Cwd qw/abs_path getcwd cwd/;
 use File::Basename;
 
-my $binPath = dirname($0);
+my $command_line = "$0 " . join(" ", @ARGV);
+my $bin_path = dirname($0);
+my $software_dir = $bin_path; $software_dir =~ s/\/bin$//;
 
 my $usage = <<USAGE;
 Usage:
@@ -70,9 +72,10 @@ Usage:
     本程序的运行需要调用其同目录下的parsing_blast_result.pl、fillingEndsOfGeneModels和GFF3Clear指令；也依赖可以直接运行的指令diamond。
 
 USAGE
-if (@ARGV==0){die $usage}
+my $usage_english = &get_usage_english();
+if (@ARGV==0){die $usage_english}
 
-my ($out_prefix, $max_hits_num_per_match_region, $max_hit_num_per_single_species, $cpu, $identity, $evalue, $homolog_coverage, $method, $genetic_code, $tmp_dir, $threshod_ratio_of_intron_Supported_times, $output_raw_GFF3, $output_alignment_GFF3, $max_alignment_num_for_each_gene_region, $put_massive_temporary_data_into_memory, $help_flag);
+my ($out_prefix, $max_hits_num_per_match_region, $max_hit_num_per_single_species, $cpu, $identity, $evalue, $homolog_coverage, $method, $genetic_code, $tmp_dir, $threshod_ratio_of_intron_Supported_times, $output_raw_GFF3, $output_alignment_GFF3, $max_alignment_num_for_each_gene_region, $put_massive_temporary_data_into_memory, $help, $chinese_help);
 my (@cmdString, $cmdString, $cmdString1, $cmdString2, $cmdString3, $cmdString4, $cmdString5);
 GetOptions(
     "out_prefix:s" => \$out_prefix,
@@ -90,8 +93,27 @@ GetOptions(
     "output_alignment_GFF3:s" => \$output_alignment_GFF3,
     "max_alignment_num_for_each_gene_region:i" => \$max_alignment_num_for_each_gene_region,
     "put_massive_temporary_data_into_memory!" => \$put_massive_temporary_data_into_memory,
-    "help" => \$help_flag,
+    "help" => \$help,
+    "chinese_help" => \$chinese_help,
 );
+if ( $chinese_help ) { die $usage }
+if ( $help ) { die $usage_english }
+
+# 在标准错误输出中给出程序的运行命令。
+my $pwd = `pwd`;
+my $programe_name = basename($0);
+print STDERR "\n#################### $programe_name | Start ####################\n";
+print STDERR "PWD: $pwd" . (localtime) . ": CMD: " . $command_line . "\n";
+print STDERR "============================================\n";
+
+########### 解析参数 #################
+# 使用绝对路径
+$output_alignment_GFF3 = abs_path($output_alignment_GFF3) if $output_alignment_GFF3;
+$output_raw_GFF3 = abs_path($output_raw_GFF3) if $output_raw_GFF3;
+my $input_protein = abs_path($ARGV[0]);
+my $input_genome = abs_path($ARGV[1]);
+
+# 设置参数的默认值
 $out_prefix ||= "out";
 $max_hits_num_per_match_region ||= 10;
 $max_hit_num_per_single_species ||= 2;
@@ -105,29 +127,22 @@ foreach ( split /,/, $method ) {
     warn "Warning: The method $_ is not correct.\n" unless ( $_ eq "exonerate" or $_ eq "genewise" or $_ eq "gth" );
 }
 $genetic_code ||= 1;
+$threshod_ratio_of_intron_Supported_times = 0.5 unless defined $threshod_ratio_of_intron_Supported_times;
+$max_alignment_num_for_each_gene_region ||= 5;
+
+# 准备临时文件夹路径
 my $date = `date +%Y%m%d%H%M%S`; chomp($date);
 $tmp_dir ||= "tmp_$date$$";
 $tmp_dir = abs_path($tmp_dir);
 mkdir $tmp_dir unless -e $tmp_dir;
-$threshod_ratio_of_intron_Supported_times = 0.5 unless defined($threshod_ratio_of_intron_Supported_times);
-$output_alignment_GFF3 = abs_path($output_alignment_GFF3) if $output_alignment_GFF3;
-$output_raw_GFF3 = abs_path($output_raw_GFF3) if $output_raw_GFF3,
-$max_alignment_num_for_each_gene_region ||= 5;
-
-if ( $help_flag ) { die $usage }
-
-my $input_protein = abs_path($ARGV[0]);
-my $input_genome = abs_path($ARGV[1]);
-
-my $pwd = `pwd`; print STDERR "##########\nPWD (Current Directory): $pwd";
-print STDERR (localtime) . "CMD (Main Program): $0 " . join(" ", @ARGV) . "\n##########\n\n";
+###############################
 
 
 # 1. 运行MMseqs2分析，寻找蛋白序列和参考基因组的匹配位点。
 print STDERR "1. align genome sequences against homolog proteins through MMseqs2 software.\n";
 chdir $tmp_dir;
 my $pwd = `pwd`; print STDERR "PWD: $pwd";
-$cmdString = "$binPath/homolog_prediction.01MMseqs2CalHits --cpu $cpu --identity $identity --evalue $evalue --homolog_coverage $homolog_coverage --threshold_Hit_cover_ratio 0.9 --threshold_Hit_score_ratio 0.4 --threshold_species_num $max_hit_num_per_single_species --threshold_Hit_num $max_hits_num_per_match_region --tmp_dir a.MMseqs2CalHits $input_protein $input_genome > $out_prefix.filteredHits.tab 2> a.MMseqs2CalHits.log";
+$cmdString = "$bin_path/homolog_prediction.01MMseqs2CalHits --cpu $cpu --identity $identity --evalue $evalue --homolog_coverage $homolog_coverage --threshold_Hit_cover_ratio 0.9 --threshold_Hit_score_ratio 0.4 --threshold_species_num $max_hit_num_per_single_species --threshold_Hit_num $max_hits_num_per_match_region --tmp_dir a.MMseqs2CalHits $input_protein $input_genome > $out_prefix.filteredHits.tab 2> a.MMseqs2CalHits.log";
 
 &execute_cmds($cmdString, "a.MMseqs2CalHits.ok");
 
@@ -135,8 +150,8 @@ $cmdString = "$binPath/homolog_prediction.01MMseqs2CalHits --cpu $cpu --identity
 print STDERR "2. predicting gene models according the Hits of homologs.\n";
 my @cmdString;
 if ( $put_massive_temporary_data_into_memory ) {
-	# 将海量分割的数据文件放入内存运行
-	# 首先获取临时文件夹路径，以利于程序中断后继续运行。
+    # 将海量分割的数据文件放入内存运行
+    # 首先获取临时文件夹路径，以利于程序中断后继续运行。
     my $tmp_dir_in_memory = "/dev/shm/homolog_prediction.02HitToGenePrediction_$date$$";;
     if ( -s "b.hitToGenePrediction.tmp_dir" ) {
         open IN, "b.hitToGenePrediction.tmp_dir" or die $!;
@@ -149,13 +164,13 @@ if ( $put_massive_temporary_data_into_memory ) {
         print OUT $tmp_dir_in_memory;
         close OUT;
     }
-	# 然后，得到运行的命令。
-    push @cmdString, "$binPath/homolog_prediction.02HitToGenePrediction --cpu $cpu --method $method --genetic_code $genetic_code --tmp_dir $tmp_dir_in_memory $input_protein $input_genome $out_prefix.filteredHits.tab > $out_prefix.geneModels.tab 2> b.hitToGenePrediction.log";
-	# 运行完毕后，删除中间文件夹，以释放内存。
+    # 然后，得到运行的命令。
+    push @cmdString, "$bin_path/homolog_prediction.02HitToGenePrediction --cpu $cpu --method $method --genetic_code $genetic_code --tmp_dir $tmp_dir_in_memory $input_protein $input_genome $out_prefix.filteredHits.tab > $out_prefix.geneModels.tab 2> b.hitToGenePrediction.log";
+    # 运行完毕后，删除中间文件夹，以释放内存。
     push @cmdString, "rm -rf $tmp_dir_in_memory";
 }
 else {
-    push @cmdString, "$binPath/homolog_prediction.02HitToGenePrediction --cpu $cpu --method $method --genetic_code $genetic_code --tmp_dir b.hitToGenePrediction $input_protein $input_genome $out_prefix.filteredHits.tab > $out_prefix.geneModels.tab 2> b.hitToGenePrediction.log";
+    push @cmdString, "$bin_path/homolog_prediction.02HitToGenePrediction --cpu $cpu --method $method --genetic_code $genetic_code --tmp_dir b.hitToGenePrediction $input_protein $input_genome $out_prefix.filteredHits.tab > $out_prefix.geneModels.tab 2> b.hitToGenePrediction.log";
 }
 
 &execute_cmds(@cmdString, "b.hitToGenePrediction.ok");
@@ -163,8 +178,12 @@ else {
 # 3. 同一基因区域仅取一个最优基因模型，得到GFF3文件，并对基因模型进行好坏分类。
 print STDERR "3. picking out the best geng model for classification.\n";
 my @cmdString;
-push @cmdString, "$binPath/homolog_prediction.03GetGeneModels --tmp_dir c.getGeneModels --output_raw_GFF3 c.getGeneModels/homolog_prediction.raw.gff3 --output_alignment_GFF3 c.getGeneModels/homolog_alignment.gff3 --max_alignment_num_for_each_gene_region $max_alignment_num_for_each_gene_region $input_genome out.geneModels.tab > $out_prefix.geneModels.gff3 2> c.getGeneModels.log";
-push @cmdString, "cp c.getGeneModels/homolog_prediction.raw.gff3 $output_raw_GFF3" if $output_raw_GFF3;
+push @cmdString, "$bin_path/homolog_prediction.03GetGeneModels --tmp_dir c.getGeneModels --output_raw_GFF3 c.getGeneModels/homolog_prediction.raw.gff3 --output_alignment_GFF3 c.getGeneModels/homolog_alignment.gff3 --max_alignment_num_for_each_gene_region $max_alignment_num_for_each_gene_region $input_genome out.geneModels.tab > $out_prefix.geneModels.gff3 2> c.getGeneModels.log";
+if ( $output_raw_GFF3 ) {
+    push @cmdString, "$bin_path/GFF3_merging_and_removing_redundancy --first_file_score 0 $input_genome c.getGeneModels/homolog_prediction.raw.gff3 > homolog.gff3 2> c.GFF3_merging_and_removing_redundancy.log" if $output_raw_GFF3;
+    push @cmdString, "$bin_path/GFF3Clear --genome $input_genome --gene_prefix homolog homolog.gff3 > $output_raw_GFF3 2> /dev/null";
+    push @cmdString, "rm -rf homolog.gff3";
+}
 push @cmdString, "cp c.getGeneModels/homolog_alignment.gff3 $output_alignment_GFF3" if $output_alignment_GFF3;
 
 &execute_cmds(@cmdString, "c.getGeneModels.ok");
@@ -227,7 +246,7 @@ while (<IN>) {
 close IN; close OUT;
 my $total = 0; $total = $numA + $numB + $numC + $numD;
 
-$cmdString = "$binPath/GFF3Clear --genome $input_genome --no_attr_add --gene_prefix homolog out.geneModels.filter.gff3 2> d.GFF3Clear.log";
+$cmdString = "$bin_path/GFF3Clear --genome $input_genome --no_attr_add --gene_prefix homolog out.geneModels.filter.gff3 2> d.GFF3Clear.log";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
@@ -251,4 +270,72 @@ sub execute_cmds {
     }
 
     return 1;
+}
+
+sub get_usage_english {
+my $usage = <<USAGE;
+Usage:
+    $0 [options] homolog_proteins.fasta genome_seq.fasta > out.gff3
+
+    本程序能利用临近物种的全基因组蛋白序列对目标物种的全基因组序列进行基因预测，并将结果以GFF3格式输出到标准输出。
+    结果中的基因模型分为四类：A，excellent gene models，对同源蛋白序列覆盖100%，且起始密码子和终止密码子和同源蛋白匹配一致；B，good gene models，对同源蛋白覆盖不小于80%且强制补齐后完整基因模型长度不小于同源蛋白序列长度的80%；C，fair gene models，对同源蛋白覆盖不小于40%且强制补齐的完整基因模型长度不小于同源蛋白序列长度的40%；D，poor gene models，对同源蛋白覆盖小于40%、或强制补齐的完整基因模型长度小于同源蛋白序列长度的40%、或不能强制补齐的基因模型。前三类基因模型都是完整的基因模型，最后一个CDS是包含终止密码子的，最后一类基因模型有些是完整的，有些是不完整的，其尾部若是完整的，则最后一个CDS是包含终止密码子的。
+    程序输出的基因模型中，其intron信息中包含Supported_times标签，表示不同的基因预测方法或不同的同源蛋白支持的次数。例如，有10个同源蛋白在3种预测方法都支持一个intron，则该intron的Supported_times值是30。默认情况下，--threshod_ratio_of_intron_Supported_times 参数的值是 0.5，表示程序根据A和B类基因模型计算出所有introns的Supported_times中位数值，再用于对C和D类基因模型进行过滤。若C或D类基因模型中所有introns的Supported_times值都低于上一步计算出的中位数值，则过滤其基因模型；若设置 --threshod_ratio_of_intron_Supported_times 参数值为 0，则不进行过滤；该参数值越大，则要求越严格，过滤的基因模型数量越多。
+    程序运行原理简述：（1）先调用mmseqs命令，将同源蛋白比对到基因组序列上。（2）挑选满足比对阈值的同源蛋白，从exonerate、genewise或gth三种软件中选择至少一个软件进行基因预测，并对目标基因区域多个软件和多个同源蛋白的预测结果进行排序。（3）挑选最优的基因预测结果，再对基因模型进行补齐并分成四类。（4）对较差的C和D类基因模型进行过滤。
+    根据程序的计算原理，使用的同源蛋白数量越多，预测基因模型的准确性和完整性会越好，相应的计算消耗时间越长。因此，推荐使用5~10个物种的全基因组蛋白序列作为输入。
+
+    --out_prefix <string>    default: out
+    设置输出文件前缀。程序默认输出如下文件：（1）out.filteredHits.tab，将同源蛋白序列和基因组序列进行比对的结果文件；（2）out.geneModels.tab，表格格式的基因模型信息，按基因所在区域划分数据，包含所有同源蛋白同源蛋白利用多个软件的基因预测结果；（3）out.geneModels.gff3，基因预测得到的基因模型，每个基因区域仅选择一个最优基因模型，并对基因模型进行补齐和去重叠。（4）在程序标准输出中更进一步使用intron支持次数作为更严格阈值，得到的最终基因模型数量更少更准确。
+
+    --max_hits_num_per_match_region <int>    default: 10
+    设置基因组上一个同源匹配区域（一个基因区域）的最大同源蛋白的匹配数量。
+
+    --max_hit_num_per_single_species <int>    default: 2
+    设置基因组上一个同源匹配区域（一个基因区域）和单个物种的最大同源蛋白的匹配数量。让一个基因区域尽量和多个物种的同源蛋白都有比对结果，利于后续的一致性预测结果分析，并根据一致性结果的数量判断结果的可靠性。该参数生效需要输入的同源蛋白FASTA文件头部中包含物种名称信息。程序识别蛋白序列名称中的关键词species（大小写均可以识别）及其后的字符[a-zA-Z0-9]作为物种名称。例如XP_002436309_2_SpeciesSorghumBicolor，程序识别其物种名称为SpeciesSorghumBicolor。
+
+    --cpu <int>    default: 8
+    设置mmseqs程序使用线程数，genewise或gth命令运行的并行数。
+
+    --identity <float>    default: 0.2
+    --evalue <float>    default: 1e-9
+    --homolog_coverage <float>    default: 0.3
+    设置对同源蛋白和基因序列的比对结果进行过滤的Identity、E-value和homolog_coverage阈值。
+
+    --method <string>    default: exonerate
+    设置进行基因预测的方法，其值可以设定为exonerate、genewise、gth或all。若需要同时使用多种方法，则输入使用逗号分割的多个值；若使用所有三种方法进行分析，可以设置--method参数值为all，但最消耗计算时间。三种方法中：exonerate和genewise的准确性结果比较一致，但gth方法预测基因模型的sensitivity下降很多，specificity提高很多。以三种方法对Oryza sativa基因组的预测为例，其预测结果的准确性如下表所示。和NCBI上标准的共28736个基因模型的注释结果进行比较，评估四个准确性值：基因水平sensitivity、基因水平specificity、exon水平sensitivity、exon水平specificity。可以看出，使用多种方法整合预测后再过滤，得到的基因模型数量能接近真实的基因数量，且结果较准确。
+    方法       基因数量    gene_sensitivity    gene_specificity    exon_sensitivity    exon_specificity
+    exonerate  38537       47.05%              35.09%              58.90%              73.55%
+    genewise   40455       47.32%              33.61%              62.08%              71.27%
+    gth        8888        19.80%              64.02%              30.43%              90.54%
+    all        40538       48.54%              34.41%              63.85%              71.86%
+    filtered   28184       45.62%              46.51%              61.26%              79.59%
+
+    --genetic_code <int>    default: 1
+    设置遗传密码。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。
+
+    --tmp_dir <string>    default: tmp_\$date\$pid
+    程序运行时临时文件夹名称。
+
+    --threshod_ratio_of_intron_Supported_times <float>    default: 0.5
+    程序根据A和B类基因模型计算出所有introns的Supported_times，对这些数值按从小到大进行排序，再计算出本参数所处位置的值threshold_value。该参数设置的范围为[0, 1]，默认情况下本参数的值为0.5，即表示使用中位数值作为threshold_value。使用计算出的threshold_value值，对C和D类基因模型进行过滤。若C或D类基因模型中所有introns的Supported_times值都低于上一步计算出的threshold_value值，则过滤其基因模型。当设置本参数值为0时，强制设置threshold_value值为0，则表示保留所有的基因模型。
+
+    --output_raw_GFF3 <string>    default: None
+    让程序输出未对末端强制填补的GFF3文件，是同源蛋白预测的原始结果。
+
+    --output_alignment_GFF3 <string>    default: None
+    让程序输出一个GFF3格式的同源蛋白比对文件，包含同源蛋白对基因组序列的比对信息。一个基因区域输出每个同源蛋白的最优比对信息。
+
+    --max_alignment_num_for_each_gene_region <int>    default: 5
+    当输出GFF3格式同源蛋白比对文件时，每个基因区域最多输出5个同源蛋白的结果。
+
+    --put_massive_temporary_data_into_memory    default: None
+    添加该参数后，程序将海量的临时文件存放到内存中，以减少对磁盘的I/O需求并加快运行速度，但消耗更多内存。本程序第二步运行homolog_prediction.02HitToGenePrediction命令时，对基因组和同源蛋白数据进行了分割，生成了海量的小文件。添加该参数后，则将该命令生成的临时文件夹放入到/dev/shm路径下，会消耗更多内存。例如，对玉米2G大小的基因组使用13万条同源蛋白序列进行分析时，需要消耗87G存储空间。
+
+    --help    default: None
+    display this help and exit.
+
+    本程序的运行需要调用其同目录下的parsing_blast_result.pl、fillingEndsOfGeneModels和GFF3Clear指令；也依赖可以直接运行的指令diamond。
+
+USAGE
+
+return $usage;
 }

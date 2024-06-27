@@ -7,9 +7,9 @@ use File::Basename;
 
 my $usage = <<USAGE;
 Usage:
-    $0 [options] genome.fasta in1.gff3 in2.gff3 > out.gff3 
+    $0 [options] genome.fasta in1.gff3 in2.gff3 in3.gff3 ... > out.gff3 
 
-    本程序用于将合并两个输入的GFF3文件中的基因模型，进行去冗余处理，对基因模型进行打分并挑选更可信的结果。
+    本程序用于将输入的一个或多个GFF3文件中的基因模型，进行去冗余处理，对基因模型进行打分并挑选更可信的结果。
 
     程序运行原理：
     (1) 程序对所有输入的基因模型进行打分。首先，按CDS长度进行打分，每bp长度记1分，得到初步得分S；然后，根据intron数量打分，每增加一个intron，增加一定比例(相对S)得分，第一个intron增加分数最多，后续的intron增加的分数按比例递减，且所有intron增加的得分之和不超过S；然后，按基因完整性打分，5'端完整，增加一定比例(相对S)得分，3'端完整，增加一定比例(相对S)得分；最后，按输入文件的先后顺序，第一个输入文件，增加一定比例(相对S)得分，第二个输入文件分值不变。
@@ -29,7 +29,7 @@ Usage:
     设置基因模型在3'端完整时得分增加比例。
 
     --first_file_score <float>    default: 0.5
-    设置第一个输入文件额外增加的得分比例。
+    设置第一个输入文件额外增加的得分比例。有利于优先选择第一个输入GFF3文件中的基因模型。
 
     --overlap_coverage <float>    default: 0.30
     设置一个覆盖度阈值。当两个基因型模型对应转录本的CDS重叠区碱基数 / 较小基因模型CDS去冗余碱基数 > 该覆盖度阈值时， 则需要去除冗余的基因模型。
@@ -67,16 +67,18 @@ if ( $help ) { die $usage_english }
 
 ########### 解析参数 #################
 # 使用绝对路径
-my $input_genome = abs_path($ARGV[0]);
-my $input_GFF3_1 = abs_path($ARGV[1]);
-my $input_GFF3_2 = abs_path($ARGV[2]);
+my $input_genome = abs_path(shift @ARGV);
+my @input_GFF3;
+foreach ( @ARGV ) {
+    push @input_GFF3, abs_path($_);
+}
 
 # 设置参数的默认值
-$intron_score ||= 0.3;
-$complete5p_score ||= 0.5;
-$complete3p_score ||= 0.5;
-$first_file_score ||= 0.5;
-$overlap_coverage ||= 0.3;
+$intron_score = 0.3 unless defined $intron_score;
+$complete5p_score = 0.5 unless defined $complete5p_score;
+$complete3p_score = 0.5 unless defined $complete3p_score;
+$first_file_score = 0.5 unless defined $first_file_score;
+$overlap_coverage = 0.3 unless defined $overlap_coverage;
 $start_codon ||= "ATG";
 $stop_codon ||= "TAA,TAG,TGA";
 my (%start_codon, %stop_codon);
@@ -94,13 +96,7 @@ while (<IN>) {
 }
 close IN;
 
-# 读取第一个GFF3文件
-my %GFF3_info1 = &get_geneModels_from_GFF3($input_GFF3_1);
-
-# 读取第二个GFF3文件
-my %GFF3_info2 = &get_geneModels_from_GFF3($input_GFF3_2);
-
-# 进一步解析2个输入的GFF3信息，得到基因信息
+# 依次分析输入的GFF3文件，得到基因信息
 # %gene_CDS，存放两个文件中所有基因的CDS信息，键是基因ID，值是\n分隔的CDS信息(起始结束正负链用\t分隔)。若基因有多个可变剪接，选择其得分最高转录本的CDS信息。
 # %cds2gene存放每个CDS对应的基因ID信息，是一个多重哈希。染色体名称 -> 正负链 -> 索引位置 -> CDS起始结束 -> 基因ID -> 1。用于找两两重叠的基因。
 # %gene_CDS 和 %cds2gene 用于找有重叠的基因。
@@ -108,185 +104,105 @@ my %GFF3_info2 = &get_geneModels_from_GFF3($input_GFF3_2);
 # %chr 和 %strand 存放基因ID对应的染色体和正负链。
 # %gene_CDS_length 存放基因ID对应的CDS长度。若基因有多个可变剪接，选择其得分最高转录本的CDS长度。
 my (%gene_CDS, %cds2gene, %gene_score, %chr, %strand, %gene_CDS_length, %sort1, %sort2, %sort3, %sort4, %gene_info);
+my $input_file_num = 0;
+foreach ( @input_GFF3 ) {
+    $input_file_num ++;
 
-# 对第一个GFF3文件中的基因模型进行打分，解析其CDS信息。
-foreach my $gene_ID ( sort keys %GFF3_info1 ) {
-    my @gene_header = split /\t/, $GFF3_info1{$gene_ID}{"header"};
-    $sort1{$gene_ID} = $gene_header[0];
-    $sort2{$gene_ID} = $gene_header[3];
-    $sort3{$gene_ID} = $gene_header[4];
-    $sort4{$gene_ID} = $gene_header[6];
-    $gene_info{$gene_ID} = $GFF3_info1{$gene_ID};
+    # 读入GFF3内容
+    my %GFF3_info = &get_geneModels_from_GFF3($_);
+    foreach my $gene_ID ( sort keys %GFF3_info ) {
+        # 分析基因的GFF3信息，做好排序，以利于最终的数据输出
+        my @gene_header = split /\t/, $GFF3_info{$gene_ID}{"header"};
+        $sort1{$gene_ID} = $gene_header[0];
+        $sort2{$gene_ID} = $gene_header[3];
+        $sort3{$gene_ID} = $gene_header[4];
+        $sort4{$gene_ID} = $gene_header[6];
+        $gene_info{$gene_ID} = $GFF3_info{$gene_ID};
 
-    my @mRNA_ID = @{$GFF3_info1{$gene_ID}{"mRNA_ID"}};
-    # 对每个转录本进行打分，最终每个基因选择其最高分值的转录本作为其CDS信息。
-    my (%mRNA_score, %mRNA_CDS, %mRNA_CDS_length);
-    foreach my $mRNA_ID ( sort @mRNA_ID ) {
-        my $mRNA_info = $GFF3_info1{$gene_ID}{"mRNA_info"}{$mRNA_ID};
-        my $mRNA_header = $GFF3_info1{$gene_ID}{"mRNA_header"}{$mRNA_ID};
-        my @mRNA_header = split /\t/, $mRNA_header;
-        # 获得染色体名称和正负链信息
-        my ($chr, $strand) = ($mRNA_header[0], $mRNA_header[6]);
-        $chr{$gene_ID} = $chr; $strand{$gene_ID} = $strand;
+        my @mRNA_ID = @{$GFF3_info{$gene_ID}{"mRNA_ID"}};
+        # 对每个转录本进行打分，最终每个基因选择其最高分值的转录本作为其CDS信息。
+        my (%mRNA_score, %mRNA_CDS, %mRNA_CDS_length);
+        foreach my $mRNA_ID ( sort @mRNA_ID ) {
+            my $mRNA_info = $GFF3_info{$gene_ID}{"mRNA_info"}{$mRNA_ID};
+            my $mRNA_header = $GFF3_info{$gene_ID}{"mRNA_header"}{$mRNA_ID};
+            my @mRNA_header = split /\t/, $mRNA_header;
+            # 获得染色体名称和正负链信息
+            my ($chr, $strand) = ($mRNA_header[0], $mRNA_header[6]);
+            $chr{$gene_ID} = $chr; $strand{$gene_ID} = $strand;
 
-        # 分析转录本的CDS信息
-        my (@CDS, $CDS_length);
-        foreach ( split /\n/, $mRNA_info ) {
-            @_ = split /\t/;
-            if ( $_[2] eq "CDS" ) {
-                push @CDS, "$_[3]\t$_[4]\t$_[6]";
-                $CDS_length += (abs($_[4] - $_[3]) + 1);
-                my $index1 = int($_[3] / 1000);
-                my $index2 = int($_[4] / 1000);
-                foreach ($index1 .. $index2) {
-                    $cds2gene{$chr}{$strand}{$_}{"$_[3]\t$_[4]"}{$gene_ID} = 1;
+            # 分析转录本的CDS信息
+            my (@CDS, $CDS_length);
+            foreach ( split /\n/, $mRNA_info ) {
+                @_ = split /\t/;
+                if ( $_[2] eq "CDS" ) {
+                    push @CDS, "$_[3]\t$_[4]\t$_[6]";
+                    $CDS_length += (abs($_[4] - $_[3]) + 1);
+                    my $index1 = int($_[3] / 1000);
+                    my $index2 = int($_[4] / 1000);
+                    foreach ($index1 .. $index2) {
+                        $cds2gene{$chr}{$strand}{$_}{"$_[3]\t$_[4]"}{$gene_ID} = 1;
+                    }
                 }
             }
-        }
-        $mRNA_CDS{$mRNA_ID} = join "\n", @CDS;
-        $mRNA_CDS_length{$mRNA_ID} = $CDS_length;
-
-        # 分析转录本的完整性
-        my $integrity = &analysis_geneModels_integrity(\@CDS, $chr, $strand);
-
-        # 计算转录本得分
-        my $score = $CDS_length;
-        #print STDERR "$mRNA_ID\t$score\n";
-        # 首先根据intron数量，增加得分比例
-        if ( @CDS == 1 ) {
-            # 只有一个CDS，则得分就是CDS长度
-            $score = $CDS_length;
-        }
-        elsif ( @CDS == 2 ) {
-            # 有两个CDS，则得分增加--intron_score参数设定的比例
-            $score += $CDS_length * $intron_score;
-        }
-        elsif ( @CDS > 2 ) {
-            # 有三个或以上CDS，第一个intron增加--intron_score参数设定的比例
-            my $add_score = $CDS_length * $intron_score;
-            $score += $add_score;
-            # 从第二个intron及往后，增加的分值逐项递减。为上一个intron的 ( 1 - intron_score参数值)。
-            foreach ( 1 .. (@CDS - 2) ) {
-                $add_score = $add_score * ( 1 - $intron_score );
-                $score += $add_score;
+            $mRNA_CDS{$mRNA_ID} = join "\n", @CDS;
+            $mRNA_CDS_length{$mRNA_ID} = $CDS_length;
+    
+            # 分析转录本的完整性
+            my $integrity = &analysis_geneModels_integrity(\@CDS, $chr, $strand);
+    
+            # 计算转录本得分
+            my $score = $CDS_length;
+            #print STDERR "$mRNA_ID\t$score\n";
+            # 首先根据intron数量，增加得分比例
+            if ( @CDS == 1 ) {
+                # 只有一个CDS，则得分就是CDS长度
+                $score = $CDS_length;
             }
-        }
-        #print STDERR "$mRNA_ID\t$score\n";
-        # 再根据基因完整性进行打分
-        if ( $integrity eq "5prime_partial" ) {
-            $score += $CDS_length * $complete3p_score;
-        }
-        elsif ( $integrity eq "3prime_partial" ) {
-            $score += $CDS_length * $complete5p_score;
-        }
-        elsif ( $integrity eq "complete" ) {
-            $score += $CDS_length * ($complete3p_score + $complete5p_score);
-        }
-        #print STDERR "$mRNA_ID\t$score\n";
-        # 若使输入的第一个GFF3文件，则继续增加得分
-        $score += $CDS_length * $first_file_score;
-        #print STDERR "$mRNA_ID\t$score\n";
-
-        $mRNA_score{$mRNA_ID} = $score;
-
-		#print STDERR "$mRNA_ID\t$integrity\t$score\n";
-    }
-
-    # 选择得分最高的转录本，其CDS做为基因的信息
-    @mRNA_ID = sort {$mRNA_score{$b} <=> $mRNA_score{$a} or $a cmp $b} @mRNA_ID;
-    $gene_CDS{$gene_ID} = $mRNA_CDS{$mRNA_ID[0]};
-    $gene_score{$gene_ID} = sprintf("%d", $mRNA_score{$mRNA_ID[0]});
-    $gene_CDS_length{$gene_ID} = $mRNA_CDS_length{$mRNA_ID[0]};
-
-    #print STDERR "$gene_ID\t$gene_score{$gene_ID}\n$gene_CDS{$gene_ID}\n";
-}
-
-# 对第二个GFF3文件中的基因模型进行打分，解析其CDS信息。
-foreach my $gene_ID ( sort keys %GFF3_info2 ) {
-    my @gene_header = split /\t/, $GFF3_info2{$gene_ID}{"header"};
-    $sort1{$gene_ID} = $gene_header[0];
-    $sort2{$gene_ID} = $gene_header[3];
-    $sort3{$gene_ID} = $gene_header[4];
-    $sort4{$gene_ID} = $gene_header[6];
-    $gene_info{$gene_ID} = $GFF3_info2{$gene_ID};
-
-    my @mRNA_ID = @{$GFF3_info2{$gene_ID}{"mRNA_ID"}};
-    # 对每个转录本进行打分，最终每个基因选择其最高分值的转录本作为其CDS信息。
-    my (%mRNA_score, %mRNA_CDS, %mRNA_CDS_length);
-    foreach my $mRNA_ID ( sort @mRNA_ID ) {
-        my $mRNA_info = $GFF3_info2{$gene_ID}{"mRNA_info"}{$mRNA_ID};
-        my $mRNA_header = $GFF3_info2{$gene_ID}{"mRNA_header"}{$mRNA_ID};
-        my @mRNA_header = split /\t/, $mRNA_header;
-        # 获得染色体名称和正负链信息
-        my ($chr, $strand) = ($mRNA_header[0], $mRNA_header[6]);
-        $chr{$gene_ID} = $chr; $strand{$gene_ID} = $strand;
-
-        # 分析转录本的CDS信息
-        my (@CDS, $CDS_length);
-        foreach ( split /\n/, $mRNA_info ) {
-            @_ = split /\t/;
-            if ( $_[2] eq "CDS" ) {
-                push @CDS, "$_[3]\t$_[4]\t$_[6]";
-                $CDS_length += (abs($_[4] - $_[3]) + 1);
-                my $index1 = int($_[3] / 1000);
-                my $index2 = int($_[4] / 1000);
-                foreach ($index1 .. $index2) {
-                    $cds2gene{$chr}{$strand}{$_}{"$_[3]\t$_[4]"}{$gene_ID} = 1;
+            elsif ( @CDS == 2 ) {
+                # 有两个CDS，则得分增加--intron_score参数设定的比例
+                $score += $CDS_length * $intron_score;
+            }
+            elsif ( @CDS > 2 ) {
+                # 有三个或以上CDS，第一个intron增加--intron_score参数设定的比例
+                my $add_score = $CDS_length * $intron_score;
+                $score += $add_score;
+                # 从第二个intron及往后，增加的分值逐项递减。为上一个intron的 ( 1 - intron_score参数值)。
+                foreach ( 1 .. (@CDS - 2) ) {
+                    $add_score = $add_score * ( 1 - $intron_score );
+                    $score += $add_score;
                 }
             }
-        }
-        $mRNA_CDS{$mRNA_ID} = join "\n", @CDS;
-        $mRNA_CDS_length{$mRNA_ID} = $CDS_length;
-
-        # 分析转录本的完整性
-        my $integrity = &analysis_geneModels_integrity(\@CDS, $chr, $strand);
-
-        # 计算转录本得分
-        my $score = $CDS_length;
-        # 首先根据intron数量，增加得分比例
-        if ( @CDS == 1 ) {
-            # 只有一个CDS，则得分就是CDS长度
-            $score = $CDS_length;
-        }
-        elsif ( @CDS == 2 ) {
-            # 有两个CDS，则得分增加--intron_score参数设定的比例
-            $score += $CDS_length * $intron_score;
-        }
-        elsif ( @CDS > 2 ) {
-            # 有三个或以上CDS，第一个intron增加--intron_score参数设定的比例
-            my $add_score = $CDS_length * $intron_score;
-            $score += $add_score;
-            # 从第二个intron及往后，增加的分值逐项递减。为上一个intron的 ( 1 - intron_score参数值)。
-            foreach ( 1 .. (@CDS - 2) ) {
-                $add_score = $add_score * ( 1 - $intron_score );
-                $score += $add_score;
+            #print STDERR "$mRNA_ID\t$score\n";
+            # 再根据基因完整性进行打分
+            if ( $integrity eq "5prime_partial" ) {
+                $score += $CDS_length * $complete3p_score;
             }
+            elsif ( $integrity eq "3prime_partial" ) {
+                $score += $CDS_length * $complete5p_score;
+            }
+            elsif ( $integrity eq "complete" ) {
+                $score += $CDS_length * ($complete3p_score + $complete5p_score);
+            }
+            #print STDERR "$mRNA_ID\t$score\n";
+            # 若使输入的第一个GFF3文件，则继续增加得分
+            $score += $CDS_length * $first_file_score if $input_file_num == 1; 
+            #print STDERR "$mRNA_ID\t$score\n";
+    
+            $mRNA_score{$mRNA_ID} = $score;
+    
+            #print STDERR "$mRNA_ID\t$integrity\t$score\n";
         }
-        # 再根据基因完整性进行打分
-        if ( $integrity eq "5prime_partial" ) {
-            $score += $CDS_length * $complete3p_score;
-        }
-        elsif ( $integrity eq "3prime_partial" ) {
-            $score += $CDS_length * $complete5p_score;
-        }
-        elsif ( $integrity eq "complete" ) {
-            $score += $CDS_length * ($complete3p_score + $complete5p_score);
-        }
-        # 输入的第二个文件不额外加分。
-
-        $mRNA_score{$mRNA_ID} = $score;
+    
+        # 选择得分最高的转录本，其CDS做为基因的信息
+        @mRNA_ID = sort {$mRNA_score{$b} <=> $mRNA_score{$a} or $a cmp $b} @mRNA_ID;
+        $gene_CDS{$gene_ID} = $mRNA_CDS{$mRNA_ID[0]};
+        $gene_score{$gene_ID} = sprintf("%d", $mRNA_score{$mRNA_ID[0]});
+        $gene_CDS_length{$gene_ID} = $mRNA_CDS_length{$mRNA_ID[0]};
+    
+        #print STDERR "$gene_ID\t$gene_score{$gene_ID}\n$gene_CDS{$gene_ID}\n";
     }
-
-    # 选择得分最高的转录本，其CDS做为基因的信息
-    @mRNA_ID = sort {$mRNA_score{$b} <=> $mRNA_score{$a} or $a cmp $b} @mRNA_ID;
-    $gene_CDS{$gene_ID} = $mRNA_CDS{$mRNA_ID[0]};
-    $gene_score{$gene_ID} = sprintf("%d", $mRNA_score{$mRNA_ID[0]});
-    $gene_CDS_length{$gene_ID} = $mRNA_CDS_length{$mRNA_ID[0]};
-
-    #print STDERR "$gene_ID\t$gene_score{$gene_ID}\n$gene_CDS{$gene_ID}\n";
 }
-
-
+    
 # 先找到两两有重叠的基因信息
 my %overlap;
 foreach my $gene_ID ( keys %gene_CDS ) {
@@ -528,9 +444,9 @@ sub get_usage_english {
 
 my $usage = <<USAGE;
 Usage:
-    $0 [options] genome.fasta in1.gff3 in2.gff3 > out.gff3 
+    $0 [options] genome.fasta in1.gff3 in2.gff3 in3.gff3 ...  > out.gff3 
 
-    This program is used to combine gene models from two input GFF3 files, get rid of any duplicates, evaluate the gene models, and choose more trustworthy results.
+    This program is designed to get rid of any unnecessary repetition in one or more GFF3 files containing gene models, evaluate the gene models, and choose the most reliable results.
 
     Here's how the program works:
     (1) It scores all input gene models. First, it gives points based on CDS length, with 1 point for each base pair, resulting in an initial score S. Then, it scores based on intron number, adding a certain percentage (relative to S) for each additional intron. The first intron adds the most points and subsequent ones add fewer proportionally. Also, the total points from all introns cannot exceed S. Next, it scores based on gene integrity by adding a certain percentage (relative to S) for a complete 5' end and another percentage for a complete 3' end. Finally, it adds a certain percentage (relative to S) to the score of the first input file while keeping the second input file's score unchanged. 
@@ -550,7 +466,7 @@ Usage:
     Set the gene model to increase the score proportionally when the 3' end is complete.
 
     --first_file_score <float>    default: 0.5
-    Set the additional score percentage for gene models in the first input file.
+    Set the additional score percentage for the first input file. This helps prioritize gene models from the first input GFF3 file.
 
     --overlap_coverage <float>    default: 0.30
     Set a coverage threshold. Suppose the number of base pairs in the overlapping region of CDS between two gene models exceeds the coverage threshold divided by the number of redundant base pairs in the CDS of the smaller gene model. In that case, we need to remove the redundant gene model.

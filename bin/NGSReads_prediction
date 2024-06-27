@@ -460,9 +460,12 @@ else {
 
 # 6. 对转录本预测的基因模型去冗余。
 print STDERR "\nStep 6: Cut down on the repetitive gene models predicted from transcriptome data. (" . (localtime) . ")\n";
-$cmdString = "$bin_path/GFF3Clear --GFF3_source NGSReads --genome $input_genome --gene_prefix transfrag --no_attr_add transfrag.ORF_filledByHomolog.gff3 > transfrag.genome.gff3 2> /dev/null";
+my @cmdString;
+push @cmdString, "$bin_path/GFF3_merging_and_removing_redundancy $input_genome transfrag.ORF_filledByHomolog.gff3 > transfrag.gff3 2> /dev/null";
+push @cmdString,  "$bin_path/GFF3Clear --GFF3_source NGSReads --genome $input_genome --gene_prefix transfrag --no_attr_add transfrag.gff3 > transfrag.genome.gff3 2> /dev/null";
+push @cmdString, "rm -rf transfrag.gff3";
 
-&execute_cmds($cmdString, "$tmp_dir/06.GFF3Clear.ok");
+&execute_cmds($cmdString, "$tmp_dir/06.removing_redundancy.ok");
 
 if ( $output_raw_GFF3 ) {
     my $output_raw_GFF3_info;
@@ -470,7 +473,12 @@ if ( $output_raw_GFF3 ) {
     $output_raw_GFF3_info = join "", <IN>;
     close IN;
     open OUT, ">", $output_raw_GFF3 or die "Error: Can not create file $output_raw_GFF3, $!";
-    print OUT $output_raw_GFF3_info;
+    foreach ( split /\n\n/, $output_raw_GFF3_info ) {
+        if (m/Integrity=complete/ && m/Form=.*?_([\d\.]+)\%/ && $1 >= 50) {
+            s/(\tgene\t.*ID=[^;]+)/$1;Type=excellent_gene_models_predicted_by_NGSReads/;
+        }
+        print OUT "$_\n\n";
+    }
     close OUT;
 }
 

@@ -103,8 +103,8 @@ Parameters:
     all        32293       48.19%              42.89%              66.91%              78.00%
     filtered   23857       45.19%              54.44%              64.44%              83.72%
 
-    --optimize_augustus_method <int>    default: 1
-    设置AUGUSTUS Training时的参数优化方法。1，表示仅调用BGM2AT.optimize_augustus进行优化，能充分利用所有CPU线程对所有参数并行化测试，速度快；2，表示BGM2AT.optimize_augustus优化完毕后，再使用AUGUSTUS软件自带的optimize_augustus.pl程序接着再进行优化，此时运行速度慢，效果可能更好。使用本参数的优先级更高，能覆盖--config指定参数配置文件中BGM2AT的参数值。
+    --optimize_augustus_method <int>    default: 3
+    设置AUGUSTUS Training时的参数优化方法。1，表示仅调用BGM2AT.optimize_augustus进行优化，能充分利用所有CPU线程对所有参数并行化测试，速度快；2，表示仅调用AUGUSTUS软件自带的optimize_augustus.pl程序进行优化，该方法的速度较慢，但结果更好；3，表示先使用BGM2AT.optimize_augustus优化完毕后，再使用AUGUSTUS软件自带的optimize_augustus.pl程序接着再进行优化，同时兼顾运算速度和效果。使用本参数的优先级更高，能覆盖--config指定参数配置文件中BGM2AT相同参数的值。
     
     --no_alternative_splicing_analysis    default: None
     添加该参数后，程序不会进行可变剪接分析。需要注意的时，当输入了NGS reads数据时，程序默认会根据intron和碱基测序深度信息进行基因的可变剪接分析。
@@ -142,7 +142,8 @@ if (@ARGV==0){die $usage_english}
 my ($genome, $RM_species, $RM_species_Dfam, $RM_species_RepBase, $RM_lib, $no_RepeatModeler, $pe1, $pe2, $single_end, $sam, $strand_specific, $protein, $augustus_species, $HMM_db, $BLASTP_db, $config, $BUSCO_lineage_dataset);
 my ($out_prefix, $gene_prefix, $chinese_help, $help);
 my ($cpu, $put_massive_temporary_data_into_memory, $genetic_code, $homolog_prediction_method, $optimize_augustus_method, $no_alternative_splicing_analysis, $delete_unimportant_intermediate_files);
-my ($cmdString, $cmdString1, $cmdString2, $cmdString3, $cmdString4, $cmdString5);
+my ($cmdString, $cmdString1, $cmdString2, $cmdString3, $cmdString4, $cmdString5, @cmdString);
+my ($start_codon, $stop_codon);
 GetOptions(
     "genome:s" => \$genome,
     "RM_species:s" => \$RM_species,
@@ -307,7 +308,6 @@ else{
 &execute_cmds($cmdString, "$tmp_dir/1.RepeatMasker.ok");
 
 
-
 # Step 2: homolog_prediction
 print STDERR "\n============================================\n";
 print STDERR "Step 2: Homolog_prediction" . "(" . (localtime) . ")" . "\n";
@@ -349,47 +349,43 @@ else {
 &execute_cmds($cmdString, "$tmp_dir/3.NGSReads_prediction.ok");
 
 
-# Step 4: Combine NGSReads and Homolog Predictions
+# Step 4: Augustus gene prediction
 print STDERR "\n============================================\n";
-print STDERR "Step 4: Combine NGSReads and Homolog Predictions" . "(" . (localtime) . ")" . "\n";
-mkdir "$tmp_dir/4.evidence_gene_models" unless -e "$tmp_dir/4.evidence_gene_models";
-chdir "$tmp_dir/4.evidence_gene_models"; print STDERR "\nPWD: $tmp_dir/4.evidence_gene_models\n";
+print STDERR "Step 4: Augustus/HMM Trainning " . "(" . (localtime) . ")" . "\n";
+mkdir "$tmp_dir/4.augustus" unless -e "$tmp_dir/4.augustus";
+chdir "$tmp_dir/4.augustus";
 
-$cmdString = "$bin_path/GFF3_merging_two_files $genome $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.gff3 $tmp_dir/2.homolog_prediction/homolog_prediction.gff3 > $tmp_dir/4.evidence_gene_models/evidence_gene_models.gff3 2> $tmp_dir/4.evidence_gene_models/GFF3_merging_two_files.log";
+# 4.1 Augustus HMM Training
+mkdir "$tmp_dir/4.augustus/training" unless -e "$tmp_dir/4.augustus/training";
+chdir "$tmp_dir/4.augustus/training"; print STDERR "\nPWD: $tmp_dir/4.augustus/training\n";
 
-&execute_cmds($cmdString, "$tmp_dir/4.evidence_gene_models.ok");
+# 4.1.1 合并Transcript和Homolog预测的基因模型
+$cmdString = "$bin_path/GFF3_merging_and_removing_redundancy $config{'GFF3_merging_and_removing_redundancy'} $genome $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.raw.gff3 $tmp_dir/2.homolog_prediction/homolog_prediction.raw.gff3 > evidence_gene_models.gff3 2> GFF3_merging_and_removing_redundancy.log";
 
+&execute_cmds($cmdString, "01.evidence_gene_models.ok");
 
-# Step 5: Augustus gene prediction
-print STDERR "\n============================================\n";
-print STDERR "Step 5: Augustus/HMM Trainning " . "(" . (localtime) . ")" . "\n";
-mkdir "$tmp_dir/5.augustus" unless -e "$tmp_dir/5.augustus";
-chdir "$tmp_dir/5.augustus";
-
-# 5.1 第一次 Augustus HMM Training
-mkdir "$tmp_dir/5.augustus/training" unless -e "$tmp_dir/5.augustus/training";
-chdir "$tmp_dir/5.augustus/training"; print STDERR "\nPWD: $tmp_dir/5.augustus/training\n";
-
-# 5.1.1 由GFF3文件得到用于AUGUSTUS Training的基因模型。
-# 选择步骤4中的excellent基因模型
+# 4.1.2 选择完整且准确的基因模型
 unless ( -s "excellent.gff3" ) {
-	my $input = "$tmp_dir/4.evidence_gene_models/evidence_gene_models.gff3";
+	my $input = "$tmp_dir/4.augustus/training/evidence_gene_models.gff3";
 	open IN, $input or die "Error: Can not open file $input, $!";
-	open OUT, ">", "excellent.gff3" or die "Error: Can not create file excellent.gff3, $!";
+	my $output = "$tmp_dir/4.augustus/training/evidence_gene_models.excellent.gff3";
+	open OUT, ">", $output or die "Error: Can not create file $output, $!";
 	$/ = "\n\n";
 	while (<IN>) {
 		print OUT if m/excellent/;
 	}
 	close IN; close OUT;
+	open OUT, ">", "02.evidence_gene_models.excellent.ok" or die $!; close OUT;
 }
 
-$cmdString = "$bin_path/geneModels2AugusutsTrainingInput $config{'geneModels2AugusutsTrainingInput'} --out_prefix ati --cpu $cpu excellent.gff3 $genome &> geneModels2AugusutsTrainingInput.log";
-unless ( -e "geneModels2AugusutsTrainingInput.ok" ) {
+# 4.1.3 选择CDS数量较多、CDS长度较长、CDS/exon比例较大且去冗余的基因模型。
+$cmdString = "$bin_path/geneModels2AugusutsTrainingInput $config{'geneModels2AugusutsTrainingInput'} --out_prefix ati --cpu $cpu evidence_gene_models.excellent.gff3 $genome &> geneModels2AugusutsTrainingInput.log";
+unless ( -e "03.geneModels2AugusutsTrainingInput.ok" ) {
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
     # 若用于Augustus training的基因数量少于1000个，则重新运行geneModels2AugusutsTrainingInput，降低阈值来增加基因数量。
-    my $input_file = "$tmp_dir/5.augustus/training/geneModels2AugusutsTrainingInput.log";
+    my $input_file = "$tmp_dir/4.augustus/training/geneModels2AugusutsTrainingInput.log";
     open IN, $input_file or die "Error: Can not open file $input_file, $!";
     my $training_genes_number = 0;
     while (<IN>) {
@@ -402,18 +398,18 @@ unless ( -e "geneModels2AugusutsTrainingInput.ok" ) {
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
     }
 
-    open OUT, ">", "geneModels2AugusutsTrainingInput.ok" or die $!; close OUT;
+    open OUT, ">", "03.geneModels2AugusutsTrainingInput.ok" or die $!; close OUT;
 }
 else {
     print STDERR "CMD(Skipped): $cmdString\n";
 }
 
-# 5.1.2 分析基因长度和基因间区长度信息，从而确定Trainig时选择基因模型两侧翼序列长度。
+# 4.1.4 分析基因长度和基因间区长度信息，从而确定Trainig时选择基因模型两侧翼序列长度。
 my $flanking_length;
-unless ( -e "get_flanking_length.ok" ) {
+unless ( -e "04.get_flanking_length.ok" && -s "$tmp_dir/4.augustus/training/flanking_length.txt" ) {
     my (%gene_info, @intergenic_length, @gene_length);
     # 读取基因模型信息
-    my $input_file = "$tmp_dir/4.evidence_gene_models/evidence_gene_models.gff3";
+    my $input_file = "$tmp_dir/4.augustus/training/evidence_gene_models.gff3";
     open IN, $input_file or die "Error: Can not open file $input_file, $!";
     while (<IN>) {
         if (m/\tgene\t/) {
@@ -444,46 +440,46 @@ unless ( -e "get_flanking_length.ok" ) {
     $flanking_length = int($intergenic_length[@intergenic_length/2] / 8);
     $flanking_length = $gene_length[@gene_length/2] if $flanking_length >= $gene_length[@gene_length/2];
     # 输出flanking_length到指定文件中。
-    my $outpu_file = "$tmp_dir/5.augustus/training/flanking_length.txt";
+    my $outpu_file = "$tmp_dir/4.augustus/training/flanking_length.txt";
     open OUT, ">", $outpu_file or die "Can not create file $outpu_file, $!";
     print OUT $flanking_length;
     close OUT;
 
-    open OUT, ">", "get_flanking_length.ok" or die $!; close OUT;
+    open OUT, ">", "04.get_flanking_length.ok" or die $!; close OUT;
     print STDERR (localtime) . ": The flanking length was set to $flanking_length for AUGUSTUS Training.\n";
 }
 else {
-    my $input_file = "$tmp_dir/5.augustus/training/flanking_length.txt";
+    my $input_file = "$tmp_dir/4.augustus/training/flanking_length.txt";
     open IN, $input_file or die "Error: Can not open file $input_file, $!";
     $flanking_length = <IN>;
     close IN;
     print STDERR (localtime) . ": The flanking length was set to $flanking_length for AUGUSTUS Training.\n";
 }
 
-# 5.1.3 进行Augustus training
+# 4.1.5 进行Augustus training
 # 若--augustus_species参数设置的文件夹已经存在，则对其进行参数优化；不存在，则完全重新进行Training和优化。
 my $augustus_species_start_from = "";
 if ( -e "$ENV{'AUGUSTUS_CONFIG_PATH'}/species/$augustus_species/${augustus_species}_parameters.cfg" ) {
     $augustus_species_start_from = "--augustus_species_start_from $augustus_species";
 }
-$cmdString1 = "$bin_path/BGM2AT $config{'BGM2AT'} --AUGUSTUS_CONFIG_PATH $tmp_dir/5.augustus/config $augustus_species_start_from --flanking_length $flanking_length --CPU $cpu --onlytrain_GFF3 ati.filter1.gff3 ati.filter2.gff3 $genome $augustus_species &> BGM2AT.log";
+$cmdString1 = "$bin_path/BGM2AT $config{'BGM2AT'} --AUGUSTUS_CONFIG_PATH $tmp_dir/4.augustus/config $augustus_species_start_from --flanking_length $flanking_length --CPU $cpu --onlytrain_GFF3 ati.filter1.gff3 ati.filter2.gff3 $genome $augustus_species &> BGM2AT.log";
 $cmdString2 = "cp accuary_of_AUGUSTUS_HMM_Training.txt ../";
-$cmdString3 = "cp -a $tmp_dir/5.augustus/config/species/$augustus_species $ENV{'AUGUSTUS_CONFIG_PATH'}/species/ || echo Can not create file in directory $ENV{'AUGUSTUS_CONFIG_PATH'}/species/";
+$cmdString3 = "cp -a $tmp_dir/4.augustus/config/species/$augustus_species $ENV{'AUGUSTUS_CONFIG_PATH'}/species/ || echo Can not create file in directory $ENV{'AUGUSTUS_CONFIG_PATH'}/species/";
 
-&execute_cmds($cmdString1, $cmdString2, $cmdString3, "$tmp_dir/5.augustus/training.ok");
+&execute_cmds($cmdString1, $cmdString2, $cmdString3, "$tmp_dir/4.augustus/training.ok");
 
-# 5.2 准备Hints信息
-chdir "$tmp_dir/5.augustus"; print STDERR "\nPWD: $tmp_dir/5.augustus\n";
-$cmdString = "$bin_path/prepareAugusutusHints $config{'prepareAugusutusHints'} $tmp_dir/3.NGSReads_prediction/intron.txt $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.raw.gff3 $tmp_dir/2.homolog_prediction/homolog_prediction.gff3 > hints.gff";
+# 4.2 准备Hints信息
+chdir "$tmp_dir/4.augustus"; print STDERR "\nPWD: $tmp_dir/4.augustus\n";
+$cmdString = "$bin_path/prepareAugusutusHints $config{'prepareAugusutusHints'} --intron_tab $tmp_dir/3.NGSReads_prediction/intron.txt $tmp_dir/4.augustus/evidence_gene_models.gff3 $tmp_dir/3.NGSReads_prediction/transfrag.ORF_filledByHomolog.gff3 $tmp_dir/2.homolog_prediction/c.getGeneModels/homolog_prediction.raw.gff3 > hints.gff";
 
 &execute_cmds($cmdString, "prepareAugusutusHints.ok");
 
-# 5.3 进行Augustus基因预测
-# 5.3.1 先分析基因长度信息，从而计算基因组序列打断的长度，以利于并行化运行augustus命令。
+# 4.3 进行Augustus基因预测
+# 4.3.1 先分析基因长度信息，从而计算基因组序列打断的长度，以利于并行化运行augustus命令。
 my ($segmentSize, $overlapSize) = (1000000, 100000);
 unless ( -e "get_segmentSize.ok" ) {
     # 获取最长的基因长度
-    my $input_file = "$tmp_dir/4.evidence_gene_models/evidence_gene_models.gff3";
+    my $input_file = "$tmp_dir/4.augustus/training/evidence_gene_models.gff3";
     open IN, $input_file or die "Error: Can not open file $input_file, $!";
     my @gene_length;
     while (<IN>) {
@@ -502,7 +498,7 @@ unless ( -e "get_segmentSize.ok" ) {
         $segmentSize = $overlapSize * 10;
     }
     # 将overlapSize和segmentSize输出到文件segmentSize.txt文件中
-    my $outpu_file = "$tmp_dir/5.augustus/segmentSize.txt";
+    my $outpu_file = "$tmp_dir/4.augustus/segmentSize.txt";
     open OUT, ">", $outpu_file or die "Can not create file $outpu_file, $!";
     print OUT "$segmentSize\t$overlapSize";
     close OUT;
@@ -511,18 +507,18 @@ unless ( -e "get_segmentSize.ok" ) {
     print STDERR (localtime) . ": When executing augustus command lines using ParaFly, the genome sequences were split into segments. The longest segment spanned $segmentSize bp, and two adjacent segments overlapped by $overlapSize bp.\n";
 }
 else {
-    my $input_file = "$tmp_dir/5.augustus/segmentSize.txt";
+    my $input_file = "$tmp_dir/4.augustus/segmentSize.txt";
     open IN, $input_file or die "Error: Can not open file $input_file, $!";
     ($segmentSize, $overlapSize) = split /\t/, <IN>;
     close IN;
     print STDERR (localtime) . ": When executing augustus command lines using ParaFly, the genome sequences were split into segments. The longest segment spanned $segmentSize bp, and two adjacent segments overlapped by $overlapSize bp.\n";
 }
 
-# 5.3.2 Augustus gene prediction
-$cmdString1 = "$bin_path/paraAugusutusWithHints $config{'paraAugusutusWithHints'} --species $augustus_species --AUGUSTUS_CONFIG_PATH $tmp_dir/5.augustus/config --cpu $cpu --segmentSize $segmentSize --overlapSize $overlapSize --tmp_dir aug_para_with_hints $genome hints.gff > augustus.raw.gff3";
-$cmdString2 = "$bin_path/addHintRatioToAugustusResult $tmp_dir/4.evidence_gene_models/evidence_gene_models.gff3 hints.gff augustus.raw.gff3 > augustus.gff3";
+# 4.3.2 Augustus gene prediction
+$cmdString1 = "$bin_path/paraAugusutusWithHints $config{'paraAugusutusWithHints'} --species $augustus_species --AUGUSTUS_CONFIG_PATH $tmp_dir/4.augustus/config --cpu $cpu --segmentSize $segmentSize --overlapSize $overlapSize --tmp_dir aug_para_with_hints $genome hints.gff > augustus.raw.gff3";
+$cmdString2 = "$bin_path/addHintRatioToAugustusResult $tmp_dir/4.augustus/training/evidence_gene_models.gff3 hints.gff augustus.raw.gff3 > augustus.gff3";
 
-&execute_cmds($cmdString1, $cmdString2, "$tmp_dir/5.augustus.ok");
+&execute_cmds($cmdString1, $cmdString2, "$tmp_dir/4.augustus.ok");
 
 
 # Step 6: CombineGeneModels
@@ -550,9 +546,29 @@ geneModels.h.lowQuality.gff3\t对基因模型进行过滤，获得的低质量�
 geneModels.i.coding.gff3\t对geneModels.h.coding.gff3中的基因模型进行了强制补齐\n";
 close OUT;
 
+# 6.1 使用AUGUSTUS预测的基因模型对NGSReads和Homolog预测的不完整基因模型进行填补。
+@cmdString = ();
+push @cmdString, "$bin_path/GFF3_filling_gene_models_Parallel --cpu $cpu --tmp_dir a.FillingGeneModelsByAugustus_for_homolog_prediction --ouput_filling_detail_tab a.FillingGeneModelsByAugustus_for_homolog_prediction.tab --start_codon $start_codon --stop_codon $stop_codon --attribute_for_filling_complete Filled_by_AUGUSTUS=True $genome $tmp_dir/2.homolog_prediction/homolog_prediction.raw.gff3 $tmp_dir/4.augustus/augustus.gff3 > homolog_prediction.FillByAugustus.gff3 2> homolog_prediction.FillByAugustus.log";
+push @cmdString, "$bin_path/GFF3_filling_gene_models_Parallel --cpu $cpu --tmp_dir a.FillingGeneModelsByAugustus_for_NGSReads_prediction --ouput_filling_detail_tab a.FillingGeneModelsByAugustus_for_NGSReads_prediction.tab --start_codon $start_codon --stop_codon $stop_codon --attribute_for_filling_complete Filled_by_AUGUSTUS=True $genome $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.raw.gff3 $tmp_dir/4.augustus/augustus.gff3 > NGSReads_prediction.FillByAugustus.gff3 2> NGSReads_prediction.FillByAugustus.log";
+
+&execute_cmds(@cmdString, "01.FillingGeneModelsByAugustus.ok");
+
+# 6.2 合并NGSReads、Homolog和Augustus预测的基因模型
+@cmdString = ();
+push @cmdString, "$bin_path/GFF3_merging_and_removing_redundancy $config{'GFF3_merging_and_removing_redundancy'} --start_codon $start_codon --stop_codon $stop_codon $genome NGSReads_prediction.FillByAugustus.gff3 homolog_prediction.FillByAugustus.gff3 > evidence_prediction.gff3 2> GFF3_merging_and_removing_redundancy.1.log";
+push @cmdString, "$bin_path/GFF3_merging_and_removing_redundancy $config{'GFF3_merging_and_removing_redundancy'} --start_codon $start_codon --stop_codon $stop_codon $genome evidence_prediction.gff3 $tmp_dir/4.augustus/augustus.gff3 > all_prediction.gff3 2> GFF3_merging_and_removing_redundancy.2.log";
+
+&execute_cmds(@cmdString, "02.GFF3_merging_and_removing_redundancy.ok");
+
+# 6.3 对不完整基因模型进行首尾强制补齐。
+$cmdString = "$bin_path/fillingEndsOfGeneModels $config{'fillingEndsOfGeneModels'} --filling_need_transcriptID filling_need_transcriptID.txt --nonCompletedGeneModels geneModels.f.gff3 $genome all_prediction.gff3 > all_prediction.filled.gff3 2> fillingEndsOfGeneModels.1.log";
+
+&execute_cmds($cmdString, "03.fillingEndsOfGeneModels.ok");
+
+exit;
 # 6.1 第一轮基因预测结果整合：以AUGUSTUS结果为主，进行三种基因预测结果的整合
 # 对三种基因预测结果进行第一轮整合，以Augustus结果为准。得到 combine.1.gff3 为有Evidence支持的结果，combine.2.gff3为支持不足的结果。
-my $cmdString1 = "$bin_path/paraCombineGeneModels $config{'paraCombineGeneModels'} --cpu $cpu $tmp_dir/5.augustus/augustus.gff3 $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.raw.gff3 $tmp_dir/2.homolog_prediction/homolog_prediction.gff3 $tmp_dir/5.augustus/hints.gff &> /dev/null";
+my $cmdString1 = "$bin_path/paraCombineGeneModels $config{'paraCombineGeneModels'} --cpu $cpu $tmp_dir/4.augustus/augustus.gff3 $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.raw.gff3 $tmp_dir/2.homolog_prediction/homolog_prediction.gff3 $tmp_dir/4.augustus/hints.gff &> /dev/null";
 my $cmdString2 = "$bin_path/GFF3Clear --genome $genome --no_attr_add --coverage 0.8 combine.1.gff3 > geneModels.a.gff3 2> /dev/null";
 my $cmdString3 = "$bin_path/GFF3Clear --genome $genome --no_attr_add --coverage 0.8 combine.2.gff3 > geneModels.b.gff3 2> /dev/null";
 my $cmdString4 = "perl -p -i -e 's/(=[^;]+)\.t1/\$1.t01/g' geneModels.a.gff3 geneModels.b.gff3";
@@ -730,7 +746,7 @@ if ( $protein ) {
 if ( (($pe1 && $pe2) or $single_end or $sam) && $protein ) {
     push @cmdString, "cp $tmp_dir/4.evidence_gene_models/evidence_gene_models.gff3 $out_prefix.evidence_prediction.gff3";
 }
-push @cmdString, "$bin_path/GFF3Clear --genome $genome --no_attr_add $tmp_dir/5.augustus/augustus.gff3 > $out_prefix.augustus_prediction.gff3";
+push @cmdString, "$bin_path/GFF3Clear --genome $genome --no_attr_add $tmp_dir/4.augustus/augustus.gff3 > $out_prefix.augustus_prediction.gff3";
 push @cmdString, "4.output_methods_GFF3.ok";
 
 &execute_cmds(@cmdString);
@@ -822,14 +838,14 @@ unless ( -e "$tmp_dir/7.output_gene_models.ok" ) {
         print OUT `tail -n 3 $input_file`;
     }
     # (5) 获取AUGUSTUS基因预测数量
-    if (-e "$tmp_dir/5.augustus/augustus.gff3") {
-        my $input_file = "$tmp_dir/5.augustus/augustus.gff3";
+    if (-e "$tmp_dir/4.augustus/augustus.gff3") {
+        my $input_file = "$tmp_dir/4.augustus/augustus.gff3";
         print OUT "The statistics of gene models predicted by AUGUSTUS:\n";
         my $gene_num = `grep -P "\tgene" $input_file | wc -l`; chomp($gene_num);
         print OUT "$gene_num genes were predicted by augustus.\n\n";
     }
     # (6) 获取AUGUSTUS Training的准确率信息和预测基因数量统计
-    my $input_file = "$tmp_dir/5.augustus/accuary_of_AUGUSTUS_HMM_Training.txt";
+    my $input_file = "$tmp_dir/4.augustus/accuary_of_AUGUSTUS_HMM_Training.txt";
     open IN, $input_file or die "Error: Can not open file $input_file, $!";
     print OUT <IN>;
     close IN;
@@ -861,8 +877,8 @@ if ( $delete_unimportant_intermediate_files ) {
     push @cmdString, "rm -rf $tmp_dir/3.NGSReads_prediction/a.trimmomatic $tmp_dir/3.NGSReads_prediction/b.hisat2 $tmp_dir/3.NGSReads_prediction/c.transcript";
     # 删除 2.homolog_prediction 文件夹下的数据
     push @cmdString, "rm -rf $tmp_dir/2.homolog_prediction/a.MMseqs2CalHits $tmp_dir/2.homolog_prediction/b.hitToGenePrediction $tmp_dir/2.homolog_prediction/c.getGeneModels";
-    # 删除 5.augustus 文件夹下的数据
-    push @cmdString, "rm -rf $tmp_dir/5.augustus/aug_para_with_hints";
+    # 删除 4.augustus 文件夹下的数据
+    push @cmdString, "rm -rf $tmp_dir/4.augustus/aug_para_with_hints";
     # 删除 6.combine_gene_models 文件夹下的数据
     push @cmdString, "rm -rf $tmp_dir/6.combine_gene_models/combineGeneModels_tmp $tmp_dir/6.combine_gene_models/*tmp";
     # 删除 7.output_gene_models 文件夹下的数据
@@ -889,7 +905,7 @@ sub statistics_combination {
 
     # （1）分析NGS reads、homolog和AUGUSTUS三种方法预测的基因数量，合并后的基因数量。
     my ($augustus_gene_num, $NGSreads_gene_num, $homolog_gene_num) = (0, 0, 0);
-    $augustus_gene_num = `grep -P "\tgene\t" $tmp_dir/5.augustus/augustus.gff3 | wc -l`;
+    $augustus_gene_num = `grep -P "\tgene\t" $tmp_dir/4.augustus/augustus.gff3 | wc -l`;
     $NGSreads_gene_num = `grep -P "\tgene\t" $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.raw.gff3 | wc -l`;
     $homolog_gene_num = `grep -P "\tgene\t" $tmp_dir/2.homolog_prediction/homolog_prediction.gff3 | wc -l`;
     chomp($augustus_gene_num); chomp($NGSreads_gene_num); chomp($homolog_gene_num);
@@ -1193,8 +1209,8 @@ Parameters:
     all        32293       48.19%              42.89%              66.91%              78.00%
     filtered   23857       45.19%              54.44%              64.44%              83.72%
 
-    --optimize_augustus_method <int>    default: 1
-    Enter the method for AUGUSTUS parameters optimization. 1, indicates that only BGM2AT.optimize_augustus is called for AUGUSTUS optimization, which can use all CPU threads to parallel test all parameters and is fast. 2, means that the script optimize_augustus.pl provided by the AUGUSTUS software was called sequentially for AUGUSTUS optimization after BGM2AT.optimize_augustus had finished its run. This second step is much slower, but probably more effective. This parameter has a higher priority and can override the BGM2AT parameter value in the parameter configuration file specified by --config.
+    --optimize_augustus_method <int>    default: 3
+    Enter the method for AUGUSTUS parameters optimization. 1, indicates that only BGM2AT.optimize_augustus is called for optimization, which can fully utilize all CPU threads and run at a fast speed; 2, indicates that only the optimize_augustus.pl program provided by the AUGUSTUS software is used for optimization, which is slower than the first method, but the results are better; 3, indicates that BGM2AT.optimize_augustus is optimized first, then the optimize_augustus.pl program provided by the AUGUSTUS software is used, followed by further optimization. This method prioritizes both speed and effectiveness. It can cover the values of the same parameters specified in the --config parameter configuration file for BGM2AT.
     
     --no_alternative_splicing_analysis    default: None
     When this parameter is added, the program does not perform alternative splicing analysis. Note that GETA defaults to perform alternative splicing analysis based on intron and base sequencing depth information when NGS reads were input.
@@ -1290,12 +1306,269 @@ sub parsing_input_parameters {
     $cpu ||= 4;
 
     $genetic_code ||= 1;
+	# 根据遗传密码得到起始密码子和终止密码子
+	@_ = &codon_table("$tmp_dir/codon.table");
+	my (%start_codon, %stop_codon);
+	%start_codon = %{$_[1]};
+	%stop_codon = %{$_[2]};
+	$start_codon = join ",", sort keys %start_codon;
+	$stop_codon = join ",", sort keys %stop_codon;
 
     die $chinese_help if $chinese_help;
     die $help if $help;
 
     return 1;
 }
+
+sub codon_table {
+    my %code = (
+        "TTT" => "F",
+        "TTC" => "F",
+        "TTA" => "L",
+        "TTG" => "L",
+        "TCT" => "S",
+        "TCC" => "S",
+        "TCA" => "S",
+        "TCG" => "S",
+        "TAT" => "Y",
+        "TAC" => "Y",
+        "TAA" => "X",
+        "TAG" => "X",
+        "TGT" => "C",
+        "TGC" => "C",
+        "TGA" => "X",
+        "TGG" => "W",
+        "CTT" => "L",
+        "CTC" => "L",
+        "CTA" => "L",
+        "CTG" => "L",
+        "CCT" => "P",
+        "CCC" => "P",
+        "CCA" => "P",
+        "CCG" => "P",
+        "CAT" => "H",
+        "CAC" => "H",
+        "CAA" => "Q",
+        "CAG" => "Q",
+        "CGT" => "R",
+        "CGC" => "R",
+        "CGA" => "R",
+        "CGG" => "R",
+        "ATT" => "I",
+        "ATC" => "I",
+        "ATA" => "I",
+        "ATG" => "M",
+        "ACT" => "T",
+        "ACC" => "T",
+        "ACA" => "T",
+        "ACG" => "T",
+        "AAT" => "N",
+        "AAC" => "N",
+        "AAA" => "K",
+        "AAG" => "K",
+        "AGT" => "S",
+        "AGC" => "S",
+        "AGA" => "R",
+        "AGG" => "R",
+        "GTT" => "V",
+        "GTC" => "V",
+        "GTA" => "V",
+        "GTG" => "V",
+        "GCT" => "A",
+        "GCC" => "A",
+        "GCA" => "A",
+        "GCG" => "A",
+        "GAT" => "D",
+        "GAC" => "D",
+        "GAA" => "E",
+        "GAG" => "E",
+        "GGT" => "G",
+        "GGC" => "G",
+        "GGA" => "G",
+        "GGG" => "G",
+    );
+    my %start_codon;
+    $start_codon{"ATG"} = 1;
+    if ( $genetic_code == 1 ) {
+        # The Standard Code
+        #$start_codon{"TTG"} = 1;
+        #$start_codon{"CTG"} = 1;
+    }
+    elsif ( $genetic_code == 2 ) {
+        # The Vertebrate Mitochondrial Code
+        $code{"AGA"} = "X";
+        $code{"AGG"} = "X";
+        $code{"ATA"} = "M";
+        $code{"TGA"} = "W";
+        $start_codon{"ATA"} = 1;
+        $start_codon{"ATT"} = 1;
+        $start_codon{"ATC"} = 1;
+        $start_codon{"GTG"} = 1;
+    }
+    elsif ( $genetic_code == 3 ) {
+        # The Yeast Mitochondrial Code
+        $code{"ATA"} = "M";
+        $code{"CTT"} = "T";
+        $code{"CTC"} = "T";
+        $code{"CTA"} = "T";
+        $code{"CTG"} = "T";
+        $code{"TGA"} = "W";
+        $start_codon{"ATA"} = 1;
+        $start_codon{"GTG"} = 1;
+    }
+    elsif ( $genetic_code == 4 ) {
+        # The Mold, Protozoan, and Coelenterate Mitochondrial Code and the Mycoplasma/Spiroplasma Code
+        $code{"TGA"} = "W";
+        $start_codon{"ATA"} = 1;
+        $start_codon{"ATT"} = 1;
+        $start_codon{"ATC"} = 1;
+        $start_codon{"GTG"} = 1;
+        $start_codon{"CTG"} = 1;
+        $start_codon{"TTA"} = 1;
+        $start_codon{"TTG"} = 1;
+    }
+    elsif ( $genetic_code == 5 ) {
+        # The Invertebrate Mitochondrial Code
+        $code{"AGA"} = "S";
+        $code{"AGG"} = "S";
+        $code{"ATA"} = "M";
+        $code{"TGA"} = "W";
+        $start_codon{"ATA"} = 1;
+        $start_codon{"ATT"} = 1;
+        $start_codon{"ATC"} = 1;
+        $start_codon{"GTG"} = 1;
+        $start_codon{"TTG"} = 1;
+    }
+    elsif ( $genetic_code == 6 ) {
+        # The Ciliate, Dasycladacean and Hexamita Nuclear Code
+        $code{"TAA"} = "Q";
+        $code{"TAG"} = "Q";
+    }
+    elsif ( $genetic_code == 9 ) {
+        # The Echinoderm and Flatworm Mitochondrial Code
+        $code{"AAA"} = "N";
+        $code{"AGA"} = "S";
+        $code{"AGG"} = "S";
+        $code{"TGA"} = "W";
+        $start_codon{"GTG"} = 1;
+    }
+    elsif ( $genetic_code == 10 ) {
+        # The Euplotid Nuclear Code
+        $code{"TGA"} = "C";
+    }
+    elsif ( $genetic_code == 11 ) {
+        # The Bacterial, Archaeal and Plant Plastid Code
+        $start_codon{"ATA"} = 1;
+        $start_codon{"ATT"} = 1;
+        $start_codon{"ATC"} = 1;
+        $start_codon{"GTG"} = 1;
+        $start_codon{"CTG"} = 1;
+        $start_codon{"TTG"} = 1;
+    }
+    elsif ( $genetic_code == 12 ) {
+        # The Alternative Yeast Nuclear Code
+        $code{"CTG"} = "S";
+        $start_codon{"CTG"} = 1;
+    }
+    elsif ( $genetic_code == 13 ) {
+        # The Ascidian Mitochondrial Code
+        $code{"AGA"} = "G";
+        $code{"AGG"} = "G";
+        $code{"ATA"} = "M";
+        $code{"TGA"} = "W";
+        $start_codon{"ATA"} = 1;
+        $start_codon{"GTG"} = 1;
+        $start_codon{"TTG"} = 1;
+    }
+    elsif ( $genetic_code == 14 ) {
+        # The Alternative Flatworm Mitochondrial Code
+        $code{"AAA"} = "N";
+        $code{"AGA"} = "S";
+        $code{"AGG"} = "S";
+        $code{"TAA"} = "Y";
+        $code{"TGA"} = "W";
+    }
+    elsif ( $genetic_code == 16 ) {
+        # Chlorophycean Mitochondrial Code
+        $code{"TAG"} = "L";
+    }
+    elsif ( $genetic_code == 21 ) {
+        # Trematode Mitochondrial Code
+        $code{"TGA"} = "W";
+        $code{"ATA"} = "M";
+        $code{"AGA"} = "S";
+        $code{"AGG"} = "S";
+        $code{"AAA"} = "N";
+        $start_codon{"GTG"} = 1;
+    }
+    elsif ( $genetic_code == 22 ) {
+        # Scenedesmus obliquus Mitochondrial Code
+        $code{"TCA"} = "X";
+        $code{"TAG"} = "L";
+    }
+    elsif ( $genetic_code == 23 ) {
+        # Thraustochytrium Mitochondrial Code
+        $code{"TTA"} = "X";
+        $start_codon{"ATT"} = 1;
+        $start_codon{"GTG"} = 1;
+    }
+    elsif ( $genetic_code == 24 ) {
+        # Rhabdopleuridae Mitochondrial Code
+        $code{"AGA"} = "S";
+        $code{"AGG"} = "K";
+        $code{"TGA"} = "W";
+        $start_codon{"GTG"} = 1;
+        $start_codon{"CTG"} = 1;
+        $start_codon{"TTG"} = 1;
+    }
+    elsif ( $genetic_code == 25 ) {
+        # Candidate Division SR1 and Gracilibacteria Code
+        $code{"TGA"} = "G";
+        $start_codon{"GTG"} = 1;
+        $start_codon{"TTG"} = 1;
+    }
+    elsif ( $genetic_code == 26 ) {
+        # Pachysolen tannophilus Nuclear Code
+        # warning: The descritpions of initiation codons by 2 methods are confict according to the NCBI web site.
+        $code{"CTG"} = "A";
+        $start_codon{"GTG"} = 1;
+        $start_codon{"TTG"} = 1;
+    }
+    elsif ( $genetic_code == 27 ) {
+        # Karyorelict Nuclear Code
+        $code{"TAG"} = "Q";
+        $code{"TAA"} = "Q";
+    }
+    elsif ( $genetic_code == 29 ) {
+        # Mesodinium Nuclear Code
+        $code{"TAA"} = "Y";
+        $code{"TAG"} = "Y";
+    }
+    elsif ( $genetic_code == 30 ) {
+        # Peritrich Nuclear Code
+        $code{"TAA"} = "E";
+        $code{"TAG"} = "E";
+    }
+    elsif ( $genetic_code == 31 ) {
+        # Blastocrithidia Nuclear Code
+        $code{"TGA"} = "W";
+    }
+    elsif ( $genetic_code == 33 ) {
+        # Cephalodiscidae Mitochondrial UAA-Tyr Code
+        $code{"TAA"} = "Y";
+        $code{"TGA"} = "Y";
+        $code{"AGA"} = "S";
+        $code{"AGG"} = "K";
+    }
+
+    my %stop_codon;
+    foreach ( keys %code ) {
+        $stop_codon{$_} = 1 if $code{$_} eq "X";
+    }
+
+    return (\%code, \%start_codon, \%stop_codon);
+}
+
 
 # 根据基因组大小选择程序自带的配置文件。
 sub choose_config_file {
@@ -1349,14 +1622,15 @@ sub choose_config_file {
     }
     $config{"homolog_prediction"} =~ s/--method \S+/--method $homolog_prediction_method/;
 
-    $optimize_augustus_method ||= 1;
-    unless ( $optimize_augustus_method == 1 or $optimize_augustus_method == 2 ) {
-        die "Error: The value of --optimize_augustus_method shoud be 1 or 2\n";
+    $optimize_augustus_method ||= 3;
+    unless ( $optimize_augustus_method == 1 or $optimize_augustus_method == 2 or $optimize_augustus_method == 3 ) {
+        die "Error: The value of --optimize_augustus_method shoud be 1, 2 or 3\n";
     }
     $config{"BGM2AT"} =~ s/--optimize_augustus_method \d+/--optimize_augustus_method $optimize_augustus_method/;
 
     if ( defined $put_massive_temporary_data_into_memory ) {
         $config{"homolog_prediction"} =~ s/\s*$/ --put_massive_temporary_data_into_memory/;
+		$config{"BGM2AT"} =~ s/\s*$/ --put_massive_temporary_data_into_memory/;
     }
 
     # 生成本次程序运行的配置文件

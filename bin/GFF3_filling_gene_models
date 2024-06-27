@@ -247,7 +247,7 @@ foreach my $gene_ID ( sort keys %target_info ) {
                     $len1 = $pos2 - $pos1 + 1;
                     ( $pos1, $pos2 ) = split /\t/, $fill_CDS[-1];
                     $len2 = $pos2 - $pos1 + 1;
-                    if ( $len2 >= $len1 ) {
+                    if ( $len2 > $len1 or ($len2 == $len1 && @fill_CDS > 1) ) {
                         shift @CDS;
                         unshift @CDS, @fill_CDS;
                         print STDERR "$gene_ID\t$mRNA_ID\tMulti_CDS\t$integrity\tFilled_5p\t$fill_mRNA_ID\n";
@@ -271,7 +271,7 @@ foreach my $gene_ID ( sort keys %target_info ) {
                     $len1 = $pos2 - $pos1 + 1;
                     ( $pos1, $pos2 ) = split /\t/, $fill_CDS[0];
                     $len2 = $pos2 - $pos1 + 1;
-                    if ( $len2 >= $len1 ) {
+                    if ( $len2 > $len1 or ($len2 == $len1 && @fill_CDS > 1) ) {
                         pop @CDS;
                         push @CDS, @fill_CDS;
                         print STDERR "$gene_ID\t$mRNA_ID\tMulti_CDS\t$integrity\tFilled_3p\t$fill_mRNA_ID\n";
@@ -312,7 +312,7 @@ foreach my $gene_ID ( sort keys %target_info ) {
                         # 重叠后，填补的 CDSs 最后一个 CDS，其5'端要超出目标 CDS
                         #   ======------============>
                         #                  ====================>
-                        if ( $strand eq "+" && $fill_CDS_start <= $start ) {
+                        if ( $strand eq "+" && ($fill_CDS_start < $start or ($fill_CDS_start == $start && @fill_CDS > 1)) ) {
                             # 再检测frame是否一致
                             my $add_frame = $fill_CDS_frame;
                             $add_frame = 1 if $add_frame == 2; $add_frame = 2 if $add_frame == 1; 
@@ -331,7 +331,7 @@ foreach my $gene_ID ( sort keys %target_info ) {
                         }
                         #                      <======------============
                         #    <====================
-                        if ( $strand eq "-" && $fill_CDS_end >= $end ) {
+                        if ( $strand eq "-" && ($fill_CDS_end > $end or ($fill_CDS_end == $end && @fill_CDS > 1)) ) {
                             # 再检测frame是否一致
                             my $add_frame = $fill_CDS_frame;
                             $add_frame = 1 if $add_frame == 2; $add_frame = 2 if $add_frame == 1;
@@ -380,7 +380,7 @@ foreach my $gene_ID ( sort keys %target_info ) {
                         # 重叠后，填补的 CDSs 最后一个 CDS，其5'端要超出目标 CDS
                         #                  ========------============>
                         # ====================>
-                        if ( $strand eq "+" && $fill_CDS_end >= $end ) {
+                        if ( $strand eq "+" && ($fill_CDS_end > $end or ($fill_CDS_end == $end && @fill_CDS > 1) )) {
                             # 再检测frame是否一致
                             my $add_frame = $fill_CDS_frame;
                             $add_frame = 1 if $add_frame == 2; $add_frame = 2 if $add_frame == 1;
@@ -401,7 +401,7 @@ foreach my $gene_ID ( sort keys %target_info ) {
                         }
                         #  <========------==========
                         #                      <===============
-                        if ( $strand eq "-" && $fill_CDS_start <= $start ) {
+                        if ( $strand eq "-" && ($fill_CDS_start < $start or ($fill_CDS_start == $start && @fill_CDS > 1))) {
                             # 再检测frame是否一致
                             my $add_frame = $fill_CDS_frame;
                             $add_frame = 1 if $add_frame == 2; $add_frame = 2 if $add_frame == 1;
@@ -452,6 +452,7 @@ foreach my $gene_ID ( sort keys %target_info ) {
         if ( $integrity ne "complete") {
             my $integrity_new = &analysis_geneModels_integrity(\@CDS, $chr, $strand);
             if ($integrity_new eq "complete") {
+                print STDERR "Filled_to_complete: $gene_ID\n";
                 $mRNA_header =~ s/\;?\s*$/;$attribute_for_filling_complete;\n/ if defined $attribute_for_filling_complete;
             }
         }

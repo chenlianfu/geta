@@ -23,7 +23,10 @@ TruSeq3-PE-2.fa:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:50 TOPHRE
 --min_protein_length 100 --genetic_code 1
 
 [homolog_prediction]
---identity 0.2 --evalue 1e-9 --homolog_coverage 0.3 --max_hits_num_per_match_region 10 --max_hit_num_per_single_species 2 --method all --threshod_ratio_of_intron_Supported_times 0.5
+--identity 0.2 --evalue 1e-9 --homolog_coverage 0.3 --max_hits_num_per_match_region 10 --max_hit_num_per_single_species 2 --method all --threshod_ratio_of_intron_Supported_times 0.0
+
+[GFF3_merging_and_removing_redundancy]
+--intron_score 0.3 --complete5p_score 0.5 --complete3p_score 0.5 --first_file_score 0.5 --overlap_coverage 0.3
 
 [geneModels2AugusutsTrainingInput]
 --min_evalue 1e-9 --min_identity 0.8 --min_coverage_ratio 0.8 --min_cds_num 2 --min_cds_length 450 --min_cds_exon_ratio 0.60
@@ -31,11 +34,11 @@ TruSeq3-PE-2.fa:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:50 TOPHRE
 # if gene models number of ati.filter2.gff3 was few, recommed to decrease --min_cds_exon_ratio and increase --min_coverage_ratio.
 
 [BGM2AT]
---min_gene_number_for_augustus_training 500 --gene_number_for_accuracy_detection 200 --gene_models_minimum_num_for_test 100 --gene_models_maximum_num_for_test 600 --gene_models_ratio_for_test 0.2 --gene_models_num_per_test 50 --pstep 6 --rounds 6 --optimize_augustus_method 1 --min_intron_len 20
+--min_gene_number_for_augustus_training 500 --gene_number_for_accuracy_detection 200 --gene_models_minimum_num_for_test 100 --gene_models_maximum_num_for_test 600 --gene_models_ratio_for_test 0.2 --gene_models_num_per_test 200 --pstep 6 --method1_rounds 6 --method2_rounds 3 --optimize_augustus_method 3 --min_intron_len 20
 # During the step of BGM2AT: --flanking_length was automatically calculated; --stopAfterFirstEtraining was set or not set at different steps; --onlytrain_GFF3 was set to a intermediate file.
 
 [prepareAugusutusHints]
---margin 20
+--margin 20 --CDS_length 900
 # note: to obtain the exonpart or cdspart hints, the margin 20bp will be removed.
 
 [paraAugusutusWithHints]

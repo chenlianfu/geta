@@ -80,29 +80,36 @@ while (<IN>) {
 close IN;
 
 # extrinsic.cfg
+# 给M E P不同类型的hints设置参数。(1) 添加individual_liability，表示当有组内有不满足要求的hint时，仅删除该hint，而不是像默认情况下删除整组的hints信息。(2) 添加1group1gene，表示程序尝试预测出一个能完全覆盖整组hints的基因模型，能有利于处理多组hints之间的Gaps，即有利于使用多组Hints预测出一个完整的基因。例如，两个ESTs分别比对到一个基因的5'和3'端时，得到了两组Hints，添加1group1gene后，程序有利于将两组hints合并预测出一个基因。
+# 同时有intron和CDSpart hints时，推荐设置CDSpart的得分系数高于intron，这样有利于AUGUSTUS调整不正确的intron，得到更准确的基因模型。本软件中CDSpart的得分系数时intron的一百倍。
+# 起始密码子和终止密码子对基因预测的影响可能时最大的，设置其得分系数最高。
+# Feature(CDS CDSpart intron)后紧跟两个数据，第一个是奖励系数，第二个是惩罚系数。第二个值越小，则表示没有hints支持时，更谨慎地预测基因，即最终预测的基因数量越少，specificity越高。
 my $extrinsic = '[SOURCES]
 M RM E W P
 
 [SOURCE-PARAMETERS]
+M individual_liability 1group1gene
+E individual_liability 1group1gene
+P individual_liability 1group1gene
 
 [GENERAL]
-      start      1        0.8  M    1  1e+100  RM  1     1    E 1    1000    W 1    1    P   1   1000
-       stop      1        0.8  M    1  1e+100  RM  1     1    E 1    1000    W 1    1    P   1   1000
-        tss      1          1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
-        tts      1          1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
-        ass      1  0.95  0.1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   100
-        dss      1  0.95  0.1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   100
-   exonpart      1  .992 .985  M    1  1e+100  RM  1     1    E 1    1e4  W 1    1    P   1   1
-       exon      1          1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
- intronpart      1          1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
-     intron      1       0.34  M    1  1e+100  RM  1     1    E 1    1e6  W 1    100  P   1   1e4
-    CDSpart      1     1 .985  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1e5
-        CDS      1          1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
-    UTRpart      1     1    1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
-        UTR      1          1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
-     irpart      1          1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
-nonexonpart      1          1  M    1  1e+100  RM  1     1.15 E 1    1    W 1    1    P   1   1
-  genicpart      1          1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1';
+      start      1         1  M    1  1e+100  RM  1     1    E 1    1e6  W 1    1    P   1   100
+       stop      1         1  M    1  1e+100  RM  1     1    E 1    1e6  W 1    1    P   1   100
+        tss      1         1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
+        tts      1         1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
+        ass      1   1     1  M    1  1e+100  RM  1     1    E 1    100  W 1    1    P   1   100
+        dss      1   1     1  M    1  1e+100  RM  1     1    E 1    100  W 1    1    P   1   100
+   exonpart      1   1     1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
+       exon      1         1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
+ intronpart      1         1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
+     intron      1     0.168  M    1  1e+100  RM  1     1    E 1    100  W 1    1    P   1   10
+    CDSpart      1   1  0.99  M    1  1e+100  RM  1     1    E 1    1e3  W 1    1    P   1   100
+        CDS      1         1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
+    UTRpart      1   1     1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
+        UTR      1         1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
+     irpart      1         1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
+nonexonpart      1         1  M    1  1e+100  RM  1     1.14 E 1    1    W 1    1    P   1   1
+  genicpart      1         1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1';
 open OUT, ">", "extrinsic.cfg" or die $!;
 print OUT "$extrinsic\n";
 close OUT;
@@ -279,7 +286,7 @@ foreach my $seq_id (sort keys %out_id) {
                 next if $gene eq $_;
                 @_ = split /\t/, $_;
                 if ($gene_info[2] <= $_[3] && $gene_info[3] >= $_[2]) {
-                    #print STDERR "Overlap Gene deleted: $gene || $_\n";
+                    print STDERR "Overlap Gene deleted: $gene || $_\n";
                     delete $out{$gene};
                 }
             }
