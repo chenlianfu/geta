@@ -286,7 +286,7 @@ foreach my $seq_id (sort keys %out_id) {
                 next if $gene eq $_;
                 @_ = split /\t/, $_;
                 if ($gene_info[2] <= $_[3] && $gene_info[3] >= $_[2]) {
-                    print STDERR "Overlap Gene deleted: $gene || $_\n";
+					#print STDERR "Overlap Gene deleted: $gene || $_\n";
                     delete $out{$gene};
                 }
             }

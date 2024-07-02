@@ -38,7 +38,7 @@ TruSeq3-PE-2.fa:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:50 TOPHRE
 # During the step of BGM2AT: --flanking_length was automatically calculated; --stopAfterFirstEtraining was set or not set at different steps; --onlytrain_GFF3 was set to a intermediate file.
 
 [prepareAugusutusHints]
---margin 20 --CDS_length 900
+--margin 20 --CDS_ratio 0.333
 # note: to obtain the exonpart or cdspart hints, the margin 20bp will be removed.
 
 [paraAugusutusWithHints]

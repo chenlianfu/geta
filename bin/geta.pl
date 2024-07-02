@@ -470,7 +470,7 @@ $cmdString3 = "cp -a $tmp_dir/4.augustus/config/species/$augustus_species $ENV{'
 
 # 4.2 准备Hints信息
 chdir "$tmp_dir/4.augustus"; print STDERR "\nPWD: $tmp_dir/4.augustus\n";
-$cmdString = "$bin_path/prepareAugusutusHints $config{'prepareAugusutusHints'} --intron_tab $tmp_dir/3.NGSReads_prediction/intron.txt $tmp_dir/4.augustus/evidence_gene_models.gff3 $tmp_dir/3.NGSReads_prediction/transfrag.ORF_filledByHomolog.gff3 $tmp_dir/2.homolog_prediction/c.getGeneModels/homolog_prediction.raw.gff3 > hints.gff";
+$cmdString = "$bin_path/prepareAugusutusHints $config{'prepareAugusutusHints'} $tmp_dir/4.augustus/evidence_gene_models.gff3 > hints.gff";
 
 &execute_cmds($cmdString, "prepareAugusutusHints.ok");
 
@@ -521,7 +521,7 @@ $cmdString2 = "$bin_path/addHintRatioToAugustusResult $tmp_dir/4.augustus/traini
 &execute_cmds($cmdString1, $cmdString2, "$tmp_dir/4.augustus.ok");
 
 
-# Step 6: CombineGeneModels
+# Step 5: CombineGeneModels
 print STDERR "\n============================================\n";
 print STDERR "Step 6: CombineGeneModels " . "(" . (localtime) . ")" . "\n";
 mkdir "$tmp_dir/6.combine_gene_models" unless -e "$tmp_dir/6.combine_gene_models";
