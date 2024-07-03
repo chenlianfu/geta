@@ -2,6 +2,9 @@
 use strict;
 use Getopt::Long;
 use Cwd qw/abs_path getcwd cwd/;
+use File::Basename;
+
+my $bin_path = dirname($0);
 
 my $usage = <<USAGE;
 Usage:
@@ -74,8 +77,8 @@ close IN;
 open IN, $ARGV[1] or die $!;
 my %hints;
 while (<IN>) {
-   @_ = split /\t/;
-    $hints{$_[0]} .= $_;
+	@_ = split /\t/;
+	$hints{$_[0]} .= $_;
 }
 close IN;
 
@@ -102,7 +105,7 @@ P individual_liability 1group1gene
    exonpart      1   1     1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
        exon      1         1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
  intronpart      1         1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
-     intron      1     0.168  M    1  1e+100  RM  1     1    E 1    100  W 1    1    P   1   10
+     intron      1     0.168  M    1  1e+100  RM  1     1    E 1    100  W 1    1e3  P   1   10
     CDSpart      1   1  0.99  M    1  1e+100  RM  1     1    E 1    1e3  W 1    1    P   1   100
         CDS      1         1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
     UTRpart      1   1     1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
@@ -115,231 +118,160 @@ print OUT "$extrinsic\n";
 close OUT;
 
 mkdir $tmp_dir unless -e $tmp_dir;
-my %out_id;
-open COM, ">", "$tmp_dir/command.augustus.list" or die $!;
-foreach my $seq_id (sort keys %seq) {
-    my $seq = $seq{$seq_id};
-    my $seq_length = length $seq;
-    my $hints_info = $hints{$seq_id};
-    my @hints_info = split /\n/, $hints_info;
 
-    if ($seq_length > $segmentSize) {
+# 对数据进行分隔，并生成命令行
+my %out_id;
+unless ( -e "$tmp_dir/split.ok" && -s "$tmp_dir/out_id.list" ) {
+	# 输出augustus命令行
+    open COM, ">", "$tmp_dir/command.augustus.list" or die $!;
+    foreach my $seq_id (sort keys %seq) {
+        my $seq = $seq{$seq_id};
+        my $seq_length = length $seq;
+        my $hints_info = $hints{$seq_id};
+        my @hints_info = split /\n/, $hints_info;
+    
+		# 将染色体序列分隔成多份多段
         my @partion = &get_partition($seq_length, $segmentSize, $overlapSize);
-        my $last_end_hints;
+
+		# 对染色体的每段进行数据提取
         foreach (@partion) {
+			# 确定一段序列的起始和结束位点，以0作为起始。
             my $start = $_ - 1;
             my $end = $start + $segmentSize;
             my $sub_seq = substr($seq, $start, $segmentSize);
 
+			# 输出基因组序列
             open OUT, ">", "$tmp_dir/$seq_id.$start.fasta" or die "Can not create file $seq_id.$start.fasta, $!\n";
             print OUT ">$seq_id\n$sub_seq\n";
             close OUT;
-
+    
+			# 输出hints信息
             open OUT, ">", "$tmp_dir/$seq_id.$start.gff" or die "Can not create file $seq_id.$start.gff, $!\n";
-            if ($last_end_hints) {
-                my @last_end_hints = split /\n/, $last_end_hints;
-                foreach (@last_end_hints) {
-                    @_ = split /\t/;
-                    my $feature_start = $_[3] - $start;
-                    my $feature_end = $_[4] - $start;
-                    print OUT "$_[0]\t$_[1]\t$_[2]\t$feature_start\t$feature_end\t$_[5]\t$_[6]\t$_[7]\t$_[8]\n";
-                }
-            }
-            $last_end_hints = "";
-            my @info = @hints_info;
-            foreach (@info) {
-                @_ = split /\t/;
-                if ($_[4] <= $end) {
-                    my $feature_start = $_[3] - $start;
-                    my $feature_end = $_[4] - $start;
-                    print OUT "$_[0]\t$_[1]\t$_[2]\t$feature_start\t$feature_end\t$_[5]\t$_[6]\t$_[7]\t$_[8]\n";
-                    if ($_[3] >= ($end - $overlapSize + 1)) {
-                        $last_end_hints .= "$_\n";
-                    }
-                    shift @hints_info;
-                }
-                else {
-                    last;
-                }
-            }
+			foreach ( @hints_info ) {
+				@_ = split /\t/;
+				if ( $_[3] >= $start + 1 && $_[4] <= $end + 1 ) {
+					my $feature_start = $_[3] - $start;
+					my $feature_end = $_[4] - $start;
+					print OUT "$_[0]\t$_[1]\t$_[2]\t$feature_start\t$feature_end\t$_[5]\t$_[6]\t$_[7]\t$_[8]\n";
+				}
+			}
             close OUT;
 
-            if ($alternatives_from_evidence) {
-                print COM "augustus --gff3=on --species=$species $AUGUSTUS_CONFIG_PATH --hintsfile=$tmp_dir/$seq_id.$start.gff --extrinsicCfgFile=extrinsic.cfg --allow_hinted_splicesites=gcag,atac --alternatives-from-evidence=true --min_intron_len=$min_intron_len --softmasking=1 $tmp_dir/$seq_id.$start.fasta > $tmp_dir/$seq_id.$start.out\n";
-            }
-            else {
-                print COM "augustus --gff3=on --species=$species $AUGUSTUS_CONFIG_PATH --hintsfile=$tmp_dir/$seq_id.$start.gff --extrinsicCfgFile=extrinsic.cfg --allow_hinted_splicesites=gcag,atac --min_intron_len=$min_intron_len --softmasking=1 $tmp_dir/$seq_id.$start.fasta > $tmp_dir/$seq_id.$start.out\n";
-            }
+			# 输出augustus命令行信息
+			my $alternatives_from_evidence_parameter = "";
+			$alternatives_from_evidence_parameter = "--alternatives-from-evidence=true" if $alternatives_from_evidence;
+			;
+            print COM "augustus --gff3=on --species=$species $AUGUSTUS_CONFIG_PATH --hintsfile=$tmp_dir/$seq_id.$start.gff --extrinsicCfgFile=extrinsic.cfg --allow_hinted_splicesites=gcag,atac $alternatives_from_evidence_parameter --min_intron_len=$min_intron_len --softmasking=1 $tmp_dir/$seq_id.$start.fasta > $tmp_dir/$seq_id.$start.out\n";
+
             $out_id{$seq_id}{"$seq_id.$start"} = $start;
         }
+	}
+    close COM;
+
+    open OUT, ">", "$tmp_dir/split.ok" or die $!; close OUT;
+
+    open OUT, ">", "$tmp_dir/out_id.list" or die "Error: Can not create file $tmp_dir/out_id.list, $!";
+    foreach my $seq_id ( sort keys %out_id ) {
+        foreach ( sort {$out_id{$seq_id}{$a} <=> $out_id{$seq_id}{$b}} keys %{$out_id{$seq_id}} ) {
+            print OUT "$seq_id\t$_\t$out_id{$seq_id}{$_}\n";
+        }
     }
-    else {
-        open OUT, ">", "$tmp_dir/$seq_id.0.fasta" or die "Can not create file $seq_id.0.fasta, $!\n";
-        print OUT ">$seq_id\n$seq\n";
-        close OUT;
-
-        open OUT, ">", "$tmp_dir/$seq_id.0.gff" or die "Can not create file $seq_id.0.gff, $!\n";
-        print OUT $hints_info;
-        close OUT;
-
-        if ($alternatives_from_evidence) {
-            print COM "augustus --gff3=on --species=$species $AUGUSTUS_CONFIG_PATH --hintsfile=$tmp_dir/$seq_id.0.gff --extrinsicCfgFile=extrinsic.cfg --allow_hinted_splicesites=gcag,atac --alternatives-from-evidence=true --min_intron_len=$min_intron_len --softmasking=1 $tmp_dir/$seq_id.0.fasta > $tmp_dir/$seq_id.0.out\n";
-        }
-        else {
-            print COM "augustus --gff3=on --species=$species $AUGUSTUS_CONFIG_PATH --hintsfile=$tmp_dir/$seq_id.0.gff --extrinsicCfgFile=extrinsic.cfg --allow_hinted_splicesites=gcag,atac --min_intron_len=$min_intron_len --softmasking=1 $tmp_dir/$seq_id.0.fasta > $tmp_dir/$seq_id.0.out\n";
-        }
-        $out_id{$seq_id}{"$seq_id.0"} = 1;
+    close OUT;
+}
+else {
+    open IN, "$tmp_dir/out_id.list" or die "Can not open file $tmp_dir/out_id.list, $!";
+    while ( <IN> ) {
+        chomp;
+        @_ = split /\t/;
+        $out_id{$_[0]}{$_[1]} = $_[2];
     }
 }
-close COM;
-
+    
 my $cmdString = "ParaFly -c $tmp_dir/command.augustus.list -CPU $cpu &> $tmp_dir/command.augustus.log";
 system ($cmdString) == 0 or die "Failed to execute: $cmdString\n$!\n";
 
-my (%out, $info, %hints_supporting_ratio, %intron_supporting_info);
+# 转换坐标
+my $gene_num = 0;
+open CMD1, ">", "$tmp_dir/command.GFF3Clear.list" or die "Error: Can not create file $tmp_dir/command.GFF3Clear.list, $!";
+open CMD2, ">", "$tmp_dir/command.GFF3_merging_and_removing_redundancy.list" or die "Error: Can not create file $tmp_dir/command.GFF3_merging_and_removing_redundancy.list, $!";
 foreach my $seq_id (sort keys %out_id) {
     my @partition = sort {$out_id{$seq_id}{$a} <=> $out_id{$seq_id}{$b}} keys %{$out_id{$seq_id}};
-    # foreach (@partition) { print "$seq_id\t$_\n"; }
+    foreach my $par (@partition) {
+        # 获得坐标初始值，真正的坐标需要增加该值。
+        my $locus = $1 if $par =~ m/\.(\d+)$/;
 
-    if (@partition > 1) {
-        my (@margin_geneModels, %geneModels, @overlap_geneModels);
-        open IN, "$tmp_dir/$partition[0].out" or die "Can not open file $tmp_dir/$partition[0].out, $!\n";
+        # 解析基因模型
+        my (@gene_ID, $gene_ID, $old_gene_ID, %gene_info, %hints_supporting_ratio, %intron_supporting_info);
+        open IN, "$tmp_dir/$par.out" or die "Can not open file $tmp_dir/$par.out, $!\n";
         while (<IN>) {
-            if (m/^# \% of transcript supported by hints \(any source\)\: (\S+)/) {
-                $hints_supporting_ratio{$info} = $1;
+            # 修改GFF3格式和坐标。transcript更正为mRNA，起始和结束坐标增加初始值。
+            @_ = split /\t/, $_;
+            unless ( m/^#/ ) {
+                $_[2] = "mRNA" if $_[2] eq "transcript";
+                $_[3] += $locus;
+                $_[4] += $locus;
+                $_ = join "\t", @_;
             }
-            if (m/^# CDS introns\: (\S+)/) {
-                $intron_supporting_info{$info} = $1;
+
+            # 得到基因新旧ID名称。
+            if ( $_[2] eq "gene" ) {
+                $gene_num ++;
+                $gene_ID = "g$gene_num";
+                push @gene_ID, $gene_ID;
+                $old_gene_ID = $1 if $_[8] =~ m/ID=([^;\s]+)/;
             }
-            next if m/^#/; next if m/^\s*$/;
-            if (m/\tgene\t/) {
-                @_ = split /\t/;
-                $info = "$_[0]\t$_[6]\t$_[3]\t$_[4]";
-                #print STDERR "$info\n";
-                $geneModels{$info} = 1;
-            }
-            $out{$info} .= $_;
+            # 将旧ID替换为新ID，并得到基因的信息，保存基因信息到到 %gene_info
+            s/ID=$old_gene_ID/ID=$gene_ID/g;
+            s/Parent=$old_gene_ID/Parent=$gene_ID/g;
+            $gene_info{$gene_ID} .= $_;
+            # 分析Hint比例
+            $hints_supporting_ratio{$gene_ID} = $1 if m/^# \% of transcript supported by hints \(any source\)\: (\S+)/;
+            $intron_supporting_info{$gene_ID} = $1 if m/^# CDS introns\: (\S+)/;
         }
         close IN;
-        push @margin_geneModels, $info;
-        #delete $out{$gene[-1]};
-        shift @partition;
 
-        foreach (@partition) {
-            my $locus = $1 if m/\.(\d+)$/;
-            open IN, "$tmp_dir/$_.out" or die "Can not open file $tmp_dir/$_.out, $!\n";
-            my @gene;
-            my $keep = 1;
-            while (<IN>) {
-                if (m/^# \% of transcript supported by hints \(any source\)\: (\S+)/) {
-                    $hints_supporting_ratio{$info} = $1;
-                }
-                if (m/^# CDS introns\: (\S+)/) {
-                    $intron_supporting_info{$info} = $1;
-                }
-                next if m/^#/; next if m/^\s*$/;
-                @_ = split /\t/;
-                my $start = $_[3] + $locus;
-                my $end = $_[4] + $locus;
-                if ($_[2] eq "gene") {
-                    $info = "$_[0]\t$_[6]\t$start\t$end";
-                    #print STDERR "NEXT:$info\n";
-                    if (exists $out{$info}) {
-                        $keep = 0;
-                    }
-                    else {
-                        $keep = 1;
-                        push @overlap_geneModels, $info if $_[3] <= $overlapSize;
-                    }
-                    push @gene, $info;
-                    $geneModels{$info} = 1;
-                }
-                $out{$info} .= "$_[0]\t$_[1]\t$_[2]\t$start\t$end\t$_[5]\t$_[6]\t$_[7]\t$_[8]" if $keep == 1;
-            }
-            close IN;
-            push @margin_geneModels, $gene[0];
-            push @margin_geneModels, $gene[-1];
-            #delete $out{$gene_ID[0]};
+        # 输出基因模型
+        open OUT, ">", "$tmp_dir/$par.raw.gff3" or die  "Can not create file $tmp_dir/$par.raw.gff3, $!\n";
+        foreach ( @gene_ID ) {
+            my $out = $gene_info{$_};
+            $out =~ s/(\tgene\t.*ID=[^;\s]+)/$1;hintRatio=$hints_supporting_ratio{$_};intronSupport=$intron_supporting_info{$_}/;
+            print OUT $out;
         }
+        close OUT;
 
-
-        # 若序列首尾的gene models和其它gene models有重叠，则删除它。
-        foreach my $gene (@margin_geneModels) {
-            #print STDERR "Margin Gene: $gene\n";
-            my @gene_info = split /\t/, $gene;
-            foreach (keys %geneModels) {
-                next if $gene eq $_;
-                @_ = split /\t/, $_;
-                if ($gene_info[2] <= $_[3] && $gene_info[3] >= $_[2]) {
-                    #print STDERR "Margin Gene deleted: $gene || $_\n";
-                    delete $out{$gene};
-                    delete $geneModels{$gene};
-                }
-            }
-        }
-
-        # 若两条序列重叠部分的gene models预测不一致，则删除后一条序列前端的基因模型
-        foreach my $gene (@overlap_geneModels) {
-            #print STDERR "Overlap Gene: $gene\n";
-            my @gene_info = split /\t/, $gene;
-            foreach (keys %geneModels) {
-                next if $gene eq $_;
-                @_ = split /\t/, $_;
-                if ($gene_info[2] <= $_[3] && $gene_info[3] >= $_[2]) {
-					#print STDERR "Overlap Gene deleted: $gene || $_\n";
-                    delete $out{$gene};
-                }
-            }
-        }
+        # 输出GFF3Clear命令行
+        print CMD1 "$bin_path/GFF3Clear --genome $ARGV[0] --no_attr_add $tmp_dir/$par.raw.gff3 > $tmp_dir/$par.gff3 2> $tmp_dir/$par.GFF3Clear.log\n";
     }
-    else {
-        open IN, "$tmp_dir/$seq_id.0.out" or die "Can not open file $tmp_dir/$seq_id.0.out, $!\n";
-        while (<IN>) {
-            if (m/^# \% of transcript supported by hints \(any source\)\: (\S+)/) {
-                $hints_supporting_ratio{$info} = $1;
-            }
-            if (m/^# CDS introns\: (\S+)/) {
-                $intron_supporting_info{$info} = $1;
-            }
-            next if m/^#/;
-            next if m/^\s*$/;
-            if (m/\tgene\t/) {
-                @_ = split /\t/;
-                $info = "$_[0]\t$_[6]\t$_[3]\t$_[4]";
-            }
-            $out{$info} .= $_;
-        }
-        close IN;
+
+    # 输出GFF3_merging_and_removing_redundancy命令
+    print CMD2 "$bin_path/GFF3_merging_and_removing_redundancy --first_file_score 0.0 $ARGV[0] ";
+    foreach ( @partition ) {
+        print CMD2 "$tmp_dir/$_.gff3 ";
     }
+    print CMD2 "> $tmp_dir/$seq_id.gff3 2> $tmp_dir/$seq_id.GFF3_merging_and_removing_redundancy.log\n";
 }
+close CMD1; close CMD2;
 
-my (%sort1, %sort2, %sort3, %sort4);
-foreach (keys %out) {
-   @_ = split /\t/;
-   $sort1{$_} = $_[0];
-   $sort2{$_} = $_[1];
-   $sort3{$_} = $_[2];
-   $sort4{$_} = $_[3];
-}
+# 对每个数据块的基因模型进行格式化
+my $cmdString = "ParaFly -c $tmp_dir/command.GFF3Clear.list -CPU $cpu &> $tmp_dir/command.GFF3Clear.log";
+system ($cmdString) == 0 or die "Failed to execute: $cmdString\n$!\n";
+# 对每条序列的基因模型进行整合
+my $cmdString = "ParaFly -c $tmp_dir/command.GFF3_merging_and_removing_redundancy.list -CPU $cpu &> $tmp_dir/command.GFF3_merging_and_removing_redundancy.log";
+system ($cmdString) == 0 or die "Failed to execute: $cmdString\n$!\n";
 
-my $num = 0;
-my @out = sort { $sort1{$a} cmp $sort1{$b} or $sort3{$a} <=> $sort3{$b} or $sort4{$a} <=> $sort4{$b} or $sort2{$a} cmp $sort2{$b} } keys %out;
-foreach (@out) {
-    my $info = $_;
-    $num ++;
-    my $gene_id = $gene_prefix . '0' x (length(@out) - length($num)) . $num;
-    my @line = split /\n/, $out{$_};
-    foreach (@line) {
-       if (/\tgene\t/) {
-           s/(ID=[^;]+)/$1;hintRatio=$hints_supporting_ratio{$info};intronSupport=$intron_supporting_info{$info}/;
-       }
-       s/\ttranscript\t/\tmRNA\t/;
-       s/ID=g\d+/ID=$gene_id/;
-       s/Parent=g\d+/Parent=$gene_id/;
-       print "$_\n";
-   }
-   print "\n";
+# 将所有序列的基因模型结果进行合并，得到结果文件$tmp_dir/out.gff3
+open OUT, ">", "$tmp_dir/out.gff3" or die "Can not create file $tmp_dir/out.gff3, $!";
+foreach my $seq_id (sort keys %out_id) {
+    open IN, "$tmp_dir/$seq_id.gff3" or die "Can not open file $tmp_dir/$seq_id.gff3, $!";
+    print OUT <IN>;
+    close IN;
 }
+close OUT;
+
+# 格式化输出结果，对基因预测结果进行重新编号。
+$cmdString = "$bin_path/GFF3Clear --genome $ARGV[0] --gene_prefix $gene_prefix $tmp_dir/out.gff3 ";
+system ($cmdString) == 0 or die "Failed to execute: $cmdString\n$!\n";
+
 
 sub get_partition {
     my ($length, $ss, $os) = @_;

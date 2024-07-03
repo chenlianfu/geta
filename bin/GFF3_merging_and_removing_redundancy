@@ -18,6 +18,7 @@ Usage:
     程序使用须知：
     (1) 程序需要输入基因组序列，用于检测基因模型的完整性。
     (2) 本程序接受输入带可变剪接的GFF3文件，对一个基因的多个转录本进行打分后，选其中得分最高转录本的CDS信息的作为基因的信息，再和其它基因模型进行重叠分析和得分比较。
+    (3) 本程序输入的多个GFF3文件中不能有ID一致的基因，否则结果不准确。
 
     --intron_score <float>    default: 0.3
     设置intron让基因模型得分提升比例。基因模型的一个intron让得分增加比例 = 该参数值；第二个及其它intron让得分增加比例 = (1 - 该参数值) ** (intron序号 - 1)。即多个intron让得分提升的比例呈一个无限等比数列，其首项 = 该参数值，公比 = (1 - 该参数值)，无限等比数列的和 = 1。默认设置下，首项 = 0.3，公比 = 0.7，即第一个intron让得分增加30%，第二个intron让得分增加21%，第三个intron让得分增加14.7%，第四个10.29%，以此类推，最终所有intron让得分增加比例不会超过100%。
@@ -455,6 +456,7 @@ Usage:
     Usage instructions:
     (1) The program needs a genome sequence as input to check the integrity of gene models.
     (2) This program can take in a GFF3 file with alternative splicing, score multiple transcripts of a gene, choose the CDS information from the transcript with the highest score as the gene's information, and then compare its overlap and scores with other gene models.
+    (3) When you input multiple GFF3 files into this program, make sure there are no genes with the same ID, or else the results won't be accurate.
 
     --intron_score <float>    default: 0.3
     Set introns to increase the score of gene models proportionally. The increase in score of a gene model due to one intron = the parameter value; the increase in score of a gene model due to the second and other introns = (1 - the parameter value) ** (intron index - 1). That is, the increase in score due to multiple introns forms an infinite geometric series, with the first term = the parameter value, common ratio = (1 - the parameter value), and the sum of the infinite geometric series = 1. By default, the first term = 0.3, common ratio = 0.7, so the first intron increases the score by 30%, the second intron by 21%, the third intron by 14.7%, the fourth by 10.29%, and so on, until the increase in score due to all introns does not exceed 100%.
