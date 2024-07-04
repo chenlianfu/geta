@@ -96,8 +96,8 @@ E individual_liability 1group1gene
 P individual_liability 1group1gene
 
 [GENERAL]
-      start      1         1  M    1  1e+100  RM  1     1    E 1    1e6  W 1    1    P   1   100
-       stop      1         1  M    1  1e+100  RM  1     1    E 1    1e6  W 1    1    P   1   100
+      start      1         1  M    1  1e+100  RM  1     1    E 1    1e6  W 1    1    P   1   1e3
+       stop      1         1  M    1  1e+100  RM  1     1    E 1    1e6  W 1    1    P   1   1e3
         tss      1         1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
         tts      1         1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
         ass      1   1     1  M    1  1e+100  RM  1     1    E 1    100  W 1    1    P   1   100
@@ -105,7 +105,7 @@ P individual_liability 1group1gene
    exonpart      1   1     1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
        exon      1         1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
  intronpart      1         1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
-     intron      1     0.168  M    1  1e+100  RM  1     1    E 1    100  W 1    1e3  P   1   10
+     intron      1     0.168  M    1  1e+100  RM  1     1    E 1    100  W 1    5    P   1   10
     CDSpart      1   1  0.99  M    1  1e+100  RM  1     1    E 1    1e3  W 1    1    P   1   100
         CDS      1         1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
     UTRpart      1   1     1  M    1  1e+100  RM  1     1    E 1    1    W 1    1    P   1   1
@@ -244,7 +244,7 @@ foreach my $seq_id (sort keys %out_id) {
     }
 
     # 输出GFF3_merging_and_removing_redundancy命令
-    print CMD2 "$bin_path/GFF3_merging_and_removing_redundancy --first_file_score 0.0 $ARGV[0] ";
+    print CMD2 "$bin_path/GFF3_merging_and_removing_redundancy_Parallel --cpu $cpu --first_file_score 0.0 $ARGV[0] ";
     foreach ( @partition ) {
         print CMD2 "$tmp_dir/$_.gff3 ";
     }

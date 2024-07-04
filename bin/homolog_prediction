@@ -180,7 +180,7 @@ print STDERR "3. picking out the best geng model for classification.\n";
 my @cmdString;
 push @cmdString, "$bin_path/homolog_prediction.03GetGeneModels --tmp_dir c.getGeneModels --output_raw_GFF3 c.getGeneModels/homolog_prediction.raw.gff3 --output_alignment_GFF3 c.getGeneModels/homolog_alignment.gff3 --max_alignment_num_for_each_gene_region $max_alignment_num_for_each_gene_region $input_genome out.geneModels.tab > $out_prefix.geneModels.gff3 2> c.getGeneModels.log";
 if ( $output_raw_GFF3 ) {
-    push @cmdString, "$bin_path/GFF3_merging_and_removing_redundancy --first_file_score 0 $input_genome c.getGeneModels/homolog_prediction.raw.gff3 > homolog.gff3 2> c.GFF3_merging_and_removing_redundancy.log" if $output_raw_GFF3;
+    push @cmdString, "$bin_path/GFF3_merging_and_removing_redundancy_Parallel --cpu $cpu --first_file_score 0.0 $input_genome c.getGeneModels/homolog_prediction.raw.gff3 > homolog.gff3 2> c.GFF3_merging_and_removing_redundancy.log" if $output_raw_GFF3;
     push @cmdString, "$bin_path/GFF3Clear --genome $input_genome --gene_prefix homolog homolog.gff3 > $output_raw_GFF3 2> /dev/null";
     push @cmdString, "rm -rf homolog.gff3";
 }

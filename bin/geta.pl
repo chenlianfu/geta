@@ -360,7 +360,7 @@ mkdir "$tmp_dir/4.augustus/training" unless -e "$tmp_dir/4.augustus/training";
 chdir "$tmp_dir/4.augustus/training"; print STDERR "\nPWD: $tmp_dir/4.augustus/training\n";
 
 # 4.1.1 合并Transcript和Homolog预测的基因模型
-$cmdString = "$bin_path/GFF3_merging_and_removing_redundancy $config{'GFF3_merging_and_removing_redundancy'} $genome $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.raw.gff3 $tmp_dir/2.homolog_prediction/homolog_prediction.raw.gff3 > evidence_gene_models.gff3 2> GFF3_merging_and_removing_redundancy.log";
+$cmdString = "$bin_path/GFF3_merging_and_removing_redundancy_Parallel --cpu $cpu $config{'GFF3_merging_and_removing_redundancy'} $genome $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.raw.gff3 $tmp_dir/2.homolog_prediction/homolog_prediction.raw.gff3 > evidence_gene_models.gff3 2> GFF3_merging_and_removing_redundancy.log";
 
 &execute_cmds($cmdString, "01.evidence_gene_models.ok");
 
@@ -470,7 +470,7 @@ $cmdString3 = "cp -a $tmp_dir/4.augustus/config/species/$augustus_species $ENV{'
 
 # 4.2 准备Hints信息
 chdir "$tmp_dir/4.augustus"; print STDERR "\nPWD: $tmp_dir/4.augustus\n";
-$cmdString = "$bin_path/prepareAugusutusHints $config{'prepareAugusutusHints'} $tmp_dir/4.augustus/evidence_gene_models.gff3 > hints.gff";
+$cmdString = "$bin_path/prepareAugusutusHints $config{'prepareAugusutusHints'} --intron_tab $tmp_dir/3.NGSReads_prediction/intron.txt $tmp_dir/4.augustus/training/evidence_gene_models.gff3 > hints.gff 2> prepareAugusutusHints.log";
 
 &execute_cmds($cmdString, "prepareAugusutusHints.ok");
 
@@ -523,9 +523,9 @@ $cmdString2 = "$bin_path/addHintRatioToAugustusResult $tmp_dir/4.augustus/traini
 
 # Step 5: CombineGeneModels
 print STDERR "\n============================================\n";
-print STDERR "Step 6: CombineGeneModels " . "(" . (localtime) . ")" . "\n";
-mkdir "$tmp_dir/6.combine_gene_models" unless -e "$tmp_dir/6.combine_gene_models";
-chdir "$tmp_dir/6.combine_gene_models"; print STDERR "\nPWD: $tmp_dir/6.combine_gene_models\n";
+print STDERR "Step 5: CombineGeneModels " . "(" . (localtime) . ")" . "\n";
+mkdir "$tmp_dir/5.combine_gene_models" unless -e "$tmp_dir/5.combine_gene_models";
+chdir "$tmp_dir/5.combine_gene_models"; print STDERR "\nPWD: $tmp_dir/5.combine_gene_models\n";
 
 open OUT, ">", "geneModels.Readme" or die "Can not create file geneModels.Readme, $!";
 print OUT "geneModels.a.gff3\t第一轮整合后获得的以AUGUSTUS结果为主的有足够证据支持的基因模型。
@@ -546,48 +546,34 @@ geneModels.h.lowQuality.gff3\t对基因模型进行过滤，获得的低质量�
 geneModels.i.coding.gff3\t对geneModels.h.coding.gff3中的基因模型进行了强制补齐\n";
 close OUT;
 
-# 6.1 使用AUGUSTUS预测的基因模型对NGSReads和Homolog预测的不完整基因模型进行填补。
+# 5.1 合并三种算法的基因预测结果
 @cmdString = ();
-push @cmdString, "$bin_path/GFF3_filling_gene_models_Parallel --cpu $cpu --tmp_dir a.FillingGeneModelsByAugustus_for_homolog_prediction --ouput_filling_detail_tab a.FillingGeneModelsByAugustus_for_homolog_prediction.tab --start_codon $start_codon --stop_codon $stop_codon --attribute_for_filling_complete Filled_by_AUGUSTUS=True $genome $tmp_dir/2.homolog_prediction/homolog_prediction.raw.gff3 $tmp_dir/4.augustus/augustus.gff3 > homolog_prediction.FillByAugustus.gff3 2> homolog_prediction.FillByAugustus.log";
-push @cmdString, "$bin_path/GFF3_filling_gene_models_Parallel --cpu $cpu --tmp_dir a.FillingGeneModelsByAugustus_for_NGSReads_prediction --ouput_filling_detail_tab a.FillingGeneModelsByAugustus_for_NGSReads_prediction.tab --start_codon $start_codon --stop_codon $stop_codon --attribute_for_filling_complete Filled_by_AUGUSTUS=True $genome $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.raw.gff3 $tmp_dir/4.augustus/augustus.gff3 > NGSReads_prediction.FillByAugustus.gff3 2> NGSReads_prediction.FillByAugustus.log";
+# a. 利用同源蛋白预测的基因模型对转录本预测的基因模型进行填补
+push @cmdString, "$bin_path/GFF3_filling_gene_models_Parallel --cpu $cpu --tmp_dir FillingGeneModelsByHomolog --ouput_filling_detail_tab FillingGeneModelsByHomolog.tab --start_codon $start_codon --stop_codon $stop_codon --attribute_for_filling_complete Filled_by_Homolog=True $genome $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.raw.gff3 $tmp_dir/2.homolog_prediction/homolog_prediction.raw.gff3 > geneModels.a.gff3 2> GFF3_filling_gene_models.1.log";
+# b. 合并同源蛋白预测基因模型和上一步结果
+push @cmdString, "$bin_path/GFF3_merging_and_removing_redundancy_Parallel --cpu $cpu $config{'GFF3_merging_and_removing_redundancy'} $genome geneModels.a.gff3 $tmp_dir/2.homolog_prediction/homolog_prediction.raw.gff3 > geneModels.b.gff3 2> GFF3_merging_and_removing_redundancy.1.log";
+# c. 利用augustus预测基因模型进行填补
+push @cmdString, "$bin_path/GFF3_filling_gene_models_Parallel --cpu $cpu --tmp_dir FillingGeneModelsByAugustus --ouput_filling_detail_tab FillingGeneModelsByAugustus.tab --start_codon $start_codon --stop_codon $stop_codon --attribute_for_filling_complete Filled_by_AUGUSTUS=True $genome geneModels.b.gff3 $tmp_dir/4.augustus/augustus.gff3 > geneModels.c.gff3 2> GFF3_filling_gene_models.2.log";
+# d. 强制填补末端
+push @cmdString, "$bin_path/fillingEndsOfGeneModels $config{'fillingEndsOfGeneModels'} --start_codon $start_codon --stop_codon $stop_codon $genome geneModels.c.gff3 > geneModels.d.gff3 2> fillingEndsOfGeneModels.1.log";
+# e. 合并Augustus预测基因模型和上一步结果
+push @cmdString, "$bin_path/GFF3_merging_and_removing_redundancy_Parallel --cpu $cpu $config{'GFF3_merging_and_removing_redundancy'} $genome geneModels.d.gff3 $tmp_dir/4.augustus/augustus.gff3 > geneModels.e.gff3 2> GFF3_merging_and_removing_redundancy.2.log";
+# f. 强制填补末端，生成不完整基因模型
+push @cmdString, "$bin_path/fillingEndsOfGeneModels $config{'fillingEndsOfGeneModels'} --start_codon $start_codon --stop_codon $stop_codon --nonCompletedGeneModels incomplete.gff3 $genome geneModels.e.gff3 > geneModels.f.gff3 2> fillingEndsOfGeneModels.2.log";
 
-&execute_cmds(@cmdString, "01.FillingGeneModelsByAugustus.ok");
+&execute_cmds(@cmdString, "01.combineGeneModels.ok");
 
-# 6.2 合并NGSReads、Homolog和Augustus预测的基因模型
-@cmdString = ();
-push @cmdString, "$bin_path/GFF3_merging_and_removing_redundancy $config{'GFF3_merging_and_removing_redundancy'} --start_codon $start_codon --stop_codon $stop_codon $genome NGSReads_prediction.FillByAugustus.gff3 homolog_prediction.FillByAugustus.gff3 > evidence_prediction.gff3 2> GFF3_merging_and_removing_redundancy.1.log";
-push @cmdString, "$bin_path/GFF3_merging_and_removing_redundancy $config{'GFF3_merging_and_removing_redundancy'} --start_codon $start_codon --stop_codon $stop_codon $genome evidence_prediction.gff3 $tmp_dir/4.augustus/augustus.gff3 > all_prediction.gff3 2> GFF3_merging_and_removing_redundancy.2.log";
+# 5.2 将基因分成三类: (1) 保留的完善基因模型；(2) 去除的和转座子序列重叠过多的基因模型；(3) 候选进行验证的基因模型。
 
-&execute_cmds(@cmdString, "02.GFF3_merging_and_removing_redundancy.ok");
 
-# 6.3 对不完整基因模型进行首尾强制补齐。
-$cmdString = "$bin_path/fillingEndsOfGeneModels $config{'fillingEndsOfGeneModels'} --filling_need_transcriptID filling_need_transcriptID.txt --nonCompletedGeneModels geneModels.f.gff3 $genome all_prediction.gff3 > all_prediction.filled.gff3 2> fillingEndsOfGeneModels.1.log";
+# 5.5 对候选基因模型进行检测。
 
-&execute_cmds($cmdString, "03.fillingEndsOfGeneModels.ok");
 
+# 5.6 进行可变剪接分析
+
+
+# 5.7 输出结果
 exit;
-# 6.1 第一轮基因预测结果整合：以AUGUSTUS结果为主，进行三种基因预测结果的整合
-# 对三种基因预测结果进行第一轮整合，以Augustus结果为准。得到 combine.1.gff3 为有Evidence支持的结果，combine.2.gff3为支持不足的结果。
-my $cmdString1 = "$bin_path/paraCombineGeneModels $config{'paraCombineGeneModels'} --cpu $cpu $tmp_dir/4.augustus/augustus.gff3 $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.raw.gff3 $tmp_dir/2.homolog_prediction/homolog_prediction.gff3 $tmp_dir/4.augustus/hints.gff &> /dev/null";
-my $cmdString2 = "$bin_path/GFF3Clear --genome $genome --no_attr_add --coverage 0.8 combine.1.gff3 > geneModels.a.gff3 2> /dev/null";
-my $cmdString3 = "$bin_path/GFF3Clear --genome $genome --no_attr_add --coverage 0.8 combine.2.gff3 > geneModels.b.gff3 2> /dev/null";
-my $cmdString4 = "perl -p -i -e 's/(=[^;]+)\.t1/\$1.t01/g' geneModels.a.gff3 geneModels.b.gff3";
-
-&execute_cmds($cmdString1, $cmdString2, $cmdString3, $cmdString4, "01.paraCombineGeneModels.ok");
-
-# 6.2 第二轮基因预测结果整合：以转录本和同源蛋白预测结果为准，对上一步的基因模型进行优化。
-my $cmdString1 = "perl -p -e 's/(=[^;]+)\.t1/\$1.t01/g;' $tmp_dir/4.evidence_gene_models/evidence_gene_models.gff3 > geneModels.c.gff3;";
-my $cmdString2 = "$bin_path/pickout_better_geneModels_from_evidence $config{'pickout_better_geneModels_from_evidence'} geneModels.a.gff3 geneModels.c.gff3 > picked_evidence_geneModels.gff3 2> picked_evidence_geneModels.log";
-my $cmdString3 = "$bin_path/GFF3Clear --genome $genome --no_attr_add picked_evidence_geneModels.gff3 geneModels.a.gff3 > geneModels.d.gff3 2> /dev/null";
-my $cmdString4 = "perl -p -i -e 's/Integrity=[^;]+;?//g' geneModels.d.gff3";
-
-&execute_cmds($cmdString1, $cmdString2, $cmdString3, $cmdString4, "02.pickout_better_geneModels_from_evidence.ok");
-
-# 6.3 对不完整基因模型进行首尾补齐。
-$cmdString = "$bin_path/fillingEndsOfGeneModels $config{'fillingEndsOfGeneModels'} --filling_need_transcriptID filling_need_transcriptID.txt --nonCompletedGeneModels geneModels.f.gff3 $genome geneModels.d.gff3 > geneModels.e.gff3 2> fillingEndsOfGeneModels.1.log";
-
-&execute_cmds($cmdString, "03.fillingEndsOfGeneModels.ok");
-
 # 6.4 分别对对基因模型 geneModels.b.gff3, geneModels.e.gff3 and geneModels.f.gff3 进行可变剪接分析
 unless ( $no_alternative_splicing_analysis ) {
     $cmdString1 = "$bin_path/paraAlternative_splicing_analysis $config{'alternative_splicing_analysis'} --tmp_dir paraAlternative_splicing_analysis.gb.tmp --cpu $cpu geneModels.b.gff3 $tmp_dir/3.NGSReads_prediction/intron.txt $tmp_dir/3.NGSReads_prediction/base_depth.txt > geneModels.gb_AS.gff3 2> alternative_splicing.gb.stats && $bin_path/GFF3_add_CDS_for_transcript $genome geneModels.gb_AS.gff3 > geneModels.gb.gff3";

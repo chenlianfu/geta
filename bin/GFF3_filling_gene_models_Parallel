@@ -12,7 +12,7 @@ Usage:
     $0 [options] genome.fasta target.gff3 supplementary.gff3 > target_filled.gff3
 
     程序利用 supplementary.gff3 中的编码蛋白基因模型信息，对 target.gff3 文件中不完整编码蛋白基因模型的缺失末端进行填补。程序将 target.gff3 填补后的结果输出到标准输出，可以通过 --ouput_filling_detail_tab 参数以表格形式给出填补的mRNA信息，在标准错误输出中给出统计信息。
-    程序使用须知：（1）程序主要读取编码基因模型中的CDS信息，要求输入文件中必须有CDS信息。程序根据CDS计算出intron再进行后续分析，可以允许输入文件中没有intron信息。（2）程序并不会输出 supplementary.gff3 中特有的基因模型，若需要输出，可以考虑本程序运行完毕后使用 GFF3Clear 命令整合 target_filled.gff3 和 supplementary.gff3文件。（3）程序读取supplementary.gff3中的转录本信息，
+    程序使用须知：（1）程序主要读取编码基因模型中的CDS信息，要求输入文件中必须有CDS信息。程序根据CDS计算出intron再进行后续分析，可以允许输入文件中没有intron信息。（2）程序并不会输出 supplementary.gff3 中特有的基因模型，若需要输出，可以考虑本程序运行完毕后使用 GFF3Clear 命令整合 target_filled.gff3 和 supplementary.gff3文件。（3）程序最终输出 target.gff3 中所有的基因模型。
     程序进行填补的原理：（1）首先，通过genome.fasta信息分析target.gff3中5'或3'缺失的基因模型；（2）对于多CDS基因模型，分析5'或3'缺失末端的最临近intron和紧邻其后CDS的起始读码框，在supplementary.gff3中找具有相同信息且末端更完整的基因模型进行填补；（3）对于单CDS基因模型，则在supplementary.gff3中找和缺失末端有重叠且末端更完整的基因模型进行填补。
     程序用途：（1）利用同源蛋白基因预测结果，对转录本预测基因模型进行填补；（2）利用ab initio基因预测，对转录本或同源蛋白预测的基因模型进行填补。
     本程序和标准程序GFF3_filling_gene_models的结果一致。相应的，本程序多了--cpu和--tmp_dir参数，能将输入数据按染色体和正负链进行分割，然后调用同目录下的ParaFly和GFF3_filling_gene_models程序进行并行化运算，最后合并结果。此外，本程序在标准错误输出尾部额外给出统计信息。

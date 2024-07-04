@@ -45,7 +45,7 @@ Usage:
     设置终止密码子。若有多个终止密码子，则使用逗号分割。
 
     --tmp_dir <string>    default: tmp_\$date\$pid
-    程序运行时临时文件夹名称。
+    程序运行时临时文件夹名称。程序运行完毕后，会自当删除此临时文件夹。
 
     --cpu <int>    default: 8
     设置并行数。
@@ -207,6 +207,9 @@ my @gene_ID = sort { $sort1{$a} cmp $sort1{$b} or $sort2{$a} <=> $sort2{$b} or $
 foreach my $gene_ID ( @gene_ID ) {
     print "$gene_info{$gene_ID}\n";
 }
+
+my $cmdString = "rm -rf $tmp_dir";
+(system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 
 
 sub get_usage_english {

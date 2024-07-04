@@ -13,7 +13,7 @@ Usage:
     (2) 当基因模型中同时包含excellent和Integrity=complete关键词，或包含Filled_by_homolog=True关键词，则其基因模型是使用trainscript或homolog预测的完整准确基因模型，用于生成src=M的hints。再对剩下不完整基因模型中CDS总长度不低于过阈值且CDS数量不低于阈值的基因模型进行分析，生成src=E的hints。对其余较差的基因模型，生成src=P的hints。后续使用hints进行Augustus基因预测是，对不同类型hints设置不同的得分奖励系数，推荐设置M类型为1e100，E类型1e6/1e4，P类型1e3/100。
     (3) 推荐输入给本程序的文件为evidence_gene_models.gff3，它是transcript和homolog基因预测结果整合去冗余选择最优基因模型而来的。由于不包含冗余的基因模型，因此不会将其中的transcript和homolog来源的hints分别分配高权重的E低权重的P，而是根据CDS长度和数量分配不同的hints权重。
     (4) 本程序利用了GFF3文件中CDS和intron信息，需要GFF3文件中必须有CDS和intron信息，且GFF3文件不能包含可变剪接。
-    (5) 使用 --intron_tab 参数额外输入一个表格文件，能额外生成 intron hints，设置src=E。使用 --intron_tab 参数额外输入一个表格文件，能额外生成 intron hints，设置src=E。
+    (5) 使用 --intron_tab 参数额外输入一个表格文件，能额外生成 intron hints，设置src=W。使用 --intron_GFF3 参数额外输入一个GFF3文件，能额外生成 intron hints，设置src=W。
 
     --intron_tab <string>    default: None
     输入intron信息文件。该文件中每行表示一个intron的信息，使用制表符分隔。程序使用该文件第2~6列数据，它们分别是：基因组染色体序列名称、intron所在的正负链、intron起始位点、intron结束位点(该值大于前者)和得分(一般是支持的RNA-Seq reads数量)。
@@ -204,7 +204,7 @@ if ( defined $intron_tab ) {
         next if m/^#/;
         chomp;
         @_ = split /\t/;
-        print "$_[1]\t\.\tintron\t$_[3]\t$_[4]\t$_[5]\t$_[2]\t\.\tsrc=E;mult=$_[5];pri=4;\n";
+        print "$_[1]\t\.\tintron\t$_[3]\t$_[4]\t$_[5]\t$_[2]\t\.\tsrc=W;mult=$_[5];pri=4;\n";
     }
     close IN;
 }
@@ -216,7 +216,7 @@ if ( defined $intron_GFF3 ) {
         my $multi = 1;
         $multi = $1 if m/mult=(\d+)/;
         $multi = $_[5] if $_[5] >= 1;
-        print "$_[0]\t$_[1]\t$_[2]\t$_[3]\t$_[4]\t$multi\t$_[6]\t$_[7]\tsrc=E;mult=$multi;pri=4;\n";
+        print "$_[0]\t$_[1]\t$_[2]\t$_[3]\t$_[4]\t$multi\t$_[6]\t$_[7]\tsrc=W;mult=$multi;pri=4;\n";
     }
 }
 
