@@ -28,7 +28,7 @@ Usage:
     --min_gene_number_for_augustus_training <int>    default: 500
     若用于augustus training的基因模型数量低于此数目的时候，程序直接使用所有的基因模型进行augustus training；再用这些基因模型进行准确性检测（该准确性检测结果是不可信的）。
 
-    --gene_number_for_accuracy_detection <int>    default: 200
+    --gene_number_for_accuracy_detection <int>    default: 300
     若用于augustus training的基因模型数量超过上一个参数设定阈值时，进行Augustus training时，会将gene models随机分成两部分，第一部分包含该指定数目的基因，用于准确性检测（该准确性检测结果是可信的）；剩下的基因模型用于进行augustus training。
 
     --onlytrain_GFF3 <string>    default: None
@@ -105,7 +105,7 @@ print STDERR "============================================\n";
 
 ########### 解析参数 #################
 $min_gene_number_for_augustus_training ||= 500;
-$gene_number_for_accuracy_detection ||= 200;
+$gene_number_for_accuracy_detection ||= 300;
 $CPU ||= 8;
 $gene_models_num_per_test ||= 50;
 $gene_models_minimum_num_for_test ||= 100;

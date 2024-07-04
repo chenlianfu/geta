@@ -374,6 +374,7 @@ unless ( -s "excellent.gff3" ) {
 	while (<IN>) {
 		print OUT if m/excellent/;
 	}
+	$/ = "\n";
 	close IN; close OUT;
 	open OUT, ">", "02.evidence_gene_models.excellent.ok" or die $!; close OUT;
 }
@@ -528,22 +529,23 @@ mkdir "$tmp_dir/5.combine_gene_models" unless -e "$tmp_dir/5.combine_gene_models
 chdir "$tmp_dir/5.combine_gene_models"; print STDERR "\nPWD: $tmp_dir/5.combine_gene_models\n";
 
 open OUT, ">", "geneModels.Readme" or die "Can not create file geneModels.Readme, $!";
-print OUT "geneModels.a.gff3\t第一轮整合后获得的以AUGUSTUS结果为主的有足够证据支持的基因模型。
-geneModels.b.gff3\t第一轮整合后获得的由AUGUSTUS预测的没有足够证据支持的基因模型。
-geneModels.c.gff3\t以Transcript和Homolog预测结果整合得到的完全由证据支持的基因模型。
-geneModels.d.gff3\t第二轮整合后以Transcript和Homolog预测的更优结果为主，优化后的基因模型。
-geneModels.e.gff3\t对geneModels.d.gff3中不完整基因模型成功进行强制补齐后获得的完整基因模型。
-geneModels.f.gff3\t对geneModels.d.gff3中不完整基因模型未能强制补齐后获得的不完整基因模型。
-geneModels.gb_AS.gff3\t对geneModels.b.gff3基因模型进行可变剪接分析的结果，增加的转录本没有CDS信息。
-geneModels.ge_AS.gff3\t对geneModels.e.gff3基因模型进行可变剪接分析的结果，增加的转录本没有CDS信息。
-geneModels.gf_AS.gff3\t对geneModels.f.gff3基因模型进行可变剪接分析的结果，增加的转录本没有CDS信息。
-geneModels.gb.gff3\t对geneModels.b.gff3基因模型进行可变剪接分析的结果，增加的转录本增加了CDS信息。
-geneModels.ge.gff3\t对geneModels.e.gff3基因模型进行可变剪接分析的结果，增加的转录本增加了CDS信息。
-geneModels.gf.gff3\t对geneModels.f.gff3基因模型进行可变剪接分析的结果，增加的转录本增加了CDS信息。
-geneModels.h.coding.gff3\t对基因模型进行过滤，获得的编码蛋白基因模型。
-geneModels.h.lncRNA.gff3\t对基因模型进行过滤，获得的lnc_RNA基因模型。
-geneModels.h.lowQuality.gff3\t对基因模型进行过滤，获得的低质量基因模型。
-geneModels.i.coding.gff3\t对geneModels.h.coding.gff3中的基因模型进行了强制补齐\n";
+print OUT "geneModels.a.gff3\t利用同源蛋白预测的基因模型对转录本预测的基因模型进行了填补
+geneModels.b.gff3\t和同源蛋白预测基因模型进行整合去冗余
+geneModels.c.gff3\t利用augustus预测基因模型进行了填补
+geneModels.d.gff3\t对基因模型末端进行强制填补
+geneModels.e.gff3\t和augustus预测基因模型进行整合去冗余
+geneModels.f.gff3\t对基因模型末端进行强制填补
+geneModels.g.gff3\t去除了位于转座子上的基因模型
+geneModels.h.gff3\t挑选出的高度可信的准确基因模型
+geneModels.i.gff3\t挑选出的需要进行验证的基因模型
+geneModels.j.gff3\t通过了HMM或BLASTP数据库验证的基因模型
+geneModels.k.gff3\t对高可信基因模型和通过了验证的基因模型进行整合去冗余
+geneModels.l.gff3\t添加可变剪接
+geneModels.m.gff3\t对可变剪接转录本进行了ORF分析
+
+geneModels.gff3\t基因模型结果文件
+incomplete.gff3\t不完整的基因模型
+invalidated.gff3\t未能通过HMM或BLASTP数据库验证的基因模型\n";
 close OUT;
 
 # 5.1 合并三种算法的基因预测结果
@@ -573,139 +575,47 @@ push @cmdString, "$bin_path/pickout_reliable_geneModels $config{'pickout_reliabl
 # 5.3 对不可信基因模型进行过滤。
 @cmdString = ();
 push @cmdString, "diamond makedb --db $tmp_dir/homolog --in $tmp_dir/homolog.fasta &> $tmp_dir/diamond_makedb.log";
-push @cmdString, "$bin_path/GFF3_database_validation $config{'GFF3_database_validation'} --cpu $cpu --HMM_db $HMM_db --BLASTP_db $BLASTP_db,$tmp_dir/homolog --tmp_dir GFF3_database_validation.tmp $genome geneModels.i.gff3 > geneModels.j.gff3 2> GFF3_database_validation.log";
+push @cmdString, "$bin_path/GFF3_database_validation $config{'GFF3_database_validation'} --cpu $cpu --HMM_db $HMM_db --BLASTP_db $BLASTP_db,$tmp_dir/homolog --tmp_dir GFF3_database_validation.tmp --filtered_gene_models invalidated.gff3 $genome geneModels.i.gff3 > geneModels.j.gff3 2> GFF3_database_validation.log";
 
 &execute_cmds(@cmdString, "03.GFF3_database_validation.ok");
 
 # 5.6 进行可变剪接分析
-
-
-# 5.7 输出结果
-exit;
-# 6.4 分别对对基因模型 geneModels.b.gff3, geneModels.e.gff3 and geneModels.f.gff3 进行可变剪接分析
-unless ( $no_alternative_splicing_analysis ) {
-    $cmdString1 = "$bin_path/paraAlternative_splicing_analysis $config{'alternative_splicing_analysis'} --tmp_dir paraAlternative_splicing_analysis.gb.tmp --cpu $cpu geneModels.b.gff3 $tmp_dir/3.NGSReads_prediction/intron.txt $tmp_dir/3.NGSReads_prediction/base_depth.txt > geneModels.gb_AS.gff3 2> alternative_splicing.gb.stats && $bin_path/GFF3_add_CDS_for_transcript $genome geneModels.gb_AS.gff3 > geneModels.gb.gff3";
-    $cmdString2 = "$bin_path/paraAlternative_splicing_analysis $config{'alternative_splicing_analysis'} --tmp_dir paraAlternative_splicing_analysis.ge.tmp --cpu $cpu geneModels.e.gff3 $tmp_dir/3.NGSReads_prediction/intron.txt $tmp_dir/3.NGSReads_prediction/base_depth.txt > geneModels.ge_AS.gff3 2> alternative_splicing.ge.stats && $bin_path/GFF3_add_CDS_for_transcript $genome geneModels.ge_AS.gff3 > geneModels.ge.gff3";
-    $cmdString3 = "$bin_path/paraAlternative_splicing_analysis $config{'alternative_splicing_analysis'} --tmp_dir paraAlternative_splicing_analysis.gf.tmp --cpu $cpu geneModels.f.gff3 $tmp_dir/3.NGSReads_prediction/intron.txt $tmp_dir/3.NGSReads_prediction/base_depth.txt > geneModels.gf_AS.gff3 2> alternative_splicing.gf.stats && $bin_path/GFF3_add_CDS_for_transcript $genome geneModels.gf_AS.gff3 > geneModels.gf.gff3";
+@cmdString = ();
+push @cmdString, "$bin_path/GFF3_merging_and_removing_redundancy $config{'GFF3_merging_and_removing_redundancy'} $genome geneModels.h.gff3 geneModels.j.gff3 > geneModels.k.gff3 2> GFF3_merging_and_removing_redundancy.3.log";
+if ( defined $no_alternative_splicing_analysis ) {
+	push @cmdString, "ln -sf geneModels.k.gff3 geneModels.gff3";
 }
 else {
-    $cmdString1 = "$bin_path/GFF3_add_CDS_for_transcript $genome geneModels.b.gff3 > geneModels.gb.gff3";
-    $cmdString2 = "$bin_path/GFF3_add_CDS_for_transcript $genome geneModels.e.gff3 > geneModels.ge.gff3";
-    $cmdString3 = "$bin_path/GFF3_add_CDS_for_transcript $genome geneModels.f.gff3 > geneModels.gf.gff3";
+	push @cmdString, "$bin_path/paraAlternative_splicing_analysis $config{'alternative_splicing_analysis'} --tmp_dir paraAlternative_splicing_analysis.tmp --cpu $cpu geneModels.k.gff3 $tmp_dir/3.NGSReads_prediction/intron.txt $tmp_dir/3.NGSReads_prediction/base_depth.txt > geneModels.l.gff3";
+	push @cmdString, "$bin_path/GFF3_add_CDS_for_transcript $genome geneModels.l.gff3 > geneModels.m.gff3";
+	push @cmdString, "ln -sf geneModels.m.gff3 geneModels.gff3";
 }
 
-&execute_cmds($cmdString1, $cmdString2, $cmdString3, "04.alternative_splicing_analysis.ok");
-
-# 6.5 提取待过滤的转录本ID，对 geneModels.b.gff3, geneModels.e.gff3 and geneModels.f.gff3 中的基因模型进行过滤。
-#########################################################################
-# 以下几种类型的转录本用于过滤：
-# 1. CDS占转录本长度比例较低（< 30%）的转录本；
-# 2. 所有转录本的CDS长度较短（< 600 bp）的基因，对应的所有转录本；
-# 3. 所有转录本的CDS和重复序列区域重叠比例都较高（默认 >= 30%）的基因，对应的所有转录本；
-# 4. 没有足够证据支持的基因，对应的所有转录本；
-# 5. 没法填补完整的基因，对应的所有转录本；
-# 6. 通过填补而完整的基因，对应的所有转录本。
-#########################################################################
-# 提取CDS占转录本长度比例较低、CDS长度较短和CDS和重复序列区域重叠比例较高的转录本ID
-$cmdString1 = "$bin_path/GFF3_extract_TranscriptID_for_filtering $config{'GFF3_extract_TranscriptID_for_filtering'} $tmp_dir/1.RepeatMasker/genome.repeat.gff3 geneModels.gb.gff3 geneModels.ge.gff3 geneModels.gf.gff3 > transcriptID_for_filtering.txt";
-# 提取没有足够证据基因的所有转录本ID
-$cmdString2 = "perl -ne 'print \"\$1\\tNotEnoughEvidence\\n\" if m/ID=([^;]*\\.t\\d+);/;' geneModels.gb.gff3 >> transcriptID_for_filtering.txt";
-# 提取没法填补完整基因的所有转录本ID
-$cmdString3 = "perl -ne 'print \"\$1\\tFilling2Uncomplete\\n\" if m/ID=([^;]*\\.t\\d+);/;' geneModels.gf.gff3 >> transcriptID_for_filtering.txt";
-# 提取通过填补而完整的基因的所有转录本ID
-$cmdString4 = "perl -e 'open IN, \"filling_need_transcriptID.txt\"; while (<IN>) { s/.t\\d+\\n//; \$gene{\$_} = 1; } while (<>) { print \"\$1\\tFilling2Complete\\n\" if m/ID=(([^;]+)\\.t\\d+);/ && exists \$gene{\$2} }' geneModels.ge_AS.gff3 >> transcriptID_for_filtering.txt";
-
-&execute_cmds($cmdString1, $cmdString2, $cmdString3, $cmdString4, "05.extract_TranscriptID_for_filtering.ok");
-    
-# 6.6 提取待过滤转录本的蛋白序列。
-my $cmdString1 = "$bin_path/gff3_to_protein.pl $genome geneModels.gb.gff3 geneModels.gf.gff3 geneModels.ge.gff3 > proteins_all.fasta 2> gff3_to_protein.log";
-my $cmdString2 = "perl -p -i -e 's/\\*\$//' proteins_all.fasta";
-my $cmdString3 = "$bin_path/fasta_extract_subseqs_from_list.pl proteins_all.fasta transcriptID_for_filtering.txt > proteins_for_filtering.fasta 2> fasta_extract_subseqs_from_list.log";
-
-&execute_cmds($cmdString1, $cmdString2, $cmdString3, "06.extract_proteins_for_filtering.ok" );
-
-# 6.7 对蛋白序列进行HMM和BLASTP验证。
-$cmdString1 = "";
-if ( $HMM_db ) {
-    my $hmmscan_cpu = 0;
-    $hmmscan_cpu = $1 if $config{'para_hmmscan'} =~ m/--hmmscan_cpu\s+(\d+)/;
-    my $para_hmmscan_cpu = $cpu;
-    $para_hmmscan_cpu = int($cpu / $hmmscan_cpu + 0.5) if $hmmscan_cpu;
-    $para_hmmscan_cpu = 1 if $para_hmmscan_cpu < 1;
-
-    foreach ( sort keys %HMM_db ) {
-        $cmdString1 .= "$bin_path/para_hmmscan $config{'para_hmmscan'} --outformat --cpu $para_hmmscan_cpu --no_cut_ga --hmm_db $_ --tmp_prefix $HMM_db{$_} proteins_for_filtering.fasta >> validation_hmmscan.tab 2>> para_hmmscan.1.log; $bin_path/para_hmmscan $config{'para_hmmscan'} --chunk 1 --outformat --cpu $para_hmmscan_cpu --no_cut_ga --hmm_db $_ --tmp_prefix $HMM_db{$_} proteins_for_filtering.fasta >> validation_hmmscan.tab 2>> para_hmmscan.2.log; ";
-    }
-}
-$cmdString2 = "";
-$cmdString3 = "";
-if ( $BLASTP_db ) {
-    foreach ( sort keys %BLASTP_db ) {
-        $cmdString2 .= "diamond blastp $config{'diamond'} --outfmt 5 --db $_ --query proteins_for_filtering.fasta --out validation_blastp_$BLASTP_db{$_}.xml --threads $cpu &>> diamond_blastp.log; ";
-        $cmdString3 = "$bin_path/parsing_blast_result.pl $config{'parsing_blast_result.pl'} --out-hit-confidence validation_blastp_$BLASTP_db{$_}.xml >> validation_blastp.tab; ";
-    }
-}
-$cmdString2 .= "diamond makedb --db homolog --in $tmp_dir/homolog.fasta &> diamond_makedb.log; diamond blastp $config{'diamond'} --outfmt 5 --db homolog --query proteins_for_filtering.fasta --out validation_blastp.xml --threads $cpu &> diamond_blastp.log";
-$cmdString3 .= "$bin_path/parsing_blast_result.pl $config{'parsing_blast_result.pl'} --out-hit-confidence validation_blastp.xml >> validation_blastp.tab";
-
-unless ( -e "07.validating.ok" ) {
-    open OUT, ">", "validation_hmmscan.tab" or die "Can not create file validation_hmmscan.tab, $!", close OUT;
-    open OUT, ">", "validation_blastp.tab" or die "Can not create file validation_blastp.tab, $!", close OUT;
-    if ( $HMM_db ) {
-        print STDERR (localtime) . ": CMD: $cmdString1\n";
-        system("$cmdString1") == 0 or die "failed to execute: $cmdString1\n";
-    }
-    print STDERR (localtime) . ": CMD: $cmdString2\n";
-    system("$cmdString2") == 0 or die "failed to execute: $cmdString2\n";
-    print STDERR (localtime) . ": CMD: $cmdString3\n";
-    system("$cmdString3") == 0 or die "failed to execute: $cmdString3\n";
-    open OUT, ">", "07.validating.ok" or die $!; close OUT;
-}
-else {
-    if ( $HMM_db ) {
-        print STDERR "CMD(Skipped): $cmdString1\n";
-    }
-    if ( $BLASTP_db ) {
-        print STDERR "CMD(Skipped): $cmdString2\n";
-        print STDERR "CMD(Skipped): $cmdString3\n";
-    }
-}
-
-# 6.8 根据HMM和BLASTP验证结果对基因模型进行过滤。
-# 获得验证通过的转录本ID
-$cmdString1 = "$bin_path/get_valid_transcriptID $config{'get_valid_transcriptID'} validation_hmmscan.tab validation_blastp.tab > transcriptID_validating_passed.tab 2> get_valid_transcriptID.log";
-$cmdString2 = "$bin_path/get_valid_geneModels $config{'get_valid_geneModels'} --out_prefix geneModels.h transcriptID_for_filtering.txt transcriptID_validating_passed.tab geneModels.gb.gff3 geneModels.ge.gff3 geneModels.gf.gff3 2> get_valid_geneModels.log";
-
-&execute_cmds($cmdString1, $cmdString2, "08.filtering_geneModels.ok");
-
-# 6.9 再次对基因模型进行首尾填补。
-$cmdString = "$bin_path/fillingEndsOfGeneModels $config{'fillingEndsOfGeneModels'} $genome geneModels.h.coding.gff3 > geneModels.i.coding.gff3 2> fillingEndsOfGeneModels.2.log";
-
-&execute_cmds($cmdString, "$tmp_dir/6.combine_gene_models.ok");
+&execute_cmds(@cmdString, "04.Alternative_splicing_analysis.ok");
 
 
-# Step 7: OutPut
+# Step 6: OutPut
 print STDERR "\n============================================\n";
-print STDERR "Step 7: Output gene models " . "(" . (localtime) . ")" . "\n";
-mkdir "$tmp_dir/7.output_gene_models" unless -e "$tmp_dir/7.output_gene_models";
-chdir "$tmp_dir/7.output_gene_models"; print STDERR "\nPWD: $tmp_dir/7.output_gene_models\n";
+print STDERR "Step 6: Output gene models " . "(" . (localtime) . ")" . "\n";
+mkdir "$tmp_dir/6.output_gene_models" unless -e "$tmp_dir/6.output_gene_models";
+chdir "$tmp_dir/6.output_gene_models"; print STDERR "\nPWD: $tmp_dir/6.output_gene_models\n";
 
-# 7.1 输出GFF3格式文件基因结构注释信息
-$cmdString1 = "$bin_path/GFF3Clear --GFF3_source GETA --gene_prefix $gene_prefix --gene_code_length 6 --genome $genome $tmp_dir/6.combine_gene_models/geneModels.i.coding.gff3 > $out_prefix.geneModels.gff3 2> /dev/null";
-$cmdString2 = "$bin_path/GFF3_extract_bestGeneModels $out_prefix.geneModels.gff3 > $out_prefix.bestGeneModels.gff3 2> $out_prefix.AS_num_of_codingTranscripts.stats";
-$cmdString3 = "$bin_path/GFF3Clear --GFF3_source GETA --gene_prefix ${out_prefix}ncGene  --gene_code_length 6 --genome $genome --no_attr_add $tmp_dir/6.combine_gene_models/geneModels.h.lncRNA.gff3 > $out_prefix.geneModels_lncRNA.gff3 2> /dev/null";
-$cmdString4 = "$bin_path/GFF3Clear --GFF3_source GETA --gene_prefix ${out_prefix}lqGene --gene_code_length 6 --genome $genome --no_attr_add --coverage 0.6 $tmp_dir/6.combine_gene_models/geneModels.h.lowQuality.gff3 > $out_prefix.geneModels_lowQuality.gff3 2> /dev/null";
+# 6.1 输出GFF3格式文件基因结构注释信息
+@cmdString = ();
+push @cmdString, "$bin_path/GFF3Clear --GFF3_source GETA --gene_prefix $gene_prefix --gene_code_length 6 --genome $genome $tmp_dir/5.combine_gene_models/geneModels.gff3 > $out_prefix.geneModels.gff3 2> /dev/null";
+push @cmdString, "$bin_path/GFF3_extract_bestGeneModels $out_prefix.geneModels.gff3 > $out_prefix.bestGeneModels.gff3 2> $out_prefix.AS_num_of_codingTranscripts.stats";
+push @cmdString,  "$bin_path/GFF3Clear --GFF3_source GETA --gene_prefix ${gene_prefix}lqGene --gene_code_length 6 --genome $genome --no_attr_add --coverage 0.6 $tmp_dir/5.combine_gene_models/invalidated.gff3 $tmp_dir/5.combine_gene_models/incomplete.gff3 > $out_prefix.geneModels_lowQuality.gff3 2> /dev/null";
 
-&execute_cmds($cmdString1, $cmdString2, $cmdString3, $cmdString4, "1.output_GFF3.ok");
+&execute_cmds(@cmdString, "01.output_GFF3.ok");
 
-# 7.2 输出GTF文件和基因的序列信息
+# 6.2 输出GTF文件和基因的序列信息
 $cmdString1 = "$bin_path/gff3ToGtf.pl $genome $out_prefix.geneModels.gff3 > $out_prefix.geneModels.gtf 2> /dev/null";
 $cmdString2 = "$bin_path/gff3ToGtf.pl $genome $out_prefix.bestGeneModels.gff3 > $out_prefix.bestGeneModels.gtf 2> /dev/null";
 #$cmdString3 = "$bin_path/eukaryotic_gene_model_statistics.pl $out_prefix.bestGeneModels.gtf $genome $out_prefix &> $out_prefix.geneModels.stats";
 $cmdString3 = "$bin_path/gff3_to_sequences.pl --out_prefix $out_prefix --only_gene_sequences --only_coding_gene_sequences --only_first_isoform --genetic_code 1 $genome $out_prefix.geneModels.gff3 > $out_prefix.geneModels.stats 2> /dev/null";
-&execute_cmds($cmdString1, $cmdString2, $cmdString3, "2.output_GTF.ok");
+&execute_cmds($cmdString1, $cmdString2, $cmdString3, "02.output_GTF.ok");
 
-# 7.3 输出重复序列信息及其统计结果、RepeatModeler软件构建的重复序列数据库和masked genome sequence
+# 6.3 输出重复序列信息及其统计结果、RepeatModeler软件构建的重复序列数据库和masked genome sequence
 if ( $RM_species or $RM_species_Dfam or $RM_species_RepBase or $RM_lib or (! $no_RepeatModeler) ) {
     $cmdString1 = "cp $tmp_dir/1.RepeatMasker/genome.masked.fasta $out_prefix.maskedGenome.fasta";
     $cmdString2 = "cp $tmp_dir/1.RepeatMasker/genome.repeat.stats $out_prefix.repeat.stats";
@@ -719,15 +629,15 @@ if ( $RM_species or $RM_species_Dfam or $RM_species_RepBase or $RM_lib or (! $no
         $cmdString4 = "cp $tmp_dir/1.RepeatMasker/repeatModeler/RM_\*/\*.classified $out_prefix.repeat.lib";
     }
 
-    &execute_cmds($cmdString1, $cmdString2, $cmdString3, $cmdString4, "3.output_repeat.ok");
+    &execute_cmds($cmdString1, $cmdString2, $cmdString3, $cmdString4, "03.output_repeat.ok");
 }
 else {
-    unless ( -e "3.output_repeat.ok" ) {
-        open OUT, ">", "3.output_repeat.ok" or die $!; close OUT;
+    unless ( -e "03.output_repeat.ok" ) {
+        open OUT, ">", "03.output_repeat.ok" or die $!; close OUT;
     }
 }
 
-# 7.4 输出转录本、同源蛋白和Augustus的基因预测结果
+# 6.4 输出转录本、同源蛋白和Augustus的基因预测结果
 my @cmdString;
 if ( ($pe1 && $pe2) or $single_end or $sam ) {
     push @cmdString, "cp $tmp_dir/3.NGSReads_prediction/NGSReads_alignment.gff3 $out_prefix.NGSReads_alignment.gff3";
@@ -737,15 +647,11 @@ if ( $protein ) {
     push @cmdString, "cp $tmp_dir/2.homolog_prediction/homolog_alignment.gff3 $out_prefix.homolog_alignment.gff3";
     push @cmdString, "cp $tmp_dir/2.homolog_prediction/homolog_prediction.gff3 $out_prefix.homolog_prediction.gff3";
 }
-if ( (($pe1 && $pe2) or $single_end or $sam) && $protein ) {
-    push @cmdString, "cp $tmp_dir/4.evidence_gene_models/evidence_gene_models.gff3 $out_prefix.evidence_prediction.gff3";
-}
-push @cmdString, "$bin_path/GFF3Clear --genome $genome --no_attr_add $tmp_dir/4.augustus/augustus.gff3 > $out_prefix.augustus_prediction.gff3";
-push @cmdString, "4.output_methods_GFF3.ok";
+push @cmdString, "cp $tmp_dir/4.augustus/augustus.gff3 $out_prefix.augustus_prediction.gff3";
 
-&execute_cmds(@cmdString);
+&execute_cmds(@cmdString, "04.output_methods_GFF3.ok");
 
-# 7.5 进行BUSCO分析
+# 6.5 进行BUSCO分析
 my @cmdString;
 if ( $BUSCO_lineage_dataset ) {
     foreach my $BUSCO_db_path ( @BUSCO_db ) {
@@ -767,7 +673,7 @@ if ( $BUSCO_lineage_dataset ) {
             push @cmdString, "rm -rf BUSCO_OUT.$predictd_type.$BUSCO_db_name*; $bin_path/gff3_to_protein.pl $genome $out_prefix.NGSReads_prediction.gff3 > protein.NGSReads_prediction.fasta; busco -i protein.NGSReads_prediction.fasta -o BUSCO_OUT.$predictd_type.$BUSCO_db_name -m protein -l $BUSCO_db_path -c $cpu --offline &> BUSCO_OUT.$predictd_type.$BUSCO_db_name.log";
         }
     }
-    push @cmdString, "5.BUSCO.ok";
+    push @cmdString, "05.BUSCO.ok";
 
     &execute_cmds(@cmdString);
 
@@ -798,8 +704,8 @@ if ( $BUSCO_lineage_dataset ) {
     }
 }
 
-# 7.6 输出GETA基因基因预测的各项流程统计信息，用于追踪基因预测结果的可靠性
-unless ( -e "$tmp_dir/7.output_gene_models.ok" ) {
+# 6.6 输出GETA基因基因预测的各项流程统计信息，用于追踪基因预测结果的可靠性
+unless ( -e "$tmp_dir/6.output_gene_models.ok" ) {
     open OUT, ">", "$out_prefix.gene_prediction.summary" or die "Can not create file $out_prefix.gene_prediction.summary, $!";
     # (1) 获取基因组重复序列统计信息
     if ( -e "$out_prefix.repeat.stats" ) {
@@ -820,9 +726,9 @@ unless ( -e "$tmp_dir/7.output_gene_models.ok" ) {
         }
         close IN;
     # (3) 获取转录组数据预测的基因数量的统计信息
-        my $input_file = "$tmp_dir/3.NGSReads_prediction/NGSReads_prediction.A.log";
+        my $input_file = "$tmp_dir/3.NGSReads_prediction/NGSReads_prediction.log";
         print OUT "The statistics of gene models predicted by NGS Reads:\n";
-        print OUT `tail -n 1 $input_file`;
+        print OUT `tail -n 5 $input_file | head -n 1`;
         print OUT "\n";
     }
     # (4) 获取同源蛋白预测的基因数量的统计信息
@@ -835,7 +741,7 @@ unless ( -e "$tmp_dir/7.output_gene_models.ok" ) {
     if (-e "$tmp_dir/4.augustus/augustus.gff3") {
         my $input_file = "$tmp_dir/4.augustus/augustus.gff3";
         print OUT "The statistics of gene models predicted by AUGUSTUS:\n";
-        my $gene_num = `grep -P "\tgene" $input_file | wc -l`; chomp($gene_num);
+        my $gene_num = `grep -P "\tgene\t" $input_file | wc -l`; $gene_num =~ s/\s*$//;
         print OUT "$gene_num genes were predicted by augustus.\n\n";
     }
     # (6) 获取AUGUSTUS Training的准确率信息和预测基因数量统计
@@ -846,11 +752,11 @@ unless ( -e "$tmp_dir/7.output_gene_models.ok" ) {
     print OUT "\n";
     
     # (7) 获取基因预测整合过滤的统计信息
-    print OUT &statistics_combination();
+	#print OUT &statistics_combination();
 
     # (8) 获取BUSCO分析结果
-    if ( -e "$tmp_dir/7.output_gene_models/BUSCO_results.txt" ) {
-        my $input_file = "$tmp_dir/7.output_gene_models/BUSCO_results.txt";
+    if ( -e "$tmp_dir/6.output_gene_models/BUSCO_results.txt" ) {
+        my $input_file = "$tmp_dir/6.output_gene_models/BUSCO_results.txt";
         open IN, $input_file or die "Error: Can not open file $input_file, $!";
         print OUT <IN>;
         close IN;
@@ -858,10 +764,10 @@ unless ( -e "$tmp_dir/7.output_gene_models.ok" ) {
     }
     close OUT;
 
-    open OUT, ">" , "$tmp_dir/7.output_gene_models.ok" or die $!; close OUT;
+    open OUT, ">" , "$tmp_dir/6.output_gene_models.ok" or die $!; close OUT;
 }
 
-# 7.6 删除中间文件
+# 7 删除中间文件
 if ( $delete_unimportant_intermediate_files ) {
     my @cmdString;
     print STDERR "Due to the --delete_unimportant_intermediate_files was set, so the unimportant and large intermediate files are being deleted...\n";
@@ -873,10 +779,10 @@ if ( $delete_unimportant_intermediate_files ) {
     push @cmdString, "rm -rf $tmp_dir/2.homolog_prediction/a.MMseqs2CalHits $tmp_dir/2.homolog_prediction/b.hitToGenePrediction $tmp_dir/2.homolog_prediction/c.getGeneModels";
     # 删除 4.augustus 文件夹下的数据
     push @cmdString, "rm -rf $tmp_dir/4.augustus/aug_para_with_hints";
-    # 删除 6.combine_gene_models 文件夹下的数据
-    push @cmdString, "rm -rf $tmp_dir/6.combine_gene_models/combineGeneModels_tmp $tmp_dir/6.combine_gene_models/*tmp";
-    # 删除 7.output_gene_models 文件夹下的数据
-    push @cmdString, "rm -rf $tmp_dir/7.output_gene_models/BUSCO_OUT* rm -rf $tmp_dir/7.output_gene_models/busco_downloads";
+    # 删除 5.combine_gene_models 文件夹下的数据
+    push @cmdString, "rm -rf $tmp_dir/5.combine_gene_models/FillingGeneModels* $tmp_dir/5.combine_gene_models/*tmp";
+    # 删除 6.output_gene_models 文件夹下的数据
+    push @cmdString, "rm -rf $tmp_dir/6.output_gene_models/BUSCO_OUT* $tmp_dir/6.output_gene_models/busco_downloads";
 
     push @cmdString, "6.rm_unimportant_intermediate_files.ok";
     &execute_cmds(@cmdString);
@@ -903,7 +809,7 @@ sub statistics_combination {
     $NGSreads_gene_num = `grep -P "\tgene\t" $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.raw.gff3 | wc -l`;
     $homolog_gene_num = `grep -P "\tgene\t" $tmp_dir/2.homolog_prediction/homolog_prediction.gff3 | wc -l`;
     chomp($augustus_gene_num); chomp($NGSreads_gene_num); chomp($homolog_gene_num);
-    my $input_file = "$tmp_dir/6.combine_gene_models/geneModels.a.gff3";
+    my $input_file = "$tmp_dir/5.combine_gene_models/geneModels.a.gff3";
     open IN, $input_file or die "Error: Can not open file $input_file, $!";
     my ($num_of_gene_a, $num_of_gene_b, $num_of_gene_c, $num_of_gene_d, $num_of_gene_all) = (0, 0, 0, 0, 0);
     while (<IN>) {
@@ -913,7 +819,7 @@ sub statistics_combination {
     }
     close IN;
 
-    $input_file = "$tmp_dir/6.combine_gene_models/geneModels.b.gff3";
+    $input_file = "$tmp_dir/5.combine_gene_models/geneModels.b.gff3";
     open IN, $input_file or die "Error: Can not open file $input_file, $!";
     while (<IN>) {
         $num_of_gene_b ++ if m/\tgene\t/;
@@ -933,7 +839,7 @@ sub statistics_combination {
     }
     close IN;
 
-    $input_file = "$tmp_dir/6.combine_gene_models/picked_evidence_geneModels.log";
+    $input_file = "$tmp_dir/5.combine_gene_models/picked_evidence_geneModels.log";
     open IN, $input_file or die "Error: Can not open file $input_file, $!";
     my ($evidence_gene_models_num_picked, $evidence_gene_models_num_consistent) = (0, 0);
     <IN>; <IN>; <IN>; <IN>;
@@ -941,13 +847,13 @@ sub statistics_combination {
     $_ = <IN>; $evidence_gene_models_num_picked = $1 if m/(\d+)/;
     close IN;
 
-    my $gene_models_supported_by_evidence_num = `grep -P "\tgene\t" $tmp_dir/6.combine_gene_models/geneModels.d.gff3 | wc -l`;
+    my $gene_models_supported_by_evidence_num = `grep -P "\tgene\t" $tmp_dir/5.combine_gene_models/geneModels.d.gff3 | wc -l`;
     chomp($gene_models_supported_by_evidence_num);
 
     $output .= "(2) After combining the gene models predicted by NGS reads and homologs, $evidence_gene_models_num_all evidence gene models were produced, of which $evidence_gene_models_num_NGSReads came from NGS reads and $evidence_gene_models_num_homolog from homologs. In the second round of combination, $evidence_gene_models_num_picked evidence gene models with long CDS lengths were used to replace the gene models of the previous step. There were $evidence_gene_models_num_consistent evidence gene models with the same CDS structures as predicted by AUGUSTUS at the time of replacement. Finally, $gene_models_supported_by_evidence_num gene models with sufficient evidence were obtained.\n";
     
     # （3）分析HMM和BLASTP进行验证的基因状况
-    $input_file = "$tmp_dir/6.combine_gene_models/get_valid_geneModels.log";
+    $input_file = "$tmp_dir/5.combine_gene_models/get_valid_geneModels.log";
     open IN, $input_file or die "Error: Can not open file $input_file, $!";
     $_ = join "", <IN>; 
     close IN;

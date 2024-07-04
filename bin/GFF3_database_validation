@@ -25,6 +25,9 @@ Usage:
     --tmp_dir <string>    default: tmp_\$date\$pid
     设置零时文件夹路径。
 
+    --filtered_gene_models <string>    default: None
+    添加该参数，用于输出被过滤的低质量基因模型。
+
     --help    default: None
     display this help and exit.
 
@@ -58,11 +61,12 @@ Usage:
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($HMM_db, $BLASTP_db, $tmp_dir, $hmm_evalue1, $hmm_evalue2, $hmm_length, $hmm_coverage, $blast_evalue, $blast_CIP, $blast_coverage, $hmm_evalue, $hmm_coverage, $blast_evalue, $blast_CIP, $blast_coverage, $hmm_evalue_onlyOne, $hmm_coverage_onlyOne, $blast_evalue_onlyOne, $blast_CIP_onlyOne, $blast_coverage_onlyOne, $both_required, $cpu, $help);
+my ($HMM_db, $BLASTP_db, $tmp_dir, $filtered_gene_models, $hmm_evalue1, $hmm_evalue2, $hmm_length, $hmm_coverage, $blast_evalue, $blast_CIP, $blast_coverage, $hmm_evalue, $hmm_coverage, $blast_evalue, $blast_CIP, $blast_coverage, $hmm_evalue_onlyOne, $hmm_coverage_onlyOne, $blast_evalue_onlyOne, $blast_CIP_onlyOne, $blast_coverage_onlyOne, $both_required, $cpu, $help);
 GetOptions(
     "HMM_db:s" => \$HMM_db,
     "BLASTP_db:s" => \$BLASTP_db,
     "tmp_dir:s" => \$tmp_dir,
+    "filtered_gene_models:s" => \$filtered_gene_models,
     "hmm_evalue1:f" => \$hmm_evalue1,
     "hmm_evalue2:f" => \$hmm_evalue2,
     "hmm_length:i" => \$hmm_length,
@@ -108,6 +112,7 @@ $cpu ||= 8;
 # 准备数据库信息，使用绝对路径
 my $input_genome = abs_path($ARGV[0]);
 my $input_GFF3 = abs_path($ARGV[1]);
+if ( defined $filtered_gene_models ) { $filtered_gene_models = abs_path($filtered_gene_models); }
 
 my (%HMM_db, %BLASTP_db);
 if ( $HMM_db ) {
@@ -146,7 +151,7 @@ my @cmdString = ();
 push @cmdString, "rm -rf validation_hmmscan.tab validation_blastp.tab";
 if ( $HMM_db ) {
     foreach ( sort keys %HMM_db ) {
-		my $para_cpu = int($cpu / 2); $para_cpu = 1 if $para_cpu < 1;
+        my $para_cpu = int($cpu / 2); $para_cpu = 1 if $para_cpu < 1;
         push @cmdString, "$bin_path/para_hmmscan --evalue1 $hmm_evalue1 --evalue2 $hmm_evalue2 --hmm_length $hmm_length --coverage $hmm_coverage --no_cut_ga --chunk 20 --hmmscan_cpu 2 --outformat --cpu $para_cpu --hmm_db $_ --tmp_prefix $HMM_db{$_} proteins.fasta >> validation_hmmscan.tab 2>> para_hmmscan.1.log";
         push @cmdString, "$bin_path/para_hmmscan --evalue1 $hmm_evalue1 --evalue2 $hmm_evalue2 --hmm_length $hmm_length --coverage $hmm_coverage --no_cut_ga --chunk 1 --hmmscan_cpu 2 --outformat --cpu $para_cpu --hmm_db $_ --tmp_prefix $HMM_db{$_} proteins.fasta >> validation_hmmscan.tab 2>> para_hmmscan.2.log";
     }
@@ -226,7 +231,7 @@ close IN;
 my %mRNA2gene;
 open IN, $input_GFF3 or die "Can not open file $input_GFF3, $!";
 while (<IN>) {
-    $mRNA2gene{$2} = $1 if m/\tmRNA\t.*ID=([^;\s]+).*Parent=([^;\s]+)/;
+    $mRNA2gene{$1} = $2 if m/\tmRNA\t.*ID=([^;\s]+).*Parent=([^;\s]+)/;
 }
 close IN;
 
@@ -268,8 +273,12 @@ BLASTP更严格阈值单独有效转录本数量：$number3 / $number7 = $number
 最终有效的转录本数量：              $number10 / $number11 = $number12
 ";
 
+
 # 4. 输出GFF3结果
 open IN, $input_GFF3 or die "Can not open file $input_GFF3, $!";
+if ( defined $filtered_gene_models ) {
+    open OUT, ">", $filtered_gene_models or die "Can not create file $filtered_gene_models, $!";
+}
 my $out = 1;
 while (<IN>) {
     if ( m/\tgene\t/ ) {
@@ -281,7 +290,11 @@ while (<IN>) {
         }
     }
     print if $out == 1;
+    if (defined $filtered_gene_models) {
+        print OUT if $out == 0;
+    }
 }
+close OUT if defined $filtered_gene_models;
 
 sub percentage2value {
     my $value = $1 if $_[0] =~ m/([\d\.e-]+)/;
@@ -302,7 +315,7 @@ sub execute_cmds {
     else {
         foreach ( @_ ) {
             print STDERR (localtime) . ": CMD: $_\n";
-            system($_) == 0 or die "failed to execute: $_\n";
+            system($_) == 0 or warn "failed to execute: $_\n";
         }
         open OUT, ">", "$ok_file" or die $!; close OUT;
     }
