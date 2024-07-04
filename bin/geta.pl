@@ -563,11 +563,19 @@ push @cmdString, "$bin_path/fillingEndsOfGeneModels $config{'fillingEndsOfGeneMo
 
 &execute_cmds(@cmdString, "01.combineGeneModels.ok");
 
-# 5.2 将基因分成三类: (1) 保留的完善基因模型；(2) 去除的和转座子序列重叠过多的基因模型；(3) 候选进行验证的基因模型。
+# 5.2 去除转座子上的基因模型，再将基因模型分为可信和不可信两类。
+@cmdString = ();
+push @cmdString, "$bin_path/GFF3_remove_genes_in_repeats $config{'GFF3_remove_genes_in_repeats'} --filtered_gene_models genes_in_repeats.gff3 ../1.RepeatMasker/genome.repeat.gff3 geneModels.f.gff3 > geneModels.g.gff3 2> genes_in_repeat.txt";
+push @cmdString, "$bin_path/pickout_reliable_geneModels $config{'pickout_reliable_geneModels'} --out_stats pickout_reliable_geneModels.stats geneModels.g.gff3 > geneModels.h.gff3 2> geneModels.i.gff3";
 
+&execute_cmds(@cmdString, "02.ClassGeneModels.ok");
 
-# 5.5 对候选基因模型进行检测。
+# 5.3 对不可信基因模型进行过滤。
+@cmdString = ();
+push @cmdString, "diamond makedb --db $tmp_dir/homolog --in $tmp_dir/homolog.fasta &> $tmp_dir/diamond_makedb.log";
+push @cmdString, "$bin_path/GFF3_database_validation $config{'GFF3_database_validation'} --cpu $cpu --HMM_db $HMM_db --BLASTP_db $BLASTP_db,$tmp_dir/homolog --tmp_dir GFF3_database_validation.tmp $genome geneModels.i.gff3 > geneModels.j.gff3 2> GFF3_database_validation.log";
 
+&execute_cmds(@cmdString, "03.GFF3_database_validation.ok");
 
 # 5.6 进行可变剪接分析
 

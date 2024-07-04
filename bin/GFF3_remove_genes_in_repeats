@@ -12,17 +12,17 @@ Usage:
     The number of bases was calculated from the overlap region between the CDS of gene models and repeats. If the ratio of CDS_overlap_region_base_number / CDS_total_base_number >= 0.8, the gene models will be removed.
     If this value was set > 1.0, None gene models would be removed.
 
-	--min_coverge_ratio <float>    default: 0.6
-	Set a minimum coverage threshold for effective repeat sequences. According to the Ratio label information in the ninth column of the GFF3 file, if its value is less than the value set by this parameter, the information in this row will be ignored. 
+    --min_coverge_ratio <float>    default: 0.6
+    Set a minimum coverage threshold for effective repeat sequences. According to the Ratio label information in the ninth column of the GFF3 file, if its value is less than the value set by this parameter, the information in this row will be ignored. 
 
     --filtered_gene_models <string>    default: None
     Output the filtered gene Models in GFF3 format.
 
     --ignore_Simple_repeat   default: None
-	After adding this parameter, the program will ignore repetitive sequences of Simple_repeat, Low_complexity, Satellite, RNA, and Tandem_repeat.
+    After adding this parameter, the program will ignore repetitive sequences of Simple_repeat, Low_complexity, Satellite, RNA, and Tandem_repeat.
 
     --ignore_Unknown    default: None
-	After adding this parameter, the program will ignore repetitive sequences of Unknown, Unspecified and Other.
+    After adding this parameter, the program will ignore repetitive sequences of Unknown, Unspecified and Other.
 
 USAGE
 if (@ARGV==0){die $usage}
@@ -30,7 +30,7 @@ if (@ARGV==0){die $usage}
 my ($ratio, $min_coverge_ratio, $filtered_gene_models, $ignore_Simple_repeat, $ignore_Unknown);
 GetOptions(
     "ratio:f" => \$ratio,
-	"min_coverge_ratio:f" => \$min_coverge_ratio,
+    "min_coverge_ratio:f" => \$min_coverge_ratio,
     "filtered_gene_models:s" => \$filtered_gene_models,
     "ignore_Simple_repeat" => \$ignore_Simple_repeat,
     "ignore_Unknown" => \$ignore_Unknown,
@@ -46,20 +46,20 @@ while (<IN>) {
 
     # 忽略简单重复序列或Unknow类型重复序列
     if ( defined $ignore_Simple_repeat ) {
-		next if m/Name=Simple_repeat/;
-		next if m/Name=Low_complexity/;
-		next if m/Name=Satellite/;
-		next if m/Name=.*RNA/;
-		next if m/Name=Tandem_repeat/;
+        next if m/Name=Simple_repeat/;
+        next if m/Name=Low_complexity/;
+        next if m/Name=Satellite/;
+        next if m/Name=.*RNA/;
+        next if m/Name=Tandem_repeat/;
     }
     if ( defined $ignore_Unknown ) {
-		next if m/Name=Unknown/;
-		next if m/Name=Unspecified/;
-		next if m/Name=Other/;
+        next if m/Name=Unknown/;
+        next if m/Name=Unspecified/;
+        next if m/Name=Other/;
     }
 
-	# 忽略不可靠的转座子
-	next if (m/Ratio=([^;\s]+)/ && $1 < $min_coverge_ratio);
+    # 忽略不可靠的转座子
+    next if (m/Ratio=([^;\s]+)/ && $1 < $min_coverge_ratio);
 
     @_ = split /\t/;
     my $index1 = int($_[3] / 1000);

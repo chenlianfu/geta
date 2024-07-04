@@ -1,0 +1,130 @@
+#!/usr/bin/env perl
+
+use strict;
+use Getopt::Long;
+use Cwd qw/abs_path getcwd cwd/;
+use File::Basename;
+
+my $usage = <<USAGE;
+Usage:
+    $0 [options] geneModels.g.gff3 > geneModels.h.gff3 2> geneModels.i.gff3
+
+    This program selects reliable gene models and outputs them to the file geneModels.h.gff3, and outputs unreliable gene models to the file geneModels.i.gff3.
+
+    程序运行原理：（1） 首先，检测基因gene feature行第九列中是否包含指定的关键词（默认为excellent），若包含关键词，则认为是可信的基因模型；（2）然后，当第九列ID信息以augustus起始且其exonHintRatio标签值低于--min_exon_hint_ratio_for_augustus阈值时，认为是不可信基因模型；（3）对剩下的基因模型，若其CDS数量或总长度不能同时达到阈值，则认为是不可信基因模型；（4）剩下的基因模型是可信的基因模型。
+
+    程序使用注意事项：输入文件中不能含有可变剪接。
+
+    --reliable_keyword <string>    default: excellent
+    程序检测gene行中第九列信息，若包含有指定的关键词，则认为是可信的基因模型。
+
+    --min_exon_hint_ratio_for_augustus <float>    default: 0.4
+    程序检测gene行中第九列信息，若基因ID以augustus开头，且exonHintRatio标签值低于改参数设定阈值，则认为是不可信的基因模型。
+
+    --threshold_CDS_num <int>    default: None
+    --threshold_CDS_length <int>    default: None
+    --threshold_CDS_ratio <float>    default: 0.5
+    设置基因模型CDS数量和长度阈值。当CDS数量或总长度低于阈值时，则认为是不可信基因模型。默认情况下，程序对含有--reliable_keyword指定关键词的基因模型进行分析，得到可信基因的CDS数量和总长度后，按从小到大排序，根据--threshold_CDS_ratio参数值取分为数值作为阈值。若可信基因数量过少，低于10个，则CDS_num和CDS_length阈值设置为1和300。程序优先采用--threshold_CDS_num和--threshold_CDS_length设定的阈值。
+
+    --out_stats <string>    default: None
+    使用该参数输出统计信息。
+
+    --help    default: None
+    display this help and exit.
+
+USAGE
+if (@ARGV==0){die $usage}
+
+my ($reliable_keyword, $min_exon_hint_ratio_for_augustus, $threshold_CDS_num, $threshold_CDS_length, $threshold_CDS_ratio, $out_stats, $help);
+GetOptions(
+    "reliable_keyword:s" => \$reliable_keyword,
+    "min_exon_hint_ratio_for_augustus:f" => \$min_exon_hint_ratio_for_augustus,
+    "threshold_CDS_num:i" => \$threshold_CDS_num,
+    "threshold_CDS_length:i" => \$threshold_CDS_length,
+    "threshold_CDS_ratio:f" => \$threshold_CDS_ratio,
+    "out_stats:s" => \$out_stats,
+    "help" => \$help,
+);
+$reliable_keyword ||= "excellent";
+$min_exon_hint_ratio_for_augustus ||= 0.4;
+$threshold_CDS_ratio ||= 0.5;
+if ( defined $out_stats ) {
+    open STATS, ">", $out_stats or die "Can not create file $out_stats, $!";
+}
+if ( $help ) { die $usage }
+
+# 检测包含关键词的基因模型，其CDS数量和总长度信息
+my (@CDS_num, @CDS_length);
+$/ = "\n\n";
+open IN, $ARGV[0] or die "Can not open file $ARGV[0], $!";
+while (<IN>)  {
+    next unless m/\tgene\t.*$reliable_keyword/;
+    my @lines = split /\n/, $_;
+    my ($CDS_num, $CDS_length) = (0, 0);
+    foreach ( @lines ) {
+        if ( m/\tCDS\t(\d+)\t(\d+)/ ) {
+            $CDS_num ++;
+            $CDS_length += ($2 - $1 + 1);
+        }
+    }
+    push @CDS_num, $CDS_num if $CDS_num;
+    push @CDS_length, $CDS_length if $CDS_length;
+}
+unless ( defined $threshold_CDS_num ) {
+    @CDS_num = sort {$a <=> $b} @CDS_num;
+    $threshold_CDS_num = $CDS_num[@CDS_num * $threshold_CDS_ratio];
+    $threshold_CDS_num = 1 if @CDS_num < 10;
+}
+unless ( defined $threshold_CDS_length ) {
+    @CDS_length = sort {$a <=> $b} @CDS_length;
+    $threshold_CDS_length = $CDS_length[@CDS_length * $threshold_CDS_ratio];
+    $threshold_CDS_length = 300 if @CDS_length < 10;
+}
+print STATS "The threshold values of CDS_num and CDS_length were set to $threshold_CDS_num and $threshold_CDS_length respectively.\n";
+$/ = "\n";
+
+my ($num1, $num2, $num3, $num4, $num5, $num6) = (0,0,0,0,0,0);
+open IN, $ARGV[0] or die "Can not open file $ARGV[0], $!";
+$/ = "\n\n";
+while (<IN>) {
+    $num6 ++ if m/\tgene\t/;
+
+    # 若含有关键词excellent，则直接认为是可靠的基因模型。
+    if ( m/\tgene\t.*$reliable_keyword/ ) {
+        print; $num1 ++; next;
+    }
+    # 若是Augustus基因模型，其exon支持比例过低，则是不可靠的基因模型。
+    elsif ( /\tgene\t.*ID=augustus.*exonHintRatio=([^;\s]+)/ ) {
+        if ( $1 / 100 < $min_exon_hint_ratio_for_augustus ) {
+            print STDERR; $num2 ++; next;
+        }
+    }
+
+    # 对剩下的基因模型，检测其CDS数量和总长度。
+    my @lines = split /\n/, $_;
+    my (@CDS, $CDS_length);
+    foreach ( @lines ) {
+        if ( m/\tCDS\t((\d+)\t(\d+))/ ) {
+            push @CDS, $1;
+            $CDS_length += ($3 - $2 + 1);
+        }
+    }
+
+    # 若CDS数量和CDS总长度任一项不满足阈值时，则认为是不可靠的基因模型。
+    if ( $CDS_length < $threshold_CDS_length ) {
+        print STDERR; $num3 ++; next;
+    }
+    if ( @CDS < $threshold_CDS_num ) {
+        print STDERR; $num4 ++; next;
+    }
+
+    print; $num5 ++;
+}
+
+print STATS "输入文件中的基因模型数量: $num6;\n";
+print STATS "包含关键词 $reliable_keyword 的可信基因模型数量: $num1;\n";
+print STATS "其它可信基因模型数量: $num5;\n";
+print STATS "Augustus预测但证据支持占比低于 $min_exon_hint_ratio_for_augustus 的不可信基因模型数量: $num2;\n";
+print STATS "CDS总长度低于 $threshold_CDS_length 的不可信基因模型数量: $num3;\n";
+print STATS "CDS数量低于 $threshold_CDS_num 的不可信基因模型数量: $num4;\n";
+close STATS;

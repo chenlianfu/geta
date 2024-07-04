@@ -1,0 +1,312 @@
+#!/usr/bin/env perl
+
+use strict;
+use Getopt::Long;
+use Cwd qw/abs_path getcwd cwd/;
+use File::Basename;
+
+my $command_line = "$0 " . join(" ", @ARGV);
+my $bin_path = dirname($0);
+
+my $usage = <<USAGE;
+Usage:
+    $0 [options] genome.fasta in.gff3 > out.gff3
+
+    本程序能利用Diamond或HMM数据库对基因模型进行验证，并将通过验证的基因模型输出到标准输出中。
+
+【输入参数】
+    --HMM_db <string>    default: None
+    Enter one or more HMM databases, for filtering gene models. This parameter supports the input of multiple HMM databases, separated by commas. The program filters those gene models that do not match in all databases when using multiple HMM databases.
+
+    --BLASTP_db <string>    default: None
+    Enter one or more diamond databases, for filtering gene models. This parameter supports the input of multiple diamond databases, separated by commas. The program filters those gene models that do not match in all databases when using multiple diamond databases.
+
+【输出参数】
+    --tmp_dir <string>    default: tmp_\$date\$pid
+    设置零时文件夹路径。
+
+    --help    default: None
+    display this help and exit.
+
+
+【阈值参数】
+    --hmm_evalue1 <float>    default: 1e-5
+    --hmm_evalue2 <float>    default: 1e-3
+    --hmm_length <int>    default: 80
+    --hmm_coverage <float>    default: 0.25
+    设置和HMM数据库进行比对的Evalue和对HMM模型的覆盖度阈值。当hmm模型长度低于--hmm_length参数值时，Evalue阈值由--hmm_evalue2设置；当hmm模型长度不低于--hmm_length参数值时，Evalue阈值由--hmm_evalue1设置。
+
+    --blast_evalue <float>    default: 1e-9
+    --blast_CIP <float>    default: 0.4
+    --blast_coverage <float>    default: 0.4
+    设置和Diamond数据库进行比对的Evalue、Identity和覆盖度阈值。
+
+    --hmm_evalue_onlyOne <float>    default: 1e-7
+    --hmm_coverage_onlyOne <float>    default: 0.5
+    --blast_evalue_onlyOne <float>    default: 1e-12
+    --blast_CIP_onlyOne <float>    default: 0.6
+    --blast_coverage_onlyOne <float>    default: 0.6
+    当基因模型的蛋白序列只能和一种数据库比对上时，采取如上更严格的阈值参数进行验证。
+
+    --both_required    default: None
+    添加该参数后，基因模型和Diamond / HMM两种数据库都由比对结果，才能通过验证。
+
+【性能参数】
+    --cpu <int>    default: 8
+    设置进行使用的CPU线程数。
+
+USAGE
+if (@ARGV==0){die $usage}
+
+my ($HMM_db, $BLASTP_db, $tmp_dir, $hmm_evalue1, $hmm_evalue2, $hmm_length, $hmm_coverage, $blast_evalue, $blast_CIP, $blast_coverage, $hmm_evalue, $hmm_coverage, $blast_evalue, $blast_CIP, $blast_coverage, $hmm_evalue_onlyOne, $hmm_coverage_onlyOne, $blast_evalue_onlyOne, $blast_CIP_onlyOne, $blast_coverage_onlyOne, $both_required, $cpu, $help);
+GetOptions(
+    "HMM_db:s" => \$HMM_db,
+    "BLASTP_db:s" => \$BLASTP_db,
+    "tmp_dir:s" => \$tmp_dir,
+    "hmm_evalue1:f" => \$hmm_evalue1,
+    "hmm_evalue2:f" => \$hmm_evalue2,
+    "hmm_length:i" => \$hmm_length,
+    "hmm_coverage:f" => \$hmm_coverage,
+    "blast_evalue:f" => \$blast_evalue,
+    "blast_CIP:f" => \$blast_CIP,
+    "blast_coverage:f" => \$blast_coverage,
+    "hmm_evalue_onlyOne:f" => \$hmm_evalue_onlyOne,
+    "hmm_coverage_onlyOne:f" => \$hmm_coverage_onlyOne,
+    "blast_evalue_onlyOne:f" => \$blast_evalue_onlyOne,
+    "blast_CIP_onlyOne:f" => \$blast_CIP_onlyOne,
+    "blast_coverage_onlyOne:f" => \$blast_coverage_onlyOne,
+    "both_required" => \$both_required,
+    "cpu:i" => \$cpu,
+    "help" => \$help,
+);
+
+
+if ( $help ) { die $usage }
+
+# 在标准错误输出中给出程序的运行命令。
+my $pwd = `pwd`;
+my $programe_name = basename($0);
+print STDERR "\n#################### $programe_name | Start ####################\n";
+print STDERR "PWD: $pwd" . (localtime) . ": CMD: " . $command_line . "\n";
+print STDERR "============================================\n";
+
+########### 解析参数 #################
+$hmm_evalue1 ||= 1e-5;
+$hmm_evalue2 ||= 1e-3;
+$hmm_length ||= 80;
+$hmm_coverage ||= 0.25;
+$blast_evalue ||= 1e-9;
+$blast_CIP ||= 0.4;
+$blast_coverage ||= 0.4;
+$hmm_evalue_onlyOne ||= 1e-7;
+$hmm_coverage_onlyOne ||= 0.5;
+$blast_evalue_onlyOne ||= 1e-12;
+$blast_CIP_onlyOne ||= 0.6;
+$blast_coverage_onlyOne ||= 0.6;
+$cpu ||= 8;
+
+# 准备数据库信息，使用绝对路径
+my $input_genome = abs_path($ARGV[0]);
+my $input_GFF3 = abs_path($ARGV[1]);
+
+my (%HMM_db, %BLASTP_db);
+if ( $HMM_db ) {
+    foreach ( split /,/, $HMM_db ) {
+        $_ = abs_path($_);
+        $HMM_db{$_} = basename($_);
+    }
+}
+if ( $BLASTP_db ) {
+    foreach ( split /,/, $BLASTP_db ) {
+        $BLASTP_db{$_} = basename($_);
+    }
+}
+
+# 准备临时文件夹路径
+my $date = `date +%Y%m%d%H%M%S`; chomp($date);
+$tmp_dir ||= "tmp_$date$$";
+$tmp_dir = abs_path($tmp_dir);
+mkdir $tmp_dir unless -e $tmp_dir;
+chdir $tmp_dir; print STDERR "\nPWD: $tmp_dir\n";
+###############################
+
+
+# 1. 根据GFF3文件提取蛋白序列
+print STDERR "\n1. Extract protein sequences from the input GFF3 and genome file.\n";
+my @cmdString = ();
+push @cmdString, "$bin_path/gff3_to_protein.pl $input_genome $input_GFF3 > proteins.fasta 2> gff3_to_protein.log";
+push @cmdString, "perl -p -i -e 's/\\*\$//' proteins.fasta";
+
+&execute_cmds(@cmdString, "01.gff3_to_protein.ok");
+
+
+# 2. 对蛋白序列进行HMM和BLASTP验证。
+print STDERR "\n2. Recheck protein sequences with HMM and BLASTP methods.\n";
+my @cmdString = ();
+push @cmdString, "rm -rf validation_hmmscan.tab validation_blastp.tab";
+if ( $HMM_db ) {
+    foreach ( sort keys %HMM_db ) {
+		my $para_cpu = int($cpu / 2); $para_cpu = 1 if $para_cpu < 1;
+        push @cmdString, "$bin_path/para_hmmscan --evalue1 $hmm_evalue1 --evalue2 $hmm_evalue2 --hmm_length $hmm_length --coverage $hmm_coverage --no_cut_ga --chunk 20 --hmmscan_cpu 2 --outformat --cpu $para_cpu --hmm_db $_ --tmp_prefix $HMM_db{$_} proteins.fasta >> validation_hmmscan.tab 2>> para_hmmscan.1.log";
+        push @cmdString, "$bin_path/para_hmmscan --evalue1 $hmm_evalue1 --evalue2 $hmm_evalue2 --hmm_length $hmm_length --coverage $hmm_coverage --no_cut_ga --chunk 1 --hmmscan_cpu 2 --outformat --cpu $para_cpu --hmm_db $_ --tmp_prefix $HMM_db{$_} proteins.fasta >> validation_hmmscan.tab 2>> para_hmmscan.2.log";
+    }
+}
+if ( $BLASTP_db ) {
+    foreach ( sort keys %BLASTP_db ) {
+        push @cmdString, "diamond blastp --sensitive --max-target-seqs 20 --evalue 1e-5 --id 10 --index-chunks 1 --block-size 5 --outfmt 5 --db $_ --query proteins.fasta --out validation_blastp_$BLASTP_db{$_}.xml --threads $cpu &>> diamond_blastp.log";
+        push @cmdString, "$bin_path/parsing_blast_result.pl --evalue $blast_evalue --identity 0.1 --CIP $blast_CIP --subject-coverage $blast_coverage --query-coverage $blast_coverage --out-hit-confidence validation_blastp_$BLASTP_db{$_}.xml >> validation_blastp.tab";
+    }
+}
+
+&execute_cmds(@cmdString, "02.HMM_BLASTP.ok");
+
+
+# 3. 分析HMM和BLASTP分析结果，得到有效的基因模型。
+print STDERR "\n3. Analyzing the HMM and BLASTP analysis results, we obtain effective genes.\n";
+# 读取 HMM 结果中的 transcriptID
+open IN, "validation_hmmscan.tab" or die "Can not open file $tmp_dir/validation_hmmscan.tab, $!";
+my %hmm_transcriptID;
+while (<IN>) {
+    next if m/^#/;
+    $hmm_transcriptID{$1} = 1 if m/^(\S+)/;
+}
+close IN;
+
+# 读取 BLAST 结果中的 transcriptID
+open IN, "validation_blastp.tab" or die "Can not open file $tmp_dir/validation_blastp.tab, $!";
+my %blast_transcriptID;
+<IN>;
+while (<IN>) {
+    next if m/^#/;
+    $blast_transcriptID{$1} = 1 if m/^(\S+)/;
+}
+close IN;
+
+my %out_transcriptID;
+# 计算 HMM 算法的最终有效 transcriptID
+open IN, "validation_hmmscan.tab" or die "Can not open file $tmp_dir/validation_hmmscan.tab, $!";
+while (<IN>) {
+    next if m/^#/;
+    chomp;
+    @_ = split /\t/;
+    $_[5] = &percentage2value($_[5]);
+    # 若两种算法都有的 transcriptID，则是有效的。
+    if ( exists $blast_transcriptID{$_[0]} ) {
+        $out_transcriptID{$_[0]} = 1;
+    }
+    # 在HMM单一算法中存在的，则要提高阈值
+    elsif ( $_[3] <= $hmm_evalue_onlyOne && $_[5] >= $hmm_coverage_onlyOne ) {
+        $out_transcriptID{$_[0]} = 1;
+    }
+}
+close IN;
+
+# 计算 BLAST 算法的最终有效 transcriptID
+open IN, "validation_blastp.tab" or die "Can not open file $tmp_dir/validation_blastp.tab, $!";
+while (<IN>) {
+    next if m/^#/;
+    chomp;
+    @_ = split /\t/;
+    my ($blast_evalue_threshold, $blast_CIP_threshold, $blast_coverage_threshold) = ($blast_evalue_onlyOne, $blast_CIP_onlyOne, $blast_coverage_onlyOne);
+    $_[-3] = &percentage2value($_[-3]);
+    $_[-2] = &percentage2value($_[-2]);
+    $_[-1] = &percentage2value($_[-1]);
+    # 若两种算法都有的 transcriptID，则是有效的。
+    if ( exists $hmm_transcriptID{$_[0]} ) {
+        $out_transcriptID{$_[0]} = 1;
+    }
+    # 在BLASTP单一算法中存在的，则要提高阈值
+    elsif ( $_[-5] <= $blast_evalue_threshold && $_[-3] >= $blast_CIP_threshold && $_[-2] >= $blast_coverage_threshold && $_[-1] >= $blast_coverage_threshold ) {
+        $out_transcriptID{$_[0]} = 1;
+    }
+}
+close IN;
+
+# 分析GFF3文件，得到transcripID和geneID的对应关系
+my %mRNA2gene;
+open IN, $input_GFF3 or die "Can not open file $input_GFF3, $!";
+while (<IN>) {
+    $mRNA2gene{$2} = $1 if m/\tmRNA\t.*ID=([^;\s]+).*Parent=([^;\s]+)/;
+}
+close IN;
+
+# 统计结果，并获得有效的基因ID
+my %validated_gene;
+my ( $number1, $number2, $number3, $number4, $number5 ) = (0, 0, 0, 0, 0);
+foreach ( sort keys %out_transcriptID ) {
+    if ( $both_required ) {
+        $validated_gene{$mRNA2gene{$_}} = 1 if ( exists $blast_transcriptID{$_} && exists $hmm_transcriptID{$_} );
+    }
+    else {
+        $validated_gene{$mRNA2gene{$_}} = 1;
+    }
+    if ( exists $blast_transcriptID{$_} && exists $hmm_transcriptID{$_} ) {
+        $number1 ++;
+    }
+    elsif ( exists $hmm_transcriptID{$_} ) {
+        $number2 ++;
+    }
+    elsif ( exists $blast_transcriptID{$_} ) {
+        $number3 ++;
+    }
+}
+$number4 = %hmm_transcriptID;
+$number5 = %blast_transcriptID;
+my ($number6, $number7, $number8, $number9, $number10, $number11, $number12) = (0, 0, 0, 0, 0, 0, 0);
+$number6 = $number4 - $number1;
+$number7 = $number5 - $number1;
+$number8 = int($number2 * 100 / $number6) / 100 if $number6;
+$number9 = int($number3 * 100 / $number7) / 100 if $number7;
+$number10 = $number1 + $number2 + $number3;
+$number11 = $number1 + $number6 + $number7;
+$number12 = int($number10 * 100 / $number11) / 100 if $number11;
+print STDERR "HMM有效转录本数量：                 $number4
+BLASTP有效转录本数量：              $number5
+两种算法同时有效转录本数量：        $number1
+HMM更严格阈值单独有效转录本数量：   $number2 / $number6 = $number8
+BLASTP更严格阈值单独有效转录本数量：$number3 / $number7 = $number9
+最终有效的转录本数量：              $number10 / $number11 = $number12
+";
+
+# 4. 输出GFF3结果
+open IN, $input_GFF3 or die "Can not open file $input_GFF3, $!";
+my $out = 1;
+while (<IN>) {
+    if ( m/\tgene\t/ ) {
+        if ( m/ID=([^;\s]+)/ && exists $validated_gene{$1} ) {
+            $out = 1;
+        }
+        else {
+            $out = 0;
+        }
+    }
+    print if $out == 1;
+}
+
+sub percentage2value {
+    my $value = $1 if $_[0] =~ m/([\d\.e-]+)/;
+    $value = $value / 100;
+    return $value;
+}
+
+
+# 子程序，用于执行调用的Linux命令，同时生成.ok文件。
+sub execute_cmds {
+    my $ok_file = pop @_;
+
+    if ( -e $ok_file ) {
+        foreach ( @_ ) {
+            print STDERR "CMD(Skipped): $_\n";
+        }
+    }
+    else {
+        foreach ( @_ ) {
+            print STDERR (localtime) . ": CMD: $_\n";
+            system($_) == 0 or die "failed to execute: $_\n";
+        }
+        open OUT, ">", "$ok_file" or die $!; close OUT;
+    }
+
+    return 1;
+}
+

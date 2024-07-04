@@ -159,7 +159,7 @@ if ($fasta) {
 close CMD;
 print STDERR "将对 $gene_num_for_analysis 条序列进行 hmmscan 分析。\n";
 
-my $cmdString = "ParaFly -c $tmp_prefix.command.list -CPU $cpu &> /dev/null";
+my $cmdString = "parafly -c $tmp_prefix.command.list -CPU $cpu &> $tmp_prefix.tmp/parafly.log";
 print STDERR "CMD: $cmdString\n";
 (system $cmdString) == 0 or warn "Warning: Failed to execute: $cmdString\n";
 
