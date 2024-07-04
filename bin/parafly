@@ -232,13 +232,13 @@ while ( @commands || $runing_task_num > 0 ) {
 
     # 多轮CPU使用率同时过低或过高后，调节并行数。调节后的并行数不得低于初始并行数。
     if ( $round_num >= $rounds_delay ) {
-        # 对要调节的并行数进行设置：（1）若增加并行数0~1，则增加1；（2）对并行数取整；（3）变动幅度最高达50%(--max_ratio_for_job_num_change参数设定值)。
-        $add_task_num = 1 if ($add_task_num > 0 && $add_task_num < 1);
-        $add_task_num = int($add_task_num);
+        # 对要调节的并行数进行设置：（1）变动幅度最高达50%(--max_ratio_for_job_num_change参数设定值)；（2）若增加并行数值在-1~1，则使其为-1或1；（3）对并行数取整。
         if ( (abs($add_task_num) / $total_task_num) > $max_ratio_for_job_num_change ) {
-            $add_task_num = int($total_task_num * $max_ratio_for_job_num_change);
-            $add_task_num = 1 if ($add_task_num > 0 && $add_task_num < 1);
+            $add_task_num = $total_task_num * $max_ratio_for_job_num_change;
         }
+        $add_task_num = 1 if ($add_task_num > 0 && $add_task_num < 1);
+        $add_task_num = -1 if ($add_task_num > -1 && $add_task_num < 0);
+        $add_task_num = int($add_task_num);
 
         # 对最大并行数进行调节。若并行数减少，最少到初始的并行数。若并行数增加，最高到指定阈值。
         if ( $total_task_num + $add_task_num < $cpu ) {

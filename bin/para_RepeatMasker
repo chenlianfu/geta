@@ -149,7 +149,7 @@ unless ( $lib ) {
 }
 
 # 运行RepeatMasker程序
-my $cmdString = "$bin_path/parafly -c $tmp_dir/command.RepeatMasker.list -CPU 1 --max_parallel_j 1 --rounds_delay 5 --refresh_time 10 &> $tmp_dir/parafly.log";
+my $cmdString = "$bin_path/parafly -c $tmp_dir/command.RepeatMasker.list -CPU 1 --rounds_delay 5 --refresh_time 10 &> $tmp_dir/parafly.log";
 print STDERR "CMD: $cmdString\n";
 (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 
