@@ -465,7 +465,7 @@ push @cmdString, "$bin_path/GFF3_merging_and_removing_redundancy_Parallel --cpu 
 push @cmdString,  "$bin_path/GFF3Clear --GFF3_source NGSReads --genome $input_genome --gene_prefix transfrag --no_attr_add transfrag.gff3 > transfrag.genome.gff3 2> /dev/null";
 push @cmdString, "rm -rf transfrag.gff3";
 
-&execute_cmds($cmdString, "$tmp_dir/06.removing_redundancy.ok");
+&execute_cmds(@cmdString, "$tmp_dir/06.removing_redundancy.ok");
 
 if ( $output_raw_GFF3 ) {
     my $output_raw_GFF3_info;

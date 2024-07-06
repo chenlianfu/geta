@@ -81,11 +81,17 @@ while (<IN>) {
     }
 }
 close IN;
+my $nproc = `nproc`;
+my $max_CPU = 1;
 if ( $engine eq "ncbi" ) {
     print STDERR "将运行RepeatMasker命令的 -pa 参数设置为 $cpu，其再调用rmblastn命令以 $rmblastn_cpu 线程运行。\n";
+	$max_CPU = int($nproc / $cpu / $rmblastn_cpu * 2) if ($cpu && $rmblastn_cpu);
+	$max_CPU = 1 if $max_CPU < 1;
 }
 else {
     print STDERR "将运行RepeatMasker命令的 -pa 参数设置为 $cpu，其再调用nhmmer命令以 2 个线程运行。\n";
+	$max_CPU = int($nproc / $cpu) if $cpu;
+	$max_CPU = 1 if $max_CPU < 1;
 }
 
 # 设置临时运行文件夹
@@ -149,7 +155,7 @@ unless ( $lib ) {
 }
 
 # 运行RepeatMasker程序
-my $cmdString = "$bin_path/parafly -c $tmp_dir/command.RepeatMasker.list -CPU 1 --rounds_delay 5 --refresh_time 10 &> $tmp_dir/parafly.log";
+my $cmdString = "$bin_path/parafly -c $tmp_dir/command.RepeatMasker.list -CPU 1 --max_CPU $max_CPU --rounds_delay 5 --refresh_time 10 &> $tmp_dir/parafly.log";
 print STDERR "CMD: $cmdString\n";
 (system $cmdString) == 0 or die "Failed to execute: $cmdString\n";
 
