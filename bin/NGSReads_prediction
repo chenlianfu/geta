@@ -932,6 +932,12 @@ Parameters:
     When this parameter is set, the sequencing depth information for all bases will be output to a specified file.
 
 [Threshold]
+    --pe_used_pair_num <int>    default: 100000000
+    The program uses the maximum number of paired-end sequencing reads available. When there's a lot of input data, it uses this number of read pairs at most. If multiple datasets are provided, an equal portion of data is taken from the start of each dataset. By default, the program utilizes up to 100 million read pairs. For PE150bp sequencing, it processes around 30 gigabytes of data.
+
+    --se_used_read_num <int>    default: 100000000
+    The program uses the maximum number of single-end sequencing reads available. When there's a lot of input data, it uses this number of read at most. If multiple datasets are provided, an equal portion of data is taken from the start of each dataset. By default, the program utilizes up to 100 million read. For SE150bp sequencing, it processes around 15 gigabytes of data.
+
     --min_protein_length <int>    default: 100
     Set the minimum protein length for identifying ORFs.
 

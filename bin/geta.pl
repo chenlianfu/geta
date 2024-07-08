@@ -85,6 +85,9 @@ Parameters:
     --cpu <int>    default: 4
     设置程序运行使用的CPU线程数。
 
+    --max_used_read_num <int>    default: None
+    设置程序使用的NGSreads数据的最大数量。当程序输入了过量的NGSreads时，会自动根据基因组大小选择一定数据量的read。若添加该参数值，则指定使用的双末端测序的reads对数量或单端测序的read数量。若不设置该参数，程序自动计算使用的read对数量 = ( 2 ** (log10(genome_size / 1,000,000) - 1) )  * 50 M 。即10M的基因组最多使用50M个reads对，PE150测序数据量15G；100M基因组使用100M个reads对，PE150测序数据量30G；1G基因组使用200M个reads对，PE150测序数据量60G。
+
     --put_massive_temporary_data_into_memory    default: None
     设置将海量的临时文件存放到内存中。这样能避免磁盘I/O不足而造成程序运行减缓，但需要消耗更多内存。本流程在很多步骤中对数据进行了分割，再通过并行化来加速计算，但这对磁盘形成了极大的I/O负荷。因此，当磁盘性能较差时会严重影响计算速度。若系统内存充足，推荐添加本参数，从而将海量的临时数据存放到代表内存的/dev/shm文件夹下，以加速程序运行。此外，程序在数据分割和并行化步骤运行完毕后，会自动删除/dev/shm中的临时数据以释放内存。
 
@@ -141,7 +144,7 @@ if (@ARGV==0){die $usage_english}
 
 my ($genome, $RM_species, $RM_species_Dfam, $RM_species_RepBase, $RM_lib, $no_RepeatModeler, $pe1, $pe2, $single_end, $sam, $strand_specific, $protein, $augustus_species, $HMM_db, $BLASTP_db, $config, $BUSCO_lineage_dataset);
 my ($out_prefix, $gene_prefix, $chinese_help, $help);
-my ($cpu, $put_massive_temporary_data_into_memory, $genetic_code, $homolog_prediction_method, $optimize_augustus_method, $no_alternative_splicing_analysis, $delete_unimportant_intermediate_files);
+my ($cpu, $max_used_read_num, $put_massive_temporary_data_into_memory, $genetic_code, $homolog_prediction_method, $optimize_augustus_method, $no_alternative_splicing_analysis, $delete_unimportant_intermediate_files);
 my ($cmdString, $cmdString1, $cmdString2, $cmdString3, $cmdString4, $cmdString5, @cmdString);
 my ($start_codon, $stop_codon);
 GetOptions(
@@ -167,6 +170,7 @@ GetOptions(
     "chinese_help!" => \$chinese_help,
     "help!" => \$help,
     "cpu:i" => \$cpu,
+    "max_used_read_num:i" => \$max_used_read_num,
     "put_massive_temporary_data_into_memory!" => \$put_massive_temporary_data_into_memory,
     "genetic_code:i" => \$genetic_code,
     "homolog_prediction_method:s" => \$homolog_prediction_method,
@@ -338,7 +342,17 @@ if (($pe1 && $pe2) or $single_end or $sam) {
     push @input_parameter, "--strand_specific" if defined $strand_specific;
     push @input_parameter, "--genetic_code $genetic_code" if defined $genetic_code;
     push @input_parameter, "--put_massive_temporary_data_into_memory" if defined $put_massive_temporary_data_into_memory;
-	push @input_parameter, "--homolog_gene_models $tmp_dir/2.homolog_prediction/homolog_prediction.raw.gff3" if defined $protein;
+    push @input_parameter, "--homolog_gene_models $tmp_dir/2.homolog_prediction/homolog_prediction.raw.gff3" if defined $protein;
+
+    # 设置最大使用的双末端测序数据量 = ( 2 ** (log10(genome_size / 1,000,000) - 1) )  * 50 M reads pair。即10M的基因组最多使用50M个reads对，PE150测序数据量15G；100M基因组使用100M个reads对，PE150测序数据量30G；1G基因组使用200M个reads对，PE150测序数据量60G；
+    my $max_support_read_pair = 50000000;
+    my $genome_size_to_cal_max_support_read_pair = (log($genome_size / 1000000) / log(10)) - 1;
+    $genome_size_to_cal_max_support_read_pair = 0 if $genome_size_to_cal_max_support_read_pair < 0;
+    $genome_size_to_cal_max_support_read_pair = (2 ** $genome_size_to_cal_max_support_read_pair) * 50000000;
+    $max_support_read_pair = $genome_size_to_cal_max_support_read_pair if $genome_size_to_cal_max_support_read_pair > $max_support_read_pair;
+    $max_support_read_pair = $max_used_read_num if defined $max_used_read_num;
+    push @input_parameter, "--pe_used_pair_num $max_support_read_pair --se_used_read_num $max_support_read_pair";
+
     my $input_parameter = join " ", @input_parameter;
     $cmdString = "$bin_path/NGSReads_prediction $input_parameter --config $tmp_dir/config.txt --cpu $cpu --tmp_dir $tmp_dir/3.NGSReads_prediction --output_alignment_GFF3 $tmp_dir/3.NGSReads_prediction/NGSReads_alignment.gff3 --output_raw_GFF3 $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.raw.gff3 --intron_info_out $tmp_dir/3.NGSReads_prediction/intron.txt --base_depth_out $tmp_dir/3.NGSReads_prediction/base_depth.txt $genome > $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.gff3 2> $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.log";
 }
@@ -366,17 +380,17 @@ $cmdString = "$bin_path/GFF3_merging_and_removing_redundancy_Parallel --cpu $cpu
 
 # 4.1.2 选择完整且准确的基因模型
 unless ( -s "excellent.gff3" ) {
-	my $input = "$tmp_dir/4.augustus/training/evidence_gene_models.gff3";
-	open IN, $input or die "Error: Can not open file $input, $!";
-	my $output = "$tmp_dir/4.augustus/training/evidence_gene_models.excellent.gff3";
-	open OUT, ">", $output or die "Error: Can not create file $output, $!";
-	$/ = "\n\n";
-	while (<IN>) {
-		print OUT if m/excellent/;
-	}
-	$/ = "\n";
-	close IN; close OUT;
-	open OUT, ">", "02.evidence_gene_models.excellent.ok" or die $!; close OUT;
+    my $input = "$tmp_dir/4.augustus/training/evidence_gene_models.gff3";
+    open IN, $input or die "Error: Can not open file $input, $!";
+    my $output = "$tmp_dir/4.augustus/training/evidence_gene_models.excellent.gff3";
+    open OUT, ">", $output or die "Error: Can not create file $output, $!";
+    $/ = "\n\n";
+    while (<IN>) {
+        print OUT if m/excellent/;
+    }
+    $/ = "\n";
+    close IN; close OUT;
+    open OUT, ">", "02.evidence_gene_models.excellent.ok" or die $!; close OUT;
 }
 
 # 4.1.3 选择CDS数量较多、CDS长度较长、CDS/exon比例较大且去冗余的基因模型。
@@ -583,12 +597,12 @@ push @cmdString, "$bin_path/GFF3_database_validation $config{'GFF3_database_vali
 @cmdString = ();
 push @cmdString, "$bin_path/GFF3_merging_and_removing_redundancy $config{'GFF3_merging_and_removing_redundancy'} $genome geneModels.h.gff3 geneModels.j.gff3 > geneModels.k.gff3 2> GFF3_merging_and_removing_redundancy.3.log";
 if ( defined $no_alternative_splicing_analysis ) {
-	push @cmdString, "ln -sf geneModels.k.gff3 geneModels.gff3";
+    push @cmdString, "ln -sf geneModels.k.gff3 geneModels.gff3";
 }
 else {
-	push @cmdString, "$bin_path/paraAlternative_splicing_analysis $config{'alternative_splicing_analysis'} --tmp_dir paraAlternative_splicing_analysis.tmp --cpu $cpu geneModels.k.gff3 $tmp_dir/3.NGSReads_prediction/intron.txt $tmp_dir/3.NGSReads_prediction/base_depth.txt > geneModels.l.gff3";
-	push @cmdString, "$bin_path/GFF3_add_CDS_for_transcript $genome geneModels.l.gff3 > geneModels.m.gff3";
-	push @cmdString, "ln -sf geneModels.m.gff3 geneModels.gff3";
+    push @cmdString, "$bin_path/paraAlternative_splicing_analysis $config{'alternative_splicing_analysis'} --tmp_dir paraAlternative_splicing_analysis.tmp --cpu $cpu geneModels.k.gff3 $tmp_dir/3.NGSReads_prediction/intron.txt $tmp_dir/3.NGSReads_prediction/base_depth.txt > geneModels.l.gff3";
+    push @cmdString, "$bin_path/GFF3_add_CDS_for_transcript $genome geneModels.l.gff3 > geneModels.m.gff3";
+    push @cmdString, "ln -sf geneModels.m.gff3 geneModels.gff3";
 }
 
 &execute_cmds(@cmdString, "04.Alternative_splicing_analysis.ok");
@@ -752,7 +766,7 @@ unless ( -e "$tmp_dir/6.output_gene_models.ok" ) {
     print OUT "\n";
     
     # (7) 获取基因预测整合过滤的统计信息
-	#print OUT &statistics_combination();
+    #print OUT &statistics_combination();
 
     # (8) 获取BUSCO分析结果
     if ( -e "$tmp_dir/6.output_gene_models/BUSCO_results.txt" ) {
@@ -1094,6 +1108,9 @@ Parameters:
     --cpu <int>    default: 4
     Enter the number of CPU threads used by GETA or the called programes to run.
 
+    --max_used_read_num <int>    default: None
+    Set the maximum number of NGSreads used by the program. When the program is given too many NGSreads, it will automatically select a certain amount of data based on the size of the genome. If you add this parameter value, it specifies the number of paired reads or single-end reads used in Paired-end sequencing or single-end sequencing, respectively. If you do not set this parameter, the program automatically calculates the number of read pairs used, which is equal to ((2 ** (log10(genome_size / 1,000,000) - 1)) * 50 M). That is, 10M genome uses up to 50M read pairs, PE150 sequencing data volume of 15G; 100M genome uses up to 100M read pairs, PE150 sequencing data volume of 30G; 1G genome uses up to 200M read pairs, PE150 sequencing data volume of 60G.
+
     --put_massive_temporary_data_into_memory    default: None
     Set up massive temporary files to be stored in memory. This prevents the program from running slowly due to insufficient disk I/O, but it requires more RAM. Many steps in this pipeline would split the input data into numerous pieces and then parallelize its command lines to speed up the computation, although this results in a significant I/O load on the disk. Therefore, low disk performance has a significant impact on computation speed. If your system memory is sufficient, you are advised to add this parameter so that massive temporary data can be stored in the /dev/shm folder, which represents the memory, to speed up program execution. In addition, the program automatically deletes temporary data in /dev/shm to free up memory after the data splitting and parallelization steps are completed.
 
@@ -1206,13 +1223,13 @@ sub parsing_input_parameters {
     $cpu ||= 4;
 
     $genetic_code ||= 1;
-	# 根据遗传密码得到起始密码子和终止密码子
-	@_ = &codon_table("$tmp_dir/codon.table");
-	my (%start_codon, %stop_codon);
-	%start_codon = %{$_[1]};
-	%stop_codon = %{$_[2]};
-	$start_codon = join ",", sort keys %start_codon;
-	$stop_codon = join ",", sort keys %stop_codon;
+    # 根据遗传密码得到起始密码子和终止密码子
+    @_ = &codon_table("$tmp_dir/codon.table");
+    my (%start_codon, %stop_codon);
+    %start_codon = %{$_[1]};
+    %stop_codon = %{$_[2]};
+    $start_codon = join ",", sort keys %start_codon;
+    $stop_codon = join ",", sort keys %stop_codon;
 
     die $chinese_help if $chinese_help;
     die $help if $help;
@@ -1530,7 +1547,7 @@ sub choose_config_file {
 
     if ( defined $put_massive_temporary_data_into_memory ) {
         $config{"homolog_prediction"} =~ s/\s*$/ --put_massive_temporary_data_into_memory/;
-		$config{"BGM2AT"} =~ s/\s*$/ --put_massive_temporary_data_into_memory/;
+        $config{"BGM2AT"} =~ s/\s*$/ --put_massive_temporary_data_into_memory/;
     }
 
     # 生成本次程序运行的配置文件
