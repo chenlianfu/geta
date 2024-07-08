@@ -77,6 +77,12 @@ Parameters:
 
 
 [阈值参数]
+    --pe_used_pair_num <int>    default: 100000000
+    设置程序利用的最大双末端测序read对数量。当输入的数据较多时，最多使用此数量的read对。若输入了多组数据，则从每组前面取相同比例的数据量。程序默认最大使用100M的read对。若按照PE150bp测序，则使用的数据量为30 Gb。
+
+    --se_used_read_num <int>    default: 100000000
+    设置程序利用的最大单端测序read数量。当输入的数据较多时，最多使用此数量的read。若输入了多组数据，则从每组前面取相同比例的数据量。程序默认最大使用100M的read。若按照SE150bp测序，则使用的数据量为15 Gb。
+
     --min_protein_length <int>    default: 100
     设置鉴定ORF时最小的protein长度。
 
@@ -96,7 +102,7 @@ USAGE
 my $usage_english = &get_usage_english();
 if (@ARGV==0){die $usage_english}
 
-my ($pe1, $pe2, $single_end, $sam, $cpu, $homolog_gene_models, $tmp_dir, $strand_specific, $config, $help, $chinese_help, $cmdString, $min_protein_length, $genetic_code, $output_alignment_GFF3, $output_raw_GFF3, $intron_info_out, $base_depth_out, $put_massive_temporary_data_into_memory);
+my ($pe1, $pe2, $single_end, $sam, $cpu, $homolog_gene_models, $tmp_dir, $strand_specific, $config, $help, $chinese_help, $cmdString, $pe_used_pair_num, $se_used_read_num, $min_protein_length, $genetic_code, $output_alignment_GFF3, $output_raw_GFF3, $intron_info_out, $base_depth_out, $put_massive_temporary_data_into_memory);
 GetOptions(
     "pe1:s" => \$pe1,
     "pe2:s" => \$pe2,
@@ -107,6 +113,8 @@ GetOptions(
     "tmp_dir:s" => \$tmp_dir,
     "strand_specific" => \$strand_specific,
     "config:s" => \$config,
+    "pe_used_pair_num:i" => \$pe_used_pair_num,
+    "se_used_read_num:i" => \$se_used_read_num,
     "min_protein_length:i" => \$min_protein_length,
     "genetic_code:i" => \$genetic_code,
     "output_alignment_GFF3:s" => \$output_alignment_GFF3,
@@ -131,6 +139,8 @@ print STDERR "============================================\n";
 ########### 解析参数 #################
 $genetic_code ||= 1;
 $cpu ||= 8;
+$pe_used_pair_num ||= 100000000;
+$se_used_read_num ||= 100000000;
 $min_protein_length ||= 100;
 
 # 使用绝对路径
@@ -224,6 +234,7 @@ unless (-e "01.trimmomatic.ok") {
     $paraFly_CPU = 1 if $paraFly_CPU < 1;
 
     if ($pe1 && $pe2) {
+        # 对双末端测序数据进行质控
         my @pe_reads = sort keys %pe_reads;
         my $pe_reads_num = @pe_reads;
         my $number = 0;
@@ -241,6 +252,7 @@ unless (-e "01.trimmomatic.ok") {
         close OUT;
         $cmdString = "ParaFly -c command.trimmomatic_pe.list -CPU $paraFly_CPU &> /dev/null";
         print STDERR (localtime) . ": CMD: $cmdString\n";
+
         unless ( system("$cmdString") == 0 ) {
             # 特殊情况下 Fastq 文件中碱基质量全部为固定的值时，Trimmomatic不能自动检测phred格式而运行失败。于是强制指定为phred33，符合常规情况。
             $cmdString = "perl -pe 's/ PE / PE -phred33 /' FailedCommands > command.trimmomatic_phred33; rm FailedCommands";
@@ -251,8 +263,50 @@ unless (-e "01.trimmomatic.ok") {
             print STDERR (localtime) . ": CMD: $cmdString\n";
             system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
         }
+
+        # 检测双末端测序数据质控后的有效数据量
+        my $toal_pair_num = 0;
+        my %lib_pair_num;
+        foreach my $prefix ( @paired_end_reads_prefix ) {
+            open IN, "$prefix.trimmomatic.log" or die "Error: Can not open file $prefix.trimmomatic.log, $!";
+            while (<IN>) {
+                if ( m/Surviving:\s*(\d+)/ ) {
+                    $lib_pair_num{$prefix} = $1;
+                    $toal_pair_num += $1;
+                }
+            }
+            close IN;
+        }
+
+        # 最多输出一定的数据量
+        open OUT1, ">", "PE_reads.1.fastq" or die "Error: Can not create file PE_reads.1.fastq, $!";
+        open OUT2, ">", "PE_reads.2.fastq" or die "Error: Can not create file PE_reads.2.fastq, $!";
+        foreach my $prefix ( @paired_end_reads_prefix ) {
+            # 计算最大输出的行数
+            my $max_line_num = int($pe_used_pair_num / $toal_pair_num * $lib_pair_num{$prefix}) * 4;
+            # 输出read1中的数据
+            open IN, "$prefix.1.fastq" or die "Error: Can not open file $prefix.1.fastq, $!";
+            my $line_num = 0;
+            while (<IN>) {
+                $line_num ++;
+                last if $line_num > $max_line_num;
+                print OUT1;
+            }
+            close IN;
+            # 输出read2中的数据
+            open IN, "$prefix.2.fastq" or die "Error: Can not open file $prefix.2.fastq, $!";
+            my $line_num = 0;
+            while (<IN>) {
+                $line_num ++;
+                last if $line_num > $max_line_num;
+                print OUT2;
+            }
+            close IN;
+        }
+        close OUT1; close OUT2;
     }
     if ($single_end) {
+        # 对单端数据进行质控
         my @se_reads = sort keys %se_reads;
         my $se_reads_num = @se_reads;
         my $number = 0;
@@ -267,6 +321,7 @@ unless (-e "01.trimmomatic.ok") {
         close OUT;
         $cmdString = "ParaFly -c command.trimmomatic_pe.list -CPU $paraFly_CPU &> /dev/null";
         print STDERR (localtime) . ": CMD: $cmdString\n";
+
         unless ( system("$cmdString") == 0 ) {
             $cmdString = "perl -pe 's/ SE / SE -phred33 /' FailedCommands > command.trimmomatic_phred33; rm FailedCommands";
             print STDERR (localtime) . ": CMD: $cmdString\n";
@@ -276,38 +331,43 @@ unless (-e "01.trimmomatic.ok") {
             print STDERR (localtime) . ": CMD: $cmdString\n";
             system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
         }
-        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+
+        # 检测单端测序数据质控后的有效数据量
+        my $toal_read_num = 0;
+        my %lib_read_num;
+        foreach my $prefix ( @single_end_reads_prefix ) {
+            open IN, "$prefix.trimmomatic.log" or die "Error: Can not open file $prefix.trimmomatic.log, $!";
+            while (<IN>) {
+                if ( m/Surviving:\s*(\d+)/ ) {
+                    $lib_read_num{$prefix} = $1;
+                    $toal_read_num += $1;
+                }
+            }
+            close IN;
+        }
+
+        # 最多输出一定的数据量
+        open OUT, ">", "SE_reads.fastq" or die "Error: Can not create file SE_reads.fastq, $!";
+        foreach my $prefix ( @single_end_reads_prefix ) {
+            # 计算最大输出的行数
+            my $max_line_num = int($se_used_read_num / $toal_read_num * $lib_read_num{$prefix}) * 4;
+            # 输出read中的数据
+            open IN, "$prefix.fastq" or die "Error: Can not open file $prefix.fastq, $!";
+            my $line_num = 0;
+            while (<IN>) {
+                $line_num ++;
+                last if $line_num > $max_line_num;
+                print OUT;
+            }
+            close IN;
+        }
+        close OUT;
     }
     chdir "../";
     open OUT, ">", "01.trimmomatic.ok" or die $!; close OUT;
 }
 else {
     print STDERR "Skip Step 1 for the file 1.trimmomatic.ok exists\n";
-
-    # 跳过Trimmomatic步骤时，需要得到Clean data的数据文件名称，用于下个步骤的输入文件。
-    if ($pe1 && $pe2) {
-        my @pe_reads = sort keys %pe_reads;
-        my $pe_reads_num = @pe_reads;
-        my $number = 0;
-        foreach (@pe_reads) {
-            $number ++;
-            my $code = "0" x ( length($pe_reads_num) - length($number) ) . $number;
-            @_ = split /\t/;
-            if ( -s $_[0] && -s $_[1] ) {
-                push @paired_end_reads_prefix, "reads$code";
-            }
-        }
-    }
-    if ($single_end) {
-        my @se_reads = sort keys %se_reads;
-        my $se_reads_num = @se_reads;
-        my $number = 0;
-        foreach (@se_reads) {
-            $number ++;
-            my $code = "0" x ( length($se_reads_num) - length($number) ) . $number;
-            push @single_end_reads_prefix, "reads$code";
-        }
-    }
 }
 
 
@@ -334,22 +394,10 @@ unless (-e "02.hisat2.ok") {
     # 能处理单端，双端，链特异性与链非特异性数据
     my $input;
     if ($pe1 && $pe2) {
-        my (@input_pe1, @input_pe2, $input_pe1, $input_pe2);
-        foreach ( @paired_end_reads_prefix ) {
-            push @input_pe1, "../a.trimmomatic/$_.1.fastq";
-            push @input_pe2, "../a.trimmomatic/$_.2.fastq";
-        }
-        $input_pe1 = join ",", @input_pe1;
-        $input_pe2 = join ",", @input_pe2;
-        $input = "-1 $input_pe1 -2 $input_pe2";
+        $input = "-1 ../a.trimmomatic/PE_reads.1.fastq -2 ../a.trimmomatic/PE_reads.2.fastq";
     }
     if ($single_end) {
-        my (@input_se, $input_se);
-        foreach ( @single_end_reads_prefix ) {
-            push @input_se, "../1.trimmomatic/$_.fastq";
-        }
-        $input_se = join ",", @input_se;
-        $input .= " -U $input_se"
+        $input .= " -U ../1.trimmomatic/SE_reads.fastq"
     }
     if ($input && $strand_specific) {
         $input .= " --rna-strandness RF";
