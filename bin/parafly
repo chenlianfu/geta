@@ -143,8 +143,8 @@ my ($round_num, $round_num1, $round_num2) = (0, 0, 0);
 # 存放CPU使用率
 my @cpu_usage_per;
 
-open OUT1, ">>", "$cmdline.completed";
-open OUT2, ">", "$cmdline.failed";
+open OUT1, ">>", "$cmdline.completed" or die "Error: Can not add content to file $cmdline.completed, $!";
+open OUT2, ">", "$cmdline.failed" or die "Error: Can not create file $cmdline.failed, $!";
 while ( @commands || $runing_task_num > 0 ) {
 
     # 分析已经成功的任务
@@ -167,6 +167,7 @@ while ( @commands || $runing_task_num > 0 ) {
 
     my $commands_num = @commands;
     print STDERR (localtime) . "还剩下 $commands_num 个任务，当前 $runing_task_num 个任务正在运行中; ";
+	$| = 1;
 
     # 提交任务到后台运行
     while ( $prepare_task_num >= $command_num_in_each_chunk && @commands >= $command_num_in_each_chunk ) {
@@ -253,6 +254,7 @@ while ( @commands || $runing_task_num > 0 ) {
         ($round_num, $round_num1, $round_num2) = (0, 0, 0);
     }
     print STDERR "下一轮允许最大并行数为 $total_task_num，CPU使用率为 $cpu_usage %。\n";
+	$| = 1;
 
     # 调整parallel输入文件的命令数、parallel的并行提交数。$command_num_in_each_chunk = $parallel_j，即j值。程序运行后，若并行数不断增大，j值会增大为 int(并行数 ** 0.5) ，直至 --max_parallel_j 参数设定的最大值为止。
     $parallel_j = int($total_task_num ** 0.5);
