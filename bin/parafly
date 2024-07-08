@@ -262,9 +262,14 @@ while ( @commands || $runing_task_num > 0 ) {
     $command_num_in_each_chunk = $parallel_j;
 }
 
-# 程序运行完毕，删除中间文件夹
-my $cmdString = "rm -rf $tmp_dir1 $tmp_dir2 $tmp_dir3";
-system($cmdString);
+if ( -s "$cmdline.Failed" ) {
+    die "有些命令运行失败，请检查文件 $cmdline.Failed，查看运行失败的命令。\n";
+}
+else {
+    # 程序成功运行完毕，删除中间文件夹
+    my $cmdString = "rm -rf $tmp_dir1 $tmp_dir2 $tmp_dir3";
+    system($cmdString);
+}
 
 
 sub get_cpu_usage {
