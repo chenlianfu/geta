@@ -223,7 +223,12 @@ unless ( -s "genome.size" ) {
 }
 else {
     open IN, "$tmp_dir/genome.size" or die "Error: Can not open file $tmp_dir/genome.size, $!";
-    $genome_size = <IN>;
+    while ( <IN> ) {
+        if ( /^(\d+)/ ) {
+            $genome_size = $1;
+            last;
+        }
+    }
     close IN;
 }
 # 根据基因组大小选择软件自带的配置文件，或使用 --config 参数指定的配置文件。
