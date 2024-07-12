@@ -508,7 +508,7 @@ else {
 
 # 6. 对转录本预测的基因模型去冗余。
 print STDERR "\nStep 6: Cut down on the repetitive gene models predicted from transcriptome data. (" . (localtime) . ")\n";
-my @cmdString;
+my @cmdString = ();
 push @cmdString, "$bin_path/GFF3_merging_and_removing_redundancy_Parallel --cpu $cpu $input_genome --first_file_score 0.0 transfrag.ORF_filledByHomolog.gff3 > transfrag.gff3 2> /dev/null";
 push @cmdString,  "$bin_path/GFF3Clear --GFF3_source NGSReads --genome $input_genome --gene_prefix transfrag --no_attr_add transfrag.gff3 > transfrag.genome.gff3 2> /dev/null";
 push @cmdString, "rm -rf transfrag.gff3";

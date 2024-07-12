@@ -563,6 +563,7 @@ geneModels.l.gff3\t添加可变剪接
 geneModels.m.gff3\t对可变剪接转录本进行了ORF分析
 
 geneModels.gff3\t基因模型结果文件
+genes_in_repeats.gff3\t位于转座子序列区域的基因模型
 incomplete.gff3\t不完整的基因模型
 invalidated.gff3\t未能通过HMM或BLASTP数据库验证的基因模型\n";
 close OUT;
@@ -771,7 +772,7 @@ unless ( -e "$tmp_dir/6.output_gene_models.ok" ) {
     print OUT "\n";
     
     # (7) 获取基因预测整合过滤的统计信息
-    #print OUT &statistics_combination();
+    print OUT &statistics_combination();
 
     # (8) 获取BUSCO分析结果
     if ( -e "$tmp_dir/6.output_gene_models/BUSCO_results.txt" ) {
@@ -779,7 +780,6 @@ unless ( -e "$tmp_dir/6.output_gene_models.ok" ) {
         open IN, $input_file or die "Error: Can not open file $input_file, $!";
         print OUT <IN>;
         close IN;
-        print OUT "\n";
     }
     close OUT;
 
@@ -822,86 +822,93 @@ sub statistics_combination {
 
     $output .= "In the process of integrating and filtering the gene models predicted by NGS reads, homolog, and AUGUSTUS, the corresponding statistical data were shown as follows:\n";
 
-    # （1）分析NGS reads、homolog和AUGUSTUS三种方法预测的基因数量，合并后的基因数量。
-    my ($augustus_gene_num, $NGSreads_gene_num, $homolog_gene_num) = (0, 0, 0);
-    $augustus_gene_num = `grep -P "\tgene\t" $tmp_dir/4.augustus/augustus.gff3 | wc -l`;
-    $NGSreads_gene_num = `grep -P "\tgene\t" $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.raw.gff3 | wc -l`;
-    $homolog_gene_num = `grep -P "\tgene\t" $tmp_dir/2.homolog_prediction/homolog_prediction.gff3 | wc -l`;
-    chomp($augustus_gene_num); chomp($NGSreads_gene_num); chomp($homolog_gene_num);
-    my $input_file = "$tmp_dir/5.combine_gene_models/geneModels.a.gff3";
-    open IN, $input_file or die "Error: Can not open file $input_file, $!";
-    my ($num_of_gene_a, $num_of_gene_b, $num_of_gene_c, $num_of_gene_d, $num_of_gene_all) = (0, 0, 0, 0, 0);
-    while (<IN>) {
-        $num_of_gene_a ++ if (m/\tgene\t/ && m/augustus/);
-        $num_of_gene_c ++ if (m/\tgene\t/ && m/transfrag/);
-        $num_of_gene_d ++ if (m/\tgene\t/ && m/genewise/);
-    }
-    close IN;
-
-    $input_file = "$tmp_dir/5.combine_gene_models/geneModels.b.gff3";
+    # (1) 分析同源蛋白预测基因的情况
+    my $input_file = "$tmp_dir/2.homolog_prediction/homolog_prediction.log";
     open IN, $input_file or die "Error: Can not open file $input_file, $!";
     while (<IN>) {
-        $num_of_gene_b ++ if m/\tgene\t/;
-    }
-    close IN;
-
-    $num_of_gene_all = $num_of_gene_a + $num_of_gene_b + $num_of_gene_c + $num_of_gene_d;
-    $output .= "(1) We combined the $NGSreads_gene_num, $homolog_gene_num, and $augustus_gene_num gene models predicted by NGS reads, homolog, and AUGUSTUS, respectively. When gene models predicted by different methods overlapped, AUGUSTUS result was retained first, followed by NGS reads, and finally homolog. After the first round of combination, a total of $num_of_gene_all gene models were obtained, including $num_of_gene_a AUGUSTUS gene models with sufficient evidence, $num_of_gene_c gene models predicted by NGS reads, $num_of_gene_d gene models predicted by homolog, and $num_of_gene_b gene models predicted by AUGUSTUS but lacking evidence.\n";
-    
-    # （2）分析NGS reads和homolog合并后的基因数量，替换AUGUSTUS基因模型的数量，。
-    $input_file = "$tmp_dir/4.evidence_gene_models/evidence_gene_models.log";
-    open IN, $input_file or die "Error: Can not open file $input_file, $!";
-    my ( $evidence_gene_models_num_all, $evidence_gene_models_num_NGSReads, $evidence_gene_models_num_homolog ) = (0, 0, 0);
-    while (<IN>) {
-        $evidence_gene_models_num_all = $1 if m/Total (\d+) gene models were divided/;
-        ($evidence_gene_models_num_NGSReads, $evidence_gene_models_num_homolog) = ($1, $2) if m/ene models predicted by NGSReads: (\d+); predicted by Homolog: (\d+)/;
-    }
-    close IN;
-
-    $input_file = "$tmp_dir/5.combine_gene_models/picked_evidence_geneModels.log";
-    open IN, $input_file or die "Error: Can not open file $input_file, $!";
-    my ($evidence_gene_models_num_picked, $evidence_gene_models_num_consistent) = (0, 0);
-    <IN>; <IN>; <IN>; <IN>;
-    $_ = <IN>; $evidence_gene_models_num_consistent = $1 if m/^.*?\d+.*?\d+.*?(\d+)/;
-    $_ = <IN>; $evidence_gene_models_num_picked = $1 if m/(\d+)/;
-    close IN;
-
-    my $gene_models_supported_by_evidence_num = `grep -P "\tgene\t" $tmp_dir/5.combine_gene_models/geneModels.d.gff3 | wc -l`;
-    chomp($gene_models_supported_by_evidence_num);
-
-    $output .= "(2) After combining the gene models predicted by NGS reads and homologs, $evidence_gene_models_num_all evidence gene models were produced, of which $evidence_gene_models_num_NGSReads came from NGS reads and $evidence_gene_models_num_homolog from homologs. In the second round of combination, $evidence_gene_models_num_picked evidence gene models with long CDS lengths were used to replace the gene models of the previous step. There were $evidence_gene_models_num_consistent evidence gene models with the same CDS structures as predicted by AUGUSTUS at the time of replacement. Finally, $gene_models_supported_by_evidence_num gene models with sufficient evidence were obtained.\n";
-    
-    # （3）分析HMM和BLASTP进行验证的基因状况
-    $input_file = "$tmp_dir/5.combine_gene_models/get_valid_geneModels.log";
-    open IN, $input_file or die "Error: Can not open file $input_file, $!";
-    $_ = join "", <IN>; 
-    close IN;
-    my @number = m/(\d+) 个/g;
-    $output .= "(3) The HMM and BLASTP algorithms were used to filter transcripts from the predicted gene models. Low confidence mRNAs, such as CDS length less than 600bp or CDSs base proportion less than 30% of exons, had their protein sequences aligned to HMM or BLASTP databases and would be retained if a match was found in any database. An analysis was conducted on $gene_models_supported_by_evidence_num gene models that had evidence support and $num_of_gene_b that did not. Of these, $number[-8] low-confidence gene models were extracted for HMM and BLASTP test, resulting in $number[-2] genes identified as lncRNA, $number[-1] genes filtered as low-quality, and $number[-6] effective gene models remaining after filtering. \n";
-    
-    open IN, "$out_prefix.geneModels.gff3" or die "Can not open file $out_prefix.geneModels.gff3, $!";
-    my (%gene_ID, %gene2transcript, $num_augustus, $num_transfrag, $num_genewise);
-    while (<IN>) {
-        if (m/\tgene\t.*ID=([^;]+)/) {
-            $gene_ID{$1} = 1;
-            if (m/Source=([a-zA-Z]+)/) {
-                $num_augustus ++ if $1 eq 'augustus';
-                $num_transfrag ++ if $1 eq 'transfrag';
-                $num_genewise ++ if $1 eq 'genewise';
-            }
+        if ( m/^Finally, total (\d+) gene models were divided into 4 classes (:.*)/ ) {
+            $output .= "(1) After using MMseq2 to align the homologous protein sequences of closely related species with the reference genome, we successfully predicted $1 gene models. These models were then divided into four categories$2";
         }
-        elsif ( m/ID=([^;]+).*Parent=([^;]+)/ && exists $gene_ID{$2} ) {
-            $gene2transcript{$2}{$1} = 1;
+        elsif ( m/Predicited by gth, (\d+); predicted by exonerate, (\d+), predicted by genewise, (\d+)/ ) {
+            $output .= "Among them, gth predicted $1; exonerate predicted $2; and genewise predicted $3.\n";
+        }
+    }
+
+    # （2）分析转录本预测基因情况
+    my ($transcript_num, $ORF_num, $NGSreads_gene_num) = (0, 0);
+    $transcript_num = `grep -P ">" $tmp_dir/3.NGSReads_prediction/d.Transfrag2ORF/*.fasta | wc -l`; chomp($transcript_num);
+    $ORF_num = `grep -P "\tgene\t" $tmp_dir/3.NGSReads_prediction/transfrag.ORF.gff3 | wc -l`; chomp($ORF_num);
+    $NGSreads_gene_num = `grep -P "\tgene\t" $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.gff3 | wc -l`; chomp($NGSreads_gene_num);
+
+    my $input_file = "$tmp_dir/3.NGSReads_prediction/e.FillingGeneModelsByHomolog.tab";
+    open IN, $input_file or die "Error: Can not open file $input_file, $!";
+    while (<IN>) {
+        if ( m/对 (\d+) 个基因的 (\d+) 个mRNA进行了末端填补，其中有 (\d+) 个基因填补完整。/ ) {
+            $output .= "(2) After aligning the RNA-Seq data with the reference genome using Hisat2, we found $transcript_num transcript sequences and predicted $ORF_num ORFs. Then, we used gene models from homologous protein prediction to complete the missing ends of $1 ORF-corresponding gene models, with $2 fully filled in. Finally, we removed redundancy from the ORFs and obtained $NGSreads_gene_num gene models predicted from the transcript sequences.\n";
+        }
+    }
+
+    # (3) 整合同源蛋白和转录本预测的基因模型的情况
+    my $evidence_gene_num = 0;
+    $evidence_gene_num = `grep -P "\tgene\t" $tmp_dir/5.combine_gene_models/geneModels.b.gff3 | wc -l`; chomp($evidence_gene_num);
+    $output .= "(3) By integrating transcript predicted gene models and homolog gene prediction models, and removing redundancies, $evidence_gene_num gene models with evidence support were obtained. The integration algorithm is as follows: First, the models are scored based on the total length of the CDS region, and an additional 50% score is given to the transcript predicted gene models; If the overlap ratio between the CDS regions of two gene models exceeds 30%, the gene model with the higher score is selected.\n";
+
+    # (4) 整合AUGUSTUS基因模型
+    my ($augustus_gene_num, $combine_3_methold_gene_num) = (0, 0);
+    $augustus_gene_num = `grep -P "\tgene\t" $tmp_dir/4.augustus/augustus.gff3 | wc -l`; chomp($augustus_gene_num);
+    $combine_3_methold_gene_num = `grep -P "\tgene\t" $tmp_dir/5.combine_gene_models/geneModels.f.gff3 | wc -l`; chomp($combine_3_methold_gene_num);
+
+    my $input_file = "$tmp_dir/5.combine_gene_models/FillingGeneModelsByAugustus.tab";
+    open IN, $input_file or die "Error: Can not open file $input_file, $!";
+    while (<IN>) {
+        if ( m/对 (\d+) 个基因的 (\d+) 个mRNA进行了末端填补，其中有 (\d+) 个基因填补完整。/ ) {
+            $output .= "(4) We used the AUGUSTUS software along with hints to successfully predict $augustus_gene_num gene models. Then, we used these complete gene models to fill in the missing ends of $1 gene models derived from transcripts or homologous proteins. Out of these, $2 were successfully filled in. ";
         }
     }
     close IN;
-    my $as_gene_num = 0;
-    foreach ( keys %gene2transcript ) {
-        my @as_gene = keys %{$gene2transcript{$_}};
-        $as_gene_num ++ if @as_gene >= 2;
+
+    my $input_file = "$tmp_dir/5.combine_gene_models/fillingEndsOfGeneModels.1.log";
+    open IN, $input_file or die "Error: Can not open file $input_file, $!";
+    while (<IN>) {
+        if ( m/共有 \d+ 个基因模型进行了分析；其中有 \d+ 个完整的基因模型；有 (\d+) 个不完整的基因模型/ ) {
+            $output .= "For the remaining $1 gene models with missing ends, ";
+        }
+        elsif ( m/对其中 (\d+) 个基因模型成功进行了首尾填补.*有 (\d+) 个基因模型未能进行完整填补/ ) {
+            $output .= "we applied forced extension filling and achieved $1 complete fillings; however, $2 gene models could not be fully filled.  Finally, we combined the evidence-supported gene models with those predicted by AUGUSTUS to remove redundancy and obtained $combine_3_methold_gene_num complete gene models. The integration algorithm remained unchanged but gave an additional 50% score to evidence-supported gene models.\n"
+        }
     }
-    my $num_of_gene_ID = 0; $num_of_gene_ID = %gene_ID;
-    $output .= "(4) Finally, the gene models overlapping in the CDS region were de-redundant, achieving $num_of_gene_ID gene models, including $num_augustus predicted by AUGUSTUS, $num_transfrag from NGS reads, and $num_genewise from homologs. In addition,  alternative splicing was found in $as_gene_num gene models.\n\n";
+
+    # (5) 对基因模型进行区分
+    my ($repeat_region_gene_num, $reliable_gene_num, $excellent_gene_num, $other_reliable_gene_num, $need_validation_gene_num) = (0, 0, 0, 0, 0);
+    $repeat_region_gene_num = `grep -P "\tgene\t" $tmp_dir/5.combine_gene_models/genes_in_repeats.gff3 | wc -l`; chomp($repeat_region_gene_num);
+    $reliable_gene_num = `grep -P "\tgene\t" $tmp_dir/5.combine_gene_models/geneModels.h.gff3 | wc -l`; chomp($reliable_gene_num);
+    $excellent_gene_num = `grep -P "\tgene\t" $tmp_dir/5.combine_gene_models/geneModels.h.gff3 | grep excellent | wc -l`; chomp($excellent_gene_num);
+    $other_reliable_gene_num = $reliable_gene_num - $excellent_gene_num;
+    $need_validation_gene_num = `grep -P "\tgene\t" $tmp_dir/5.combine_gene_models/geneModels.i.gff3 | wc -l`; chomp($need_validation_gene_num);
+    my $input_file = "$tmp_dir/5.combine_gene_models/pickout_reliable_geneModels.stats";
+    open IN, $input_file or die "Error: Can not open file $input_file, $!";
+    $_ = join "", <IN>;
+    close IN;
+    if ( m/CDS总长度低于 (\d+).*CDS数量低于 (\d+)/m ) {
+        $output .= "(5) We will review all gene models obtained from transcript, homologous proteins, and ab initio predictions. Out of these, $repeat_region_gene_num gene models showing significant overlap with transposon sequences will be excluded; $excellent_gene_num highly accurate gene models marked with excellent key words will be retained; for the remaining gene models, $need_validation_gene_num with CDS total length < $1 or CDS numbers < $2 will be identified as less reliable and subjected to further HMM or BLASTP verification; the remaining $other_reliable_gene_num gene models will be considered reliable.\n";
+    }
+
+    # (6) HMM个BLASTP验证结果
+    my ($validated_gene_num, $all_gene_num) = (0, 0);
+    $validated_gene_num = `grep -P "\tgene\t" $tmp_dir/5.combine_gene_models/geneModels.j.gff3 | wc -l`; chomp($validated_gene_num);
+    $all_gene_num = `grep -P "\tgene\t" $tmp_dir/5.combine_gene_models/geneModels.k.gff3| wc -l`; chomp($all_gene_num);
+    $output .= "(6) In the validation of $need_validation_gene_num gene models using HMM and BLASTP, $validated_gene_num gene models passed the validation. Then, these validated gene models were merged with $excellent_gene_num gene models marked as excellent and $other_reliable_gene_num gene models with a large number of CDS and a longer total length. Finally, $all_gene_num merged gene models were obtained for further variable splicing analysis.\n";
+
+    # (7) 最终统计
+    my ($final_gene_num, $alternative_gene_num) = (0, 0);
+    $final_gene_num = `grep -P "\tgene\t" $out_prefix.geneModels.gff3 | wc -l`; chomp($final_gene_num);
+    my $input_file = "$out_prefix.codingGeneModels.stats";
+    open IN, $input_file or die "Error: Can not open file $input_file, $!";
+    while ( <IN> ) {
+        $alternative_gene_num = $1 if m/AS_gene number:\s+(\d+)/;
+    }
+    close IN;
+    $output .= "(7) Ultimately, the GETA software predicted $final_gene_num gene models, with $alternative_gene_num showing alternative splicing.\n\n";
     
     return $output;
 }
