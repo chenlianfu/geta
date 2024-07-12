@@ -413,7 +413,7 @@ unless ( -e "03.geneModels2AugusutsTrainingInput.ok" ) {
     }
     close IN;
     if ( $training_genes_number < 1000 ) {
-        $cmdString = "$bin_path/geneModels2AugusutsTrainingInput --min_evalue 1e-9 --min_identity 0.9 --min_coverage_ratio 0.9 --min_cds_num 1 --min_cds_length 450 --min_cds_exon_ratio 0.40 --keep_ratio_for_excluding_too_long_gene 0.99 --out_prefix ati --cpu $cpu $cpu $tmp_dir/4.evidence_gene_models/evidence_gene_models.gff3 $genome &> geneModels2AugusutsTrainingInput.log.Loose_thresholds";
+        $cmdString = "$bin_path/geneModels2AugusutsTrainingInput --min_evalue 1e-9 --min_identity 0.9 --min_coverage_ratio 0.9 --min_cds_num 1 --min_cds_length 450 --min_cds_exon_ratio 0.40 --keep_ratio_for_excluding_too_long_gene 0.99 --out_prefix ati --cpu $cpu $cpu evidence_gene_models.excellent.gff3 $genome &> geneModels2AugusutsTrainingInput.log.Loose_thresholds";
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
     }
