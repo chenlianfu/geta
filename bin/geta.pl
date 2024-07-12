@@ -889,7 +889,7 @@ sub statistics_combination {
     open IN, $input_file or die "Error: Can not open file $input_file, $!";
     $_ = join "", <IN>;
     close IN;
-    if ( m/CDS总长度低于 (\d+).*CDS数量低于 (\d+)/m ) {
+    if ( m/CDS总长度低于 (\d+).*CDS数量低于 (\d+)/s ) {
         $output .= "(5) We will review all gene models obtained from transcript, homologous proteins, and ab initio predictions. Out of these, $repeat_region_gene_num gene models showing significant overlap with transposon sequences will be excluded; $excellent_gene_num highly accurate gene models marked with excellent key words will be retained; for the remaining gene models, $need_validation_gene_num with CDS total length < $1 or CDS numbers < $2 will be identified as less reliable and subjected to further HMM or BLASTP verification; the remaining $other_reliable_gene_num gene models will be considered reliable.\n";
     }
 
