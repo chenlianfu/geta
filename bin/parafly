@@ -5,7 +5,6 @@ use Getopt::Long;
 use Cwd qw/abs_path getcwd cwd/;
 use File::Basename;
 
-my $userID = `id -u $ENV{"USER"}`; chomp($userID);
 my $date = `date +%Y%m%d%H%M%S`; chomp($date);
 
 my $usage = <<USAGE;
@@ -43,8 +42,8 @@ Usage:
     --rounds_delay <int>    default: 5
     当程序自动修改了并发数后，需要再完至少指定轮数的检测且每次检测结果都高于或低于指定阈值的CPU使用率，才进行下一次并发数的修改。当任务中命令使用了多线程，且延迟一段时间才能使用到多线程时，考虑增大该参数值，以免并行初期检测到较低的CPU利用率而增大并发数，导致提交任务过多，导致系统负载过高。
 
-    --tmp_dir_prefix <string>    default: /run/user/$userID/parafly_tmp${date}_$$
-    程序将任务数据，包括分隔的命令行任务、检测任务运行是否成功的提示文件等存放入到临时文件夹中。根据该参数指定的临时文件夹前缀，程序自动生成3个临时文件夹：（1）.cmds后缀文件夹存放命令行文件；（2）.Success后缀文件夹存放运行成功的命令编号；（3）.Failed后缀文件夹存放运行失败的命令编号。当运行的任务数量极大时，系统IO并行数量极大，在临时文件夹中生成的文件数量也极多，推荐将临时文件夹存放到性能较强的分区上。程序默认使用/run/user目录，即存放到了内存上。此外，还需要注意本程序没有自动删除临时文件夹的功能，程序运行完毕后需要自行手动删除。
+    --tmp_dir_prefix <string>    default: /dev/shm/parafly_tmp${date}_$$
+    程序将任务数据，包括分隔的命令行任务、检测任务运行是否成功的提示文件等存放入到临时文件夹中。根据该参数指定的临时文件夹前缀，程序自动生成3个临时文件夹：（1）.cmds后缀文件夹存放命令行文件；（2）.Success后缀文件夹存放运行成功的命令编号；（3）.Failed后缀文件夹存放运行失败的命令编号。当运行的任务数量极大时，系统IO并行数量极大，在临时文件夹中生成的文件数量也极多，推荐将临时文件夹存放到性能较强的分区上。程序默认使用/dev/shm/目录，即存放到了内存上。此外，还需要注意本程序没有自动删除临时文件夹的功能，程序运行完毕后需要自行手动删除。
 
     --help    default: None
     display this help and exit.
@@ -86,7 +85,7 @@ die "程序的正常运行需要依赖 GNU parallel，请先安装 parallel 后�
     unless $version_info =~ m/GNU parallel/;
 
 # 生成临时文件夹
-$tmp_dir_prefix ||= "/run/user/$userID/paraFly_tmp_${date}_$$";
+$tmp_dir_prefix ||= "/dev/shm/paraFly_tmp_${date}_$$";
 my $tmp_dir1 = "$tmp_dir_prefix.Success";
 my $tmp_dir2 = "$tmp_dir_prefix.Failed";
 my $tmp_dir3 = "$tmp_dir_prefix.cmds";
