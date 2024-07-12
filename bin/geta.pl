@@ -348,7 +348,7 @@ if (($pe1 && $pe2) or $single_end or $sam) {
     my $max_support_read_pair = 50000000;
     my $genome_size_to_cal_max_support_read_pair = (log($genome_size / 1000000) / log(10)) - 1;
     $genome_size_to_cal_max_support_read_pair = 0 if $genome_size_to_cal_max_support_read_pair < 0;
-    $genome_size_to_cal_max_support_read_pair = (2 ** $genome_size_to_cal_max_support_read_pair) * 50000000;
+    $genome_size_to_cal_max_support_read_pair = int((2 ** $genome_size_to_cal_max_support_read_pair) * 50000000);
     $max_support_read_pair = $genome_size_to_cal_max_support_read_pair if $genome_size_to_cal_max_support_read_pair > $max_support_read_pair;
     $max_support_read_pair = $max_used_read_num if defined $max_used_read_num;
     push @input_parameter, "--pe_used_pair_num $max_support_read_pair --se_used_read_num $max_support_read_pair";
