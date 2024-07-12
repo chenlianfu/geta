@@ -1,2 +1,11 @@
 [hisat2]
 --min-intronlen 20 --max-intronlen 4000 --dta --score-min L,0.0,-0.4
+
+[paraAugusutusWithHints]
+--gene_prefix augustus --min_intron_len 30
+
+[pickout_reliable_geneModels]
+--reliable_keyword excellent --min_exon_hint_ratio_for_augustus 0.2 --threshold_CDS_length 900
+
+[GFF3_database_validation]
+--hmm_evalue1 1e-5 --hmm_evalue2 1e-3 --hmm_length 80 --hmm_coverage 0.25 --blast_evalue 1e-9 --blast_CIP 0.3 --blast_coverage 0.4 --hmm_evalue_onlyOne 1e-6 --hmm_coverage_onlyOne 0.4 --blast_evalue_onlyOne 1e-10 --blast_CIP_onlyOne 0.6 --blast_coverage_onlyOne 0.6
