@@ -1,891 +1,874 @@
 #!/usr/bin/env perl
 
 use strict;
+use warnings;
 use Getopt::Long;
-use Cwd qw/abs_path getcwd cwd/;
+use Cwd qw/abs_path/;
 use File::Basename;
+use List::Util qw/min max/;
+use POSIX ();
 
-my $bin_path = dirname($0);
+my $script_path = abs_path($0);
 
 my $usage = <<USAGE;
 Usage:
     $0 [options] homolog_proteins.fasta genome.fasta out.filteredHits.tab > out.geneModels.tab
 
-    程序根据MMseqs2的结果文件out.filteredHits.tab，对各个基因区域调用exonerate/genewise/gth等软件进行基因预测(调用parafly程序进行并行化运算)。然后，对各个基因预测软件的结果进行过滤和排序，在标准输出中给出表格格式的基因模型信息。
-    本程序对输入文件out.filteredHits.tab的格式要求，相比于常规的BLAST表格12列输出结果：（1）第3列表示多个HSPs累积的Identity值；额外多出的最后一列是两个使用中划线连接的坐标数据，表示同源蛋白所在的基因区域。
-    对各个基因预测软件的结果进行过滤：过滤protein长度过低，对同源蛋白覆盖过低的基因模型；过滤终止密码子过多的基因模型。
+    程序根据MMseqs2的结果文件out.filteredHits.tab，对各个基因区域调用exonerate/genewise/gth等软件进行基因预测。程序内置进程池进行并行化运算（不再依赖ParaFly）：将任务按批次(chunk)分组，每个worker进程顺序处理一个chunk内的所有任务，直接调用预测软件（不经过shell）并在内存中解析其输出，从而避免海量小文件和调度开销。然后，对各个基因预测软件的结果进行过滤和排序，在标准输出中给出表格格式的基因模型信息。
+    本程序对输入文件out.filteredHits.tab的格式要求，相比于常规的BLAST表格12列输出结果：（1）第3列表示多个HSPs累积的Identity值；额外多出的最后一列是两个使用中划线连接的坐标数据，表示同源蛋白所在的基因区域。若最后一列不满足"数字-数字"格式，则使用第9和10列（基因组上的匹配起止位点）作为基因区域。
+    对各个基因预测软件的结果进行过滤：过滤CDS总长不是3的倍数的基因模型；过滤protein长度过低，对同源蛋白覆盖过低的基因模型；过滤终止密码子过多的基因模型。
     对各个基因预测软件的结果进行排序：(1) 按对同源蛋白的匹配长度从大到小; (2) 按CDS内部的终止密码子数量从小到大；(3) 按得到的基因模型CDS总长从大到小；(4) 按对同源蛋白比对的Evalue值从小到大；(5) 按对同源蛋白比对的Score值从大到小；(6) 按对同源蛋白比对的Identity值从大到小；(7) 按基因预测软件gth/exonerate/genewise的顺序；(8) 按输出信息的ASCII字符顺序。
-    程序运行过程中的的一些关键点：（1）将基因组序列的所有小写碱基字符变为大写后，再进行后续分析；（2）对同源蛋白序列的尾部添加终止密码子后，再计算其序列长度，并调用exonerate/genewise/gth等软件进行基因基因预测；（3）由于genewise命令给出的CDS不包含终止密码子，而exonerate和gth给出的CDS包含终止密码子，于是对genwise的结果进行修正，使其尾部的CDS能包含终止密码子；（4）其它关键点请见相关参数的描述。
+    程序运行过程中的的一些关键点：（1）将基因组序列的所有小写碱基字符变为大写后，再进行后续分析；（2）对同源蛋白序列的尾部添加终止密码子后，再计算其序列长度，并调用exonerate/genewise/gth等软件进行基因预测；（3）由于genewise命令给出的CDS不包含终止密码子，而exonerate和gth给出的CDS包含终止密码子，于是对genewise的结果进行修正，使其尾部的CDS能包含终止密码子；（4）同一个基因区域和同源蛋白存在多行比对结果时，只进行一次基因预测，并使用Score最高的比对结果的Evalue/Score/Identity进行排序；（5）其它关键点请见相关参数的描述。
     程序输出表格有15列：(1) 目标基因组序列名称；(2) 预测软件名称；(3) 基因起始位点；(4) 基因结束位点；(5) introns信息，多个introns之间使用分号分割，每个intron前后坐标使用中划线分割；(6) 基因所在的正负链；(7) 同源蛋白名称；(8) 同源蛋白包含终止密码子后的长度；(9) 同源蛋白匹配的起始位点；(10) 同源蛋白匹配的结束位点；(11) CDS总长度；(12) CDS内部的终止密码子数量；(13) MMseqs2比对的Evalue值；(14) MMseqs2比对的Score值；(15) MMseqs2比对的Identity。
+
+    断点续跑（--tmp_dir）说明：
+    程序以"chunk × 预测方法"为最小完成单元进行缓存。指定已有的--tmp_dir重新运行时：
+      (1) 若--flanking_length、--chunk_num等影响任务切分的参数未变，chunk切分阶段（regions.fa/proteins.fa/tasks.tab）会直接复用，不会重新读取基因组/蛋白序列切分任务；
+      (2) 对--method中列出的每一种方法，程序会分别检查每个chunk是否已经用相同的--genetic_code/--min_intron_length/--max_intron_length跑过该方法；已完成的方法会直接复用其结果，不会重新调用对应的预测软件；
+      (3) 因此，若第二次运行相比第一次只是在--method中新增了方法（例如第一次--method exonerate，第二次--method exonerate,genewise），则exonerate的结果会被直接复用，只需重新计算新增的genewise部分；
+      (4) 若--genetic_code、--min_intron_length、--max_intron_length等参数发生变化，则对应方法的已有结果会被视为过期，自动重新计算。
 
     --threshold_protein_length <int>    default: 25
     --threshold_homolog_coverage <float>    default: 0.2
     --threshold_inter_stop_codon_num <int>    default: 3
-    设置使用同源蛋白进行基因预测后，对基因模型结果进行过滤的阈值。蛋白序列长度阈值、对同源蛋白覆盖率阈值和内部终止密码子数量阈值。使用genwise/gth/exonerate进行基因预测后，对获得的基因模型进行过滤，要求其蛋白序列长度不小于指定阈值，要求对同源蛋白的覆盖率不低于指定阈值，要求内部的终止密码子数量不高于指定阈值。
+    设置使用同源蛋白进行基因预测后，对基因模型结果进行过滤的阈值。要求基因模型对同源蛋白的匹配长度不小于指定阈值，对同源蛋白的覆盖率不低于指定阈值，内部的终止密码子数量不高于指定阈值。这些参数可以设置为0。
 
     --flanking_length <int>    default: None
-    设置侧翼序列长度。程序根据MMseqs2比对结果，选取基因组序列匹配区域及其两侧翼--flanking_length参数指定长度的序列，作为核酸序列，输入给genewise或gth命令，用于基因预测。若不设置此参数，程序会根据MMseqs2的结果自动进行计算，侧翼长度刚好超过90%以上的query匹配区域。分析query在基因组上的匹配区域时，首先看MMseqs2输入文件最后一列信息若满足"数字坐标-数字坐标"格式，则得到匹配区域，若不满足，则使用第7和8列数据作为匹配区域。若使用本参数直接指定侧翼长度，推荐设置为5000。
+    设置侧翼序列长度。程序根据MMseqs2比对结果，选取基因组序列匹配区域及其两侧翼--flanking_length参数指定长度的序列，作为核酸序列，输入给基因预测软件。若不设置此参数，程序会根据MMseqs2的结果自动进行计算，侧翼长度刚好超过90%以上的基因区域长度。若使用本参数直接指定侧翼长度，推荐设置为5000。
 
     --cpu <int>    default: 8
-    设置运行genewise或gth命令的并行化数。
+    设置并行运行的worker进程数。
 
-    --method <int>    default: exonerate
-    设置进行基因预测的方法，其值可以设定为exonerate、genewise、gth或all。若需要同时使用多种方法，则输入使用逗号分割的多个值；若使用所有三种方法进行分析，可以设置--method参数值为all，但最消耗计算时间。gth和exonerate支持尾部终止密码子的比对，而genewise不支持，其基因预测结果中，前两者基因模型的尾部CDS可能包含终止密码子，genewise却不会。
+    --method <string>    default: exonerate
+    设置进行基因预测的方法，其值可以设定为exonerate、genewise、gth或all。若需要同时使用多种方法，则输入使用逗号分割的多个值；设置为all则使用所有三种方法，但最消耗计算时间。gth和exonerate支持尾部终止密码子的比对，而genewise不支持，其基因预测结果中，前两者基因模型的尾部CDS可能包含终止密码子，genewise却不会。使用相同的--tmp_dir重新运行且只是新增了方法时，已完成方法的结果会被复用（见上文"断点续跑"说明）。
 
     --genetic_code <int>    default: 1
-    设置遗传密码。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。本程序调用的exonerate、genewise和gth三个命令都支持遗传密码参数。由于genewise需要一个codon.table文件作为遗传密码支持，本程序会根据--genetic_code参数值专门生成相应的codon.table文件。而exonerate和gth分别使用--geneticcode和-translationtable参数可以直接支持相应的遗传密码，本参数的值会传递给它们。
+    设置遗传密码。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。genewise使用程序生成的codon.table文件；exonerate和gth分别使用--geneticcode和-translationtable参数。
 
     --min_intron_length <int>    default: 20
-    --max_intron_length <int>    default: 200000
-    设置最小和最大intron长度。这两个参数仅在使用exonerate软件进行基因预测时生效，作为exonerate命令的--minintron和--maxintron参数的值。
+    --max_intron_length <int>    default: 3.6 * sqrt(genomeSize)
+    设置最小和最大intron长度。这两个参数仅在使用exonerate软件进行基因预测时生效。
 
     --tmp_dir <string>    default: tmp_\$date\$pid
-    程序运行时临时文件夹名称。
+    程序运行时临时文件夹名称。指定已有的临时文件夹时，程序会跳过已经完成的chunk（按"chunk × 方法"为单元，见上文说明），实现断点续跑。
 
-    --chunk_num <int>    default: 1000
-    将同源蛋白放于不同的文件夹下存放，每个文件夹存放指定数量（默认1000个）的同源蛋白用于基因预测的输入输出文件。由于用于基因预测的命令经常高达数十万甚至上百万个，需要读取或生成的文件数据非常大。若时将这些文件存放于一个文件夹，会导致一个文件夹下包含大量的小文件，对其小文件的读取和生成效率极低，导致程序运行也极其缓慢。因此，将文件分批存放，从而提高读写效率和程序运行效率。
+    --chunk_num <int>    default: 200
+    每个chunk包含的基因预测任务数量。每个chunk由一个worker进程顺序处理，每个chunk仅生成少量文件。该值过大会导致末尾负载不均衡，过小会增加进程启动开销，一般设置为100~1000即可。
+
+    --timeout <int>    default: 3600
+    单个基因预测命令的最长运行时间（秒）。超时的命令被终止并计为失败。设置为0表示不限制。
 
     --help    default: None
     display this help and exit.
 
 USAGE
-if (@ARGV==0){die $usage}
 
-my ($method, $genetic_code, $flanking_length, $cpu, $tmp_dir, $chunk_num, $help_flag, $threshold_protein_length, $threshold_homolog_coverage, $threshold_homolog_coverage, $threshold_inter_stop_codon_num, $min_intron_length, $max_intron_length);
+my ($method, $genetic_code, $flanking_length, $cpu, $tmp_dir, $chunk_num, $help_flag,
+    $threshold_protein_length, $threshold_homolog_coverage, $threshold_inter_stop_codon_num,
+    $min_intron_length, $max_intron_length, $timeout, $worker_dir, $codon_table_file,
+    $run_methods_arg);
 GetOptions(
-    "method:s" => \$method,
-    "genetic_code:i" => \$genetic_code,
-    "flanking_length:i" => \$flanking_length,
-    "cpu:i" => \$cpu,
-    "tmp_dir:s" => \$tmp_dir,
-    "chunk_num:i" => \$chunk_num,
-    "help" => \$help_flag,
-    "threshold_protein_length:i" => \$threshold_protein_length,
-    "threshold_homolog_coverage:f" => \$threshold_homolog_coverage,
-    "threshold_inter_stop_codon_num:i" => \$threshold_inter_stop_codon_num,
-    "min_intron_length:i" => \$min_intron_length,
-    "max_intron_length:i" => \$max_intron_length,
-);
-$min_intron_length ||= 20;
-$max_intron_length ||= 200000;
-$threshold_protein_length ||= 25;
-$threshold_homolog_coverage ||= 0.2;
-$threshold_inter_stop_codon_num ||= 3;
-$cpu ||= 8;
-$genetic_code ||= 1;
-my $date = `date +%Y%m%d%H%M%S`; chomp($date);
-$tmp_dir ||= "tmp_$date$$";
-$tmp_dir = abs_path($tmp_dir);
-mkdir $tmp_dir unless -e $tmp_dir;
-$chunk_num ||= 1000;
-$method ||= "exonerate";
-my %method;
+    "method=s"                         => \$method,
+    "genetic_code=i"                   => \$genetic_code,
+    "flanking_length=i"                => \$flanking_length,
+    "cpu=i"                            => \$cpu,
+    "tmp_dir=s"                        => \$tmp_dir,
+    "chunk_num=i"                      => \$chunk_num,
+    "help"                             => \$help_flag,
+    "threshold_protein_length=i"       => \$threshold_protein_length,
+    "threshold_homolog_coverage=f"     => \$threshold_homolog_coverage,
+    "threshold_inter_stop_codon_num=i" => \$threshold_inter_stop_codon_num,
+    "min_intron_length=i"              => \$min_intron_length,
+    "max_intron_length=i"              => \$max_intron_length,
+    "timeout=i"                        => \$timeout,
+    # 内部参数：worker模式
+    "worker=s"                         => \$worker_dir,
+    "codon_table=s"                    => \$codon_table_file,
+    "run_methods=s"                    => \$run_methods_arg,
+) or die $usage;
+
+if ($help_flag) { print $usage; exit 0; }
+
+$min_intron_length              //= 20;
+$max_intron_length              //= 200000;
+$threshold_protein_length       //= 25;
+$threshold_homolog_coverage     //= 0.2;
+$threshold_inter_stop_codon_num //= 3;
+$cpu                            //= 8;
+$genetic_code                   //= 1;
+$chunk_num                      //= 200;
+$timeout                        //= 3600;
+$method                         //= "exonerate";
+
 $method = "gth,exonerate,genewise" if $method eq "all";
-foreach ( split /,/, $method ) {
+my %method;
+foreach (split /,/, $method) {
+    die "Error: The method '$_' is not correct, it should be exonerate, genewise, gth or all.\n"
+        unless $_ eq "exonerate" or $_ eq "genewise" or $_ eq "gth";
     $method{$_} = 1;
-    warn "Warning: The method $_ is not correct.\n" unless ( $_ eq "exonerate" or $_ eq "genewise" or $_ eq "gth" );
 }
-print "#GenomeSeqID\tSoftware\tStart\tEnd\tIntrons\tStrand\tHomologProteinName\tHomologLength\tStart\tEnd\tCDSLength\tStopCodonNum\tMMseqs2Evalue\tMMseqs2Score\tMMseqs2Identity\n";
+my @methods    = grep { $method{$_} } qw/gth exonerate genewise/;
+my $method_sig = join(",", @methods);
+die "Error: no method specified.\n" unless @methods;
+die "Error: --cpu must be >= 1.\n" if $cpu < 1;
+die "Error: --chunk_num must be >= 1.\n" if $chunk_num < 1;
 
-if ( $help_flag ) { die $usage }
 
-my $input_file1 = abs_path($ARGV[0]);
-my $input_file2 = abs_path($ARGV[1]);
-my $input_file3 = abs_path($ARGV[2]);
-
-# 读取同源蛋白序列信息
-open IN, $input_file1 or die "Can not open file $input_file1, $!";
-my (%homolog_seq, $id, %homolog_seq_length);
-while (<IN>) {
-    chomp;
-    if (/>(\S+)/) { $id = $1; }
-    else { $homolog_seq{$id} .= $_; }
-}
-close IN;
-# 修改同源蛋白序列信息，去除尾部可能的终止密码子，并添加终止密码子
-foreach ( keys %homolog_seq ) {
-    my $seq = $homolog_seq{$_};
-    $seq =~ s/[X*]*$/\*/;
-    $homolog_seq_length{$_} = length($seq);
-    $homolog_seq{$_} = $seq;
+##############################################################################
+# worker模式：处理单个chunk（仅运行其中缺失的方法）后退出
+##############################################################################
+if (defined $worker_dir) {
+    &worker_main($worker_dir);
+    exit 0;
 }
 
-# 读取基因组序列信息
-open IN, $input_file2 or die "Can not open file $input_file2, $!";
-my (%genome_seq, %seq_sort);
-my $seq_sort_num = 0;
-while (<IN>) {
-    chomp;
-    if (/>(\S+)/) { $id = $1; $seq_sort_num ++; $seq_sort{$id} = $seq_sort_num; }
-    else { $genome_seq{$id} .= uc($_); }
+##############################################################################
+# 主进程
+##############################################################################
+die $usage unless @ARGV == 3;
+my ($input_file1, $input_file2, $input_file3) = @ARGV;
+foreach ($input_file1, $input_file2, $input_file3) {
+    die "Error: file $_ does not exist.\n" unless -e $_;
 }
-close IN;
+($input_file1, $input_file2, $input_file3) = map { abs_path($_) } ($input_file1, $input_file2, $input_file3);
 
-# 读取MMseqs2比对结果信息，获取基因长度。也获取匹配evalue和score信息用，用于后续同一个基因区域多个基因模型排序。
-open IN, $input_file3 or die "Can not open file $input_file3, $!";
-my (%gene_length, @gene_length, %hit_evalue, %hit_score, %hit_identity);
-<IN>;
-while (<IN>) {
-    chomp;
-    @_ = split /\t/;
-    if ( $_[-1] =~ m/(\d+)-(\d+)/ ) {
-        $gene_length{$_[1]}{$_[-1]} = 1;
+# 计算基因组总长度，用于设置--max_intron_length的默认值：3.6 * sqrt(genomeSize)。
+my $genomeSize = &get_fasta_total_length($input_file1);
+unless ( $max_intron_length ) {
+    $max_intron_length = int( 3.6 * sqrt($genomeSize) + 0.5 );
+}
+
+# 检查软件是否可用
+my %program = (exonerate => "exonerate", genewise => "genewise", gth => "gth");
+foreach (@methods) {
+    die "Error: program $program{$_} was not found in \$PATH.\n" unless &which($program{$_});
+}
+
+my $date = `date +%Y%m%d%H%M%S`; chomp($date);
+$tmp_dir //= "tmp_$date$$";
+mkdir $tmp_dir unless -e $tmp_dir;
+die "Error: can not create directory $tmp_dir.\n" unless -d $tmp_dir;
+$tmp_dir = abs_path($tmp_dir);
+
+# 读取同源蛋白序列信息（去除尾部可能的终止符，再添加终止符*）
+my %homolog_seq = %{ &read_fasta($input_file1) };
+foreach (keys %homolog_seq) {
+    $homolog_seq{$_} =~ s/[X*]*$/*/;
+}
+
+# 读取MMseqs2比对结果
+open my $hit_fh, '<', $input_file3 or die "Can not open file $input_file3, $!";
+my (%region, %hit_info, @tasks_raw, %task_seen, %need_genome_seq);
+while (my $line = <$hit_fh>) {
+    chomp $line; $line =~ s/\r$//;
+    next if $line =~ m/^\s*(#|$)/;
+    my @f = split /\t/, $line;
+    # 跳过表头及格式不正确的行
+    next if @f < 12 or $f[8] !~ m/^\d+$/ or $f[9] !~ m/^\d+$/;
+    my ($query, $subject) = @f[0, 1];
+    my $strand = $f[8] > $f[9] ? "minus" : "plus";
+    my ($rs, $re) = ($f[8], $f[9]);
+    ($rs, $re) = ($1, $2) if $f[-1] =~ m/^\s*(\d+)-(\d+)\s*$/;
+    ($rs, $re) = ($re, $rs) if $rs > $re;
+    my $rkey = "$subject.${rs}_$re";
+
+    # 同一区域同一蛋白存在多行比对时，保留Score最高者
+    my $h = $hit_info{$rkey}{$query};
+    $hit_info{$rkey}{$query} = [$f[10], $f[11], $f[2]] if !$h or $f[11] > $h->[1];
+
+    $region{$rkey} ||= [$subject, $rs, $re];
+    my $task_key = "$rkey\t$query\t$strand";
+    next if $task_seen{$task_key}++;
+    push @tasks_raw, [$rkey, $query, $strand];
+    $need_genome_seq{$subject} = 1;
+}
+close $hit_fh;
+undef %task_seen;
+
+# 判断是否需要生成chunk输入文件；若已生成（断点续跑），则无需读入基因组序列
+my $stage1_ok = "$tmp_dir/1.create_chunks.ok";
+my $need_stage1 = ! -e $stage1_ok;
+print STDERR (localtime) . ": Reading genome file $input_file2 " . ($need_stage1 ? "(sequences)" : "(sequence names only)") . "\n";
+my ($seq_order, $genome_seq) = &read_genome($input_file2, \%need_genome_seq, $need_stage1);
+
+# 过滤缺少序列信息的任务
+my (@tasks, %warned);
+foreach my $t (@tasks_raw) {
+    my ($rkey, $query) = @$t;
+    my $subject = $region{$rkey}[0];
+    unless (exists $seq_order->{$subject}) {
+        warn "Warning: genome sequence $subject not found in $input_file2, skipped.\n" unless $warned{"g\t$subject"}++;
+        next;
     }
-    else {
-        $gene_length{$_[1]}{"$_[6]\-$_[7]"} = 1;
+    unless (exists $homolog_seq{$query}) {
+        warn "Warning: homolog protein $query not found in $input_file1, skipped.\n" unless $warned{"p\t$query"}++;
+        next;
     }
-    $_[-1] =~ s/-/_/;
-    $hit_evalue{"$_[1].$_[-1]"}{$_[0]} = $_[10];
-    $hit_score{"$_[1].$_[-1]"}{$_[0]} = $_[11];
-    $hit_identity{"$_[1].$_[-1]"}{$_[0]} = $_[2];
+    push @tasks, $t;
 }
-close IN;
-foreach ( keys %gene_length) {
-    @_ = keys %{$gene_length{$_}};
-    foreach ( @_ ) {
-        push @gene_length, abs($2 - $1) + 1 if m/(\d+)-(\d+)/;
-    }
-}
-# 获取基因长度信息，并设置侧翼序列长度。
-@gene_length = sort {$a <=> $b} @gene_length;
-$flanking_length = $gene_length[@gene_length * 0.9] unless defined($flanking_length);
-print STDERR "Through the MMseqs2 hits, 90% of the query length are greater than $gene_length[@gene_length * 0.9] bp, and the Flanking length was set to $flanking_length bp.\n";
+undef @tasks_raw;
+die "Error: no valid hits in $input_file3.\n" unless @tasks;
 
-# 根据每个MMseqs2 Hit结果，输出基因预测的文件和命令行。
-open IN, $input_file3 or die "Can not open file $input_file3, $!";
-if ( exists $method{"genewise"} && ! -e "$tmp_dir/1.create_CMD_genewise.ok" ) {
-    open CMD1, ">", "$tmp_dir/command.genewise.list" or die "Can not create file $tmp_dir/command.genewise.list, $!";
-}
-if ( exists $method{"gth"} && ! -e "$tmp_dir/1.create_CMD_gth.ok" ) {
-    open CMD2, ">", "$tmp_dir/command.gth.list" or die "Can not create file $tmp_dir/command.gth.list, $!";
+my %used_region = map { $_->[0] => 1 } @tasks;
+foreach (keys %region) { delete $region{$_} unless $used_region{$_}; }
 
-}
-if ( exists $method{"exonerate"} && ! -e "$tmp_dir/1.create_CMD_exonerate.ok" ) {
-    open CMD3, ">", "$tmp_dir/command.exonerate.list" or die "Can not create file $tmp_dir/command.exonerate.list, $!";
-}
-# 输出genewise的codon.table文件
-my (%genetic_code, %start_codon, %stop_codon);
-@_ = &create_genewise_codon_table("$tmp_dir/codon.table");
-%genetic_code = %{$_[0]};
-%start_codon = %{$_[1]};
-%stop_codon = %{$_[2]};
-#foreach ( keys %stop_codon ) { print STDERR "$_\t$stop_codon{$_}\n"; }
-#foreach ( keys %start_codon ) { print STDERR "$_\t$start_codon{$_}\n"; }
+# 获取基因区域长度信息，并设置侧翼序列长度
+my @gene_length = sort { $a <=> $b } map { $region{$_}[2] - $region{$_}[1] + 1 } keys %region;
+my $p90 = $gene_length[int(@gene_length * 0.9)];
+$flanking_length = $p90 unless defined $flanking_length;
+print STDERR "Through the MMseqs2 hits, 90% of the gene regions are shorter than $p90 bp, and the Flanking length was set to $flanking_length bp.\n";
 
-<IN>;
-my $hit_number = 0;
-my (%gene_region, %gene_region_sort1, %gene_region_sort2, %gene_region_sort3);
-while (<IN>) {
-    # 选择chunk文件夹。
-    my $chunk_code = int($hit_number / $chunk_num);
-    $hit_number ++;
-    mkdir "$tmp_dir/chunk$chunk_code" unless -e "$tmp_dir/chunk$chunk_code";
-    if ( exists $method{"genewise"} && ! -e "$tmp_dir/chunk$chunk_code/genewise" ) {
-        mkdir "$tmp_dir/chunk$chunk_code/genewise";
-    }
-    if ( exists $method{"gth"} && ! -e "$tmp_dir/chunk$chunk_code/gth" ) {
-        mkdir "$tmp_dir/chunk$chunk_code/gth";
-    }
-    if ( exists $method{"exonerate"} && ! -e "$tmp_dir/chunk$chunk_code/exonerate") {
-        mkdir "$tmp_dir/chunk$chunk_code/exonerate";
-    }
-
-    @_ = split /\t/;
-    # 检测基因在正义链还是负义链
-    my $strand = "plus";
-    if ( $_[8] > $_[9] ) {
-        $strand = "minus";
-        ($_[8], $_[9]) = ($_[9], $_[8]);
-    }
-
-    # 分析得到匹配区域及其两侧翼的序列信息
-    my ($region_start, $region_end) = ($_[8], $_[9]);
-    my ($region_start, $region_end) = ($1, $2) if $_[-1] =~ m/(\d+)-(\d+)/;
-    ($region_start, $region_end) = ($region_end, $region_start) if $region_start > $region_end;
-    my $length = $region_end - $region_start + 1 + $flanking_length + $flanking_length;
-    my $start = $region_start - 1 - $flanking_length;
+# 计算每个基因区域的截取起点和区域ID
+foreach my $rkey (keys %region) {
+    my ($subject, $rs, $re) = @{$region{$rkey}};
+    my $start = $rs - 1 - $flanking_length;
     $start = 0 if $start < 0;
-    my $out_prefix = "$_[1].$region_start\_$region_end.start$start.$_[0]";
-    my $gene_region = "$_[1].$region_start\_$region_end.start$start";
-    $gene_region_sort1{$gene_region} = $seq_sort{$_[0]};
-    $gene_region_sort2{$gene_region} = $region_start;
-    $gene_region_sort3{$gene_region} = $region_end;
+    my $length = $re - $start + $flanking_length;
+    push @{$region{$rkey}}, $start, $length, "$rkey.start$start";
+}
+# $region{$rkey} = [subject, rs, re, offset(0-based start), length, region_id]
 
-    # 输出基因组上的序列
-    unless ( -e "$tmp_dir/1.create_fasta.ok" ) {
-        my $seq = substr($genome_seq{$_[1]}, $start, $length);
-        open OUT, ">", "$tmp_dir/chunk$chunk_code/$out_prefix.genome.fasta" or die "Can not create file $tmp_dir/chunk$chunk_code/$out_prefix.genome.fasta, $!";
-        print OUT ">$_[1].$region_start\_$region_end.start$start\n$seq\n";
-        close OUT; 
-        #print STDERR "OKOK\n";
-    }
+my $chunk_total = int((@tasks + $chunk_num - 1) / $chunk_num);
+my $stage1_sig  = join("\t", scalar(@tasks), $chunk_num, $flanking_length, $chunk_total);
 
-    # 输出同源蛋白序列
-    unless ( -e "$tmp_dir/1.create_fasta.ok" ) {
-        my $homolog_seq = $homolog_seq{$_[0]};
-        open OUT, ">", "$tmp_dir/chunk$chunk_code/$out_prefix.homolog.fasta" or die "Can not create file $tmp_dir/chunk$chunk_code/$out_prefix.homolog.fasta, $!";
-        print OUT ">$_[0]\n$homolog_seq\n";
-        close OUT;
-    }
+# 输出genewise的codon.table文件
+my $codon_table = "$tmp_dir/codon.table";
+&genetic_code_table($genetic_code, $codon_table);
 
-    # 输出并行化命令行
-    if ($strand eq "plus") {
-        if ( exists $method{"genewise"} ) {
-            print CMD1 "genewise $tmp_dir/chunk$chunk_code/$out_prefix.homolog.fasta $tmp_dir/chunk$chunk_code/$out_prefix.genome.fasta -codon $tmp_dir/codon.table -tfor -gff -quiet -silent -genesf > $tmp_dir/chunk$chunk_code/genewise/$out_prefix.gff\n" unless -e "$tmp_dir/1.create_CMD_genewise.ok";
-            $gene_region{$gene_region}{"$tmp_dir/chunk$chunk_code/genewise/$out_prefix.gff"} = 1;
+if ($need_stage1) {
+    print STDERR (localtime) . ": Creating $chunk_total chunks for " . scalar(@tasks) . " tasks in $tmp_dir\n";
+    foreach my $c (0 .. $chunk_total - 1) {
+        my $dir = "$tmp_dir/chunk$c";
+        mkdir $dir unless -e $dir;
+        my $last = min(($c + 1) * $chunk_num, scalar(@tasks)) - 1;
+        open my $tfh, '>', "$dir/tasks.tab"   or die "Can not create file $dir/tasks.tab, $!";
+        open my $rfh, '>', "$dir/regions.fa"  or die "Can not create file $dir/regions.fa, $!";
+        open my $pfh, '>', "$dir/proteins.fa" or die "Can not create file $dir/proteins.fa, $!";
+        my (%r_done, %p_done);
+        foreach my $i ($c * $chunk_num .. $last) {
+            my ($rkey, $query, $strand) = @{$tasks[$i]};
+            my ($subject, undef, undef, $offset, $length, $region_id) = @{$region{$rkey}};
+            print $tfh "$region_id\t$subject\t$offset\t$strand\t$query\n";
+            unless ($r_done{$region_id}++) {
+                print $rfh ">$region_id\n" . substr($genome_seq->{$subject}, $offset, $length) . "\n";
+            }
+            unless ($p_done{$query}++) {
+                print $pfh ">$query\n$homolog_seq{$query}\n";
+            }
         }
-        if ( exists $method{"gth"} ) {
-            print CMD2 "gth -protein $tmp_dir/chunk$chunk_code/$out_prefix.homolog.fasta -genomic $tmp_dir/chunk$chunk_code/$out_prefix.genome.fasta -translationtable $genetic_code -f -gff3out -intermediate > $tmp_dir/chunk$chunk_code/gth/$out_prefix.gff\n" unless -e "$tmp_dir/1.create_CMD_gth.ok";
-            $gene_region{$gene_region}{"$tmp_dir/chunk$chunk_code/gth/$out_prefix.gff"} = 1;
+        close $tfh; close $rfh; close $pfh;
+    }
+    open my $ok, '>', $stage1_ok or die "Can not create file $stage1_ok, $!";
+    print $ok "$stage1_sig\n";
+    close $ok;
+}
+else {
+    open my $ok, '<', $stage1_ok or die "Can not open file $stage1_ok, $!";
+    my $sig = <$ok>; close $ok;
+    chomp($sig) if defined $sig;
+    die "Error: $stage1_ok exists but its parameters ($sig) do not match the current run ($stage1_sig). Please use a new --tmp_dir.\n"
+        unless defined $sig and $sig eq $stage1_sig;
+    print STDERR (localtime) . ": Chunk files already exist in $tmp_dir, skip creating.\n";
+}
+undef $genome_seq;
+undef %homolog_seq;
+
+##############################################################################
+# 进程池并行运行各chunk（按chunk×方法为单元，跳过已完成的方法）
+##############################################################################
+my $current_run_sig = &method_run_sig();
+my @pending;    # 元素: [chunk_index, \@missing_methods]
+my ($chunk_fully_done, $chunk_partial) = (0, 0);
+foreach my $c (0 .. $chunk_total - 1) {
+    my $dir = "$tmp_dir/chunk$c";
+    my @missing;
+    foreach my $m (@methods) {
+        my $okfile = "$dir/2.$m.ok";
+        my $done = 0;
+        if (-e $okfile) {
+            open my $fh, '<', $okfile;
+            my $sig = <$fh>;
+            close $fh;
+            chomp($sig) if defined $sig;
+            $done = 1 if defined $sig and $sig eq $current_run_sig;
         }
+        push @missing, $m unless $done;
+    }
+    if (@missing) {
+        push @pending, [$c, \@missing];
+        $chunk_partial ++;
     }
     else {
-        if ( exists $method{"genewise"} ) {
-            print CMD1 "genewise $tmp_dir/chunk$chunk_code/$out_prefix.homolog.fasta $tmp_dir/chunk$chunk_code/$out_prefix.genome.fasta -codon $tmp_dir/codon.table -trev -gff -quiet -silent -genesf > $tmp_dir/chunk$chunk_code/genewise/$out_prefix.gff\n" unless -e "$tmp_dir/1.create_CMD_genewise.ok";
-            $gene_region{$gene_region}{"$tmp_dir/chunk$chunk_code/genewise/$out_prefix.gff"} = 1;
-        }
-        if ( exists $method{"gth"} ) {
-            print CMD2 "gth -protein $tmp_dir/chunk$chunk_code/$out_prefix.homolog.fasta -genomic $tmp_dir/chunk$chunk_code/$out_prefix.genome.fasta -translationtable $genetic_code -r -gff3out -intermediate > $tmp_dir/chunk$chunk_code/gth/$out_prefix.gff\n" unless -e "$tmp_dir/1.create_CMD_gth.ok";
-            $gene_region{$gene_region}{"$tmp_dir/chunk$chunk_code/gth/$out_prefix.gff"} = 1;
-        }
-    }
-    if ( exists $method{"exonerate"} ) {
-        print CMD3 "exonerate --model protein2genome --geneticcode $genetic_code --forcegtag true --minintron $min_intron_length --maxintron $max_intron_length --showtargetgff true --showsugar true --showalignment false --showvulgar false $tmp_dir/chunk$chunk_code/$out_prefix.homolog.fasta $tmp_dir/chunk$chunk_code/$out_prefix.genome.fasta > $tmp_dir/chunk$chunk_code/exonerate/$out_prefix.gff\n" unless -e "$tmp_dir/1.create_CMD_exonerate.ok";
-        $gene_region{$gene_region}{"$tmp_dir/chunk$chunk_code/exonerate/$out_prefix.gff"} = 1;
+        $chunk_fully_done ++;
     }
 }
+my $todo = scalar(@pending);
+print STDERR (localtime) . ": $chunk_fully_done/$chunk_total chunks already finished for all requested methods ($method_sig); "
+    . "$todo chunks need (re)computation of one or more methods, using $cpu workers.\n";
 
-open OUT, ">", "$tmp_dir/1.create_fasta.ok" or die "Can not create file $tmp_dir/1.create_fasta.ok, $!"; close OUT;
-if ( exists $method{"genewise"} && ! -e "$tmp_dir/1.create_CMD_genewise.ok" ) {
-    close CMD1;
-    open OUT, ">", "$tmp_dir/1.create_CMD_genewise.ok" or die $!; close OUT;
+my (%running, @failed_chunks);
+my $finished = 0;
+local $SIG{INT} = local $SIG{TERM} = sub {
+    kill 'TERM', keys %running;
+    die "Interrupted. Finished chunks are kept in $tmp_dir, re-run with the same --tmp_dir to resume.\n";
+};
+while (@pending or %running) {
+    while (@pending and keys(%running) < $cpu) {
+        my $item = shift @pending;
+        my ($c, $missing_ref) = @$item;
+        my $dir = "$tmp_dir/chunk$c";
+        my $run_methods_str = join(",", @$missing_ref);
+        my $pid = fork();
+        die "Can not fork: $!" unless defined $pid;
+        if ($pid == 0) {
+            exec($^X, $script_path, "--worker", $dir, "--method", $method_sig,
+                 "--run_methods", $run_methods_str,
+                 "--genetic_code", $genetic_code, "--min_intron_length", $min_intron_length,
+                 "--max_intron_length", $max_intron_length, "--timeout", $timeout,
+                 "--codon_table", $codon_table)
+                or do { print STDERR "Can not exec worker: $!\n"; POSIX::_exit(127); };
+        }
+        $running{$pid} = $c;
+    }
+    my $pid = waitpid(-1, 0);
+    last if $pid == -1;
+    next unless exists $running{$pid};
+    my $c = delete $running{$pid};
+    if ($? != 0) {
+        push @failed_chunks, $c;
+        warn "Warning: worker for chunk$c exited abnormally (status $?), see $tmp_dir/chunk$c/worker.log\n";
+    }
+    $finished ++;
+    if ($finished == $todo or $finished % max(1, int($todo / 100)) == 0) {
+        printf STDERR "%s: %d/%d chunks finished (%.1f%%)\n", scalar(localtime), $finished, $todo, 100 * $finished / $todo;
+    }
 }
-if ( exists $method{"gth"} && ! -e "$tmp_dir/1.create_CMD_gth.ok"  ) {
-    close CMD2;
-    open OUT, ">", "$tmp_dir/1.create_CMD_gth.ok" or die $!; close OUT;
-}
-if ( exists $method{"exonerate"}  && ! -e "$tmp_dir/1.create_CMD_exonerate.ok" ) {
-    close CMD3;
-    open OUT, ">", "$tmp_dir/1.create_CMD_exonerate.ok" or die $!; close OUT;
-}
+die "Error: " . scalar(@failed_chunks) . " chunks failed (chunk" . join(",chunk", @failed_chunks) . "). Re-run with --tmp_dir $tmp_dir to resume.\n" if @failed_chunks;
 
-# 并行化运行基因预测命令genewise/gth/exonerate
-my $cmdString;
-if ( exists $method{"genewise"} ) {
-    $cmdString = "$bin_path/parafly -c $tmp_dir/command.genewise.list -CPU $cpu --refresh_time 5 --rounds_delay 5 &> $tmp_dir/parafly.genewise.log";
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString");
-    # 检测运行成功的命令超过90%，则让程序继续运行。
-    open IN1, "$tmp_dir/command.genewise.list";
-    open IN2, "$tmp_dir/command.genewise.list.completed";
-    my ($num1, $num2) = (0, 0); my %cmd;
-    while (<IN1>) {
-        $num1 ++; $cmd{$_} = 1;
-    }
-    close IN1;
-    while (<IN2>) {
-        $num2 ++ if exists $cmd{$_};
-    }
-    close IN2;
-    if ( $num1 == 0 or $num2 / $num1 < 0.9 ) {
-        die "failed to execute: $cmdString\n";
-    }
-}
-if ( exists $method{"gth"} ) {
-    $cmdString = "$bin_path/parafly -c $tmp_dir/command.gth.list -CPU $cpu --refresh_time 1 --rounds_delay 2 &> $tmp_dir/parafly.gth.log";
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString");
-    # 检测运行成功的命令超过90%，则让程序继续运行。
-    open IN1, "$tmp_dir/command.gth.list";
-    open IN2, "$tmp_dir/command.gth.list.completed";
-    my ($num1, $num2) = (0, 0); my %cmd;
-    while (<IN1>) {
-        $num1 ++; $cmd{$_} = 1;
-    }
-    close IN1;
-    while (<IN2>) {
-        $num2 ++ if exists $cmd{$_};
-    }
-    close IN2;
-    if ( $num1 == 0 or $num2 / $num1 < 0.9 ) {
-        die "failed to execute: $cmdString\n";
+##############################################################################
+# 汇总结果（按--method中的每个方法分别读取其结果文件，无论是本次还是上次运行完成的）
+##############################################################################
+my (%models, %stat);
+foreach my $c (0 .. $chunk_total - 1) {
+    my $dir = "$tmp_dir/chunk$c";
+    foreach my $m (@methods) {
+        open my $sfh, '<', "$dir/stats.$m.tab" or die "Can not open file $dir/stats.$m.tab, $!";
+        my $line = <$sfh>;
+        close $sfh;
+        chomp($line) if defined $line;
+        my (undef, $total, $failed) = split /\t/, ($line // '');
+        $stat{$m}[0] += ($total  // 0);
+        $stat{$m}[1] += ($failed // 0);
+
+        open my $rfh, '<', "$dir/result.$m.tab" or die "Can not open file $dir/result.$m.tab, $!";
+        while (<$rfh>) {
+            chomp;
+            my ($region_id, $info) = split /\t/, $_, 2;
+            $models{$region_id}{$info} = 1;
+        }
+        close $rfh;
     }
 }
-if ( exists $method{"exonerate"} ) {
-    $cmdString = "$bin_path/parafly -c $tmp_dir/command.exonerate.list -CPU $cpu --refresh_time 1 --rounds_delay 2 &> $tmp_dir/parafly.exonerate.log";
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString");
-    # 检测运行成功的命令超过90%，则让程序继续运行。
-    open IN1, "$tmp_dir/command.exonerate.list";
-    open IN2, "$tmp_dir/command.exonerate.list.completed";
-    my ($num1, $num2) = (0, 0); my %cmd;
-    while (<IN1>) {
-        $num1 ++; $cmd{$_} = 1;
-    }
-    close IN1;
-    while (<IN2>) {
-        $num2 ++ if exists $cmd{$_};
-    }
-    close IN2;
-    if ( $num1 == 0 or $num2 / $num1 < 0.9 ) {
-        die "failed to execute: $cmdString\n";
-    }
+# 检测各方法运行成功的命令超过90%，则让程序继续运行
+foreach my $m (@methods) {
+    my ($total, $failed) = @{ $stat{$m} || [0, 0] };
+    printf STDERR "%s: %d commands, %d failed.\n", $m, $total, $failed;
+    die "Error: too many $m commands failed ($failed/$total), see $tmp_dir/chunk*/worker.log\n"
+        if $total == 0 or ($total - $failed) / $total < 0.9;
 }
 
 # 对每个基因区域进行基因预测的结果分析和排序
-foreach my $gene_region ( sort { $gene_region_sort1{$a} <=> $gene_region_sort1{$b} or $gene_region_sort2{$a} <=> $gene_region_sort2{$b} or $gene_region_sort3{$a} <=> $gene_region_sort3{$b} or $a cmp $b } keys %gene_region ) {
-    my @files = keys %{$gene_region{$gene_region}};
-    print "$gene_region:\n";
-    &out_homolog_prediction_tab(\@files, $gene_region);
+print "#GenomeSeqID\tSoftware\tStart\tEnd\tIntrons\tStrand\tHomologProteinName\tHomologLength\tStart\tEnd\tCDSLength\tStopCodonNum\tMMseqs2Evalue\tMMseqs2Score\tMMseqs2Identity\n";
+foreach my $rkey (sort { $seq_order->{$region{$a}[0]} <=> $seq_order->{$region{$b}[0]}
+                         or $region{$a}[1] <=> $region{$b}[1]
+                         or $region{$a}[2] <=> $region{$b}[2]
+                         or $a cmp $b } keys %region) {
+    my $region_id = $region{$rkey}[5];
+    print "$region_id:\n";
+    &out_homolog_prediction_tab($rkey, $models{$region_id} || {});
 }
+print STDERR (localtime) . ": All done.\n";
 
 sub out_homolog_prediction_tab {
-    my @files = @{$_[0]};
-    my $gene_region = $_[1];
-    $gene_region =~ s/\.start\d+//;
-
-    # 对同一个基因区域的多个基因预测结果文件进行分析。过滤低质量基因模型；每个基因模型提取11列数据。
-    my (%structure_sort0, %structure_sort1, %structure_sort2, %structure_sort3, %structure_sort4, %structure_sort5, %structure_sort6);
+    my ($rkey, $model_ref) = @_;
     my %sort_software = ("gth", 1, "exonerate", 2, "genewise", 3);
-    foreach my $file ( @files ) {
-        #print STDERR "===FILE==> $file <==FILE===\n";
-        # 分析基因预测得到的GFF文件内容。每个基因预测结果对应一行信息，以制表符分割：(1) 目标基因组序列名称；(2) 预测软件名称；(3) 基因起始位点；(4) 基因结束位点；(5) introns信息，多个introns之间使用分号分割，每个intron前后坐标使用中划线分割；(6) 基因所在的正负链；(7) 同源蛋白名称；(8) 同源蛋白其长度；(9) 同源蛋白匹配的起始位点；(10) 同源蛋白匹配的结束位点；(11) CDS总长度；(12) CDS内部的终止密码子数量。
-        my %get_gene_structure = &get_gene_structure($file);
-        foreach ( keys %get_gene_structure ) {
-            @_ = split /\t/;
-            my ($aligned_protein_length, $aligned_protein_ratio) = (0, 0);
-            $aligned_protein_length = abs($_[9] - $_[8]) + 1;
-            $aligned_protein_ratio = $aligned_protein_length / $_[7] if $_[7];
-            # 过滤CDS总长不是3的倍数的基因模型。gth软件预测的基因模型容易出现此种情况，导致起始密码子和终止密码子处不准确。
-            next if ($_[10] % 3) != 0;
-            # 过滤protein长度过低，对同源蛋白覆盖过低的基因模型。
-            next unless  ( $aligned_protein_length >= $threshold_protein_length && $aligned_protein_ratio >= $threshold_homolog_coverage );
-            # 过滤终止密码子过多的基因模型
-            next if $_[11] > $threshold_inter_stop_codon_num;
-            #if ( $aligned_protein_length >= $threshold_protein_length && $aligned_protein_ratio >= $threshold_homolog_coverage ) {
-            #print STDERR "$aligned_protein_length\t$_[11]\t$_[10]\t$hit_evalue{$gene_region}{$_[6]}\t$hit_score{$gene_region}{$_[6]}\t$sort_software{$_[1]}\n";
-            $structure_sort0{$_} = $aligned_protein_length;
-            $structure_sort5{$_} = $_[11];
-            $structure_sort1{$_} = $_[10];
-            $structure_sort2{$_} = $hit_evalue{$gene_region}{$_[6]};
-            $structure_sort3{$_} = $hit_score{$gene_region}{$_[6]};
-            $structure_sort4{$_} = $sort_software{$_[1]};
-            $structure_sort6{$_} = $hit_identity{$gene_region}{$_[6]};
-        }
+    my (%s0, %s1, %s2, %s3, %s4, %s5, %s6);
+    foreach my $info (keys %$model_ref) {
+        my @f = split /\t/, $info;
+        my $aligned_protein_length = abs($f[9] - $f[8]) + 1;
+        my $aligned_protein_ratio  = $f[7] ? $aligned_protein_length / $f[7] : 0;
+        # 过滤CDS总长不是3的倍数的基因模型
+        next if $f[10] % 3 != 0;
+        # 过滤protein长度过低，对同源蛋白覆盖过低的基因模型
+        next unless $aligned_protein_length >= $threshold_protein_length && $aligned_protein_ratio >= $threshold_homolog_coverage;
+        # 过滤终止密码子过多的基因模型
+        next if $f[11] > $threshold_inter_stop_codon_num;
+        my $h = $hit_info{$rkey}{$f[6]} || [1e9, 0, 0];
+        $s0{$info} = $aligned_protein_length;
+        $s5{$info} = $f[11];
+        $s1{$info} = $f[10];
+        $s2{$info} = $h->[0];
+        $s3{$info} = $h->[1];
+        $s6{$info} = $h->[2];
+        $s4{$info} = $sort_software{$f[1]} // 9;
     }
-
-    # 对各基因模型模型排序，排序规则：(1) 按对同源蛋白的匹配长度从大到小; (2) 按CDS内部的终止密码子数量从小到大排序；(3) 按得到的基因模型CDS总长从大到小；(4) 按对同源蛋白比对的Evalue值从小到大；(5) 按对同源蛋白比对的Score值从大到小；(6) 按对同源蛋白比对的Identity值从大到小；(7) 按基因预测软件gth/genewise/exonerate的顺序；(8) 按输出信息的ASCII字符顺序。
-    my @gene_model = sort { $structure_sort0{$b} <=> $structure_sort0{$a} or $structure_sort5{$a} <=> $structure_sort5{$b} or $structure_sort1{$b} <=> $structure_sort1{$a} or $structure_sort2{$a} <=> $structure_sort2{$b} or $structure_sort3{$b} <=> $structure_sort3{$a} or $structure_sort6{$b} <=> $structure_sort6{$a} or $structure_sort4{$a} <=> $structure_sort4{$b} or $a cmp $b } keys %structure_sort0;
-    foreach ( @gene_model ) {
-        print "$_\t$structure_sort2{$_}\t$structure_sort3{$_}\t$structure_sort6{$_}\%\n";
+    my @gene_model = sort {
+           $s0{$b} <=> $s0{$a}
+        or $s5{$a} <=> $s5{$b}
+        or $s1{$b} <=> $s1{$a}
+        or $s2{$a} <=> $s2{$b}
+        or $s3{$b} <=> $s3{$a}
+        or $s6{$b} <=> $s6{$a}
+        or $s4{$a} <=> $s4{$b}
+        or $a cmp $b
+    } keys %s0;
+    foreach (@gene_model) {
+        print "$_\t$s2{$_}\t$s3{$_}\t$s6{$_}\%\n";
     }
     print "\n";
 }
 
-# 本子程序能根据一个基因预测的GFF文件，提取其信息，得到11列的数据，每行对应一个基因模型。11列：(1) 目标基因组序列名称；(2) 预测软件名称；(3) 基因起始位点；(4) 基因结束位点；(5) introns信息，多个introns之间使用分号分割，每个intron前后坐标使用中划线分割；(6) 基因所在的正负链；(7) 同源蛋白名称；(8) 同源蛋白其长度；(9) 同源蛋白匹配的起始位点；(10) 同源蛋白匹配的结束位点；(11) CDS总长度；(12) CDS内部的终止密码子数量。
-sub get_gene_structure {
-    my $gff_file_name = $_[0];
-    my ($genome_seq_name, $software_name, $homolog_protein_name, $homolog_protein_length, $shift_length);
-    if ( $gff_file_name =~ m#chunk\d+/(\w+)/(.*?)\.\d+_\d+\.start(\d+)\.(.*)\.gff# ) {
-        ($software_name, $genome_seq_name, $shift_length, $homolog_protein_name) = ($1, $2, $3, $4);
-        $homolog_protein_length = $homolog_seq_length{$homolog_protein_name};
-        #print STDERR "$software_name\t$genome_seq_name\t$homolog_protein_name\t$homolog_protein_length\t$shift_length\n";
+##############################################################################
+# worker：顺序处理一个chunk中的所有任务，但只运行调用方指定的--run_methods
+# （即该chunk中尚未完成、或参数已变化需要重跑的方法），已完成方法的结果文件保持不变。
+##############################################################################
+my $current_child_pid;
+
+sub worker_main {
+    my $dir = shift;
+    open(STDERR, '>>', "$dir/worker.log") or die "Can not open $dir/worker.log, $!";
+    $SIG{TERM} = $SIG{INT} = sub {
+        kill 'KILL', $current_child_pid if $current_child_pid;
+        POSIX::_exit(1);
+    };
+
+    # 本次worker实际需要运行的方法列表：若--run_methods未指定（例如手动调用worker模式），
+    # 退化为运行--method中的全部方法，行为与旧版本一致。
+    my @run_methods = $run_methods_arg ? split(/,/, $run_methods_arg) : @methods;
+    die "Error: no method to run in worker.\n" unless @run_methods;
+
+    my (undef, $stop_codon) = &genetic_code_table($genetic_code);
+    my %region_seq  = %{ &read_fasta("$dir/regions.fa") };
+    my %protein_seq = %{ &read_fasta("$dir/proteins.fa") };
+
+    my $work = "$dir/work";
+    mkdir $work unless -e $work;
+    my $pfile = "$work/protein.fa";
+    my $gfile = "$work/genome.fa";
+
+    open my $tfh, '<', "$dir/tasks.tab" or die "Can not open file $dir/tasks.tab, $!";
+
+    # 为本次要运行的每个方法分别打开一个独立的结果输出文件（.tmp，处理完成后再rename），
+    # 不影响其它已完成方法已有的result.<method>.tab文件。
+    my (%out_fh, %stat);
+    foreach my $m (@run_methods) {
+        open $out_fh{$m}, '>', "$dir/result.$m.tab.tmp" or die "Can not create file $dir/result.$m.tab.tmp, $!";
+        $stat{$m} = [0, 0];
     }
 
-    my %out;
-    # 对不同的基因预测软件，分析其结果。
-    if ( $software_name eq "genewise" ) {
-        open IN, $gff_file_name or die "Can not open file $_, $!";
-        $/ = "//\n";
-        my $genesf = <IN>;
-        my $gff = <IN>;
-        close IN;
-        $/ = "\n";
+    while (my $line = <$tfh>) {
+        chomp $line;
+        my ($region_id, $seq_id, $offset, $strand, $protein_id) = split /\t/, $line;
+        &write_file($pfile, ">$protein_id\n$protein_seq{$protein_id}\n");
+        &write_file($gfile, ">$region_id\n$region_seq{$region_id}\n");
+        my %ctx = (
+            seq_id      => $seq_id,
+            offset      => $offset,
+            seq         => $region_seq{$region_id},
+            protein_id  => $protein_id,
+            protein_len => length($protein_seq{$protein_id}),
+            stop        => $stop_codon,
+        );
 
-        # 获取匹配信息
-        my (%homolog_match_pos, $gene_region);
-        foreach ( split /\n/, $genesf ) {
-            if (m/^Gene\s+(\d+)\s+(\d+)/) {
-                my $query_start = $1 + $shift_length;
-                my $query_end = $2 + $shift_length;
-                ($query_start, $query_end) = ($query_end, $query_start) if $query_start > $query_end;
-                $gene_region = "$query_start\t$query_end";
+        foreach my $m (@run_methods) {
+            my @cmd;
+            if ($m eq "genewise") {
+                @cmd = ("genewise", $pfile, $gfile, "-codon", $codon_table_file,
+                        ($strand eq "plus" ? "-tfor" : "-trev"), "-gff", "-quiet", "-silent", "-genesf");
             }
-            elsif (m/Supporting\s+\d+\s+\d+\s+(\d+)\s+(\d+)/) {
-                $homolog_match_pos{$gene_region}{$1} = 1;
-                $homolog_match_pos{$gene_region}{$2} = 1;
+            elsif ($m eq "gth") {
+                @cmd = ("gth", "-protein", $pfile, "-genomic", $gfile, "-translationtable", $genetic_code,
+                        ($strand eq "plus" ? "-f" : "-r"), "-gff3out", "-intermediate");
             }
-        }
-
-        my %cds;
-        foreach ( split /\n/, $gff ) {
-            if ( m/\tcds\t(\d+)\t(\d+)\t[^\t]+\t([^\t]+)\t.*\t(\S+)/ ) {
-                my $start = $1 + $shift_length;
-                my $end = $2 + $shift_length;
-                $cds{"$4\t$3"}{"$start\t$end"} = 1;
+            else {
+                @cmd = ("exonerate", "--model", "protein2genome", "--geneticcode", $genetic_code,
+                        "--forcegtag", "true", "--minintron", $min_intron_length, "--maxintron", $max_intron_length,
+                        "--showtargetgff", "true", "--showsugar", "true", "--showalignment", "false",
+                        "--showvulgar", "false", $pfile, $gfile);
             }
+            $stat{$m}[0] ++;
+            my ($text, $msg) = &run_command($timeout, @cmd);
+            unless (defined $text) {
+                $stat{$m}[1] ++;
+                print STDERR "[$m failed: $msg] region=$region_id protein=$protein_id\n";
+                next;
+            }
+            my @models = $m eq "genewise" ? &parse_genewise(\%ctx, $text)
+                       : $m eq "gth"      ? &parse_gth(\%ctx, $text)
+                       :                    &parse_exonerate(\%ctx, $text);
+            print { $out_fh{$m} } "$region_id\t$_\n" foreach @models;
         }
-
-        # 获取CDS和intron信息
-        foreach ( keys %cds ) {
-            @_ = split /\t/, $_;
-            my $strand = $_[1];
-            my @cds = keys %{$cds{$_}};
-            my ($start, $end, $intron_info, $CDS_length) = &get_info_from_CDSs(@cds);
-            my @homolog_match_pos = sort {$a <=> $b} keys %{$homolog_match_pos{"$start\t$end"}};
-            # 若最后一个CDS后紧跟的是终止密码子，则修正CDS信息，使其包含终止密码子。
-            my ($if_stop_codon_at_last_CDS, $CDSs_modified) = &if_stop_codon_at_last_CDS($genome_seq_name, $strand, \@cds);
-            @cds = split /;/, $CDSs_modified if $if_stop_codon_at_last_CDS == 1;
-            # 获取CDS和intron信息
-            ($start, $end, $intron_info, $CDS_length) = &get_info_from_CDSs(@cds);
-            my $inter_stop_codon_num = &get_inter_stop_codon_num($genome_seq_name, $strand, \@cds, \%stop_codon);
-            my ($homolog_protein_start, $homolog_protein_end) = ($homolog_match_pos[0], $homolog_match_pos[-1]);
-            $homolog_protein_end ++ if $if_stop_codon_at_last_CDS == 1;
-            my $output_info = "$genome_seq_name\t$software_name\t$start\t$end\t$intron_info\t$strand\t$homolog_protein_name\t$homolog_protein_length\t$homolog_protein_start\t$homolog_protein_end\t$CDS_length\t$inter_stop_codon_num";
-            $out{$output_info} = 1;
-            #print STDERR "$output_info\n";
-        }
+        # 清空工作目录（包括gth生成的索引文件）
+        &clean_dir($work);
     }
-    elsif ( $software_name eq "gth" ) {
-        open IN, $gff_file_name or die "Can not open file $_, $!";
-        my ( %align_of_gene, %strand_of_gene, %cds);
-        while (<IN>) {
-            @_ = split /\t/;
-            # 获取匹配信息
-            if ( $_[2] eq "gene" ) {
-                if ( $_[-1] =~ m/ID=(\w+);Target=\S+\s+(\d+)\s+(\d+)/ ) {
-                    my ($pos_start, $pos_end) = ($2, $3);
-                    ($pos_start, $pos_end) = ($3, $2) if $2 > $3;
-                    $align_of_gene{$1} = "$pos_start\t$pos_end";
-                    $strand_of_gene{$1} = $_[6];
-                }
-            }
-            # 获取CDS和intron信息
-            elsif ( $_[2] eq "exon" ) {
-                my $start = $_[3] + $shift_length;
-                my $end = $_[4] + $shift_length;
-                if ( $_[-1] =~ m/Parent=(\w+)/ ) {
-                    $cds{$1}{"$start\t$end"} = 1;
-                }
-            }
-        }
-        close IN;
+    close $tfh;
+    rmdir $work;
 
-        foreach my $gene_id ( keys %cds ) {
-            my $strand = $strand_of_gene{$gene_id};
-            my ($homolog_protein_start, $homolog_protein_end) = split /\t/, $align_of_gene{$gene_id};
-            my @cds = keys %{$cds{$gene_id}};
-            my ($start, $end, $intron_info, $CDS_length) = &get_info_from_CDSs(@cds);
-            my $inter_stop_codon_num = &get_inter_stop_codon_num($genome_seq_name, $strand, \@cds, \%stop_codon);
-            my $output_info = "$genome_seq_name\t$software_name\t$start\t$end\t$intron_info\t$strand\t$homolog_protein_name\t$homolog_protein_length\t$homolog_protein_start\t$homolog_protein_end\t$CDS_length\t$inter_stop_codon_num";
-            $out{$output_info} = 1;
-            #print STDERR "$output_info\n";
-        }
+    # 每个方法独立、原子性地落盘：先rename结果文件，再写统计文件，最后写.ok标记
+    # （标记内容为参数签名，用于下次运行时判断该方法在此chunk中是否仍然有效）。
+    my $sig = &method_run_sig();
+    foreach my $m (@run_methods) {
+        close $out_fh{$m};
+        rename "$dir/result.$m.tab.tmp", "$dir/result.$m.tab" or die "Can not rename $dir/result.$m.tab.tmp, $!";
+        open my $sfh, '>', "$dir/stats.$m.tab" or die "Can not create file $dir/stats.$m.tab, $!";
+        print $sfh "$m\t$stat{$m}[0]\t$stat{$m}[1]\n";
+        close $sfh;
+        &write_file("$dir/2.$m.ok", "$sig\n");
     }
-    elsif ( $software_name eq "exonerate" ) {
-        $/ = "--- END OF GFF DUMP ---";
-        open IN, $gff_file_name or die "Can not open file $_, $!";
-        while (my $gene_info = <IN>) {
-            my ($homolog_protein_start, $homolog_protein_end, $strand, @cds);
-            foreach ( split /\n/, $gene_info ) {
-                @_ = split /\t/;
-                # 获取匹配信息
-                if ( m/^sugar:\s*\S+\s+(\d+)\s+(\d+)/ ) {
-                    ($homolog_protein_start, $homolog_protein_end) = ($1, $2);
-                    ($homolog_protein_start, $homolog_protein_end) = ($2, $1) if $1 > $2;
-                    $homolog_protein_start ++;
-                }
-                if ( $_[2] eq "gene" ) {
-                    $strand = $_[6];
-                }
-                # 获取CDS和intron信息
-                elsif ( $_[2] eq "cds" ) {
-                    my $start = $_[3] + $shift_length;
-                    my $end = $_[4] + $shift_length;
-                    push @cds, "$start\t$end";
-                }
-            }
-            next unless @cds;
-            my ($start, $end, $intron_info, $CDS_length) = &get_info_from_CDSs(@cds);
-            my $inter_stop_codon_num = &get_inter_stop_codon_num($genome_seq_name, $strand, \@cds, \%stop_codon);
-            my $output_info = "$genome_seq_name\t$software_name\t$start\t$end\t$intron_info\t$strand\t$homolog_protein_name\t$homolog_protein_length\t$homolog_protein_start\t$homolog_protein_end\t$CDS_length\t$inter_stop_codon_num";
-            $out{$output_info} = 1;
-            #print STDERR "$output_info\n";
-        }
-        close IN;
-        $/ = "\n";
-    }
-
-    return %out;
 }
 
-sub get_inter_stop_codon_num {
-    my $genome_seq_name = $_[0];
-    my $strand = $_[1];
-    my @cds_input = @{$_[2]};
-    my %stop_codon = %{$_[3]};
-
-    # 得到CDS信息
-    my @cds;
-    foreach ( @cds_input ) {
-        my ($start, $end) = split /\t/, $_;
-        ($start, $end) = ($end, $start) if $start > $end;
-        push @cds, "$start\t$end";
+# 不经过shell直接运行命令，捕获标准输出。返回(输出内容, 状态信息)，失败时输出内容为undef。
+sub run_command {
+    my ($timeout, @cmd) = @_;
+    my $pid = open(my $fh, '-|', @cmd);
+    return (undef, "can not run $cmd[0]: $!") unless $pid;
+    $current_child_pid = $pid;
+    my ($text, $timed_out) = ('', 0);
+    my $ok = eval {
+        local $SIG{ALRM} = sub { die "TIMEOUT\n" };
+        alarm($timeout) if $timeout > 0;
+        local $/;
+        $text = <$fh>;
+        alarm(0);
+        1;
+    };
+    unless ($ok) {
+        alarm(0);
+        die $@ unless $@ eq "TIMEOUT\n";
+        kill 'KILL', $pid;
+        $timed_out = 1;
     }
-    @cds = sort {$a <=> $b} @cds;
-    # 得到CDS序列
-    my $cds_seq;
-    foreach (@cds) {
-        @_ = split /\t/;
-        $cds_seq .= substr($genome_seq{$genome_seq_name}, $_[0] - 1, $_[1] - $_[0] + 1);
-    }
-    if ( $strand eq "-" ) {
-        $cds_seq = reverse $cds_seq;
-        $cds_seq =~ tr/ATCG/TAGC/;
-    }
-    # 计算终止密码子数量
-    my $stop_codon_num = 0;
-    my $frame = length($cds_seq) % 3;
-    $frame = 3 if $frame == 0;
-    $cds_seq =~ s/\w{$frame}$//;
-    while ( $cds_seq =~ s/(\w\w\w)// ) {
-        $stop_codon_num ++ if exists $stop_codon{$1};
-    }
-
-    return $stop_codon_num;
+    close $fh;
+    my $status = $?;
+    $current_child_pid = undef;
+    return (undef, "timeout after ${timeout}s") if $timed_out;
+    return (undef, "exit code " . ($status >> 8) . ", signal " . ($status & 127)) if $status != 0;
+    return (defined $text ? $text : '', "ok");
 }
 
-sub if_stop_codon_at_last_CDS {
-    my ($genome_seq_name, $strand) = @_;
-    my @cds_input = @{$_[2]};
-    my ($if_stop_codon_at_last_CDS, $CDSs_modified) = (0, "");
+##############################################################################
+# 各预测软件结果解析。返回12列信息的列表：(1) 目标基因组序列名称；(2) 预测软件名称；(3) 基因起始位点；(4) 基因结束位点；(5) introns信息；(6) 正负链；(7) 同源蛋白名称；(8) 同源蛋白长度；(9) 同源蛋白匹配起始位点；(10) 同源蛋白匹配结束位点；(11) CDS总长度；(12) CDS内部终止密码子数量。
+##############################################################################
+sub parse_genewise {
+    my ($ctx, $text) = @_;
+    my ($genesf, $gff) = split m{^//\n}m, $text, 3;
+    return () unless defined $gff;
+    my $off = $ctx->{offset};
 
-    # 得到CDS信息
-    my @cds;
-    foreach ( @cds_input ) {
-        my ($start, $end) = split /\t/, $_;
-        ($start, $end) = ($end, $start) if $start > $end;
-        push @cds, "$start\t$end";
-    }
-    @cds = sort {$a <=> $b} @cds;
-    
-    # 获得最后一个CDS后紧跟的3个碱基
-    my $codon_seq;
-    if ( $strand eq "+" ) {
-        my ($start, $end) = split /\t/, $cds[-1];
-        $codon_seq = substr($genome_seq{$genome_seq_name}, $end, 3);
-        #print STDERR join(";", @cds) . "\t$genome_seq_name\t$strand\t$codon_seq\n";
-        if ( exists $stop_codon{$codon_seq} ) {
-            $if_stop_codon_at_last_CDS = 1;
-            $end += 3;
-            $cds[-1] = "$start\t$end";
+    # 获取匹配信息
+    my (@genes, $cur);
+    foreach (split /\n/, $genesf) {
+        if (m/^Gene\s+(\d+)\s+(\d+)/) {
+            my ($s, $e) = ($1 + $off, $2 + $off);
+            ($s, $e) = ($e, $s) if $s > $e;
+            $cur = { s => $s, e => $e, pos => [] };
+            push @genes, $cur;
+        }
+        elsif ($cur && m/Supporting\s+\d+\s+\d+\s+(\d+)\s+(\d+)/) {
+            push @{$cur->{pos}}, $1, $2;
         }
     }
-    elsif ( $strand eq "-" ) {
-        my ($start, $end) = split /\t/, $cds[0];
-        $codon_seq = substr($genome_seq{$genome_seq_name}, $start - 4, 3);
-        #print STDERR "$genome_seq_name\t$start\t$codon_seq\n";
-        $codon_seq = reverse $codon_seq;
-        $codon_seq =~ tr/ATCG/TAGC/;
-        if ( exists $stop_codon{$codon_seq} ) {
-            $if_stop_codon_at_last_CDS = 1;
-            $start -= 3;
-            $cds[0] = "$start\t$end";
-        }
 
+    my (%cds, @order);
+    foreach (split /\n/, $gff) {
+        next unless m/\tcds\t(\d+)\t(\d+)\t[^\t]+\t([^\t]+)\t.*\t(\S+)\s*$/;
+        my $k = "$4\t$3";
+        push @order, $k unless $cds{$k};
+        push @{$cds{$k}}, [$1 + $off, $2 + $off];
     }
-    $CDSs_modified = join(";", @cds);
-    
-    #print STDERR "$genome_seq_name\t$strand\t$codon_seq\t$if_stop_codon_at_last_CDS\t$CDSs_modified\n";
-    return($if_stop_codon_at_last_CDS, $CDSs_modified);
+
+    my @out;
+    foreach my $k (@order) {
+        my $strand = (split /\t/, $k)[1];
+        my ($gs, $ge, undef, undef, $cds) = &cds_info(@{$cds{$k}});
+        # 找到对应的Gene：优先完全一致，否则取重叠最大者
+        my ($best, $best_ov) = (undef, 0);
+        foreach my $g (@genes) {
+            if ($g->{s} == $gs && $g->{e} == $ge) { $best = $g; last; }
+            my $ov = min($ge, $g->{e}) - max($gs, $g->{s}) + 1;
+            ($best, $best_ov) = ($g, $ov) if $ov > $best_ov;
+        }
+        next unless $best and @{$best->{pos}};
+        my @pos = sort { $a <=> $b } @{$best->{pos}};
+        my ($ps, $pe) = ($pos[0], $pos[-1]);
+        # 若最后一个CDS后紧跟的是终止密码子，则修正CDS信息，使其包含终止密码子
+        $pe ++ if &extend_stop_codon($ctx, $strand, $cds);
+        my ($s, $e, $intron, $len, $sorted) = &cds_info(@$cds);
+        my $stop_num = &internal_stop_num($ctx, $strand, $sorted);
+        push @out, join("\t", $ctx->{seq_id}, "genewise", $s, $e, $intron, $strand, $ctx->{protein_id}, $ctx->{protein_len}, $ps, $pe, $len, $stop_num);
+    }
+    return @out;
 }
 
-sub get_info_from_CDSs {
-    # 根据CDSs信息鉴定起始和结束位点
-    my (@cds, @pos, $CDS_length);
-    foreach ( @_ ) {
-        my ($start, $end) = split /\t/, $_;
-        ($start, $end) = ($end, $start) if $start > $end;
-        push @cds, "$start\t$end";
-        push @pos, ($start, $end);
-        $CDS_length += ( $end - $start + 1 );
-    }
-    @pos = sort {$a <=> $b} @pos;
-    @cds = sort {$a <=> $b} @cds;
-
-    # 根据CDSs信息鉴定introns。
-    my %intron;
-    my $first_CDS = shift @cds;
-    my ($last_start, $last_end) = split /\t/, $first_CDS;
-    foreach ( @cds ) {
-        my ($start, $end) = split /\t/, $_;
-        if ($start > $last_end) {
-            my $intron_start = $last_end + 1;
-            my $intron_stop = $start - 1;
-            $intron{"$intron_start-$intron_stop"} = 1 if $intron_stop >= $intron_start;
+sub parse_gth {
+    my ($ctx, $text) = @_;
+    my $off = $ctx->{offset};
+    my (%align, %strand, %cds, @order);
+    foreach my $line (split /\n/, $text) {
+        next if $line =~ m/^#/;
+        my @f = split /\t/, $line;
+        next if @f < 9;
+        if ($f[2] eq "gene") {
+            my ($id) = $f[8] =~ m/ID=([^;\s]+)/;
+            next unless defined $id;
+            if ($f[8] =~ m/Target=\S+\s+(\d+)\s+(\d+)/) {
+                $align{$id} = [sort { $a <=> $b } ($1, $2)];
+            }
+            $strand{$id} = $f[6];
         }
-        ($last_start, $last_end) = ($start, $end);
+        elsif ($f[2] eq "exon") {
+            if ($f[8] =~ m/Parent=([^;\s]+)/) {
+                push @order, $1 unless $cds{$1};
+                push @{$cds{$1}}, [$f[3] + $off, $f[4] + $off];
+            }
+        }
     }
-
-    # 输出CDSs的起始和结束位点，introns信息
-    my $intron_info = "NULL";
-    $intron_info = join(";", sort {$a <=> $b} keys %intron) if %intron;
-    return ($pos[0], $pos[-1], $intron_info, $CDS_length);
+    my @out;
+    foreach my $id (@order) {
+        next unless $align{$id} and defined $strand{$id};
+        my ($s, $e, $intron, $len, $sorted) = &cds_info(@{$cds{$id}});
+        my $stop_num = &internal_stop_num($ctx, $strand{$id}, $sorted);
+        push @out, join("\t", $ctx->{seq_id}, "gth", $s, $e, $intron, $strand{$id}, $ctx->{protein_id}, $ctx->{protein_len}, @{$align{$id}}, $len, $stop_num);
+    }
+    return @out;
 }
 
+sub parse_exonerate {
+    my ($ctx, $text) = @_;
+    my $off = $ctx->{offset};
+    my @out;
+    foreach my $rec (split /--- END OF GFF DUMP ---/, $text) {
+        my ($ps, $pe, $strand, @cds);
+        foreach my $line (split /\n/, $rec) {
+            if ($line =~ m/^sugar:\s*\S+\s+(\d+)\s+(\d+)/) {
+                ($ps, $pe) = sort { $a <=> $b } ($1, $2);
+                $ps ++;
+                next;
+            }
+            my @f = split /\t/, $line;
+            next if @f < 8;
+            if    ($f[2] eq "gene") { $strand = $f[6]; }
+            elsif ($f[2] eq "cds")  { push @cds, [$f[3] + $off, $f[4] + $off]; }
+        }
+        next unless @cds and defined $ps and defined $strand;
+        my ($s, $e, $intron, $len, $sorted) = &cds_info(@cds);
+        my $stop_num = &internal_stop_num($ctx, $strand, $sorted);
+        push @out, join("\t", $ctx->{seq_id}, "exonerate", $s, $e, $intron, $strand, $ctx->{protein_id}, $ctx->{protein_len}, $ps, $pe, $len, $stop_num);
+    }
+    return @out;
+}
 
-sub create_genewise_codon_table {
+# 根据CDSs信息得到：起始位点、结束位点、introns信息、CDS总长、排序去重后的CDS列表
+sub cds_info {
+    my %seen;
+    my @cds = sort { $a->[0] <=> $b->[0] or $a->[1] <=> $b->[1] }
+              grep { !$seen{"$_->[0]\t$_->[1]"}++ }
+              map  { $_->[0] <= $_->[1] ? [$_->[0], $_->[1]] : [$_->[1], $_->[0]] } @_;
+    my $len = 0;
+    $len += $_->[1] - $_->[0] + 1 foreach @cds;
+    my @introns;
+    my $last_end = $cds[0][1];
+    foreach my $i (1 .. $#cds) {
+        my ($s, $e) = @{$cds[$i]};
+        push @introns, ($last_end + 1) . "-" . ($s - 1) if $s > $last_end + 1;
+        $last_end = $e if $e > $last_end;
+    }
+    return ($cds[0][0], $last_end, (@introns ? join(";", @introns) : "NULL"), $len, \@cds);
+}
+
+# 按基因组坐标(1-based)从区域序列中取序列，越界部分返回空
+sub region_substr {
+    my ($ctx, $gstart, $len) = @_;
+    my $i = $gstart - $ctx->{offset} - 1;
+    return '' if $i < 0 or $i >= length($ctx->{seq});
+    return substr($ctx->{seq}, $i, $len);
+}
+
+sub revcomp {
+    my $seq = reverse $_[0];
+    $seq =~ tr/ACGTRYKMBVDH/TGCAYRMKVBHD/;
+    return $seq;
+}
+
+# 若最后一个CDS后紧跟终止密码子，则原地修改CDS使其包含终止密码子，返回1
+sub extend_stop_codon {
+    my ($ctx, $strand, $cds) = @_;
+    if ($strand eq "+") {
+        my $codon = &region_substr($ctx, $cds->[-1][1] + 1, 3);
+        if (length($codon) == 3 && exists $ctx->{stop}{$codon}) { $cds->[-1][1] += 3; return 1; }
+    }
+    elsif ($strand eq "-") {
+        my $st = $cds->[0][0] - 3;
+        return 0 if $st < 1;
+        my $codon = &revcomp(&region_substr($ctx, $st, 3));
+        if (length($codon) == 3 && exists $ctx->{stop}{$codon}) { $cds->[0][0] -= 3; return 1; }
+    }
+    return 0;
+}
+
+# 计算CDS内部（不含最后一个密码子）的终止密码子数量
+sub internal_stop_num {
+    my ($ctx, $strand, $cds) = @_;
+    my $seq = join('', map { &region_substr($ctx, $_->[0], $_->[1] - $_->[0] + 1) } @$cds);
+    $seq = &revcomp($seq) if $strand eq "-";
+    my $trim = length($seq) % 3 || 3;
+    my $L = length($seq) - $trim;
+    my $stop = $ctx->{stop};
+    my $n = 0;
+    for (my $i = 0; $i < $L; $i += 3) {
+        $n ++ if exists $stop->{substr($seq, $i, 3)};
+    }
+    return $n;
+}
+
+##############################################################################
+# 通用子程序
+##############################################################################
+sub read_fasta {
+    my $file = shift;
+    open my $fh, '<', $file or die "Can not open file $file, $!";
+    my (%seq, $id);
+    while (<$fh>) {
+        s/\s+$//;
+        if (m/^>(\S+)/) { $id = $1; $seq{$id} = ''; }
+        elsif (defined $id) { s/\s+//g; $seq{$id} .= $_; }
+    }
+    close $fh;
+    return \%seq;
+}
+
+# 读取基因组：总是记录序列顺序；$load为真时仅保存需要的序列（转为大写）
+sub read_genome {
+    my ($file, $need, $load) = @_;
+    open my $fh, '<', $file or die "Can not open file $file, $!";
+    my (%order, %seq, $id, $keep);
+    my $n = 0;
+    while (<$fh>) {
+        if (m/^>(\S+)/) {
+            $id = $1; $order{$id} = ++$n;
+            $keep = $load && $need->{$id};
+            $seq{$id} = '' if $keep;
+        }
+        elsif ($keep) {
+            s/\s+//g;
+            $seq{$id} .= uc($_);
+        }
+    }
+    close $fh;
+    return (\%order, \%seq);
+}
+
+sub write_file {
+    my ($file, $content) = @_;
+    open my $fh, '>', $file or die "Can not create file $file, $!";
+    print $fh $content;
+    close $fh;
+}
+
+sub clean_dir {
+    my $dir = shift;
+    opendir my $dh, $dir or return;
+    foreach (readdir $dh) {
+        next if $_ eq '.' or $_ eq '..';
+        unlink "$dir/$_";
+    }
+    closedir $dh;
+}
+
+sub which {
+    my $prog = shift;
+    foreach my $d (split /:/, ($ENV{PATH} // '')) {
+        return "$d/$prog" if -f "$d/$prog" && -x _;
+    }
+    return;
+}
+
+# 影响某个预测方法结果有效性的参数签名。用于判断某个chunk中某个方法之前跑出的结果
+# 在本次运行的参数下是否仍然有效；若不一致，则视为过期，需要重新运行该方法。
+sub method_run_sig {
+    return "$genetic_code\t$min_intron_length\t$max_intron_length";
+}
+
+# 根据遗传密码返回(\%code, \%stop_codon)；若给定文件名，则同时输出genewise的codon.table文件
+sub genetic_code_table {
+    my ($gc, $out_file) = @_;
     my %code = (
-        "TTT" => "F",
-        "TTC" => "F",
-        "TTA" => "L",
-        "TTG" => "L",
-        "TCT" => "S",
-        "TCC" => "S",
-        "TCA" => "S",
-        "TCG" => "S",
-        "TAT" => "Y",
-        "TAC" => "Y",
-        "TAA" => "X",
-        "TAG" => "X",
-        "TGT" => "C",
-        "TGC" => "C",
-        "TGA" => "X",
-        "TGG" => "W",
-        "CTT" => "L",
-        "CTC" => "L",
-        "CTA" => "L",
-        "CTG" => "L",
-        "CCT" => "P",
-        "CCC" => "P",
-        "CCA" => "P",
-        "CCG" => "P",
-        "CAT" => "H",
-        "CAC" => "H",
-        "CAA" => "Q",
-        "CAG" => "Q",
-        "CGT" => "R",
-        "CGC" => "R",
-        "CGA" => "R",
-        "CGG" => "R",
-        "ATT" => "I",
-        "ATC" => "I",
-        "ATA" => "I",
-        "ATG" => "M",
-        "ACT" => "T",
-        "ACC" => "T",
-        "ACA" => "T",
-        "ACG" => "T",
-        "AAT" => "N",
-        "AAC" => "N",
-        "AAA" => "K",
-        "AAG" => "K",
-        "AGT" => "S",
-        "AGC" => "S",
-        "AGA" => "R",
-        "AGG" => "R",
-        "GTT" => "V",
-        "GTC" => "V",
-        "GTA" => "V",
-        "GTG" => "V",
-        "GCT" => "A",
-        "GCC" => "A",
-        "GCA" => "A",
-        "GCG" => "A",
-        "GAT" => "D",
-        "GAC" => "D",
-        "GAA" => "E",
-        "GAG" => "E",
-        "GGT" => "G",
-        "GGC" => "G",
-        "GGA" => "G",
-        "GGG" => "G",
+        "TTT" => "F", "TTC" => "F", "TTA" => "L", "TTG" => "L",
+        "TCT" => "S", "TCC" => "S", "TCA" => "S", "TCG" => "S",
+        "TAT" => "Y", "TAC" => "Y", "TAA" => "X", "TAG" => "X",
+        "TGT" => "C", "TGC" => "C", "TGA" => "X", "TGG" => "W",
+        "CTT" => "L", "CTC" => "L", "CTA" => "L", "CTG" => "L",
+        "CCT" => "P", "CCC" => "P", "CCA" => "P", "CCG" => "P",
+        "CAT" => "H", "CAC" => "H", "CAA" => "Q", "CAG" => "Q",
+        "CGT" => "R", "CGC" => "R", "CGA" => "R", "CGG" => "R",
+        "ATT" => "I", "ATC" => "I", "ATA" => "I", "ATG" => "M",
+        "ACT" => "T", "ACC" => "T", "ACA" => "T", "ACG" => "T",
+        "AAT" => "N", "AAC" => "N", "AAA" => "K", "AAG" => "K",
+        "AGT" => "S", "AGC" => "S", "AGA" => "R", "AGG" => "R",
+        "GTT" => "V", "GTC" => "V", "GTA" => "V", "GTG" => "V",
+        "GCT" => "A", "GCC" => "A", "GCA" => "A", "GCG" => "A",
+        "GAT" => "D", "GAC" => "D", "GAA" => "E", "GAG" => "E",
+        "GGT" => "G", "GGC" => "G", "GGA" => "G", "GGG" => "G",
     );
-    my %start_codon;
-    $start_codon{"ATG"} = 1;
-    if ( $genetic_code == 1 ) {
-        # The Standard Code
-        $start_codon{"TTG"} = 1;
-        $start_codon{"CTG"} = 1;
-    }
-    elsif ( $genetic_code == 2 ) {
-        # The Vertebrate Mitochondrial Code
-        $code{"AGA"} = "X";
-        $code{"AGG"} = "X";
-        $code{"ATA"} = "M";
-        $code{"TGA"} = "W";
-        $start_codon{"ATA"} = 1;
-        $start_codon{"ATT"} = 1;
-        $start_codon{"ATC"} = 1;
-        $start_codon{"GTG"} = 1;
-    }
-    elsif ( $genetic_code == 3 ) {
-        # The Yeast Mitochondrial Code
-        $code{"ATA"} = "M";
-        $code{"CTT"} = "T";
-        $code{"CTC"} = "T";
-        $code{"CTA"} = "T";
-        $code{"CTG"} = "T";
-        $code{"TGA"} = "W";
-        $start_codon{"ATA"} = 1;
-        $start_codon{"GTG"} = 1;
-    }
-    elsif ( $genetic_code == 4 ) {
-        # The Mold, Protozoan, and Coelenterate Mitochondrial Code and the Mycoplasma/Spiroplasma Code
-        $code{"TGA"} = "W";
-        $start_codon{"ATA"} = 1;
-        $start_codon{"ATT"} = 1;
-        $start_codon{"ATC"} = 1;
-        $start_codon{"GTG"} = 1;
-        $start_codon{"CTG"} = 1;
-        $start_codon{"TTA"} = 1;
-        $start_codon{"TTG"} = 1;
-    }
-    elsif ( $genetic_code == 5 ) {
-        # The Invertebrate Mitochondrial Code
-        $code{"AGA"} = "S";
-        $code{"AGG"} = "S";
-        $code{"ATA"} = "M";
-        $code{"TGA"} = "W";
-        $start_codon{"ATA"} = 1;
-        $start_codon{"ATT"} = 1;
-        $start_codon{"ATC"} = 1;
-        $start_codon{"GTG"} = 1;
-        $start_codon{"TTG"} = 1;
-    }
-    elsif ( $genetic_code == 6 ) {
-        # The Ciliate, Dasycladacean and Hexamita Nuclear Code
-        $code{"TAA"} = "Q";
-        $code{"TAG"} = "Q";
-    }
-    elsif ( $genetic_code == 9 ) {
-        # The Echinoderm and Flatworm Mitochondrial Code
-        $code{"AAA"} = "N";
-        $code{"AGA"} = "S";
-        $code{"AGG"} = "S";
-        $code{"TGA"} = "W";
-        $start_codon{"GTG"} = 1;
-    }
-    elsif ( $genetic_code == 10 ) {
-        # The Euplotid Nuclear Code
-        $code{"TGA"} = "C";
-    }
-    elsif ( $genetic_code == 11 ) {
-        # The Bacterial, Archaeal and Plant Plastid Code
-        $start_codon{"ATA"} = 1;
-        $start_codon{"ATT"} = 1;
-        $start_codon{"ATC"} = 1;
-        $start_codon{"GTG"} = 1;
-        $start_codon{"CTG"} = 1;
-        $start_codon{"TTG"} = 1;
-    }
-    elsif ( $genetic_code == 12 ) {
-        # The Alternative Yeast Nuclear Code
-        $code{"CTG"} = "S";
-        $start_codon{"CTG"} = 1;
-    }
-    elsif ( $genetic_code == 13 ) {
-        # The Ascidian Mitochondrial Code
-        $code{"AGA"} = "G";
-        $code{"AGG"} = "G";
-        $code{"ATA"} = "M";
-        $code{"TGA"} = "W";
-        $start_codon{"ATA"} = 1;
-        $start_codon{"GTG"} = 1;
-        $start_codon{"TTG"} = 1;
-    }
-    elsif ( $genetic_code == 14 ) {
-        # The Alternative Flatworm Mitochondrial Code
-        $code{"AAA"} = "N";
-        $code{"AGA"} = "S";
-        $code{"AGG"} = "S";
-        $code{"TAA"} = "Y";
-        $code{"TGA"} = "W";
-    }
-    elsif ( $genetic_code == 16 ) {
-        # Chlorophycean Mitochondrial Code
-        $code{"TAG"} = "L";
-    }
-    elsif ( $genetic_code == 21 ) {
-        # Trematode Mitochondrial Code
-        $code{"TGA"} = "W";
-        $code{"ATA"} = "M";
-        $code{"AGA"} = "S";
-        $code{"AGG"} = "S";
-        $code{"AAA"} = "N";
-        $start_codon{"GTG"} = 1;
-    }
-    elsif ( $genetic_code == 22 ) {
-        # Scenedesmus obliquus Mitochondrial Code
-        $code{"TCA"} = "X";
-        $code{"TAG"} = "L";
-    }
-    elsif ( $genetic_code == 23 ) {
-        # Thraustochytrium Mitochondrial Code
-        $code{"TTA"} = "X";
-        $start_codon{"ATT"} = 1;
-        $start_codon{"GTG"} = 1;
-    }
-    elsif ( $genetic_code == 24 ) {
-        # Rhabdopleuridae Mitochondrial Code
-        $code{"AGA"} = "S";
-        $code{"AGG"} = "K";
-        $code{"TGA"} = "W";
-        $start_codon{"GTG"} = 1;
-        $start_codon{"CTG"} = 1;
-        $start_codon{"TTG"} = 1;
-    }
-    elsif ( $genetic_code == 25 ) {
-        # Candidate Division SR1 and Gracilibacteria Code
-        $code{"TGA"} = "G";
-        $start_codon{"GTG"} = 1;
-        $start_codon{"TTG"} = 1;
-    }
-    elsif ( $genetic_code == 26 ) {
-        # Pachysolen tannophilus Nuclear Code
-        # warning: The descritpions of initiation codons by 2 methods are confict according to the NCBI web site.
-        $code{"CTG"} = "A";
-        $start_codon{"GTG"} = 1;
-        $start_codon{"TTG"} = 1;
-    }
-    elsif ( $genetic_code == 27 ) {
-        # Karyorelict Nuclear Code
-        $code{"TAG"} = "Q";
-        $code{"TAA"} = "Q";
-    }
-    elsif ( $genetic_code == 29 ) {
-        # Mesodinium Nuclear Code
-        $code{"TAA"} = "Y";
-        $code{"TAG"} = "Y";
-    }
-    elsif ( $genetic_code == 30 ) {
-        # Peritrich Nuclear Code
-        $code{"TAA"} = "E";
-        $code{"TAG"} = "E";
-    }
-    elsif ( $genetic_code == 31 ) {
-        # Blastocrithidia Nuclear Code
-        $code{"TGA"} = "W";
-    }
-    elsif ( $genetic_code == 33 ) {
-        # Cephalodiscidae Mitochondrial UAA-Tyr Code
-        $code{"TAA"} = "Y";
-        $code{"TGA"} = "Y";
-        $code{"AGA"} = "S";
-        $code{"AGG"} = "K";
-    }
+    my %change = (
+        1  => {},                                                          # The Standard Code
+        2  => { AGA => "X", AGG => "X", ATA => "M", TGA => "W" },          # Vertebrate Mitochondrial
+        3  => { ATA => "M", CTT => "T", CTC => "T", CTA => "T", CTG => "T", TGA => "W" }, # Yeast Mitochondrial
+        4  => { TGA => "W" },                                              # Mold/Protozoan/Coelenterate Mito; Mycoplasma
+        5  => { AGA => "S", AGG => "S", ATA => "M", TGA => "W" },          # Invertebrate Mitochondrial
+        6  => { TAA => "Q", TAG => "Q" },                                  # Ciliate, Dasycladacean and Hexamita Nuclear
+        9  => { AAA => "N", AGA => "S", AGG => "S", TGA => "W" },          # Echinoderm and Flatworm Mitochondrial
+        10 => { TGA => "C" },                                              # Euplotid Nuclear
+        11 => {},                                                          # Bacterial, Archaeal and Plant Plastid
+        12 => { CTG => "S" },                                              # Alternative Yeast Nuclear
+        13 => { AGA => "G", AGG => "G", ATA => "M", TGA => "W" },          # Ascidian Mitochondrial
+        14 => { AAA => "N", AGA => "S", AGG => "S", TAA => "Y", TGA => "W" }, # Alternative Flatworm Mitochondrial
+        16 => { TAG => "L" },                                              # Chlorophycean Mitochondrial
+        21 => { TGA => "W", ATA => "M", AGA => "S", AGG => "S", AAA => "N" }, # Trematode Mitochondrial
+        22 => { TCA => "X", TAG => "L" },                                  # Scenedesmus obliquus Mitochondrial
+        23 => { TTA => "X" },                                              # Thraustochytrium Mitochondrial
+        24 => { AGA => "S", AGG => "K", TGA => "W" },                      # Rhabdopleuridae Mitochondrial
+        25 => { TGA => "G" },                                              # Candidate Division SR1 and Gracilibacteria
+        26 => { CTG => "A" },                                              # Pachysolen tannophilus Nuclear
+        27 => { TAG => "Q", TAA => "Q" },                                  # Karyorelict Nuclear
+        28 => {},                                                          # Condylostoma Nuclear (stop codons ambiguous)
+        29 => { TAA => "Y", TAG => "Y" },                                  # Mesodinium Nuclear
+        30 => { TAA => "E", TAG => "E" },                                  # Peritrich Nuclear
+        31 => { TGA => "W" },                                              # Blastocrithidia Nuclear
+        32 => { TAG => "W" },                                              # Balanophoraceae Plastid
+        33 => { TAA => "Y", TGA => "Y", AGA => "S", AGG => "K" },          # Cephalodiscidae Mitochondrial UAA-Tyr
+    );
+    die "Error: genetic code $gc is not supported.\n" unless exists $change{$gc};
+    warn "Warning: stop codons of genetic code 28 are ambiguous, TAA/TAG/TGA are treated as stop codons.\n" if $gc == 28 and $out_file;
+    $code{$_} = $change{$gc}{$_} foreach keys %{$change{$gc}};
 
-    open OUT, ">", "$_[0]" or die "Can not create file $_[0], $!";
-    my @code = ("TTT","TTC","TTA","TTG","TCT","TCC","TCA","TCG","TAT","TAC","TAA","TAG","TGT","TGC","TGA","TGG","CTT","CTC","CTA","CTG","CCT","CCC","CCA","CCG","CAT","CAC","CAA","CAG","CGT","CGC","CGA","CGG","ATT","ATC","ATA","ATG","ACT","ACC","ACA","ACG","AAT","AAC","AAA","AAG","AGT","AGC","AGA","AGG","GTT","GTC","GTA","GTG","GCT","GCC","GCA","GCG","GAT","GAC","GAA","GAG","GGT","GGC","GGA","GGG");
-    foreach ( @code ) {
-        print OUT "$_ $code{$_}\n";
+    if ($out_file) {
+        my @order = qw/TTT TTC TTA TTG TCT TCC TCA TCG TAT TAC TAA TAG TGT TGC TGA TGG CTT CTC CTA CTG CCT CCC CCA CCG CAT CAC CAA CAG CGT CGC CGA CGG ATT ATC ATA ATG ACT ACC ACA ACG AAT AAC AAA AAG AGT AGC AGA AGG GTT GTC GTA GTG GCT GCC GCA GCG GAT GAC GAA GAG GGT GGC GGA GGG/;
+        &write_file($out_file, join('', map { "$_ $code{$_}\n" } @order));
     }
-    close OUT;
+    my %stop_codon = map { $_ => 1 } grep { $code{$_} eq "X" } keys %code;
+    return (\%code, \%stop_codon);
+}
 
-    my %stop_codon;
-    foreach ( keys %code ) {
-        $stop_codon{$_} = $code{$_} if $code{$_} eq "X";
+sub get_fasta_total_length {
+    my ($fasta_file) = @_;
+    my $total_length = 0;
+    open my $fh, "<", $fasta_file or die "Can not open fasta file $fasta_file, $!";
+    while (<$fh>) {
+        next if /^>/;
+        chomp;
+        $total_length += length($_);
     }
-
-    return (\%code, \%start_codon, \%stop_codon);
+    close $fh;
+    return $total_length;
 }

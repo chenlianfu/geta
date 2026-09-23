@@ -20,6 +20,8 @@ Usage:
 
     输入文件out.geneModels.tab包含15列数据：(1) 目标基因组序列名称；(2) 预测软件名称；(3) 基因起始位点；(4) 基因结束位点；(5) introns信息，多个introns之间使用分号分割，每个intron前后坐标使用中划线分割；(6) 基因所在的正负链；(7) 同源蛋白名称；(8) 同源蛋白其长度；(9) 同源蛋白匹配的起始位点；(10) 同源蛋白匹配的结束位点；(11) CDS总长度；(12) CDS内部的终止密码子数量；(13) Diamond BLASTX比对的Evalue值；(14) Diamond BLASTX比对的Score值；(15) Diamond BLASTX比对的Identity。
 
+    文件中每份数据（对应一个基因组区域及其侧翼序列的预测结果）以两个换行符分割，数据块的第一行为区域标题，格式形如"GenomeSeqID.RegionStart_RegionEnd.startN:"，其中 RegionStart、RegionEnd 是该数据块对应的目标基因区域（不含侧翼序列）在基因组上的起止坐标。程序会依据该坐标，剔除数据块中和目标区域完全没有重叠（即预测结果完全落在侧翼序列部分）的基因预测记录，然后再从剩余记录中选择最优基因模型，避免相邻、有部分序列重叠的基因组提取区域中，同一个串联重复（多拷贝）基因的预测结果被相邻区域重复选中，导致基因模型数量被错误地合并减少。若某数据块的区域标题不满足该格式，则不进行坐标过滤。
+
     --threshold_homolog_coverage_good <float>    default: 0.8
     --threshold_homolog_coverage_fair <float>    default: 0.4
     设置对同源蛋白覆盖度阈值。若基因模型对同源蛋白的覆盖率不低于--threshold_homolog_coverage_good，则评估为good gene models；若基因模型对同源蛋白的覆盖率不低于--threshold_homolog_coverage_fair，则评估成fair gene models。
@@ -45,6 +47,9 @@ Usage:
     --max_alignment_num_for_each_gene_region <int>    default: 5
     当输出GFF3格式同源蛋白比对文件时，每个基因区域最多输出5个同源蛋白的结果。
 
+    --cpu <int>    default: 1
+    设置CPU线程数。该参数值将传递给fillingEndsOfGeneModel命令。
+
     --help    default: None
     display this help and exit.
 
@@ -53,7 +58,7 @@ Usage:
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($help_flag, $threshold_homolog_coverage_good, $threshold_homolog_coverage_fair, $tmp_dir, $genetic_code, $no_fair_gene_models, $no_poor_gene_models, $output_raw_GFF3, $output_alignment_GFF3, $max_alignment_num_for_each_gene_region);
+my ($help_flag, $threshold_homolog_coverage_good, $threshold_homolog_coverage_fair, $tmp_dir, $genetic_code, $no_fair_gene_models, $no_poor_gene_models, $output_raw_GFF3, $output_alignment_GFF3, $max_alignment_num_for_each_gene_region, $cpu);
 GetOptions(
     "help" => \$help_flag,
     "threshold_homolog_coverage_good:f" => \$threshold_homolog_coverage_good,
@@ -65,10 +70,12 @@ GetOptions(
     "output_raw_GFF3:s" => \$output_raw_GFF3,
     "output_alignment_GFF3:s" => \$output_alignment_GFF3,
     "max_alignment_num_for_each_gene_region:i" => \$max_alignment_num_for_each_gene_region,
+    "cpu:i" => \$cpu,
 );
 $threshold_homolog_coverage_good ||= 0.8;
 $threshold_homolog_coverage_fair ||= 0.4;
 $genetic_code ||= 1;
+$cpu ||= 1;
 my $date = `date +%Y%m%d%H%M%S`; chomp($date);
 $tmp_dir ||= "tmp_$date$$";
 $tmp_dir = abs_path($tmp_dir);
@@ -79,7 +86,7 @@ if ( $help_flag ) { die $usage }
 my $input_file1 = abs_path($ARGV[0]);
 my $input_file2 = abs_path($ARGV[1]);
 $output_alignment_GFF3 = abs_path($output_alignment_GFF3) if $output_alignment_GFF3;
-$output_raw_GFF3 = abs_path($output_raw_GFF3) if $output_raw_GFF3,
+$output_raw_GFF3 = abs_path($output_raw_GFF3) if $output_raw_GFF3;
 $max_alignment_num_for_each_gene_region ||= 5;
 
 # 读取基因组序列信息
@@ -99,8 +106,14 @@ if ( $output_alignment_GFF3 ) {
     <IN>;
     $/ = "\n\n";
     while (<IN>) {
-        s/(.*):\n//;
+        my $gene_region = $1 if s/(.*):\n//;
         my @geneModels = split /\n/, $_;
+
+        # 剔除和目标区域没有重叠（即完全落在侧翼序列部分）的基因预测结果，避免侧翼序列中相邻拷贝基因的
+        # 比对信息混入当前目标区域的同源蛋白比对结果。
+        my ($region_start, $region_end) = get_target_region_start_end($gene_region);
+        @geneModels = filter_geneModels_by_target_region(\@geneModels, $region_start, $region_end);
+
         my %geneModels;
         my $out_num = 0;
         foreach my $geneModels ( @geneModels ) {
@@ -137,6 +150,14 @@ while (<IN>) {
     my $gene_region = $1 if s/(.*):\n//;
     s/\n*$//;
     my @geneModels = split /\n/, $_;
+
+    # 去除和当前目标区域没有重叠的基因预测结果（即完全落在为提取基因组序列而添加的侧翼序列部分的结果）。
+    # 若不做这一步过滤，相邻、有序列重叠的基因组提取区域中，属于同一个串联重复（多拷贝）基因、评分最高的那条
+    # 预测记录会被多个相邻区域重复当作"最优模型"选中，导致原本存在的多个基因拷贝在最终结果中被错误地合并为
+    # 更少的基因模型。
+    my ($region_start, $region_end) = get_target_region_start_end($gene_region);
+    @geneModels = filter_geneModels_by_target_region(\@geneModels, $region_start, $region_end);
+
     if ( @geneModels ) {
         $gene_num ++; push @geneID, "gene$gene_num";
         # 得到目标基因区域最优的基因模型
@@ -185,7 +206,7 @@ while (<IN>) {
 }
 close IN;
 $/ = "\n";
-close OUTA; close OUTB; close OUTC; close OUTD; close OUTE if $output_raw_GFF3;
+close OUTA; close OUTB; close OUTC; close OUTD;
 if ( $output_raw_GFF3 ) {
     close OUTE;
     print STDERR "生成了基于同源蛋白对参考基因组进行基因预测的原始结果GFF3文件 $output_raw_GFF3 。\n";
@@ -200,16 +221,16 @@ $start_codon = join ",", sort keys %start_codon;
 $stop_codon = join ",", sort keys %stop_codon;
 
 # 调用fillingEndsOfGeneModels命令对基因模型进行强行补充完整。
-my $cmdString = "$binPath/fillingEndsOfGeneModels --nonCompletedGeneModels $tmp_dir/A_NF.gff3 --start_codon $start_codon --stop_codon $stop_codon $input_file1 $tmp_dir/A_raw.gff3 > $tmp_dir/A_FE.gff3 2> $tmp_dir/fillingEndsOfGeneModels.A.log";
+my $cmdString = "$binPath/fillingEndsOfGeneModels --cpu $cpu --nonCompletedGeneModels $tmp_dir/A_NF.gff3 --start_codon $start_codon --stop_codon $stop_codon $input_file1 $tmp_dir/A_raw.gff3 > $tmp_dir/A_FE.gff3 2> $tmp_dir/fillingEndsOfGeneModels.A.log";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-my $cmdString = "$binPath/fillingEndsOfGeneModels --nonCompletedGeneModels $tmp_dir/B_NF.gff3 --start_codon $start_codon --stop_codon $stop_codon $input_file1 $tmp_dir/B_raw.gff3 > $tmp_dir/B_FE.gff3 2> $tmp_dir/fillingEndsOfGeneModels.B.log";
+$cmdString = "$binPath/fillingEndsOfGeneModels --cpu $cpu --nonCompletedGeneModels $tmp_dir/B_NF.gff3 --start_codon $start_codon --stop_codon $stop_codon $input_file1 $tmp_dir/B_raw.gff3 > $tmp_dir/B_FE.gff3 2> $tmp_dir/fillingEndsOfGeneModels.B.log";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-my $cmdString = "$binPath/fillingEndsOfGeneModels --nonCompletedGeneModels $tmp_dir/C_NF.gff3 --start_codon $start_codon --stop_codon $stop_codon $input_file1 $tmp_dir/C_raw.gff3 > $tmp_dir/C_FE.gff3 2> $tmp_dir/fillingEndsOfGeneModels.C.log";
+$cmdString = "$binPath/fillingEndsOfGeneModels --cpu $cpu --nonCompletedGeneModels $tmp_dir/C_NF.gff3 --start_codon $start_codon --stop_codon $stop_codon $input_file1 $tmp_dir/C_raw.gff3 > $tmp_dir/C_FE.gff3 2> $tmp_dir/fillingEndsOfGeneModels.C.log";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-my $cmdString = "$binPath/fillingEndsOfGeneModels --nonCompletedGeneModels $tmp_dir/D_NF.gff3 --start_codon $start_codon --stop_codon $stop_codon $input_file1 $tmp_dir/D_raw.gff3 > $tmp_dir/D_FE.gff3 2> $tmp_dir/fillingEndsOfGeneModels.D.log";
+$cmdString = "$binPath/fillingEndsOfGeneModels --cpu $cpu --nonCompletedGeneModels $tmp_dir/D_NF.gff3 --start_codon $start_codon --stop_codon $stop_codon $input_file1 $tmp_dir/D_raw.gff3 > $tmp_dir/D_FE.gff3 2> $tmp_dir/fillingEndsOfGeneModels.D.log";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
@@ -399,7 +420,7 @@ foreach ( @geneID ) {
 }
 close OUTA; close OUTB; close OUTC; close OUTD;
 my ($numA, $numB, $numC, $numD) = (0, 0, 0, 0);
-$numA = %classA; $numB = %classB; $numC = %classC; $numD = %classD; 
+$numA = %classA; $numB = %classB; $numC = %classC; $numD = %classD;
 print STDERR "第二轮补齐基因模型后分类：A 类 $numA 个、B 类 $numB 个、C 类 $numC 个、D 类 $numD 个。\n";
 
 # 合并四类基因模型结果，并去冗余
@@ -424,6 +445,31 @@ $/ = "\n";
 my $num_total = 0; $num_total = $numA + $numB + $numC + $numD;
 print STDERR "第三轮整合基因模型后分类：A 类 $numA 个、B 类 $numB 个、C 类 $numC 个、D 类 $numD 个，基因模型总数为 $num_total 个。\n";
 
+
+# 解析基因区域标题字符串（如 "Chr01.21331_22440.start0"），获得该区域对应目标基因区域（不含侧翼序列）
+# 在基因组上的起始和终止坐标。若无法按预期格式解析出坐标，返回空列表，调用者应放弃坐标过滤，按原有逻辑处理。
+sub get_target_region_start_end {
+    my ($gene_region) = @_;
+    if ( $gene_region && $gene_region =~ /\.(\d+)_(\d+)\.start\d+$/ ) {
+        return ($1, $2);
+    }
+    return ();
+}
+
+# 去除和目标区域没有重叠的基因预测结果（即预测结果完全落在为提取基因组序列而添加的侧翼序列部分）。
+# 输入的基因预测结果表格数据（每行以Tab分割），第3、4列（数组下标2、3）为该基因模型在基因组上的起止坐标，
+# 对负链基因该两列坐标可能大小颠倒，故取其最小值和最大值再判断是否与目标区间存在重叠。
+# 若 $region_start / $region_end 未定义（即无法从区域标题解析出坐标），则不做任何过滤，原样返回。
+sub filter_geneModels_by_target_region {
+    my ($geneModels_aref, $region_start, $region_end) = @_;
+    return @$geneModels_aref unless (defined $region_start && defined $region_end);
+    return grep {
+        my @field = split /\t/, $_;
+        my ($model_start, $model_end) = ($field[2], $field[3]);
+        ($model_start, $model_end) = ($model_end, $model_start) if $model_start > $model_end;
+        ( $model_end >= $region_start && $model_start <= $region_end );
+    } @$geneModels_aref;
+}
 
 # 计算protein序列对同源蛋白的覆盖度
 sub cal_protein_length_ratio {

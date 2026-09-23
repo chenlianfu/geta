@@ -279,6 +279,18 @@ foreach my $gene_id ( @gene_id ) {
                 print;
             }
         }
+        elsif ($strand eq '.') {
+            foreach (sort {$b <=> $a} @exon) {
+                $exon_num ++;
+                my $out = "$chr\t$source\texon\t$_\t.\t$strand\t\.\tID=$mRNAID.exon$exon_num;Parent=$mRNAID;\n";
+                @_ = split /\t/;
+                $sort{$out} = $_[0];
+                $sort_UTR{$out} = 2;
+            }
+            foreach (sort {$sort{$b} <=> $sort{$a} or $sort_UTR{$a} <=> $sort_UTR{$b}} keys %sort) {
+                print;
+            }
+        }
         print "\n";
 
         #print "$gtf_info{$gene_id}{$mRNA_ID}\n";

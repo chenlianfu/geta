@@ -6,7 +6,7 @@ my $usage = <<USAGE;
 Usage:
     perl $0 --out_prefix out genome.fasta input1.gff3 [input2.gff3 ...] > statitics.txt
 
-    本程序用于根据GFF3的内容信息和基因组序列，转换出对应的序列信息，并对各种类型的Features进行统计。程序能对各种类型的Feature都进行序列转换，每种类型的Feature各得到一个Fasta文件，gene类型的Feature能得到CDS、cDNA和Protein三个Fasta文件。
+    本程序用于根据GFF3的内容信息和基因组序列，转换出对应的序列信息，并对各种类型的Features进行统计。程序能对各种类型的Feature都进行序列转换，每种类型的Feature各得到一个Fasta文件，gene类型的Feature能得到CDS、cDNA和Protein三个Fasta文件。注意程序输出CDS序列时，若GFF3文件中起始CDS的Frame不为0，则去除对应的碱基，从第一个codon的第一个碱基开始输出CDS序列。
 
     程序支持输入多个GFF3文件，并根据其中的Feature ID输出序列。所以输入的GFF3文件第9列一定得要有ID信息。若一个文件中同一个ID出现多次，则仅使用其ID后出现的数据信息；若多个文件中出现相同的ID，则使用输入文件靠最前的GFF3文件中的数据信息。程序最终输出序列信息时，按照输入GFF3文件先后顺序和GFF3文件内容中出现的ID先后顺序输出序列。
 
@@ -64,7 +64,7 @@ my (%genome_seq, $genome_seq_id);
 while (<IN>) {
     chomp;
     if (m/^>(\S+)/) { $genome_seq_id = $1; }
-    else { $genome_seq{$genome_seq_id} .= $_; }
+    else { tr/atcgn/ATCGN/; $genome_seq{$genome_seq_id} .= $_; }
 }
 close IN;
 
@@ -94,11 +94,14 @@ foreach my $input_file ( @GFF3_file ) {
     close IN;
 }
 
-# 删除可能存在的输出文件
+# 生成空白的输出文件
+my %output_fh;
 foreach ( keys %feature_name ) {
-    unlink "$out_prefix.$_.fasta" if -e "$out_prefix.$_.fasta";
+	open $output_fh{$_}, ">", "$out_prefix.$_.fasta" or die "Can not create file $out_prefix.$_.fasta, $!";
     if ( $_ eq "gene" ) {
-        unlink "$out_prefix.CDS.fasta"; unlink "$out_prefix.cDNA.fasta"; unlink "$out_prefix.protein.fasta";
+        open $output_fh{"CDS"}, ">", "$out_prefix.CDS.fasta"    or die "Can not create file $out_prefix.CDS.fasta, $!";
+        open $output_fh{"cDNA"}, ">", "$out_prefix.cDNA.fasta"   or die "Can not create file $out_prefix.cDNA.fasta, $!";
+        open $output_fh{"protein"}, ">", "$out_prefix.protein.fasta" or die "Can not create file $out_prefix.protein.fasta, $!";
     }
 }
 
@@ -121,6 +124,7 @@ foreach my $gene_ID ( @geneID ) {
     # 若GFF3的Feature名称为gene，则需要分析第二层和第三层信息，输出cDNA(exon)、CDS和Protein序列。
     if ( $header_field[2] eq "gene" ) {
         my %mRNA_info;
+	next unless exists $gff3_info{$gene_ID}{"mRNA_ID"};
         my @mRNA_ID = @{$gff3_info{$gene_ID}{"mRNA_ID"}};
 
         foreach my $mRNA_ID ( @mRNA_ID ) {
@@ -199,21 +203,15 @@ foreach my $gene_ID ( @geneID ) {
             # 输出 CDS, exon 和 Protein 序列
             my $header_output = &get_fasta_header($mRNA_ID, $mRNA_header[8]);
             if ( $seq_CDS ) {
-                open OUT, ">>", "$out_prefix.CDS.fasta" or die "Can not create file $out_prefix.CDS.fasta, $!";
-                print OUT "$header_output$seq_CDS\n";
-                close OUT;
+                print {$output_fh{"CDS"}} "$header_output$seq_CDS\n";
                 $collected_output_file_name{"$out_prefix.CDS.fasta"} = 1;
             }
             if ( $seq_cDNA ) {
-                open OUT, ">>", "$out_prefix.cDNA.fasta" or die "Can not create file $out_prefix.cDNA.fasta, $!";
-                print OUT "$header_output$seq_cDNA\n";
-                close OUT;
+                print {$output_fh{"cDNA"}} "$header_output$seq_cDNA\n";
                 $collected_output_file_name{"$out_prefix.cDNA.fasta"} = 1;
             }
             if ( $seq_protein ) {
-                open OUT, ">>", "$out_prefix.protein.fasta" or die "Can not create file $out_prefix.protein.fasta, $!";
-                print OUT "$header_output$seq_protein\n";
-                close OUT;
+                print {$output_fh{"protein"}} "$header_output$seq_protein\n";
                 $collected_output_file_name{"$out_prefix.protein.fasta"} = 1;
             }
 
@@ -244,12 +242,13 @@ foreach my $gene_ID ( @geneID ) {
     my $seq_length = abs($header_field[4] - $header_field[3]) + 1;
     push @{$stats{$header_field[2]}}, $seq_length;
     my $sequence_output = substr($genome_seq{$header_field[0]}, $start_site, $seq_length);
-    open OUT, ">>", "$out_prefix.$header_field[2].fasta" or die "Can not create file $out_prefix.$header_field[2].fasta, $!";
     $collected_output_file_name{"$out_prefix.$header_field[2].fasta"} = 1 if $header_field[2];
     $sequence_output = &rc($sequence_output) if $header_field[6] eq "-";
     my $header_output = &get_fasta_header($gene_ID, $header_field[8]);
-    print OUT "$header_output$sequence_output\n";
-    close OUT;
+    print {$output_fh{$header_field[2]}} "$header_output$sequence_output\n";
+}
+foreach ( keys %output_fh ) {
+	close $output_fh{$_};
 }
 
 if ( -e "$out_prefix.CDS.fasta" ) {
@@ -424,6 +423,9 @@ sub get_seqs {
             $seq_protein .= "X";
         }
     }
+
+    # 若起始CDS的frame不为0，则输出CDS时减少对应的碱基数。
+    $seq_CDS =~ s/\w{$frame}// if $frame != 0;
 
     return ($seq_CDS, $seq_exon, $seq_protein);
 }
