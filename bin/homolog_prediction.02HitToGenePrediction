@@ -90,7 +90,6 @@ GetOptions(
 if ($help_flag) { print $usage; exit 0; }
 
 $min_intron_length              //= 20;
-$max_intron_length              //= 200000;
 $threshold_protein_length       //= 25;
 $threshold_homolog_coverage     //= 0.2;
 $threshold_inter_stop_codon_num //= 3;

@@ -7,7 +7,9 @@ use Cwd qw/abs_path/;
 use File::Basename qw/dirname basename/;
 use File::Path qw/remove_tree make_path/;
 use File::Spec;
-use POSIX qw/strftime/;
+use POSIX qw/strftime :sys_wait_h/;
+use Fcntl qw/:flock/;
+use Digest::MD5;
 
 my $command_line = "$0 " . join(" ", @ARGV);
 my $prog_name    = basename($0);
@@ -17,7 +19,23 @@ my $bin_path     = dirname($self_path);
 my @ALL_METHODS = qw/gth exonerate genewise miniprot spaln/;
 my %MM_METHOD   = map { $_ => 1 } qw/gth exonerate genewise/;
 
-my $usage = <<'USAGE';
+# 传给01MMseqs2CalHits的固定阈值（写入断点续跑的签名，若以后修改这里，相应步骤会自动重算）
+my $HIT_COVER_RATIO = 0.9;
+my $HIT_SCORE_RATIO = 0.4;
+
+# 全局状态：临时目录、文件锁、当前正在运行的子进程
+my ($tmp_dir, $tmp_dir_ready, $lock_fh);
+my $child_pid;
+
+# 无论是正常报错、被Ctrl-C/kill中断，还是子命令失败，只要临时目录已经建立，退出时都提示如何续跑。
+END {
+    if ($tmp_dir_ready && $? != 0) {
+        print STDERR "\n$prog_name did not finish. The finished steps are kept in $tmp_dir .\n"
+                   . "To resume, run the same command again (you may also change --method or other parameters) with: --tmp_dir $tmp_dir\n";
+    }
+}
+
+my $usage_cn = <<'USAGE';
 Usage:
     __PROG__ [options] homolog_proteins.fasta genome_seq.fasta > out.gff3
 
@@ -49,6 +67,22 @@ Usage:
       4. 若指定--output_raw_GFF3或--output_alignment_GFF3，则输出的是多个来源整合后的内容：
          raw GFF3调用GFF3_merging_and_removing_redundancy整合后再GFF3Clear；比对GFF3为各来源比对结果去重后按基因组位置排序的合并。
 
+    断点续跑（--tmp_dir）说明：
+      程序在临时文件夹中为每个步骤记录"输入文件内容指纹 + 相关参数"（*.sig）和完成标记（*.ok）。程序被中断（Ctrl-C、kill、断电、命令报错）后，
+      使用相同的 --tmp_dir 重新输入命令即可继续运行，已经完成的步骤会被跳过，未完成的步骤从其内部可续跑的位置继续。
+      (1) 输入文件的指纹由文件大小和分布在全文件的多个数据块的MD5值组成，不依赖文件修改时间，复制或touch文件不会导致重算；
+      (2) 再次运行时修改--method：
+            - 已经完成的来源（mmseqs、miniprot、spaln）及其结果被直接复用，只运行新增的来源；例如先运行--method exonerate，再运行
+              --method exonerate,miniprot,spaln，则exonerate部分全部跳过，只运行miniprot和spaln；
+            - 同一个mmseqs来源内新增或减少 exonerate/genewise/gth 时，MMseqs2比对和已经完成的"基因区域块 x 预测方法"结果被复用，
+              只计算新增的方法，然后重新挑选最优基因模型；
+            - 去掉某个来源后，其结果保留在临时文件夹中，之后再加回来仍可复用；最终整合、过滤总是按当前--method重新进行；
+      (3) 修改其它参数时，只重算受该参数影响的步骤：例如修改--identity/--evalue/--homolog_coverage只重做MMseqs2 Hit过滤而不重做耗时的
+          mmseqs search；修改--overlap_coverage只重做miniprot/spaln比对之后的步骤，而不重新比对；修改--threshod_ratio_of_intron_Supported_times
+          只重做最后的过滤；--cpu、--gene_prefix等不影响中间结果的参数不会触发重算；
+      (4) 同一个--tmp_dir同一时间只允许一个程序使用（文件锁）；程序被中断或失败时，会在末尾提示续跑所需的--tmp_dir。
+      (5) 若--tmp_dir由旧版本程序生成，旧版本的完成标记格式不同，无法确认其参数，该步骤会被重新计算一次。
+
     根据程序的计算原理，使用的同源蛋白数量越多，预测基因模型的准确性和完整性越好，相应的计算时间越长。推荐使用5~10个物种的全基因组蛋白序列作为输入。
 
     --max_hits_num_per_match_region <int>    default: 10
@@ -67,14 +101,7 @@ Usage:
 
     --method <string>    default: miniprot
     设置基因预测的方法，可选exonerate、genewise、gth、miniprot、spaln或all（使用全部五种）。使用多种方法时用逗号分割，例如 exonerate,miniprot,spaln。
-    exonerate和genewise的准确性比较一致，gth的sensitivity低很多但specificity高很多；miniprot速度很快；spaln的准确性通常较高。以exonerate、genewise和gth三种方法对Oryza sativa基因组的预测为例（和NCBI标准的28736个基因模型比较）：
-    方法       基因数量    gene_sensitivity    gene_specificity    exon_sensitivity    exon_specificity
-    exonerate  38537       47.05%              35.09%              58.90%              73.55%
-    genewise   40455       47.32%              33.61%              62.08%              71.27%
-    gth        8888        19.80%              64.02%              30.43%              90.54%
-    all        40538       48.54%              34.41%              63.85%              71.86%
-    filtered   28184       45.62%              46.51%              61.26%              79.59%
-    使用多种方法整合预测后再过滤，得到的基因模型数量能接近真实的基因数量，且结果较准确。
+    使用相同的--tmp_dir重新运行并修改该参数时，已完成的方法结果会被复用（见上文"断点续跑"说明）。
 
     --genetic_code <int>    default: 1
     设置遗传密码，参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。
@@ -92,7 +119,7 @@ Usage:
     输出同源蛋白比对GFF3时，每个来源每个基因区域最多输出的同源蛋白个数。
 
     --method_comparison_stats <string>    default: None
-    当--method指定了2个及以上来源（mmseqs、miniprot、spaln这三个来源中的任意组合）时，设置该参数后，程序会在整合各来源结果之前，对每两个来源的GFF3结果调用GFF3_merging_and_removing_redundancy命令的--compare_2gff3_stats参数进行两两比较，得到：各来源各自的非冗余基因数量；两个来源之间CDS重叠比例超过--overlap_coverage阈值的冲突基因数量；这些冲突基因中双方得分较高的比例。程序将所有两两比较的结果汇总（包括每一对来源的详细统计，以及所有来源在全部两两比较中的总体胜出比例），输出到该参数指定的文件中，用于评估哪种方法的预测效果更好、各方法之间的一致性如何。此步骤不影响最终整合结果。每一对来源详细的逐基因冲突记录保留在--tmp_dir目录下的 compare.<来源1>_vs_<来源2>.stats.txt 文件中，供进一步查阅。
+    当--method指定了2个及以上来源（mmseqs、miniprot、spaln这三个来源中的任意组合）时，设置该参数后，程序会在整合各来源结果之前，对每两个来源的GFF3结果调用GFF3_merging_and_removing_redundancy命令的--compare_2gff3_stats参数进行两两比较，得到：各来源各自的非冗余基因数量；两个来源之间CDS重叠比例超过--overlap_coverage阈值的冲突基因数量；这些冲突基因中双方得分较高的比例。程序将所有两两比较的结果汇总（包括每一对来源的详细统计，以及所有来源在全部两两比较中的总体胜出比例），输出到该参数指定的文件中，用于评估哪种方法的预测效果更好、各方法之间的一致性如何。此步骤不影响最终整合结果。每一对来源详细的逐基因冲突记录保留在--tmp_dir目录下的 compare.<来源1>_vs_<来源2>.stats.txt 文件中，供进一步查阅。已完成且输入没有变化的两两比较在续跑时不会重复运行。
 
     --overlap_coverage <float>    default: 0.30
     CDS重叠覆盖度阈值，传递给GFF3_merging_and_removing_redundancy的--overlap_coverage和GFF3Clear的--coverage，用于去除CDS有重叠的冗余基因模型；同时传递给miniprot和spaln流程。
@@ -113,19 +140,143 @@ Usage:
     设置最终基因ID的前缀。
 
     --tmp_dir <string>    default: tmp_$date$pid
-    程序运行的临时文件夹。指定已有的临时文件夹重新运行时，已经完成且参数和输入文件没有变化的步骤会被跳过（断点续跑）；某一步的参数或输入文件发生变化时，该步骤及其依赖的中间结果会自动重新计算。
+    程序运行的临时文件夹。指定已有的临时文件夹重新运行时，已经完成且参数和输入文件没有变化的步骤会被跳过（断点续跑）；某一步的参数或输入文件发生变化时，只有受影响的步骤及其依赖的中间结果会自动重新计算（详见上文"断点续跑"说明）。若不设置该参数，每次运行都会新建一个带日期和进程号的临时文件夹，无法续跑；程序被中断时会提示应使用的--tmp_dir。
 
     --help    default: None
-    display this help and exit.
+    显示英文帮助信息并退出（默认的帮助信息为英文）。
+
+    --chinese_help    default: None
+    显示中文帮助信息并退出。
 
     依赖：本程序所在目录需要有 GFF3_merging_and_removing_redundancy、fillingEndsOfGeneModels、GFF3Clear，以及所选方法对应的 homolog_prediction.0X 脚本；
     终端中需要能直接运行所选方法对应的命令：mmseqs（exonerate/genewise/gth方法需要）、exonerate、genewise、gth、miniprot、spaln。
     输入文件、临时文件夹和输出路径中不能包含空格或shell特殊字符。
 
 USAGE
-$usage =~ s/__PROG__/$prog_name/g;
 
-if (@ARGV == 0) { print STDERR $usage; exit 1; }
+my $usage_en = <<'USAGE_EN';
+Usage:
+    __PROG__ [options] homolog_proteins.fasta genome_seq.fasta > out.gff3
+
+    This program predicts genes in the genome of a target species using the whole-genome protein sequences of closely related species, and writes the result to STDOUT in GFF3 format.
+    Five prediction methods are supported. They can be used alone or in any combination; the results of multiple methods are merged and redundancy-removed by the program:
+      (1) exonerate / genewise / gth: MMseqs2 first aligns the homologous proteins to the genome to locate the gene regions, and then the corresponding software predicts the exon-intron structures
+          (homolog_prediction.01MMseqs2CalHits, .02HitToGenePrediction and .03GetGeneModels are called in turn).
+          These three methods are already integrated region by region inside this pipeline, so the program regards them as one source (mmseqs);
+      (2) miniprot: calls homolog_prediction.04miniprot2GeneModels; the source is miniprot;
+      (3) spaln: calls homolog_prediction.05spaln2GeneModels; the source is spaln.
+
+    The gene models in the result are divided into four classes: A, excellent gene models: 100% coverage of the homologous protein, and the start codon and stop codon are consistent with the protein alignment; B, good gene models: coverage of the homologous protein >= 80%, and the length of the complete gene model after forced end-filling >= 80% of the homologous protein length; C, fair gene models: coverage >= 40%, and the length of the complete gene model after forced end-filling >= 40% of the homologous protein length; D, poor gene models: coverage < 40%, or the length of the complete gene model after forced end-filling < 40% of the homologous protein length, or the gene model can not be completed by forced end-filling. All gene models of the first three classes are complete (the last CDS contains the stop codon); some class D gene models are complete and some are not.
+
+    Each intron line in the output contains the tag Supported_times, the number of times that the intron is supported by different prediction methods or different homologous proteins. For example, if an intron is supported by 10 homologous proteins in each of 3 prediction methods, its Supported_times is 30.
+
+    Workflow:
+      0. Check the parameters and input files, and check that the commands required by --method can be executed directly in the terminal (if not, the program exits with an error before running anything).
+      1. Run the prediction pipeline of each source specified by --method. Each source yields a GFF3 result (containing gene models of classes A~D), a raw GFF3 (the ends are not filled) and a homolog alignment GFF3.
+      2. If there are multiple sources, GFF3_merging_and_removing_redundancy (--first_file_score 0.0, all sources have equal priority) merges the gene models of the sources,
+         and then GFF3Clear removes overlaps and renumbers the genes. The result is results/all.clear.gff3 in the temporary directory (all four classes, before intron filtering).
+      2.5 If --method_comparison_stats is set, before merging, the program compares every two sources with the --compare_2gff3_stats function of GFF3_merging_and_removing_redundancy,
+          and reports the CDS-overlap conflicts and the score comparison between the gene models of the two sources in the file specified by this parameter,
+          which is used to evaluate the prediction performance of the methods and their consistency. This step does not affect the final merged result.
+      3. Filter class C and D gene models by the Supported_times of introns: for each source, the threshold_value is calculated from the Supported_times of all introns of its class A and B gene models
+         at the quantile given by --threshod_ratio_of_intron_Supported_times (default 0.5, the median).
+         Each class C or D gene model of the merged result then uses the threshold of its source (column 2 of the GFF3: gth/exonerate/genewise belong to the mmseqs source, then miniprot and spaln);
+         if the Supported_times of all its introns are lower than the threshold, the gene model is removed. Class C/D gene models without an intron (single-exon) are not filtered.
+         Class A and B gene models are never filtered. After filtering, GFF3Clear is run again to renumber the genes, and the result is written to STDOUT.
+      4. If --output_raw_GFF3 or --output_alignment_GFF3 is specified, the output contains the merged content of all sources:
+         the raw GFF3 is merged by GFF3_merging_and_removing_redundancy and then processed by GFF3Clear; the alignment GFF3 is the combination of the alignment results of all sources, de-duplicated and sorted by genome position.
+
+    Resuming an interrupted run (--tmp_dir):
+      For each step the program records in the temporary directory a signature (content fingerprints of the input files + the relevant parameters, *.sig) and a completion mark (*.ok).
+      After the program is interrupted (Ctrl-C, kill, power failure, or a failed command), run the same command again with the same --tmp_dir to continue: the finished steps are skipped,
+      and an unfinished step continues from the position where its own program can resume.
+      (1) The fingerprint of an input file consists of its size and the MD5 values of several data blocks spread over the whole file. It does not depend on the modification time, so copying or touching a file does not cause recomputation.
+      (2) When --method is changed in a re-run:
+            - The finished sources (mmseqs, miniprot, spaln) and their results are reused directly and only the newly added sources are run. For example, after running --method exonerate,
+              running --method exonerate,miniprot,spaln skips the whole exonerate part and only runs miniprot and spaln;
+            - When exonerate/genewise/gth is added to or removed from the mmseqs source, the MMseqs2 alignment and the finished "gene region chunk x prediction method" results are reused,
+              only the newly added method is calculated, and then the best gene model of each region is picked out again;
+            - After a source is removed, its results stay in the temporary directory and can still be reused if it is added back later; the final merging and filtering are always redone for the current --method;
+      (3) When other parameters are changed, only the steps affected by them are recomputed: for example, changing --identity/--evalue/--homolog_coverage only redoes the MMseqs2 Hit filtering and not the time-consuming mmseqs search;
+          changing --overlap_coverage only redoes the steps after the miniprot/spaln alignment without realigning; changing --threshod_ratio_of_intron_Supported_times only redoes the final filtering;
+          parameters that do not affect the intermediate results, such as --cpu and --gene_prefix, do not trigger recomputation;
+      (4) Only one program may use the same --tmp_dir at a time (file lock); when the program is interrupted or fails, it prints the --tmp_dir needed for resuming at the end.
+      (5) If the --tmp_dir was generated by an older version of the program, the completion records have a different format and their parameters can not be verified, so the corresponding steps are recomputed once.
+
+    Theoretically, the more homologous proteins are used, the better the accuracy and completeness of the predicted gene models, and the longer the running time. Whole-genome protein sequences of 5~10 species are recommended as input.
+
+    --max_hits_num_per_match_region <int>    default: 10
+    Set the maximum number of homologous protein hits in one homologous match region (one gene region) of the genome (for the exonerate/genewise/gth methods).
+
+    --max_hit_num_per_single_species <int>    default: 2
+    Set the maximum number of homologous protein hits from a single species in one homologous match region of the genome (for the exonerate/genewise/gth methods). To make this parameter work, the protein names must contain the species name: the program recognizes the keyword species (case-insensitive) in the name and the characters [a-zA-Z0-9] following it as the species name, e.g. the species name of XP_002436309_2_SpeciesSorghumBicolor is SpeciesSorghumBicolor.
+
+    --cpu <int>    default: 8
+    Set the number of threads or parallel processes used by each software.
+
+    --identity <float>    default: 0.2
+    --evalue <float>    default: 1e-9
+    --homolog_coverage <float>    default: 0.3
+    Set the Identity, E-value and homolog_coverage thresholds used to filter the MMseqs2 results (for the exonerate/genewise/gth methods).
+
+    --method <string>    default: miniprot
+    Set the gene prediction methods. The value can be exonerate, genewise, gth, miniprot, spaln or all (use all five methods). Use commas to separate multiple methods, e.g. exonerate,miniprot,spaln.
+    When the program is re-run with the same --tmp_dir and this parameter is changed, the results of the finished methods are reused (see "Resuming an interrupted run" above).
+
+    --genetic_code <int>    default: 1
+    Set the genetic code. Please refer to NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi.
+
+    --threshod_ratio_of_intron_Supported_times <float>    default: 0.5
+    (Can also be written as --threshold_ratio_of_intron_Supported_times.) Range [0, 1]. For each source, the Supported_times of all introns of its class A and B gene models are sorted from small to large, and the value at the position given by this parameter is taken as threshold_value (0.5 is the median). A class C or D gene model is removed if the Supported_times of all its introns are lower than the threshold_value of its source. Set to 0 to disable filtering; the larger the value, the stricter the filtering.
+
+    --output_raw_GFF3 <string>    default: None
+    Output the merged GFF3 file of all sources in which the ends of the gene models are not forcibly filled. It is the raw result of the homology-based prediction.
+
+    --output_alignment_GFF3 <string>    default: None
+    Output the merged homolog alignment GFF3 file of all sources, containing the alignments of the homologous proteins to the genome (the best alignment of each homologous protein is output for each gene region).
+
+    --max_alignment_num_for_each_gene_region <int>    default: 5
+    When outputting the homolog alignment GFF3, the maximum number of homologous proteins output for each gene region of each source.
+
+    --method_comparison_stats <string>    default: None
+    Effective when --method specifies two or more sources (any combination of the three sources mmseqs, miniprot and spaln). If this parameter is set, before the results of the sources are merged, the program compares every two sources with the --compare_2gff3_stats parameter of GFF3_merging_and_removing_redundancy, and obtains: the number of non-redundant genes of each source; the number of conflicting genes whose CDS overlap ratio between the two sources exceeds --overlap_coverage; and the proportion of these conflicts in which each side has the higher score. The results of all pairwise comparisons (the details of each pair of sources and the overall win proportion of every source in all pairwise comparisons) are written to the file specified by this parameter, to evaluate which method predicts better and how consistent the methods are. This step does not affect the final merged result. The detailed gene-by-gene conflict records of each pair of sources are kept in the file compare.<source1>_vs_<source2>.stats.txt in the --tmp_dir directory for further reference. Pairwise comparisons that have finished with unchanged input are not repeated when the program is resumed.
+
+    --overlap_coverage <float>    default: 0.30
+    The CDS overlap coverage threshold, passed to --overlap_coverage of GFF3_merging_and_removing_redundancy and --coverage of GFF3Clear to remove redundant gene models with overlapping CDS; it is also passed to the miniprot and spaln pipelines.
+
+    --max_intron_size <int>    default: None
+    Set the maximum intron length, passed to exonerate (--maxintron), miniprot (-G) and spaln (-yM). If not set, each pipeline uses its own default value.
+
+    --miniprot_options <string>    default: None
+    Extra options passed to miniprot. If the value starts with --, join it with an equals sign and quote it, e.g. --miniprot_options="--outs=0.95 -N 20".
+
+    --spaln_species <string>    default: None
+    The species-specific parameter set used by spaln (the -T option of spaln). It is recommended to set it to the species most closely related to the target species, e.g. arabidopsis_thaliana, zea_mays.
+
+    --spaln_options <string>    default: None
+    Extra options passed to the spaln alignment command, e.g. --spaln_options="-LS -yX2".
+
+    --gene_prefix <string>    default: homolog
+    Set the prefix of the final gene IDs.
+
+    --tmp_dir <string>    default: tmp_$date$pid
+    The temporary directory of the program. When an existing temporary directory is specified, the steps that have finished and whose parameters and input files are unchanged are skipped (resuming an interrupted run); when the parameters or input files of a step change, only the affected steps and the intermediate results they depend on are recomputed automatically (see "Resuming an interrupted run" above). If this parameter is not set, a new temporary directory named with the date and process ID is created in each run and the run can not be resumed; when the program is interrupted, it prints the --tmp_dir that should be used.
+
+    --help    default: None
+    Display this help (English) and exit.
+
+    --chinese_help    default: None
+    Display the Chinese help and exit.
+
+    Dependencies: GFF3_merging_and_removing_redundancy, fillingEndsOfGeneModels and GFF3Clear, and the homolog_prediction.0X scripts corresponding to the selected methods must be in the directory of this program;
+    the commands corresponding to the selected methods must be executable directly in the terminal: mmseqs (required by the exonerate/genewise/gth methods), exonerate, genewise, gth, miniprot and spaln.
+    The paths of the input files, the temporary directory and the output files can not contain spaces or shell special characters.
+
+USAGE_EN
+$usage_cn =~ s/__PROG__/$prog_name/g;
+$usage_en =~ s/__PROG__/$prog_name/g;
+
+if (@ARGV == 0) { print STDERR $usage_en; exit 1; }
 
 ########################################################################
 # 1. 解析并检查参数
@@ -157,7 +308,8 @@ GetOptions(\%o,
     'chinese_help',
 ) or do { print STDERR "\nRun '$prog_name --help' for usage.\n"; exit 1; };
 
-if ($o{help} || $o{chinese_help}) { print $usage; exit 0; }
+if ($o{chinese_help}) { print $usage_cn; exit 0; }
+if ($o{help})         { print $usage_en; exit 0; }
 
 $o{max_hits_num_per_match_region}         //= 10;
 $o{max_hit_num_per_single_species}        //= 2;
@@ -219,12 +371,9 @@ foreach my $k (qw/output_raw_GFF3 output_alignment_GFF3 method_comparison_stats/
 }
 
 my $date = strftime("%Y%m%d%H%M%S", localtime);
-my $tmp_dir = defined $o{tmp_dir} ? $o{tmp_dir} : "tmp_$date$$";
+my $tmp_dir_given = defined $o{tmp_dir} ? 1 : 0;
+$tmp_dir = $tmp_dir_given ? $o{tmp_dir} : "tmp_$date$$";
 $tmp_dir = File::Spec->rel2abs($tmp_dir);
-make_path($tmp_dir) unless -d $tmp_dir;
-die "Error: can not create the temporary directory $tmp_dir.\n" unless -d $tmp_dir;
-my $res_dir = "$tmp_dir/results";
-make_path($res_dir) unless -d $res_dir;
 
 # 下游脚本都是把路径直接拼接到shell命令中，路径中的空格或特殊字符会导致命令出错，因此提前检查。
 foreach my $p ($input_protein, $input_genome, $tmp_dir, $bin_path,
@@ -235,11 +384,32 @@ foreach my $p ($input_protein, $input_genome, $tmp_dir, $bin_path,
         if $p =~ /[^\w\-\.\/\+:@,=]/;
 }
 
+make_path($tmp_dir) unless -d $tmp_dir;
+die "Error: can not create the temporary directory $tmp_dir.\n" unless -d $tmp_dir;
+my $res_dir = "$tmp_dir/results";
+make_path($res_dir) unless -d $res_dir;
+
+# 文件锁：同一个临时文件夹同一时间只允许一个程序使用，避免并行运行相互破坏中间结果。
+# 锁随进程结束（包括被kill -9）自动释放；若子进程残留，锁会一直保持到子进程也结束，符合预期。
+open($lock_fh, ">>", "$tmp_dir/.homolog_prediction.lock") or die "Error: can not create the lock file in $tmp_dir, $!\n";
+flock($lock_fh, LOCK_EX | LOCK_NB)
+    or die "Error: another process is running in the temporary directory $tmp_dir, please wait for it to finish or use another --tmp_dir.\n";
+$tmp_dir_ready = 1;
+
+# 收到中断信号时，终止正在运行的整个子进程组，再退出；已经完成的步骤都保留，可以续跑。
+$SIG{INT} = $SIG{TERM} = $SIG{HUP} = sub {
+    my $s = shift;
+    &terminate_child();
+    die "Interrupted by signal SIG$s.\n";
+};
+
 my $pwd = do { require Cwd; Cwd::getcwd() };
+my $resumed = (glob("$tmp_dir/*.sig")) ? 1 : 0;
 print STDERR "\n#################### $prog_name | Start ####################\n";
 print STDERR "PWD: $pwd\n" . localtime() . ": CMD: $command_line\n";
 print STDERR "Methods: " . join(",", @methods) . "\n";
-print STDERR "Temporary directory: $tmp_dir\n";
+print STDERR "Temporary directory: $tmp_dir" . ($resumed ? " (existing records found, finished steps will be skipped)" : "") . "\n";
+print STDERR "To resume after an interruption, run the same command with: --tmp_dir $tmp_dir\n" unless $tmp_dir_given;
 print STDERR "============================================\n";
 
 ########################################################################
@@ -257,14 +427,17 @@ my %genome_order = %{ $genome_info->{order} };
 # 密码子
 my ($start_codon, $stop_codon) = &codon_sets($o{genetic_code});
 
+# 输入文件指纹（基于内容，不依赖修改时间）
+my $prot_fp   = &file_fp($input_protein);
+my $genome_fp = &file_fp($input_genome);
+
 ########################################################################
 # 4. 运行各个预测流程
 ########################################################################
 # 每个来源: { key, label, gff3, raw, aln }
 my @sources;
-my $genome_sig = &file_sig($input_genome);
-my $prot_sig   = &file_sig($input_protein);
 my $intron_arg_02 = defined $o{max_intron_size} ? "--max_intron_length $o{max_intron_size}" : "";
+my $max_intron_txt = defined $o{max_intron_size} ? $o{max_intron_size} : "default";
 
 # ---- 4.1 mmseqs来源：exonerate / genewise / gth ----
 if (@mm_methods) {
@@ -278,32 +451,57 @@ if (@mm_methods) {
     my $raw  = "$res_dir/mmseqs.raw.gff3";
     my $aln  = "$res_dir/mmseqs.alignment.gff3";
 
+    # a: MMseqs2比对 + Hit过滤。耗时最长的mmseqs search只依赖输入蛋白和基因组；
+    #    identity/evalue等只影响后面的Hit过滤，因此只需删除01脚本中Hit过滤相关的完成标记，不必重跑mmseqs。
     print STDERR "\n1. [mmseqs source: $mm_method_str] aligning homolog proteins to genome through MMseqs2.\n";
-    my $sig1 = join("|", $prot_sig, $genome_sig, "identity=$o{identity}", "evalue=$o{evalue}",
-                    "homolog_coverage=$o{homolog_coverage}", "max_hits=$o{max_hits_num_per_match_region}",
-                    "max_species=$o{max_hit_num_per_single_species}");
     &run_stage(
-        name => "a.MMseqs2CalHits", sig => $sig1, reset_dirs => [$dirA, $dirB], outputs => [$hits],
-        cmds => [ "$bin_path/homolog_prediction.01MMseqs2CalHits --cpu $o{cpu} --identity $o{identity} --evalue $o{evalue} --homolog_coverage $o{homolog_coverage} --threshold_Hit_cover_ratio 0.9 --threshold_Hit_score_ratio 0.4 --threshold_species_num $o{max_hit_num_per_single_species} --threshold_Hit_num $o{max_hits_num_per_match_region} --tmp_dir $dirA $input_protein $input_genome > $hits 2> $tmp_dir/a.MMseqs2CalHits.log" ],
+        name => "a.MMseqs2CalHits",
+        levels => [
+            { desc => "the input protein/genome files",
+              sig  => "prot=$prot_fp|genome=$genome_fp",
+              reset_dirs => [$dirA] },
+            { desc => "the MMseqs2 hit-filtering parameters",
+              sig  => join("|", "identity=$o{identity}", "evalue=$o{evalue}", "homolog_coverage=$o{homolog_coverage}",
+                           "max_hits=$o{max_hits_num_per_match_region}", "max_species=$o{max_hit_num_per_single_species}",
+                           "cover_ratio=$HIT_COVER_RATIO", "score_ratio=$HIT_SCORE_RATIO"),
+              reset_files => ["$dirA/e.HSP2Hit.ok", "$dirA/f.filterHits.ok"] },
+        ],
+        outputs => [$hits],
+        cmds => [ "$bin_path/homolog_prediction.01MMseqs2CalHits --cpu $o{cpu} --identity $o{identity} --evalue $o{evalue} --homolog_coverage $o{homolog_coverage} --threshold_Hit_cover_ratio $HIT_COVER_RATIO --threshold_Hit_score_ratio $HIT_SCORE_RATIO --threshold_species_num $o{max_hit_num_per_single_species} --threshold_Hit_num $o{max_hits_num_per_match_region} --tmp_dir $dirA $input_protein $input_genome > $hits 2> $tmp_dir/a.MMseqs2CalHits.log" ],
     );
 
     if (&count_data_lines($hits) == 0) {
         print STDERR "Warning: no homolog hit was found by MMseqs2 (see $tmp_dir/a.MMseqs2CalHits.log), the mmseqs source ($mm_method_str) is skipped.\n";
     }
     else {
+        # b: 基因结构预测。任务切分(chunk)依赖Hit文件的内容，Hit文件变化时才清空目录；
+        #    --method、--genetic_code、--max_intron_size变化时不清空目录，由02脚本自身按"chunk x 方法"复用已完成的结果。
         print STDERR "\n2. [mmseqs source: $mm_method_str] predicting gene models according to the hits of homologs.\n";
-        my $sig2 = join("|", $sig1, "method=$mm_method_str", "genetic_code=$o{genetic_code}",
-                        (defined $o{max_intron_size} ? "max_intron=$o{max_intron_size}" : "max_intron=default"));
-        # 不清空dirB：02HitToGenePrediction自身支持按"chunk x 方法"断点续跑，新增方法时可复用已有结果。
+        my $hits_fp = &file_fp($hits);
         &run_stage(
-            name => "b.hitToGenePrediction", sig => $sig2, reset_dirs => [], outputs => [$tab],
+            name => "b.hitToGenePrediction",
+            levels => [
+                { desc => "the homolog hits or the input files",
+                  sig  => "hits=$hits_fp|prot=$prot_fp|genome=$genome_fp",
+                  reset_dirs => [$dirB] },
+                { desc => "--method / --genetic_code / --max_intron_size (finished chunk x method results are reused)",
+                  sig  => "method=$mm_method_str|genetic_code=$o{genetic_code}|max_intron=$max_intron_txt" },
+            ],
+            outputs => [$tab],
             cmds => [ "$bin_path/homolog_prediction.02HitToGenePrediction --cpu $o{cpu} --method $mm_method_str --genetic_code $o{genetic_code} $intron_arg_02 --tmp_dir $dirB $input_protein $input_genome $hits > $tab 2> $tmp_dir/b.hitToGenePrediction.log" ],
         );
 
+        # c: 选择最优基因模型、补齐和分类。依赖预测结果表格的内容，因此--method变化导致表格变化时会自动重算。
         print STDERR "\n3. [mmseqs source: $mm_method_str] picking out the best gene model for each region and classifying.\n";
-        my $sig3 = join("|", $sig2, "max_aln=$o{max_alignment_num_for_each_gene_region}");
+        my $tab_fp = &file_fp($tab);
         &run_stage(
-            name => "c.getGeneModels", sig => $sig3, reset_dirs => [$dirC], outputs => [$gff3, $raw, $aln],
+            name => "c.getGeneModels",
+            levels => [
+                { desc => "the gene prediction table, genome or parameters",
+                  sig  => "tab=$tab_fp|genome=$genome_fp|genetic_code=$o{genetic_code}|max_aln=$o{max_alignment_num_for_each_gene_region}",
+                  reset_dirs => [$dirC] },
+            ],
+            outputs => [$gff3, $raw, $aln],
             cmds => [ "$bin_path/homolog_prediction.03GetGeneModels --cpu $o{cpu} --genetic_code $o{genetic_code} --tmp_dir $dirC --output_raw_GFF3 $raw --output_alignment_GFF3 $aln --max_alignment_num_for_each_gene_region $o{max_alignment_num_for_each_gene_region} $input_genome $tab > $gff3 2> $tmp_dir/c.getGeneModels.log" ],
         );
         push @sources, { key => "mmseqs", label => $mm_method_str, gff3 => $gff3, raw => $raw, aln => $aln };
@@ -319,14 +517,21 @@ if ($sel{miniprot}) {
     my $extra = "";
     $extra .= " --max_intron_size $o{max_intron_size}" if defined $o{max_intron_size};
     $extra .= " " . &shell_quote("--miniprot_options=$o{miniprot_options}") if defined $o{miniprot_options} && $o{miniprot_options} ne "";
+    my $mp_opt = defined $o{miniprot_options} ? $o{miniprot_options} : "";
 
+    # 04脚本自身检测miniprot.ok来跳过耗时的比对；比对之后的各步很快且每次都会完整重做。
+    # 因此：输入文件或比对参数变化时才清空目录重新比对；仅overlap_coverage等后续参数变化时保留比对结果。
     print STDERR "\n4. [miniprot source] aligning homolog proteins and predicting gene models through miniprot.\n";
-    my $sig = join("|", $prot_sig, $genome_sig, "genetic_code=$o{genetic_code}",
-                   "max_intron=" . (defined $o{max_intron_size} ? $o{max_intron_size} : "default"),
-                   "options=" . (defined $o{miniprot_options} ? $o{miniprot_options} : ""),
-                   "overlap=$o{overlap_coverage}", "max_aln=$o{max_alignment_num_for_each_gene_region}");
     &run_stage(
-        name => "d.miniprot", sig => $sig, reset_dirs => [$dir], outputs => [$gff3, $raw, $aln],
+        name => "d.miniprot",
+        levels => [
+            { desc => "the input files or the miniprot alignment parameters",
+              sig  => "prot=$prot_fp|genome=$genome_fp|genetic_code=$o{genetic_code}|max_intron=$max_intron_txt|options=$mp_opt",
+              reset_dirs => [$dir] },
+            { desc => "--overlap_coverage / --max_alignment_num_for_each_gene_region (the miniprot alignment is reused)",
+              sig  => "overlap=$o{overlap_coverage}|max_aln=$o{max_alignment_num_for_each_gene_region}" },
+        ],
+        outputs => [$gff3, $raw, $aln],
         cmds => [ "$bin_path/homolog_prediction.04miniprot2GeneModels --cpu $o{cpu} --genetic_code $o{genetic_code} --overlap_coverage $o{overlap_coverage} --gene_prefix miniprot --max_alignment_num_for_each_gene_region $o{max_alignment_num_for_each_gene_region} --output_raw_GFF3 $raw --output_alignment_GFF3 $aln --tmp_dir $dir$extra $input_genome $input_protein > $gff3 2> $tmp_dir/d.miniprot.log" ],
     );
     push @sources, { key => "miniprot", label => "miniprot", gff3 => $gff3, raw => $raw, aln => $aln };
@@ -342,15 +547,24 @@ if ($sel{spaln}) {
     $extra .= " --max_intron_size $o{max_intron_size}" if defined $o{max_intron_size};
     $extra .= " --species " . &shell_quote($o{spaln_species}) if defined $o{spaln_species} && $o{spaln_species} ne "";
     $extra .= " " . &shell_quote("--spaln_options=$o{spaln_options}") if defined $o{spaln_options} && $o{spaln_options} ne "";
+    my $sp_species = defined $o{spaln_species} ? $o{spaln_species} : "";
+    my $sp_opt     = defined $o{spaln_options} ? $o{spaln_options} : "";
 
+    # 05脚本分别用spaln_format.ok（基因组格式化，只依赖基因组）和spaln.ok（比对，依赖蛋白和比对参数）跳过耗时步骤。
     print STDERR "\n5. [spaln source] aligning homolog proteins and predicting gene models through spaln.\n";
-    my $sig = join("|", $prot_sig, $genome_sig, "genetic_code=$o{genetic_code}",
-                   "max_intron=" . (defined $o{max_intron_size} ? $o{max_intron_size} : "default"),
-                   "species=" . (defined $o{spaln_species} ? $o{spaln_species} : ""),
-                   "options=" . (defined $o{spaln_options} ? $o{spaln_options} : ""),
-                   "overlap=$o{overlap_coverage}", "max_aln=$o{max_alignment_num_for_each_gene_region}");
     &run_stage(
-        name => "e.spaln", sig => $sig, reset_dirs => [$dir], outputs => [$gff3, $raw, $aln],
+        name => "e.spaln",
+        levels => [
+            { desc => "the genome file",
+              sig  => "genome=$genome_fp",
+              reset_dirs => [$dir] },
+            { desc => "the protein file or the spaln alignment parameters (the formatted genome is reused)",
+              sig  => "prot=$prot_fp|genetic_code=$o{genetic_code}|max_intron=$max_intron_txt|species=$sp_species|options=$sp_opt",
+              reset_files => ["$dir/spaln.ok", "$dir/spaln.gff"] },
+            { desc => "--overlap_coverage / --max_alignment_num_for_each_gene_region (the spaln alignment is reused)",
+              sig  => "overlap=$o{overlap_coverage}|max_aln=$o{max_alignment_num_for_each_gene_region}" },
+        ],
+        outputs => [$gff3, $raw, $aln],
         cmds => [ "$bin_path/homolog_prediction.05spaln2GeneModels --cpu $o{cpu} --genetic_code $o{genetic_code} --overlap_coverage $o{overlap_coverage} --gene_prefix spaln --max_alignment_num_for_each_gene_region $o{max_alignment_num_for_each_gene_region} --output_raw_GFF3 $raw --output_alignment_GFF3 $aln --tmp_dir $dir$extra $input_genome $input_protein > $gff3 2> $tmp_dir/e.spaln.log" ],
     );
     push @sources, { key => "spaln", label => "spaln", gff3 => $gff3, raw => $raw, aln => $aln };
@@ -378,7 +592,7 @@ my $clear_extra = "--genome $input_genome --gene_prefix $o{gene_prefix} --covera
 # 5.5 若设置了--method_comparison_stats，两两比较各来源的基因模型
 #     （仅用于评估各方法预测效果及彼此一致性，不影响最终整合结果）
 ########################################################################
-&run_pairwise_comparisons(\@sources, $merge_extra, $input_genome, $tmp_dir, $o{method_comparison_stats});
+&run_pairwise_comparisons(\@sources, $merge_extra, $input_genome, $genome_fp, $tmp_dir, $o{method_comparison_stats});
 
 ########################################################################
 # 5. 整合各来源的基因模型
@@ -393,13 +607,21 @@ print STDERR "\n6. merging the gene models from " . scalar(@sources) . " source(
         push @cmds, "$bin_path/GFF3_merging_and_removing_redundancy $merge_extra $input_genome @files > $clear_in 2> $tmp_dir/f.merge.log";
     }
     push @cmds, "$bin_path/GFF3Clear --no_attr_add $clear_extra $clear_in > $res_dir/all.clear.gff3 2> $tmp_dir/f.clear.log";
-    my $sig = join("|", (map { &file_sig($_) } @files), $genome_sig, "overlap=$o{overlap_coverage}",
+    # 各来源结果按内容指纹记录：--method改变导致来源集合变化，或某来源结果重新生成后内容变化，都会触发重新整合。
+    my $sig = join("|", (map { "$_->{key}=" . &file_fp($_->{gff3}) } @sources),
+                   "genome=$genome_fp", "overlap=$o{overlap_coverage}",
                    "genetic_code=$o{genetic_code}", "prefix=$o{gene_prefix}");
-    &run_stage(name => "f.merge", sig => $sig, reset_dirs => [], outputs => ["$res_dir/all.clear.gff3"], cmds => \@cmds);
+    &run_stage(
+        name => "f.merge",
+        levels => [ { desc => "the gene models of the sources or the merging parameters", sig => $sig } ],
+        outputs => ["$res_dir/all.clear.gff3"],
+        cmds => \@cmds,
+    );
 }
 
 ########################################################################
 # 6. 使用intron的Supported_times过滤C和D类基因模型（分来源计算阈值）
+#    该步骤及其后的最终GFF3Clear都很快，每次运行都会按当前来源和参数重新进行。
 ########################################################################
 print STDERR "\n7. filtering class C and D gene models by the Supported_times of introns.\n";
 my %threshold;
@@ -421,6 +643,7 @@ foreach my $c (qw/C D/) {
 
 # 再次GFF3Clear，重新对基因编号
 my $final_gff3 = "$res_dir/final.gff3";
+unlink $final_gff3 if -e $final_gff3;
 if ($n_after > 0) {
     &run_cmd("$bin_path/GFF3Clear --no_attr_add $clear_extra $filtered_gff3 > $final_gff3 2> $tmp_dir/g.clear_final.log");
 }
@@ -434,12 +657,16 @@ else {
 ########################################################################
 if (defined $o{output_raw_GFF3}) {
     print STDERR "\n8. merging the raw GFF3 files (without filling the ends of gene models).\n";
-    my @raws = grep { -s $_ } map { $_->{raw} } @sources;
+    my @raw_sources = grep { -s $_->{raw} } @sources;
+    my @raws = map { $_->{raw} } @raw_sources;
     if (@raws) {
-        my $sig = join("|", (map { &file_sig($_) } @raws), $genome_sig, "overlap=$o{overlap_coverage}",
-                       "genetic_code=$o{genetic_code}", "prefix=$o{gene_prefix}", $o{output_raw_GFF3});
+        my $sig = join("|", (map { "$_->{key}=" . &file_fp($_->{raw}) } @raw_sources), "genome=$genome_fp",
+                       "overlap=$o{overlap_coverage}", "genetic_code=$o{genetic_code}", "prefix=$o{gene_prefix}",
+                       "out=$o{output_raw_GFF3}");
         &run_stage(
-            name => "h.merge_raw", sig => $sig, reset_dirs => [], outputs => [$o{output_raw_GFF3}],
+            name => "h.merge_raw",
+            levels => [ { desc => "the raw GFF3 files, the merging parameters or the output path", sig => $sig } ],
+            outputs => [$o{output_raw_GFF3}],
             cmds => [
                 "$bin_path/GFF3_merging_and_removing_redundancy $merge_extra $input_genome @raws > $res_dir/raw.merged.gff3 2> $tmp_dir/h.merge_raw.log",
                 "$bin_path/GFF3Clear $clear_extra $res_dir/raw.merged.gff3 > $o{output_raw_GFF3} 2> $tmp_dir/h.clear_raw.log",
@@ -472,6 +699,7 @@ foreach my $g (&read_gff3_genes($final_gff3)) {
 print STDERR "\nFinally, total $total gene models were divided into 4 classes : A, $num_class{A}; B, $num_class{B}; C, $num_class{C}; D, $num_class{D}.\n";
 print STDERR "Source of gene models: " . (join("; ", map { "$_, $num_source{$_}" } sort keys %num_source) || "none") . "\n";
 print STDERR "All the gene models before intron filtering were kept in $res_dir/all.clear.gff3.\n";
+print STDERR "Temporary directory $tmp_dir keeps all intermediate results, it can be reused with --tmp_dir when changing --method or other parameters.\n";
 print STDERR "\n#################### $prog_name | Done ####################\n";
 
 open my $final_fh, "<", $final_gff3 or die "Error: can not open file $final_gff3, $!\n";
@@ -539,18 +767,41 @@ sub read_text {
     return $t;
 }
 
+# 原子写文件：先写临时文件再rename，避免程序在写入过程中被中断而留下不完整的记录文件。
 sub write_text {
     my ($file, $text) = @_;
-    open my $fh, ">", $file or die "Error: can not create file $file, $!\n";
+    my $tmp = "$file.tmp$$";
+    open my $fh, ">", $tmp or die "Error: can not create file $tmp, $!\n";
     print $fh $text;
-    close $fh;
+    close $fh or die "Error: can not write file $tmp, $!\n";
+    rename $tmp, $file or die "Error: can not rename $tmp to $file, $!\n";
 }
 
-# 文件签名：路径、大小和修改时间。用于判断输入文件或上游结果是否发生了变化。
-sub file_sig {
+# 文件内容指纹：文件大小 + 分布在全文件的16个64KB数据块的MD5（小于1MB的文件对全文取MD5）。
+# 不依赖修改时间和路径：复制、touch或移动文件不会导致已完成的步骤被重算，内容变化则会被检测到。
+sub file_fp {
     my ($f) = @_;
-    my @st = stat($f);
-    return "$f:" . (@st ? "$st[7]:$st[9]" : "missing");
+    return "missing" unless -e $f;
+    my $size = (-s $f) || 0;
+    my $md5 = Digest::MD5->new;
+    open my $fh, "<:raw", $f or die "Error: can not open file $f, $!\n";
+    my ($blk, $n) = (65536, 16);
+    if ($size <= $blk * $n) {
+        local $/;
+        my $c = <$fh>;
+        $md5->add(defined $c ? $c : "");
+    }
+    else {
+        foreach my $i (0 .. $n - 1) {
+            my $pos = int(($size - $blk) * $i / ($n - 1));
+            seek($fh, $pos, 0);
+            my $buf;
+            my $r = read($fh, $buf, $blk);
+            $md5->add($buf) if $r;
+        }
+    }
+    close $fh;
+    return "$size:" . $md5->hexdigest;
 }
 
 sub count_data_lines {
@@ -577,42 +828,123 @@ sub count_genes {
     return $n;
 }
 
+# 运行一条shell命令。子进程单独成一个进程组，收到中断信号时可以把它及其所有后代进程一起终止，
+# 避免中断后残留的mmseqs/exonerate等进程继续写临时文件，影响下一次续跑。
 sub run_cmd {
     my ($cmd) = @_;
     print STDERR localtime() . ": CMD: $cmd\n";
-    my $rc = system($cmd);
-    if ($rc != 0) {
-        my $status = $?;
+    my $pid = fork();
+    die "Error: can not fork: $!\n" unless defined $pid;
+    if ($pid == 0) {
+        POSIX::setpgid(0, 0);
+        exec("/bin/sh", "-c", $cmd) or POSIX::_exit(127);
+    }
+    POSIX::setpgid($pid, $pid);    # 与子进程中的setpgid互为备份，避免竞争；失败可忽略
+    $child_pid = $pid;
+    my $r;
+    do { $r = waitpid($pid, 0); } while ($r == -1 && $!{EINTR});
+    my $status = $?;
+    $child_pid = undef;
+    die "Error: lost track of the command: $cmd\n" if $r != $pid;
+    if ($status != 0) {
         die sprintf("Error: failed to execute (exit code %d, signal %d): %s\n", $status >> 8, $status & 127, $cmd);
     }
 }
 
-# 以"步骤"为单位执行命令，支持断点续跑：
-#  - name.sig 记录步骤开始时的参数/输入文件签名，name.ok 记录步骤已经成功完成；
-#  - 签名与上次不一致时，删除.ok标记和reset_dirs中的中间目录（其中的结果已经过期），然后重新运行；
-#  - 签名一致且.ok存在且输出文件都在，则跳过；若上次中途失败（无.ok），则直接重新运行，由下游脚本自身的断点机制复用已完成的部分。
+sub terminate_child {
+    my $pid = $child_pid or return;
+    kill 'TERM', -$pid;
+    my $gone = 0;
+    foreach (1 .. 50) {
+        my $r = waitpid($pid, WNOHANG);
+        if ($r == $pid || $r == -1) { $gone = 1; last; }
+        select(undef, undef, undef, 0.2);
+    }
+    kill 'KILL', -$pid;
+    waitpid($pid, 0) unless $gone;
+    $child_pid = undef;
+}
+
+# 以"步骤"为单位执行命令，支持断点续跑。
+#  name    步骤名称，记录文件为 $tmp_dir/name.sig（签名）和 $tmp_dir/name.ok（完成标记）。
+#  levels  签名分层，按"越靠前越耗时/越上游"排列。每层包含：
+#            sig         该层的签名字符串（输入文件指纹、影响结果的参数等，不含换行）；
+#            desc        该层变化时显示的说明；
+#            reset_dirs  该层签名变化时要删除的中间目录；
+#            reset_files 该层签名变化时要删除的中间文件（用于让下游脚本自身的断点标记失效）。
+#          只有签名发生变化的层，才删除它对应的中间结果；未变化层的中间结果保留，由下游脚本自身的断点机制复用。
+#          任何一层变化都会使该步骤重新运行。
+#  outputs 步骤应生成的输出文件；重新运行前先删除，避免遗留上次中断时写了一半的文件。
+#  cmds    要执行的命令列表。
+# 中断安全性：先执行删除，再原子写入新签名，最后运行命令，成功后才写.ok。
+#   - 在删除过程中中断：旧签名还在，下次运行会重新检测到变化并再次删除（删除操作是幂等的）；
+#   - 在运行命令过程中中断：签名已是最新且没有.ok，下次运行不会再删除中间结果，命令从其内部可续跑的位置继续。
 sub run_stage {
     my (%a) = @_;
-    my $ok_file  = "$tmp_dir/$a{name}.ok";
-    my $sig_file = "$tmp_dir/$a{name}.sig";
-    if (-e $sig_file && &read_text($sig_file) ne "$a{sig}\n") {
-        print STDERR "Parameters or input files of step $a{name} changed since the last run, it will be recomputed.\n";
-        unlink $ok_file;
-        remove_tree($_) foreach @{ $a{reset_dirs} || [] };
+    my $name     = $a{name};
+    my $ok_file  = "$tmp_dir/$name.ok";
+    my $sig_file = "$tmp_dir/$name.sig";
+    my @levels   = @{ $a{levels} };
+    my @new_sig  = map { $_->{sig} } @levels;
+    my $record   = "#v2\n" . join("\n", @new_sig) . "\n";
+
+    # 与上次记录比较。没有可信的历史记录（首次运行，或旧版本程序生成的记录格式）时，视为所有层都发生了变化。
+    my $had_record_file = -e $sig_file ? 1 : 0;
+    my $known = 0;
+    my @changed = (1) x @levels;
+    if ($had_record_file) {
+        my $old = &read_text($sig_file);
+        if ($old =~ s/^#v2\n//) {
+            my @old_sig = split /\n/, $old;
+            if (@old_sig == @new_sig) {
+                @changed = map { $old_sig[$_] eq $new_sig[$_] ? 0 : 1 } 0 .. $#new_sig;
+                $known = 1;
+            }
+        }
     }
-    &write_text($sig_file, "$a{sig}\n");
-    my $done = -e $ok_file ? 1 : 0;
-    foreach my $f (@{ $a{outputs} || [] }) { $done = 0 unless -e $f; }
+
+    my @changed_idx = grep { $changed[$_] } 0 .. $#levels;
+    if (@changed_idx) {
+        if ($known) {
+            foreach my $i (@changed_idx) {
+                my $lv = $levels[$i];
+                my $n_reset = scalar(@{ $lv->{reset_dirs} || [] }) + scalar(@{ $lv->{reset_files} || [] });
+                print STDERR "Step $name: $lv->{desc} changed since the last run, "
+                    . ($n_reset ? "its outdated intermediate results are discarded and recomputed.\n"
+                                : "it will be run again (intermediate results that are still valid are reused).\n");
+            }
+        }
+        elsif ($had_record_file) {
+            print STDERR "Step $name: the record of the last run was generated by an older version and can not be verified, this step is recomputed.\n";
+        }
+        # 没有可信记录时@changed全为1，所有层的中间结果都会被清理
+        foreach my $i (@changed_idx) {
+            my $lv = $levels[$i];
+            remove_tree($_) foreach grep { -e $_ } @{ $lv->{reset_dirs} || [] };
+            unlink $_       foreach grep { -e $_ } @{ $lv->{reset_files} || [] };
+        }
+        unlink $ok_file if -e $ok_file;
+    }
+    &write_text($sig_file, $record);
+
+    my $done = 0;
+    if (!@changed_idx && -e $ok_file && &read_text($ok_file) eq $record) {
+        $done = 1;
+        foreach my $f (@{ $a{outputs} || [] }) { $done = 0 unless -e $f; }
+    }
     if ($done) {
-        print STDERR "CMD(Skipped, already finished): $_\n" foreach @{ $a{cmds} };
+        print STDERR "Step $name: already finished, skipped.\n";
+        print STDERR "CMD(Skipped): $_\n" foreach @{ $a{cmds} };
         return 0;
     }
-    unlink $ok_file;
+
+    unlink $ok_file if -e $ok_file;
+    unlink $_ foreach grep { -e $_ } @{ $a{outputs} || [] };
     &run_cmd($_) foreach @{ $a{cmds} };
     foreach my $f (@{ $a{outputs} || [] }) {
-        die "Error: the expected output file $f was not generated in step $a{name}.\n" unless -e $f;
+        die "Error: the expected output file $f was not generated in step $name.\n" unless -e $f;
     }
-    &write_text($ok_file, "$a{sig}\n");
+    &write_text($ok_file, $record);
     return 1;
 }
 
@@ -779,20 +1111,21 @@ sub merge_alignment_gff3 {
         or $a->{id} cmp $b->{id}
         or $a->{text} cmp $b->{text}
     } @features;
-    open my $ofh, ">", $out or die "Error: can not create file $out, $!\n";
-    print $ofh "##gff-version 3\n";
-    print $ofh "$_->{text}\n" foreach @features;
-    close $ofh;
+    &write_text($out, "##gff-version 3\n" . join("", map { "$_->{text}\n" } @features));
     return scalar(@features);
 }
 
 # 对@sources中的每一对来源，调用GFF3_merging_and_removing_redundancy命令的--compare_2gff3_stats参数进行两两比较，
 # 解析其统计结果并汇总输出到 $out_file（由--method_comparison_stats指定）。仅当$out_file已定义、且来源数>=2时执行；
 # 该步骤不会影响主流程整合结果——两两比较产生的合并GFF3和详细逐基因日志仅保留在$tmp_dir中供参考。
+# 每一对比较作为独立的断点步骤：两个来源的结果内容和相关参数都没有变化时，续跑时直接复用已有的统计文件。
 sub run_pairwise_comparisons {
-    my ($sources_ref, $merge_extra, $genome, $tmp_dir, $out_file) = @_;
+    my ($sources_ref, $merge_extra, $genome, $genome_fp, $tmp_dir, $out_file) = @_;
     return unless defined $out_file;
-    return unless @$sources_ref >= 2;
+    unless (@$sources_ref >= 2) {
+        print STDERR "\nWarning: --method_comparison_stats needs at least 2 sources with gene models, the comparison is skipped.\n";
+        return;
+    }
 
     print STDERR "\n5.5. comparing gene models between each pair of sources (for method evaluation).\n";
     my @summary;
@@ -805,7 +1138,14 @@ sub run_pairwise_comparisons {
             my $merged_out = "$tmp_dir/compare.$tag.merged.gff3";
             my $log        = "$tmp_dir/compare.$tag.log";
             my $cmd = "$bin_path/GFF3_merging_and_removing_redundancy $merge_extra --compare_2gff3_stats $stat_file $genome $sA->{gff3} $sB->{gff3} > $merged_out 2> $log";
-            &run_cmd($cmd);
+            my $sig = join("|", "$sA->{key}=" . &file_fp($sA->{gff3}), "$sB->{key}=" . &file_fp($sB->{gff3}),
+                           "genome=$genome_fp", "overlap=$o{overlap_coverage}", "genetic_code=$o{genetic_code}");
+            &run_stage(
+                name => "compare.$tag",
+                levels => [ { desc => "the gene models of $sA->{label} / $sB->{label} or the comparison parameters", sig => $sig } ],
+                outputs => [$stat_file, $merged_out],
+                cmds => [$cmd],
+            );
             my $parsed = &parse_compare_stats($stat_file, $sA->{label}, $sB->{label});
             if ($parsed) {
                 $parsed->{stat_file} = $stat_file;
