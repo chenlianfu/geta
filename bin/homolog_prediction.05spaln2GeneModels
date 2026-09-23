@@ -1,0 +1,1037 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+use Getopt::Long;
+use Cwd qw/abs_path getcwd cwd/;
+use File::Basename;
+use File::Spec;
+
+my $binPath = abs_path(dirname($0));
+
+my $usage = <<USAGE;
+Usage:
+    $0 [options] genome.fasta homolog.fasta > out.geneModels.gff3
+
+    本程序调用spaln（推荐使用Spaln3，即3.0版本及以上）将同源蛋白和参考基因组进行比对，再进行去冗余处理，最后将基因模型分为四类：
+    （A）对同源蛋白覆盖100%，比对中没有移码和内部终止密码子，且起始密码子和终止密码子和同源蛋白匹配一致（无需强制补齐即为完整基因模型）；excellent gene models
+    （B）对同源蛋白覆盖不小于80%且强制补齐后完整基因模型长度不小于同源蛋白序列长度的80%；good gene models
+    （C）对同源蛋白覆盖不小于40%且强制补齐的完整基因模型长度不小于同源蛋白序列长度的40%；fair gene models
+    （D）对同源蛋白覆盖小于40%、或强制补齐的完整基因模型长度小于同源蛋白序列长度的40%、或不能强制补齐的基因模型。poor gene models
+    本程序在临时文件夹下生成文件final_all.gff3，包含所有的基因模型。在标准输出中输出最终结果，可以选择不输出第三类或第四类基因模型。
+
+    程序运行流程：
+    (0) 检测本程序依赖的spaln命令能否在终端直接运行，检测依赖的GFF3_merging_and_removing_redundancy、fillingEndsOfGeneModels和GFF3Clear命令在同目录下是否存在且可执行。
+    (1) 在临时目录中建立参考基因组序列的软链接 genome.fa，调用 spaln 命令设置 -Wgenome -KP -t<int> -po 参数对基因组序列进行格式化（生成供蛋白质查询序列使用的 genome.bkp、genome.idx、genome.seq 等文件）；若设置了 --max_gene_size 参数，则将其参数值传递给 spaln 格式化时的 -XG 参数。运行完毕后生成 spaln_format.ok 标记文件。
+    (2) 调用 spaln 命令设置 -Q7 -O0 -A<int> -t<int> -C<int> -pq -pF -dgenome 参数将同源蛋白比对到参考基因组上，得到GFF3格式结果文件 spaln.gff。其中 -Q7 表示基因组定位加启发式比对，-O0 表示输出Gff3 gene格式，-A 参数值来自本程序的 --dp_mode 参数，-t 参数值来自本程序的 --cpu 参数，-C 参数值来自本程序的 --genetic_code 参数，-pq 屏蔽警告信息，-pF 输出完整的蛋白序列名称；若设置了 --species 参数，则将其值传递给 -T 参数以使用物种特异的参数集；若 --max_loci 参数值大于1，则将其值传递给 -M 参数，使每个同源蛋白最多比对到多个基因座上；若设置了 --max_intron_size 参数，则将其值传递给 -yM 参数；--spaln_options 参数的值会原样追加到 spaln 命令中。spaln 默认在CDS中包含终止密码子。运行完毕后生成 spaln.ok 标记文件；若复用同一临时目录重新运行，检测到 spaln_format.ok 或 spaln.ok 后会跳过对应步骤。
+    (3) 对 spaln.gff 文件的格式进行修改，得到标准的GFF3格式文件 spaln.gff3：每个比对结果生成 gene、mRNA、exon、CDS 和 intron 信息；根据CDS的Target信息得到同源蛋白匹配区间；根据基因组序列逐个CDS按其phase进行翻译，统计内部终止密码子数量，并根据相邻CDS的phase是否连续统计移码数量；因移码导致相互重叠或首尾相接的CDS片段被合并；在gene和mRNA的第9列记录同源蛋白名称、长度、匹配区间、覆盖度、移码数量、内部终止密码子数量和比对得分；intron的第9列记录所有比对结果中支持该intron的次数（Supported_times）。
+    (4) 调用GFF3_merging_and_removing_redundancy程序对 spaln.gff3 进行分析，去除冗余基因模型，得到 spaln_filtered.gff3 文件。
+    (5) 调用fillingEndsOfGeneModels命令对基因模型进行强制补齐，得到 spaln_filtered_filled.gff3 文件。
+    (6) 将基因模型分成四类，并在GFF3文件gene和mRNA行第9列进行标注成四种类型：Type=excellent_gene_models_predicted_by_homolog、Type=good_gene_models_predicted_by_homolog、Type=fair_gene_models_predicted_by_homolog或Type=poor_gene_models_predicted_by_homolog。分类规则：先根据对同源蛋白的覆盖度进行初步分类；无需补齐即完整的基因模型保持初步分类；进行过补齐的基因模型，根据补齐后CDS长度 / (同源蛋白长度 * 3) 的比值降级为B、C或D类（A类和B类可降级为B、C或D类，C类可降级为D类）；不能补齐完整的基因模型归为D类。四类基因模型分别输出到临时目录的 A_out.gff3、B_out.gff3、C_out.gff3 和 D_out.gff3 文件中。
+    (7) 调用GFF3Clear程序对格式进行修改，按A、B、C、D的顺序输入四类基因模型（类型更好的基因模型在CDS重叠冲突时优先保留），设置基因ID前缀为spaln，得到 final_all.gff3 文件，并将结果输出到标准输出。默认是输出所有四种类型的基因模型，若是添加--no_fair_gene_models或--no_poor_gene_models，则不输出第三类或第四类基因模型。
+    (8) 若设置了 --output_raw_GFF3 参数，则将强制补齐前的去冗余基因模型输出到指定文件中，包含所有四种类型的基因模型，同时也在其GFF3文件第9列标注四种类型（与最终分类结果一致）。
+
+    --threshold_homolog_coverage_good <float>    default: 0.8
+    --threshold_homolog_coverage_fair <float>    default: 0.4
+    设置对同源蛋白覆盖度阈值。若基因模型对同源蛋白的覆盖率不低于--threshold_homolog_coverage_good，则评估为good gene models；若基因模型对同源蛋白的覆盖率不低于--threshold_homolog_coverage_fair，则评估成fair gene models。
+
+    --genetic_code <int>    default: 1
+    设置遗传密码。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。该参数值传递给spaln的-C参数，并用于统计内部终止密码子、设置对基因模型去冗余和强制补齐时的起始密码子和终止密码子。
+
+    --species <string>    default: None
+    设置spaln使用的物种特异参数集，传递给spaln的-T参数。其值为spaln安装目录下table文件夹中的子目录名，或table/gnm2tab文件中第1列或第3列的物种名（例如 arabidopsis_thaliana、zea_mays 等）。建议设置为与目标物种亲缘关系最近的物种；若不设置，spaln使用通用（generic）参数集。
+
+    --dp_mode <int>    default: 1
+    设置spaln动态规划的计算模式，传递给spaln的-A参数，取值0~7。0：标量计算，最精确但最慢；1：SIMD向量化计算并使用精确的intron长度分布；2：SIMD向量化计算并使用粗粒度的intron长度分布；3：SIMD向量化计算并使用恒定的intron罚分，最快但精度最低；4~7分别与0~3对应，但仅使用单中间点的单向Hirschberg算法。
+
+    --max_loci <int>    default: 4
+    设置每个同源蛋白最多输出的基因座数量。当该值大于1时，传递给spaln的-M参数；当该值为1时，不添加-M参数，每个同源蛋白仅输出一个基因座（注意spaln的-M1含义是对未比对上的查询区域再次搜索，与此不同）。
+
+    --max_intron_size <int>    default: None
+    设置最大intron长度，传递给spaln的-yM参数。若不设置，spaln根据intron长度分布自动处理。
+
+    --max_gene_size <int>    default: None
+    设置基因组上最长基因的长度，在格式化基因组时传递给spaln的-XG参数。若不设置，spaln根据基因组大小自动推算。
+
+    --spaln_options <string>    default: None
+    设置额外传递给spaln比对命令的参数，需使用引号包裹，例如 --spaln_options "-LS -yX2"。
+
+    --overlap_coverage <float>    default: 0.30
+    设置CDS重叠覆盖度阈值，传递给GFF3_merging_and_removing_redundancy命令的--overlap_coverage参数和GFF3Clear命令的--coverage参数，用于去除CDS区有重叠的冗余基因模型。
+
+    --gene_prefix <string>    default: spaln
+    设置最终输出结果中基因ID的前缀，传递给GFF3Clear命令的--gene_prefix参数。
+
+    --tmp_dir <string>    default: tmp_\$date\$pid
+    程序运行时临时文件夹名称。
+
+    --no_fair_gene_models    default: None
+    添加该参数后，程序不在标准输出中给出第三类fair gene models。在临时文件目录下的final_all.gff3文件中依然保留所有四种类型的基因模型。
+
+    --no_poor_gene_models    default: None
+    添加该参数后，程序不在标准输出中给出第四类poor gene models。在临时文件目录下的final_all.gff3文件中依然保留所有四种类型的基因模型。
+
+    --output_raw_GFF3 <string>    default: None
+    让程序输出未进行强制末端填补的GFF3文件。该结果是同源蛋白预测的原始结果（已去冗余）。
+
+    --output_alignment_GFF3 <string>    default: None
+    让程序输出一个GFF3格式的同源蛋白比对文件，包含同源蛋白对基因组序列的比对信息。程序将同一条链上相互重叠的spaln比对结果合并为一个基因区域，一个基因区域输出每个同源蛋白的最优（比对得分最高）比对信息。
+
+    --max_alignment_num_for_each_gene_region <int>    default: 5
+    当输出GFF3格式同源蛋白比对文件时，每个基因区域最多输出5个同源蛋白的结果。
+
+    --cpu <int>    default: 1
+    设置CPU线程数。该参数值将传递给spaln、GFF3_merging_and_removing_redundancy、fillingEndsOfGeneModels和GFF3Clear命令。
+
+    --help    default: None
+    display this help and exit.
+
+    本程序的运行需要调用终端中的spaln命令，以及其同目录下的GFF3_merging_and_removing_redundancy、fillingEndsOfGeneModels和GFF3Clear命令。若修改过spaln的table目录位置，请设置环境变量ALN_TAB。
+
+USAGE
+if (@ARGV==0){die $usage}
+
+my ($help_flag, $threshold_homolog_coverage_good, $threshold_homolog_coverage_fair, $genetic_code, $species, $dp_mode, $max_loci, $max_intron_size, $max_gene_size, $spaln_options, $overlap_coverage, $gene_prefix, $tmp_dir, $no_fair_gene_models, $no_poor_gene_models, $output_raw_GFF3, $output_alignment_GFF3, $max_alignment_num_for_each_gene_region, $cpu);
+GetOptions(
+    "help" => \$help_flag,
+    "threshold_homolog_coverage_good:f" => \$threshold_homolog_coverage_good,
+    "threshold_homolog_coverage_fair:f" => \$threshold_homolog_coverage_fair,
+    "genetic_code:i" => \$genetic_code,
+    "species:s" => \$species,
+    "dp_mode:i" => \$dp_mode,
+    "max_loci:i" => \$max_loci,
+    "max_intron_size:i" => \$max_intron_size,
+    "max_gene_size:i" => \$max_gene_size,
+    "spaln_options:s" => \$spaln_options,
+    "overlap_coverage:f" => \$overlap_coverage,
+    "gene_prefix:s" => \$gene_prefix,
+    "tmp_dir:s" => \$tmp_dir,
+    "no_fair_gene_models" => \$no_fair_gene_models,
+    "no_poor_gene_models" => \$no_poor_gene_models,
+    "output_raw_GFF3:s" => \$output_raw_GFF3,
+    "output_alignment_GFF3:s" => \$output_alignment_GFF3,
+    "max_alignment_num_for_each_gene_region:i" => \$max_alignment_num_for_each_gene_region,
+    "cpu:i" => \$cpu,
+) or die $usage;
+if ( $help_flag ) { die $usage }
+die "Error: 需要且仅需要输入 genome.fasta 和 homolog.fasta 两个文件。\n\n$usage" unless @ARGV == 2;
+
+########## 设置参数默认值并检查参数 ##########
+$threshold_homolog_coverage_good = 0.8 unless defined $threshold_homolog_coverage_good;
+$threshold_homolog_coverage_fair = 0.4 unless defined $threshold_homolog_coverage_fair;
+die "Error: --threshold_homolog_coverage_good 和 --threshold_homolog_coverage_fair 的取值范围应为 (0, 1]。\n" unless ( $threshold_homolog_coverage_good > 0 && $threshold_homolog_coverage_good <= 1 && $threshold_homolog_coverage_fair > 0 && $threshold_homolog_coverage_fair <= 1 );
+die "Error: --threshold_homolog_coverage_fair 的值不能大于 --threshold_homolog_coverage_good 的值。\n" if $threshold_homolog_coverage_fair > $threshold_homolog_coverage_good;
+$genetic_code ||= 1;
+$dp_mode = 1 unless defined $dp_mode;
+die "Error: --dp_mode 的取值范围应为 0~7。\n" unless ( $dp_mode =~ m/^\d+$/ && $dp_mode >= 0 && $dp_mode <= 7 );
+$max_loci = 4 unless defined $max_loci;
+die "Error: --max_loci 的值应不小于1。\n" if $max_loci < 1;
+$max_intron_size = undef if ( defined $max_intron_size && $max_intron_size <= 0 );
+$max_gene_size = undef if ( defined $max_gene_size && $max_gene_size <= 0 );
+$species = undef if ( defined $species && $species eq "" );
+$overlap_coverage = 0.3 unless defined $overlap_coverage;
+die "Error: --overlap_coverage 的取值范围应为 [0, 1]。\n" unless ( $overlap_coverage >= 0 && $overlap_coverage <= 1 );
+$gene_prefix = "spaln" unless ( defined $gene_prefix && $gene_prefix ne "" );
+$max_alignment_num_for_each_gene_region ||= 5;
+$cpu ||= 1;
+$cpu = 1 if $cpu < 1;
+
+foreach ( @ARGV ) { die "Error: 输入文件 $_ 不存在。\n" unless -e $_; }
+my $input_genome = abs_path($ARGV[0]);
+my $input_homolog = abs_path($ARGV[1]);
+$output_raw_GFF3 = File::Spec->rel2abs($output_raw_GFF3) if $output_raw_GFF3;
+$output_alignment_GFF3 = File::Spec->rel2abs($output_alignment_GFF3) if $output_alignment_GFF3;
+
+my $date = `date +%Y%m%d%H%M%S`; chomp($date);
+$tmp_dir ||= "tmp_$date$$";
+$tmp_dir = File::Spec->rel2abs($tmp_dir);
+mkdir $tmp_dir unless -e $tmp_dir;
+die "Error: 不能创建临时文件夹 $tmp_dir 。\n" unless -d $tmp_dir;
+
+my %type_name = (
+    "A" => "excellent_gene_models_predicted_by_homolog",
+    "B" => "good_gene_models_predicted_by_homolog",
+    "C" => "fair_gene_models_predicted_by_homolog",
+    "D" => "poor_gene_models_predicted_by_homolog",
+);
+
+########## (0) 检测依赖程序 ##########
+if ( system("command -v spaln > /dev/null 2>&1") != 0 ) {
+    die "Error: 在终端中不能直接运行 spaln 命令，请确认 spaln 已安装并已加入 PATH 环境变量。\n";
+}
+foreach my $program ( qw/GFF3_merging_and_removing_redundancy fillingEndsOfGeneModels GFF3Clear/ ) {
+    die "Error: 在程序所在目录 $binPath 中未找到依赖的命令 $program 。\n" unless -e "$binPath/$program";
+    die "Error: 程序所在目录 $binPath 中的命令 $program 没有可执行权限，请使用 chmod +x 添加可执行权限。\n" unless -x "$binPath/$program";
+}
+print STDERR (localtime) . ": 依赖程序检测通过：spaln、$binPath/GFF3_merging_and_removing_redundancy、$binPath/fillingEndsOfGeneModels、$binPath/GFF3Clear 。\n";
+print STDERR "Warning: 未设置 --species 参数，spaln 将使用通用（generic）参数集；设置与目标物种亲缘关系最近的物种参数集可提高基因结构预测的准确性。\n" unless defined $species;
+
+# 根据遗传密码得到起始密码子和终止密码子
+my ($codon_ref, $start_codon_ref, $stop_codon_ref) = &codon_table();
+my $start_codon = join ",", sort keys %$start_codon_ref;
+my $stop_codon = join ",", sort keys %$stop_codon_ref;
+print STDERR "遗传密码 $genetic_code 对应的起始密码子为 $start_codon ，终止密码子为 $stop_codon 。\n";
+
+########## (1) 使用 spaln 格式化基因组序列 ##########
+my $db_name = "genome";
+my $genome_link = ( $input_genome =~ m/\.gz$/ ) ? "$tmp_dir/$db_name.fa.gz" : "$tmp_dir/$db_name.fa";
+my $cmdString;
+if ( -e "$tmp_dir/spaln_format.ok" && -e "$tmp_dir/$db_name.bkp" ) {
+    print STDERR (localtime) . ": 检测到 $tmp_dir/spaln_format.ok 文件，跳过 spaln 格式化基因组序列步骤。\n";
+}
+else {
+    unlink $genome_link if ( -e $genome_link || -l $genome_link );
+    symlink($input_genome, $genome_link) or die "Error: 不能创建基因组序列软链接 $genome_link, $!\n";
+    my $spaln_format_cpu = $cpu; $spaln_format_cpu = 16 if $spaln_format_cpu > 16;
+    $cmdString = "cd $tmp_dir && spaln -W$db_name -KP -t$spaln_format_cpu -po";
+    $cmdString .= " -XG$max_gene_size" if defined $max_gene_size;
+    $cmdString .= " $genome_link > $tmp_dir/spaln_format.log 2>&1";
+    print STDERR (localtime) . ": CMD: $cmdString\n";
+    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+    die "Error: spaln 格式化基因组序列后未生成 $tmp_dir/$db_name.bkp 文件，请检查 $tmp_dir/spaln_format.log 。\n" unless -e "$tmp_dir/$db_name.bkp";
+    open my $ok_fh, ">", "$tmp_dir/spaln_format.ok" or die "Can not create file $tmp_dir/spaln_format.ok, $!";
+    close $ok_fh;
+}
+
+########## (2) 运行 spaln 比对 ##########
+my $spaln_gff = "$tmp_dir/spaln.gff";
+$cmdString = "cd $tmp_dir && spaln -Q7 -O0 -A$dp_mode -t$cpu -C$genetic_code -pq -pF";
+$cmdString .= " -T$species" if defined $species;
+$cmdString .= " -M$max_loci" if $max_loci > 1;
+$cmdString .= " -yM$max_intron_size" if defined $max_intron_size;
+$cmdString .= " $spaln_options" if ( defined $spaln_options && $spaln_options ne "" );
+$cmdString .= " -d$db_name $input_homolog > $spaln_gff 2> $tmp_dir/spaln.log";
+if ( -e "$tmp_dir/spaln.ok" && -e $spaln_gff ) {
+    print STDERR (localtime) . ": 检测到 $tmp_dir/spaln.ok 文件，跳过 spaln 比对步骤。\n";
+}
+else {
+    print STDERR (localtime) . ": CMD: $cmdString\n";
+    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+    open my $ok_fh, ">", "$tmp_dir/spaln.ok" or die "Can not create file $tmp_dir/spaln.ok, $!";
+    close $ok_fh;
+}
+
+########## (3) 将 spaln 的 GFF3 结果转换为标准 GFF3 格式 ##########
+# 读取同源蛋白长度
+my ($homolog_length_ref, $homolog_alias_ref) = &read_homolog_length($input_homolog);
+print STDERR "从同源蛋白文件中读取了 " . scalar(keys %$homolog_length_ref) . " 条蛋白序列。\n";
+
+# 读取基因组序列，用于统计内部终止密码子和移码
+my %genome_seq = &read_genome($input_genome);
+
+# 第一遍读取：统计每个intron被所有比对结果支持的次数
+my %intron_support;
+&read_spaln_gff($spaln_gff, sub {
+    my $model = &normalize_alignment($_[0], 0) or return;
+    foreach my $intron ( @{$model->{"intron"}} ) {
+        $intron_support{"$model->{chr}\t$model->{strand}\t$intron->[0]\t$intron->[1]"} ++;
+    }
+});
+
+# 第二遍读取：输出标准GFF3格式文件
+my (@alignment, %aligned_homolog);
+my ($num_alignment, $num_complete_coverage, $num_internal_stop, $num_frameshift) = (0, 0, 0, 0);
+open my $gff3_fh, ">", "$tmp_dir/spaln.gff3" or die "Can not create file $tmp_dir/spaln.gff3, $!";
+&read_spaln_gff($spaln_gff, sub {
+    my $model = &normalize_alignment($_[0], 1) or return;
+    $num_alignment ++;
+    $num_complete_coverage ++ if $model->{"coverage"} == 1;
+    $num_internal_stop ++ if $model->{"internal_stop"} > 0;
+    $num_frameshift ++ if $model->{"frameshift"} > 0;
+    $aligned_homolog{$model->{"homolog"}} = 1;
+    print $gff3_fh &model2gff3($model, "SPaln$num_alignment", \%intron_support);
+    push @alignment, [$model->{"chr"}, $model->{"strand"}, $model->{"start"}, $model->{"end"}, $model->{"score_num"}, $model->{"homolog"}, $model->{"CDS"}] if $output_alignment_GFF3;
+});
+close $gff3_fh;
+%intron_support = ();
+%genome_seq = ();
+print STDERR (localtime) . ": spaln 共得到 $num_alignment 个比对结果，涉及 " . scalar(keys %aligned_homolog) . " 个同源蛋白；其中对同源蛋白覆盖100%的有 $num_complete_coverage 个，含内部终止密码子的有 $num_internal_stop 个，含移码的有 $num_frameshift 个；已转换为标准GFF3格式文件 $tmp_dir/spaln.gff3 。\n";
+%aligned_homolog = ();
+
+# 生成同源蛋白比对GFF3文件
+if ( $output_alignment_GFF3 ) {
+    my $region_num = &output_alignment_gff3(\@alignment, $output_alignment_GFF3, $max_alignment_num_for_each_gene_region);
+    @alignment = ();
+    print STDERR "生成了同源蛋白和参考基因组的比对GFF3文件 $output_alignment_GFF3 ，共 $region_num 个基因区域。\n";
+}
+
+########## (4) 去除冗余基因模型 ##########
+$cmdString = "$binPath/GFF3_merging_and_removing_redundancy --cpu $cpu --overlap_coverage $overlap_coverage --start_codon $start_codon --stop_codon $stop_codon --output_delete_info $tmp_dir/GFF3_merging_and_removing_redundancy.delete_info.txt $input_genome $tmp_dir/spaln.gff3 > $tmp_dir/spaln_filtered.gff3 2> $tmp_dir/GFF3_merging_and_removing_redundancy.log";
+print STDERR (localtime) . ": CMD: $cmdString\n";
+system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+my $num_filtered = &count_gene_num("$tmp_dir/spaln_filtered.gff3");
+print STDERR "去冗余后剩余 $num_filtered 个基因模型。\n";
+
+########## (5) 对基因模型进行强制补齐 ##########
+$cmdString = "$binPath/fillingEndsOfGeneModels --cpu $cpu --start_codon $start_codon --stop_codon $stop_codon $input_genome $tmp_dir/spaln_filtered.gff3 > $tmp_dir/spaln_filtered_filled.gff3 2> $tmp_dir/fillingEndsOfGeneModels.log";
+print STDERR (localtime) . ": CMD: $cmdString\n";
+system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+
+########## (6) 对基因模型进行分类 ##########
+my (%out_fh, %final_type, %stat);
+foreach my $class ( qw/A B C D/ ) {
+    open $out_fh{$class}, ">", "$tmp_dir/${class}_out.gff3" or die "Can not create file $tmp_dir/${class}_out.gff3, $!";
+}
+{
+    local $/ = "\n\n";
+    open my $in_fh, "<", "$tmp_dir/spaln_filtered_filled.gff3" or die "Can not open file $tmp_dir/spaln_filtered_filled.gff3, $!";
+    while ( my $block = <$in_fh> ) {
+        $block =~ s/\n+$//;
+        next if $block =~ m/^\s*$/;
+        my @lines = split /\n/, $block;
+
+        my ($gene_ID, $gene_attr, $mRNA_attr, $CDS_length) = (undef, "", "", 0);
+        foreach my $line ( @lines ) {
+            my @field = split /\t/, $line;
+            next if @field < 9;
+            if ( $field[2] eq "gene" ) {
+                ($gene_ID) = $field[8] =~ m/ID=([^;]+)/;
+                $gene_attr = $field[8];
+            }
+            elsif ( $field[2] eq "mRNA" ) {
+                $mRNA_attr .= "$field[8];";
+            }
+            elsif ( $field[2] eq "CDS" ) {
+                $CDS_length += abs($field[4] - $field[3]) + 1;
+            }
+        }
+        next unless defined $gene_ID;
+
+        # 根据对同源蛋白的覆盖度进行初步分类
+        my $coverage = &get_homolog_coverage($gene_attr);
+        my ($homolog_len) = $gene_attr =~ m/Homolog_length=(\d+)/;
+        $homolog_len = 1 unless $homolog_len;
+        my ($internal_stop) = $gene_attr =~ m/Internal_stop_codon=(\d+)/;
+        my ($frameshift) = $gene_attr =~ m/Frameshift=(\d+)/;
+        $internal_stop ||= 0; $frameshift ||= 0;
+        my $initial_class;
+        if ( $coverage == 1 && $internal_stop == 0 && $frameshift == 0 ) {
+            $initial_class = "A";
+        }
+        elsif ( $coverage >= $threshold_homolog_coverage_good ) {
+            $initial_class = "B";
+        }
+        elsif ( $coverage >= $threshold_homolog_coverage_fair ) {
+            $initial_class = "C";
+        }
+        else {
+            $initial_class = "D";
+        }
+
+        # 根据强制补齐的结果进行最终分类
+        my ($status, $final_class);
+        my $protein_length_ratio = $CDS_length / ($homolog_len * 3);
+        if ( $mRNA_attr =~ m/Filling2Uncomplete=True/ ) {
+            $status = "not_filled";
+            $final_class = "D";
+        }
+        elsif ( $mRNA_attr =~ m/Filling2Complete=True/ ) {
+            $status = "filled";
+            if ( $initial_class eq "A" or $initial_class eq "B" ) {
+                if ( $protein_length_ratio >= $threshold_homolog_coverage_good ) { $final_class = "B"; }
+                elsif ( $protein_length_ratio >= $threshold_homolog_coverage_fair ) { $final_class = "C"; }
+                else { $final_class = "D"; }
+            }
+            elsif ( $initial_class eq "C" ) {
+                if ( $protein_length_ratio >= $threshold_homolog_coverage_fair ) { $final_class = "C"; }
+                else { $final_class = "D"; }
+            }
+            else {
+                $final_class = "D";
+            }
+        }
+        else {
+            $status = "complete";
+            $final_class = $initial_class;
+        }
+        $stat{$initial_class}{"total"} ++;
+        $stat{$initial_class}{$status} ++;
+        $stat{$initial_class}{"to_$final_class"} ++;
+        $final_type{$gene_ID} = $final_class;
+
+        # 在gene和mRNA的第9列标注分类信息
+        foreach my $line ( @lines ) {
+            my @field = split /\t/, $line, -1;
+            next if @field < 9;
+            if ( $field[2] eq "gene" or $field[2] eq "mRNA" ) {
+                $field[8] = &set_attr($field[8], "Type", $type_name{$final_class});
+                $line = join "\t", @field;
+            }
+        }
+        print { $out_fh{$final_class} } join("\n", @lines) . "\n\n";
+    }
+    close $in_fh;
+}
+foreach my $class ( qw/A B C D/ ) { close $out_fh{$class}; }
+
+# 输出分类统计信息
+{
+    my $good = int($threshold_homolog_coverage_good * 10000 + 0.5) / 100;
+    my $fair = int($threshold_homolog_coverage_fair * 10000 + 0.5) / 100;
+    my %range = (
+        "A" => "对同源蛋白覆盖度为100%（且无移码和内部终止密码子）",
+        "B" => "对同源蛋白覆盖度[$good%, 100%]",
+        "C" => "对同源蛋白覆盖度[$fair%, $good%)",
+        "D" => "对同源蛋白覆盖度低于$fair%",
+    );
+    my @first_round;
+    foreach my $class ( qw/A B C D/ ) {
+        push @first_round, "$class 类 " . ($stat{$class}{"total"} || 0) . " 个";
+    }
+    print STDERR "第一轮生成基因模型并分类：" . join("、", @first_round) . "。\n";
+    foreach my $class ( qw/A B C D/ ) {
+        my %s = %{ $stat{$class} || {} };
+        my ($total, $complete, $filled, $not_filled) = map { $s{$_} || 0 } qw/total complete filled not_filled/;
+        my ($toA, $toB, $toC, $toD) = map { $s{"to_$_"} || 0 } qw/A B C D/;
+        print STDERR "$range{$class}的基因模型有 $total 个，其中完整的基因模型有 $complete 个，能填补完整的基因模型有 $filled 个，不能填补完整的基因模型有 $not_filled 个；";
+        print STDERR "补齐后属于A类(excellent)的有 $toA 个，属于B类(good)的有 $toB 个，属于C类(fair)的有 $toC 个，属于D类(poor)的有 $toD 个。\n";
+    }
+    my %second_round;
+    $second_round{$_} ++ foreach values %final_type;
+    print STDERR "第二轮补齐基因模型后分类：" . join("、", map { "$_ 类 " . ($second_round{$_} || 0) . " 个" } qw/A B C D/) . "。\n";
+    my $num_classified = scalar(keys %final_type);
+    print STDERR "Warning: 去冗余后有 $num_filtered 个基因模型，但强制补齐后仅对 $num_classified 个基因模型进行了分类，请检查 $tmp_dir/fillingEndsOfGeneModels.log 。\n" if $num_classified != $num_filtered;
+}
+
+########## (8) 输出强制补齐前的原始基因模型 ##########
+if ( $output_raw_GFF3 ) {
+    local $/ = "\n\n";
+    open my $in_fh, "<", "$tmp_dir/spaln_filtered.gff3" or die "Can not open file $tmp_dir/spaln_filtered.gff3, $!";
+    open my $raw_fh, ">", $output_raw_GFF3 or die "Can not create file $output_raw_GFF3, $!";
+    print $raw_fh "##gff-version 3\n";
+    while ( my $block = <$in_fh> ) {
+        $block =~ s/\n+$//;
+        next if $block =~ m/^\s*$/;
+        my @lines = split /\n/, $block;
+        my $gene_ID;
+        foreach my $line ( @lines ) {
+            my @field = split /\t/, $line;
+            if ( @field >= 9 && $field[2] eq "gene" ) {
+                ($gene_ID) = $field[8] =~ m/ID=([^;]+)/;
+                last;
+            }
+        }
+        if ( defined $gene_ID && exists $final_type{$gene_ID} ) {
+            foreach my $line ( @lines ) {
+                my @field = split /\t/, $line, -1;
+                next if @field < 9;
+                if ( $field[2] eq "gene" or $field[2] eq "mRNA" ) {
+                    $field[8] = &set_attr($field[8], "Type", $type_name{$final_type{$gene_ID}});
+                    $line = join "\t", @field;
+                }
+            }
+        }
+        print $raw_fh join("\n", @lines) . "\n\n";
+    }
+    close $in_fh;
+    close $raw_fh;
+    print STDERR "生成了基于同源蛋白对参考基因组进行基因预测的原始结果GFF3文件 $output_raw_GFF3 。\n";
+}
+
+########## (7) 合并四类基因模型，修正格式并去冗余 ##########
+$cmdString = "$binPath/GFF3Clear --genome $input_genome --gene_prefix $gene_prefix --coverage $overlap_coverage --cpu $cpu $tmp_dir/A_out.gff3 $tmp_dir/B_out.gff3 $tmp_dir/C_out.gff3 $tmp_dir/D_out.gff3 > $tmp_dir/final_all.gff3 2> $tmp_dir/GFF3Clear.log";
+print STDERR (localtime) . ": CMD: $cmdString\n";
+system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+
+my %final_num = ("A" => 0, "B" => 0, "C" => 0, "D" => 0);
+my $num_output = 0;
+{
+    local $/ = "\n\n";
+    open my $in_fh, "<", "$tmp_dir/final_all.gff3" or die "Can not open file $tmp_dir/final_all.gff3, $!";
+    print "##gff-version 3\n";
+    while ( my $block = <$in_fh> ) {
+        $block =~ s/^##gff-version 3\n//;
+        next unless $block =~ m/\tgene\t/;
+        $final_num{"A"} ++ if $block =~ m/Type=$type_name{"A"}/;
+        $final_num{"B"} ++ if $block =~ m/Type=$type_name{"B"}/;
+        $final_num{"C"} ++ if $block =~ m/Type=$type_name{"C"}/;
+        $final_num{"D"} ++ if $block =~ m/Type=$type_name{"D"}/;
+        next if ( $no_fair_gene_models && $block =~ m/Type=$type_name{"C"}/ );
+        next if ( $no_poor_gene_models && $block =~ m/Type=$type_name{"D"}/ );
+        $block =~ s/\n*$/\n\n/;
+        print $block;
+        $num_output ++;
+    }
+    close $in_fh;
+}
+my $num_total = $final_num{"A"} + $final_num{"B"} + $final_num{"C"} + $final_num{"D"};
+print STDERR "第三轮整合基因模型后分类：A 类 $final_num{A} 个、B 类 $final_num{B} 个、C 类 $final_num{C} 个、D 类 $final_num{D} 个，基因模型总数为 $num_total 个。\n";
+print STDERR "在标准输出中输出了 $num_output 个基因模型。临时文件夹 $tmp_dir 中的 final_all.gff3 文件包含所有四种类型的基因模型。\n";
+print STDERR (localtime) . ": 程序运行完毕。\n";
+
+
+########## 子程序 ##########
+
+# 读取同源蛋白序列长度（去除序列末尾代表终止密码子的*号）。
+# 返回两个哈希引用：完整序列名称 => 长度；以及序列名称中最后一个'|'之后的部分 => 完整序列名称（仅当其唯一时），
+# 用于兼容spaln在未使用-pF参数时仅输出序列名称最后一项的情况。
+sub read_homolog_length {
+    my ($file) = @_;
+    my (%length, %tail_star, $id);
+    my $fh;
+    if ( $file =~ m/\.gz$/ ) {
+        open $fh, "-|", "gzip -dc $file" or die "Can not open file $file, $!";
+    }
+    else {
+        open $fh, "<", $file or die "Can not open file $file, $!";
+    }
+    while ( my $line = <$fh> ) {
+        $line =~ s/[\r\n]+$//;
+        if ( $line =~ m/^>(\S+)/ ) {
+            $id = $1;
+            $length{$id} = 0;
+            $tail_star{$id} = 0;
+            next;
+        }
+        next unless defined $id;
+        $line =~ s/\s+//g;
+        next if $line eq "";
+        $length{$id} += length($line);
+        # 记录序列末尾连续*号的数量（仅以最后一行非空序列为准），最后统一扣除
+        $tail_star{$id} = ( $line =~ m/(\*+)$/ ) ? length($1) : 0;
+    }
+    close $fh;
+
+    my (%alias, %alias_count);
+    foreach my $seq_id ( keys %length ) {
+        $length{$seq_id} -= $tail_star{$seq_id};
+        if ( $seq_id =~ m/\|([^|]+)\|?$/ ) {
+            $alias_count{$1} ++;
+            $alias{$1} = $seq_id;
+        }
+    }
+    foreach ( keys %alias_count ) {
+        delete $alias{$_} if ( $alias_count{$_} > 1 or exists $length{$_} );
+    }
+    return (\%length, \%alias);
+}
+
+# 读取基因组序列（统一转为大写，支持gzip压缩文件）
+sub read_genome {
+    my ($file) = @_;
+    my (%seq, $id);
+    my $fh;
+    if ( $file =~ m/\.gz$/ ) {
+        open $fh, "-|", "gzip -dc $file" or die "Can not open file $file, $!";
+    }
+    else {
+        open $fh, "<", $file or die "Can not open file $file, $!";
+    }
+    while ( my $line = <$fh> ) {
+        $line =~ s/[\r\n]+$//;
+        if ( $line =~ m/^>(\S+)/ ) {
+            $id = $1;
+            $seq{$id} = "";
+            next;
+        }
+        next unless defined $id;
+        $line =~ s/\s+//g;
+        $seq{$id} .= uc($line);
+    }
+    close $fh;
+    return %seq;
+}
+
+# 逐个读取spaln -O0输出的比对结果（mRNA及其CDS信息），每读取完一个比对结果调用一次回调函数。
+# spaln -O0 的GFF3格式中：gene行和mRNA行给出基因座信息，CDS行（旧版本为小写cds）的Parent为mRNA的ID，
+# 其第9列Target属性形如 "Target=蛋白名称 起始 终止 +"，给出该CDS对应的同源蛋白氨基酸区间。
+sub read_spaln_gff {
+    my ($file, $callback) = @_;
+    my $record;
+    open my $fh, "<", $file or die "Can not open file $file, $!";
+    while ( my $line = <$fh> ) {
+        $line =~ s/[\r\n]+$//;
+        next if $line =~ m/^\s*$/;
+        next if $line =~ m/^#/;
+        my @field = split /\t/, $line;
+        next if @field < 9;
+        my $type = lc($field[2]);
+        if ( $type eq "mrna" ) {
+            $callback->($record) if $record;
+            my ($id) = $field[8] =~ m/ID=([^;]+)/;
+            $record = {
+                "id" => $id, "chr" => $field[0], "start" => $field[3], "end" => $field[4],
+                "score" => $field[5], "strand" => $field[6], "attr" => $field[8],
+                "CDS" => [], "stop" => [], "target" => [],
+            };
+            if ( $field[8] =~ m/Target=(\S+)\s+(\d+)\s+(\d+)/ ) {
+                push @{$record->{"target"}}, [$1, $2, $3];
+            }
+        }
+        elsif ( $type eq "cds" or $type eq "stop_codon" ) {
+            next unless $record;
+            my ($parent) = $field[8] =~ m/Parent=([^;]+)/;
+            next unless ( defined $parent && defined $record->{"id"} && $parent eq $record->{"id"} );
+            if ( $type eq "cds" ) {
+                push @{$record->{"CDS"}}, [$field[3], $field[4], $field[7]];
+                if ( $field[8] =~ m/Target=(\S+)\s+(\d+)\s+(\d+)/ ) {
+                    push @{$record->{"target"}}, [$1, $2, $3];
+                }
+            }
+            else {
+                push @{$record->{"stop"}}, [$field[3], $field[4]];
+            }
+        }
+    }
+    close $fh;
+    $callback->($record) if $record;
+}
+
+# 对一个spaln比对结果进行规范化：根据CDS的Target信息得到同源蛋白匹配区间；统计内部终止密码子和移码数量；
+# 将紧邻末端CDS的stop_codon并入CDS；合并因移码而重叠或首尾相接的CDS；计算intron、同源蛋白长度和覆盖度等信息。
+sub normalize_alignment {
+    my ($record, $verbose) = @_;
+    unless ( defined $record->{"id"} ) {
+        print STDERR "Warning: spaln 比对结果缺少 ID 信息，已忽略：$record->{chr}:$record->{start}-$record->{end}\n" if $verbose;
+        return;
+    }
+    unless ( @{$record->{"CDS"}} ) {
+        print STDERR "Warning: spaln 比对结果 $record->{id} 没有CDS信息，已忽略。\n" if $verbose;
+        return;
+    }
+    unless ( @{$record->{"target"}} ) {
+        print STDERR "Warning: spaln 比对结果 $record->{id} 缺少 Target 信息，已忽略。\n" if $verbose;
+        return;
+    }
+    my $strand = $record->{"strand"};
+    unless ( $strand eq "+" or $strand eq "-" ) {
+        print STDERR "Warning: spaln 比对结果 $record->{id} 的正负链信息异常，已忽略。\n" if $verbose;
+        return;
+    }
+
+    # 根据Target信息得到同源蛋白名称及匹配区间（取所有CDS的Target区间的最小值和最大值）
+    my $homolog = $record->{"target"}[0][0];
+    my ($qs, $qe);
+    foreach my $target ( @{$record->{"target"}} ) {
+        next unless $target->[0] eq $homolog;
+        my ($s, $e) = sort { $a <=> $b } ($target->[1], $target->[2]);
+        $qs = $s if ( !defined $qs || $s < $qs );
+        $qe = $e if ( !defined $qe || $e > $qe );
+    }
+
+    my @CDS;
+    foreach ( @{$record->{"CDS"}} ) {
+        my ($start, $end, $phase) = @$_;
+        ($start, $end) = ($end, $start) if $start > $end;
+        $phase = 0 unless ( defined $phase && $phase =~ m/^[012]$/ );
+        push @CDS, [$start, $end, $phase];
+    }
+    @CDS = sort { $a->[0] <=> $b->[0] or $a->[1] <=> $b->[1] } @CDS;
+
+    # 在合并CDS之前，逐个CDS按其phase翻译，统计内部终止密码子和移码数量
+    my ($internal_stop, $frameshift) = &count_internal_stop_and_frameshift(\@CDS, $record->{"chr"}, $strand);
+
+    # 若给出的终止密码子紧邻末端CDS且未包含在CDS中，则将其并入CDS（spaln默认已在CDS中包含终止密码子）
+    foreach my $stop ( @{$record->{"stop"}} ) {
+        my ($start, $end) = sort { $a <=> $b } @$stop;
+        if ( $strand eq "+" ) {
+            $CDS[-1][1] = $end if $start == $CDS[-1][1] + 1;
+        }
+        else {
+            $CDS[0][0] = $start if $end == $CDS[0][0] - 1;
+        }
+    }
+
+    # 合并因移码导致相互重叠或首尾相接的CDS片段
+    my @merged;
+    foreach my $CDS ( @CDS ) {
+        if ( @merged && $CDS->[0] <= $merged[-1][1] + 1 ) {
+            $merged[-1][1] = $CDS->[1] if $CDS->[1] > $merged[-1][1];
+            # 负链基因的5'端在坐标较大的一侧，保留该侧片段的phase
+            $merged[-1][2] = $CDS->[2] if $strand eq "-";
+        }
+        else {
+            push @merged, [@$CDS];
+        }
+    }
+
+    my @intron;
+    foreach my $i ( 1 .. $#merged ) {
+        push @intron, [$merged[$i-1][1] + 1, $merged[$i][0] - 1];
+    }
+
+    # 同源蛋白长度：优先按完整名称匹配同源蛋白FASTA文件，其次按名称最后一个'|'之后的部分匹配
+    my $homolog_len = $homolog_length_ref->{$homolog};
+    if ( !$homolog_len && exists $homolog_alias_ref->{$homolog} ) {
+        $homolog_len = $homolog_length_ref->{ $homolog_alias_ref->{$homolog} };
+    }
+    unless ( $homolog_len ) {
+        print STDERR "Warning: 在同源蛋白文件中未找到 $homolog 的序列长度，使用其比对终止位置 $qe 代替。\n" if $verbose;
+        $homolog_len = $qe;
+    }
+    my $coverage = ($qe - $qs + 1) / $homolog_len;
+    $coverage = 1 if $coverage > 1;
+
+    my $attr = $record->{"attr"};
+    my ($identity) = $attr =~ m/Identity=([^;]+)/;
+    my ($positive) = $attr =~ m/Positive=([^;]+)/;
+    my $score = $record->{"score"};
+    $score = "." unless ( defined $score && $score ne "" );
+
+    return {
+        "chr" => $record->{"chr"},
+        "source" => "spaln",
+        "strand" => $strand,
+        "start" => $merged[0][0],
+        "end" => $merged[-1][1],
+        "score" => $score,
+        "score_num" => ( $score =~ m/^-?[\d.]+(?:[eE][-+]?\d+)?$/ ? $score : 0 ),
+        "homolog" => $homolog,
+        "homolog_length" => $homolog_len,
+        "qs" => $qs,
+        "qe" => $qe,
+        "coverage" => $coverage,
+        "identity" => ( defined $identity ? $identity : "." ),
+        "positive" => ( defined $positive ? $positive : "." ),
+        "frameshift" => $frameshift,
+        "internal_stop" => $internal_stop,
+        "rank" => ".",
+        "CDS" => \@merged,
+        "intron" => \@intron,
+    };
+}
+
+# 统计一个转录本的内部终止密码子数量和移码数量。
+# 按转录方向，逐个CDS根据其phase（GFF3规范：该CDS起始处需跳过的碱基数）进行翻译，跨越CDS边界的密码子不计入，
+# 除最后一个CDS的最后一个密码子外，遇到终止密码子即计为内部终止密码子；
+# 对第二个及之后的CDS，根据其之前CDS的累计长度推算其应有的phase，与实际phase不一致时计为一次移码。
+sub count_internal_stop_and_frameshift {
+    my ($CDS_ref, $chr, $strand) = @_;
+    return (0, 0) unless exists $genome_seq{$chr};
+    my $genome_len = length($genome_seq{$chr});
+    my @CDS = sort { $a->[0] <=> $b->[0] } @$CDS_ref;
+    @CDS = reverse @CDS if $strand eq "-";
+
+    my ($internal_stop, $frameshift, $cum_length) = (0, 0, 0);
+    my $first_phase = $CDS[0][2];
+    foreach my $i ( 0 .. $#CDS ) {
+        my ($start, $end, $phase) = @{$CDS[$i]};
+        if ( $i > 0 ) {
+            my $expected_phase = (3 - (($cum_length - $first_phase) % 3)) % 3;
+            $frameshift ++ if $expected_phase != $phase;
+        }
+        $cum_length += $end - $start + 1;
+        next if ( $start < 1 || $end > $genome_len );
+        my $seq = substr($genome_seq{$chr}, $start - 1, $end - $start + 1);
+        if ( $strand eq "-" ) {
+            $seq = reverse $seq;
+            $seq =~ tr/ATCG/TAGC/;
+        }
+        my $seq_len = length($seq);
+        for ( my $j = $phase; $j + 3 <= $seq_len; $j += 3 ) {
+            # 最后一个CDS的最后一个完整密码子是终止密码子的正常位置，不计入内部终止密码子
+            last if ( $i == $#CDS && $j + 6 > $seq_len );
+            my $codon = substr($seq, $j, 3);
+            $internal_stop ++ if ( exists $codon_ref->{$codon} && $codon_ref->{$codon} eq "X" );
+        }
+    }
+
+    return ($internal_stop, $frameshift);
+}
+
+# 将规范化后的比对结果输出为标准GFF3格式（gene、mRNA、exon、CDS、intron）
+sub model2gff3 {
+    my ($model, $gene_ID, $intron_support_ref) = @_;
+    my $mRNA_ID = "$gene_ID.mRNA";
+    my ($chr, $source, $strand) = ($model->{"chr"}, $model->{"source"}, $model->{"strand"});
+
+    my $attr = join(";",
+        "Homolog_name=" . &escape_attr($model->{"homolog"}),
+        "Homolog_length=$model->{homolog_length}",
+        "Homolog_match=$model->{qs}-$model->{qe}",
+        sprintf("Homolog_coverage=%.4f", $model->{"coverage"}),
+        "Identity=$model->{identity}",
+        "Positive=$model->{positive}",
+        "Frameshift=$model->{frameshift}",
+        "Internal_stop_codon=$model->{internal_stop}",
+        "Alignment_rank=$model->{rank}",
+        "Alignment_score=$model->{score}",
+    ) . ";";
+
+    my $out = join("\t", $chr, $source, "gene", $model->{"start"}, $model->{"end"}, $model->{"score"}, $strand, ".", "ID=$gene_ID;Name=$gene_ID;$attr") . "\n";
+    $out .= join("\t", $chr, $source, "mRNA", $model->{"start"}, $model->{"end"}, $model->{"score"}, $strand, ".", "ID=$mRNA_ID;Name=$mRNA_ID;Parent=$gene_ID;$attr") . "\n";
+
+    # 各子Feature按转录方向编号
+    my @CDS = @{$model->{"CDS"}};
+    my @intron = @{$model->{"intron"}};
+    if ( $strand eq "-" ) {
+        @CDS = reverse @CDS;
+        @intron = reverse @intron;
+    }
+    my @feature;
+    my $num = 0;
+    foreach my $CDS ( @CDS ) {
+        $num ++;
+        push @feature, [$CDS->[0], 1, join("\t", $chr, $source, "exon", $CDS->[0], $CDS->[1], ".", $strand, ".", "ID=$mRNA_ID.exon$num;Parent=$mRNA_ID;")];
+        push @feature, [$CDS->[0], 2, join("\t", $chr, $source, "CDS", $CDS->[0], $CDS->[1], ".", $strand, $CDS->[2], "ID=$mRNA_ID.CDS$num;Parent=$mRNA_ID;")];
+    }
+    $num = 0;
+    foreach my $intron ( @intron ) {
+        $num ++;
+        my $support = $intron_support_ref->{"$chr\t$strand\t$intron->[0]\t$intron->[1]"} || 1;
+        push @feature, [$intron->[0], 3, join("\t", $chr, $source, "intron", $intron->[0], $intron->[1], ".", $strand, ".", "ID=$mRNA_ID.intron$num;Parent=$mRNA_ID;Supported_times=$support;")];
+    }
+    if ( $strand eq "-" ) {
+        @feature = sort { $b->[0] <=> $a->[0] or $a->[1] <=> $b->[1] } @feature;
+    }
+    else {
+        @feature = sort { $a->[0] <=> $b->[0] or $a->[1] <=> $b->[1] } @feature;
+    }
+    $out .= "$_->[2]\n" foreach @feature;
+    $out .= "\n";
+
+    return $out;
+}
+
+# 输出同源蛋白比对GFF3文件：将同一条链上相互重叠的比对结果合并为一个基因区域，
+# 每个基因区域中每个同源蛋白仅输出比对得分最高的结果，最多输出 $max_num 个同源蛋白。
+sub output_alignment_gff3 {
+    my ($alignment_ref, $file, $max_num) = @_;
+    my @aln = sort { $a->[0] cmp $b->[0] or $a->[1] cmp $b->[1] or $a->[2] <=> $b->[2] or $a->[3] <=> $b->[3] } @$alignment_ref;
+
+    open my $fh, ">", $file or die "Can not create file $file, $!";
+    print $fh "##gff-version 3\n";
+    my (@region, $region_chr, $region_strand, $region_end);
+    my $region_num = 0;
+    my $flush = sub {
+        return unless @region;
+        $region_num ++;
+        my (%seen, $out_num);
+        $out_num = 0;
+        foreach my $x ( sort { $b->[4] <=> $a->[4] or $a->[5] cmp $b->[5] } @region ) {
+            next if $seen{$x->[5]} ++;
+            print $fh &gff3_alignment($x);
+            $out_num ++;
+            last if $out_num >= $max_num;
+        }
+        @region = ();
+    };
+    foreach my $x ( @aln ) {
+        if ( @region && $x->[0] eq $region_chr && $x->[1] eq $region_strand && $x->[2] <= $region_end ) {
+            push @region, $x;
+            $region_end = $x->[3] if $x->[3] > $region_end;
+        }
+        else {
+            $flush->();
+            @region = ($x);
+            ($region_chr, $region_strand, $region_end) = ($x->[0], $x->[1], $x->[3]);
+        }
+    }
+    $flush->();
+    close $fh;
+
+    return $region_num;
+}
+
+sub gff3_alignment {
+    my ($x) = @_;
+    my ($chr, $strand, $score, $homolog) = ($x->[0], $x->[1], $x->[4], &escape_attr($x->[5]));
+    my @CDS = sort { $a->[0] <=> $b->[0] } @{$x->[6]};
+    @CDS = reverse @CDS if $strand eq "-";
+
+    my ($frame, $length, $out) = (0, 0, "");
+    foreach my $CDS ( @CDS ) {
+        $out .= join("\t", $chr, "spaln", "protein_match", $CDS->[0], $CDS->[1], $score, $strand, $frame, "ID=$homolog;Name=$homolog") . "\n";
+        $length += ($CDS->[1] - $CDS->[0] + 1);
+        $frame = $length % 3;
+        if ( $frame == 1 ) {
+            $frame = 2;
+        }
+        elsif ( $frame == 2 ) {
+            $frame = 1;
+        }
+    }
+
+    return $out;
+}
+
+# 根据gene第9列的Homolog_match和Homolog_length信息计算对同源蛋白的覆盖度
+sub get_homolog_coverage {
+    my ($attr) = @_;
+    my ($homolog_len) = $attr =~ m/Homolog_length=(\d+)/;
+    my ($qs, $qe) = $attr =~ m/Homolog_match=(\d+)-(\d+)/;
+    return 0 unless ( $homolog_len && defined $qs && defined $qe );
+    my $coverage = (abs($qe - $qs) + 1) / $homolog_len;
+    $coverage = 1 if $coverage > 1;
+    return $coverage;
+}
+
+# 在第9列中设置某个标签的值：若已存在则替换；新标签放在ID、Name、Parent之后
+sub set_attr {
+    my ($attr, $key, $value) = @_;
+    my @kv;
+    foreach my $kv ( split /;/, $attr ) {
+        $kv =~ s/^\s+//;
+        $kv =~ s/\s+$//;
+        next if $kv eq "";
+        next if $kv =~ m/^\Q$key\E=/;
+        push @kv, $kv;
+    }
+    my $pos = 0;
+    foreach my $i ( 0 .. $#kv ) {
+        $pos = $i + 1 if $kv[$i] =~ m/^(?:ID|Name|Parent)=/;
+    }
+    splice @kv, $pos, 0, "$key=$value";
+    return join(";", @kv) . ";";
+}
+
+# 对GFF3第9列中具有特殊含义的字符进行转义
+sub escape_attr {
+    my ($string) = @_;
+    $string =~ s/([;=,&%\t])/sprintf("%%%02X", ord($1))/ge;
+    return $string;
+}
+
+sub count_gene_num {
+    my ($file) = @_;
+    my $num = 0;
+    open my $fh, "<", $file or die "Can not open file $file, $!";
+    while ( <$fh> ) {
+        $num ++ if m/^[^#][^\t]*\t[^\t]*\tgene\t/;
+    }
+    close $fh;
+    return $num;
+}
+
+sub codon_table {
+    my %code = (
+        "TTT" => "F", "TTC" => "F", "TTA" => "L", "TTG" => "L",
+        "TCT" => "S", "TCC" => "S", "TCA" => "S", "TCG" => "S",
+        "TAT" => "Y", "TAC" => "Y", "TAA" => "X", "TAG" => "X",
+        "TGT" => "C", "TGC" => "C", "TGA" => "X", "TGG" => "W",
+        "CTT" => "L", "CTC" => "L", "CTA" => "L", "CTG" => "L",
+        "CCT" => "P", "CCC" => "P", "CCA" => "P", "CCG" => "P",
+        "CAT" => "H", "CAC" => "H", "CAA" => "Q", "CAG" => "Q",
+        "CGT" => "R", "CGC" => "R", "CGA" => "R", "CGG" => "R",
+        "ATT" => "I", "ATC" => "I", "ATA" => "I", "ATG" => "M",
+        "ACT" => "T", "ACC" => "T", "ACA" => "T", "ACG" => "T",
+        "AAT" => "N", "AAC" => "N", "AAA" => "K", "AAG" => "K",
+        "AGT" => "S", "AGC" => "S", "AGA" => "R", "AGG" => "R",
+        "GTT" => "V", "GTC" => "V", "GTA" => "V", "GTG" => "V",
+        "GCT" => "A", "GCC" => "A", "GCA" => "A", "GCG" => "A",
+        "GAT" => "D", "GAC" => "D", "GAA" => "E", "GAG" => "E",
+        "GGT" => "G", "GGC" => "G", "GGA" => "G", "GGG" => "G",
+    );
+    my %start_codon;
+    $start_codon{"ATG"} = 1;
+    if ( $genetic_code == 1 ) {
+        # The Standard Code
+        #$start_codon{"TTG"} = 1;
+        #$start_codon{"CTG"} = 1;
+    }
+    elsif ( $genetic_code == 2 ) {
+        # The Vertebrate Mitochondrial Code
+        $code{"AGA"} = "X"; $code{"AGG"} = "X"; $code{"ATA"} = "M"; $code{"TGA"} = "W";
+        $start_codon{$_} = 1 foreach qw/ATA ATT ATC GTG/;
+    }
+    elsif ( $genetic_code == 3 ) {
+        # The Yeast Mitochondrial Code
+        $code{"ATA"} = "M"; $code{"CTT"} = "T"; $code{"CTC"} = "T"; $code{"CTA"} = "T"; $code{"CTG"} = "T"; $code{"TGA"} = "W";
+        $start_codon{$_} = 1 foreach qw/ATA GTG/;
+    }
+    elsif ( $genetic_code == 4 ) {
+        # The Mold, Protozoan, and Coelenterate Mitochondrial Code and the Mycoplasma/Spiroplasma Code
+        $code{"TGA"} = "W";
+        $start_codon{$_} = 1 foreach qw/ATA ATT ATC GTG CTG TTA TTG/;
+    }
+    elsif ( $genetic_code == 5 ) {
+        # The Invertebrate Mitochondrial Code
+        $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"ATA"} = "M"; $code{"TGA"} = "W";
+        $start_codon{$_} = 1 foreach qw/ATA ATT ATC GTG TTG/;
+    }
+    elsif ( $genetic_code == 6 ) {
+        # The Ciliate, Dasycladacean and Hexamita Nuclear Code
+        $code{"TAA"} = "Q"; $code{"TAG"} = "Q";
+    }
+    elsif ( $genetic_code == 9 ) {
+        # The Echinoderm and Flatworm Mitochondrial Code
+        $code{"AAA"} = "N"; $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"TGA"} = "W";
+        $start_codon{"GTG"} = 1;
+    }
+    elsif ( $genetic_code == 10 ) {
+        # The Euplotid Nuclear Code
+        $code{"TGA"} = "C";
+    }
+    elsif ( $genetic_code == 11 ) {
+        # The Bacterial, Archaeal and Plant Plastid Code
+        $start_codon{$_} = 1 foreach qw/ATA ATT ATC GTG CTG TTG/;
+    }
+    elsif ( $genetic_code == 12 ) {
+        # The Alternative Yeast Nuclear Code
+        $code{"CTG"} = "S";
+        $start_codon{"CTG"} = 1;
+    }
+    elsif ( $genetic_code == 13 ) {
+        # The Ascidian Mitochondrial Code
+        $code{"AGA"} = "G"; $code{"AGG"} = "G"; $code{"ATA"} = "M"; $code{"TGA"} = "W";
+        $start_codon{$_} = 1 foreach qw/ATA GTG TTG/;
+    }
+    elsif ( $genetic_code == 14 ) {
+        # The Alternative Flatworm Mitochondrial Code
+        $code{"AAA"} = "N"; $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"TAA"} = "Y"; $code{"TGA"} = "W";
+    }
+    elsif ( $genetic_code == 16 ) {
+        # Chlorophycean Mitochondrial Code
+        $code{"TAG"} = "L";
+    }
+    elsif ( $genetic_code == 21 ) {
+        # Trematode Mitochondrial Code
+        $code{"TGA"} = "W"; $code{"ATA"} = "M"; $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"AAA"} = "N";
+        $start_codon{"GTG"} = 1;
+    }
+    elsif ( $genetic_code == 22 ) {
+        # Scenedesmus obliquus Mitochondrial Code
+        $code{"TCA"} = "X"; $code{"TAG"} = "L";
+    }
+    elsif ( $genetic_code == 23 ) {
+        # Thraustochytrium Mitochondrial Code
+        $code{"TTA"} = "X";
+        $start_codon{$_} = 1 foreach qw/ATT GTG/;
+    }
+    elsif ( $genetic_code == 24 ) {
+        # Rhabdopleuridae Mitochondrial Code
+        $code{"AGA"} = "S"; $code{"AGG"} = "K"; $code{"TGA"} = "W";
+        $start_codon{$_} = 1 foreach qw/GTG CTG TTG/;
+    }
+    elsif ( $genetic_code == 25 ) {
+        # Candidate Division SR1 and Gracilibacteria Code
+        $code{"TGA"} = "G";
+        $start_codon{$_} = 1 foreach qw/GTG TTG/;
+    }
+    elsif ( $genetic_code == 26 ) {
+        # Pachysolen tannophilus Nuclear Code
+        # warning: The descritpions of initiation codons by 2 methods are confict according to the NCBI web site.
+        $code{"CTG"} = "A";
+        $start_codon{$_} = 1 foreach qw/GTG TTG/;
+    }
+    elsif ( $genetic_code == 27 ) {
+        # Karyorelict Nuclear Code
+        $code{"TAG"} = "Q"; $code{"TAA"} = "Q";
+    }
+    elsif ( $genetic_code == 29 ) {
+        # Mesodinium Nuclear Code
+        $code{"TAA"} = "Y"; $code{"TAG"} = "Y";
+    }
+    elsif ( $genetic_code == 30 ) {
+        # Peritrich Nuclear Code
+        $code{"TAA"} = "E"; $code{"TAG"} = "E";
+    }
+    elsif ( $genetic_code == 31 ) {
+        # Blastocrithidia Nuclear Code
+        $code{"TGA"} = "W";
+    }
+    elsif ( $genetic_code == 33 ) {
+        # Cephalodiscidae Mitochondrial UAA-Tyr Code
+        $code{"TAA"} = "Y"; $code{"TGA"} = "Y"; $code{"AGA"} = "S"; $code{"AGG"} = "K";
+    }
+    else {
+        print STDERR "Warning: 不支持的遗传密码 $genetic_code ，起始和终止密码子按标准遗传密码设置。\n";
+    }
+
+    my %stop_codon;
+    foreach ( keys %code ) {
+        $stop_codon{$_} = 1 if $code{$_} eq "X";
+    }
+
+    return (\%code, \%start_codon, \%stop_codon);
+}
