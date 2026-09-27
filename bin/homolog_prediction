@@ -41,9 +41,7 @@ Usage:
 
     本程序利用临近物种的全基因组蛋白序列对目标物种的全基因组序列进行基因预测，并将结果以GFF3格式输出到标准输出。
     支持五种预测方法，可单独使用，也可任意组合，程序会将多种方法的结果汇总、去冗余：
-      (1) exonerate / genewise / gth：先调用MMseqs2将同源蛋白比对到基因组，确定基因区域，再调用对应软件做精细的基因结构预测
-          （依次调用 homolog_prediction.01MMseqs2CalHits、.02HitToGenePrediction、.03GetGeneModels）。
-          这三种方法在同一个流程内部已经按基因区域整合成一份结果，本程序把它们视为一个来源(mmseqs)；
+      (1) exonerate / genewise / gth：先调用MMseqs2将同源蛋白比对到基因组，确定基因区域，再调用对应软件做精细的基因结构预测（依次调用 homolog_prediction.01MMseqs2CalHits、.02HitToGenePrediction、.03GetGeneModels）。这三种方法在同一个流程内部已经按基因区域整合成一份结果，本程序把它们视为一个来源(mmseqs)；
       (2) miniprot：调用 homolog_prediction.04miniprot2GeneModels，来源为miniprot；
       (3) spaln：调用 homolog_prediction.05spaln2GeneModels，来源为spaln。
 
@@ -54,32 +52,19 @@ Usage:
     程序运行流程：
       0. 检查参数、输入文件，并根据--method检测所需的命令是否能在终端中直接执行（不满足则在开始运行前报错退出）。
       1. 依次运行--method指定的各个预测流程，每个来源得到一份GFF3结果（含A~D四类基因模型）、一份未补齐末端的原始GFF3和一份同源蛋白比对GFF3。
-      2. 若存在多个来源，调用GFF3_merging_and_removing_redundancy（--first_file_score 0.0，各来源地位平等）整合各来源的基因模型，
-         再调用GFF3Clear去重叠、重新编号，得到临时文件夹下的 results/all.clear.gff3（含四类基因模型，尚未按intron过滤）。
-      2.5 若设置了--method_comparison_stats参数，程序会在整合之前，对各来源两两调用GFF3_merging_and_removing_redundancy命令的
-          --compare_2gff3_stats功能，比较每两个来源基因模型的CDS重叠冲突情况和得分高低，将汇总统计信息输出到该参数指定的文件中，
-          用于评估各方法的预测效果及彼此之间的一致性；此步骤不影响最终整合结果。
-      3. 用intron的Supported_times过滤C和D类基因模型：分别对每个来源的GFF3文件，根据其A和B类基因模型所有introns的Supported_times，
-         按--threshod_ratio_of_intron_Supported_times指定的分位置计算出该来源的阈值threshold_value（默认0.5，即中位数）；
-         然后对整合后的每个C或D类基因模型，依据其来源（GFF3第2列：gth/exonerate/genewise属于mmseqs来源，miniprot，spaln）选取对应阈值：
-         若该基因模型所有introns的Supported_times都低于阈值，则过滤该基因模型；没有intron的（单外显子）C/D类基因模型不做过滤。
-         A和B类基因模型不过滤。过滤后再次调用GFF3Clear重新编号，输出到标准输出。
-      4. 若指定--output_raw_GFF3或--output_alignment_GFF3，则输出的是多个来源整合后的内容：
-         raw GFF3调用GFF3_merging_and_removing_redundancy整合后再GFF3Clear；比对GFF3为各来源比对结果去重后按基因组位置排序的合并。
+      2. 若存在多个来源，程序会先按步骤2.5得到的准确性排序，对各来源的GFF3文件重新排列先后顺序，再调用GFF3_merging_and_removing_redundancy（--first_file_score 0.0，同一顺位下各来源地位平等，但输入顺序已按预测准确性由高到低排列）整合各来源的基因模型，再调用GFF3Clear去重叠、重新编号，得到临时文件夹下的 results/all.clear.gff3（含四类基因模型，尚未按intron过滤）。
+      2.5 只要存在两个及以上来源，程序就会在整合之前，对每两个来源两两调用GFF3_merging_and_removing_redundancy命令的--compare_2gff3_stats功能，比较每两个来源基因模型的CDS重叠冲突情况和得分高低；再汇总每个来源在所有两两比较中的胜出比例，得到mmseqs、miniprot、spaln这些来源的预测准确性排序，并按该顺序（准确性从高到低）排列输入给步骤2的GFF3_merging_and_removing_redundancy命令的GFF3文件顺序：由于该命令在多个基因模型得分打平时（--first_file_score 0.0下得分打平很常见）优先保留排在前面的输入文件，因此让预测更准确的来源排在前面，有助于在打分打平的情况下优先保留更可信的基因模型，得到更好的整合结果。这一步骤本身不改变各来源的基因模型内容，只影响它们在步骤2中的输入顺序。若设置了--method_comparison_stats参数，程序还会将两两比较的详细统计信息汇总输出到该参数指定的文件中，用于评估各方法的预测效果及彼此之间的一致性；不设置该参数时，两两比较仍会执行以确定准确性排序，只是不额外生成该汇总报告文件（每一对来源详细的逐基因冲突记录，以及排序时依据的胜出比例，仍会保留在--tmp_dir目录下的 compare.<来源1>_vs_<来源2>.stats.txt 文件中）。
+      3. 用intron的Supported_times过滤C和D类基因模型：分别对每个来源的GFF3文件，根据其A和B类基因模型所有introns的Supported_times，按--threshod_ratio_of_intron_Supported_times指定的分位置计算出该来源的阈值threshold_value（默认0.5，即中位数）；然后对整合后的每个C或D类基因模型，依据其来源（GFF3第2列：gth/exonerate/genewise属于mmseqs来源，miniprot，spaln）选取对应阈值：若该基因模型所有introns的Supported_times都低于阈值，则过滤该基因模型；没有intron的（单外显子）C/D类基因模型不做过滤。A和B类基因模型不过滤。过滤后再次调用GFF3Clear重新编号，输出到标准输出。
+      4. 若指定--output_raw_GFF3或--output_alignment_GFF3，则输出的是多个来源整合后的内容：raw GFF3调用GFF3_merging_and_removing_redundancy整合后再GFF3Clear（整合顺序同样使用步骤2.5得到的准确性排序）；比对GFF3为各来源比对结果去重后按基因组位置排序的合并。
 
     断点续跑（--tmp_dir）说明：
-      程序在临时文件夹中为每个步骤记录"输入文件内容指纹 + 相关参数"（*.sig）和完成标记（*.ok）。程序被中断（Ctrl-C、kill、断电、命令报错）后，
-      使用相同的 --tmp_dir 重新输入命令即可继续运行，已经完成的步骤会被跳过，未完成的步骤从其内部可续跑的位置继续。
+      程序在临时文件夹中为每个步骤记录"输入文件内容指纹 + 相关参数"（*.sig）和完成标记（*.ok）。程序被中断（Ctrl-C、kill、断电、命令报错）后，使用相同的 --tmp_dir 重新输入命令即可继续运行，已经完成的步骤会被跳过，未完成的步骤从其内部可续跑的位置继续。
       (1) 输入文件的指纹由文件大小和分布在全文件的多个数据块的MD5值组成，不依赖文件修改时间，复制或touch文件不会导致重算；
       (2) 再次运行时修改--method：
-            - 已经完成的来源（mmseqs、miniprot、spaln）及其结果被直接复用，只运行新增的来源；例如先运行--method exonerate，再运行
-              --method exonerate,miniprot,spaln，则exonerate部分全部跳过，只运行miniprot和spaln；
-            - 同一个mmseqs来源内新增或减少 exonerate/genewise/gth 时，MMseqs2比对和已经完成的"基因区域块 x 预测方法"结果被复用，
-              只计算新增的方法，然后重新挑选最优基因模型；
+            - 已经完成的来源（mmseqs、miniprot、spaln）及其结果被直接复用，只运行新增的来源；例如先运行--method exonerate，再运行--method exonerate,miniprot,spaln，则exonerate部分全部跳过，只运行miniprot和spaln；
+            - 同一个mmseqs来源内新增或减少 exonerate/genewise/gth 时，MMseqs2比对和已经完成的"基因区域块 x 预测方法"结果被复用，只计算新增的方法，然后重新挑选最优基因模型；
             - 去掉某个来源后，其结果保留在临时文件夹中，之后再加回来仍可复用；最终整合、过滤总是按当前--method重新进行；
-      (3) 修改其它参数时，只重算受该参数影响的步骤：例如修改--identity/--evalue/--homolog_coverage只重做MMseqs2 Hit过滤而不重做耗时的
-          mmseqs search；修改--overlap_coverage只重做miniprot/spaln比对之后的步骤，而不重新比对；修改--threshod_ratio_of_intron_Supported_times
-          只重做最后的过滤；--cpu、--gene_prefix等不影响中间结果的参数不会触发重算；
+      (3) 修改其它参数时，只重算受该参数影响的步骤：例如修改--identity/--evalue/--homolog_coverage只重做MMseqs2 Hit过滤而不重做耗时的mmseqs search；修改--overlap_coverage只重做miniprot/spaln比对之后的步骤，而不重新比对；修改--threshod_ratio_of_intron_Supported_times只重做最后的过滤；--cpu、--gene_prefix等不影响中间结果的参数不会触发重算；
       (4) 同一个--tmp_dir同一时间只允许一个程序使用（文件锁）；程序被中断或失败时，会在末尾提示续跑所需的--tmp_dir。
       (5) 若--tmp_dir由旧版本程序生成，旧版本的完成标记格式不同，无法确认其参数，该步骤会被重新计算一次。
 
@@ -119,7 +104,7 @@ Usage:
     输出同源蛋白比对GFF3时，每个来源每个基因区域最多输出的同源蛋白个数。
 
     --method_comparison_stats <string>    default: None
-    当--method指定了2个及以上来源（mmseqs、miniprot、spaln这三个来源中的任意组合）时，设置该参数后，程序会在整合各来源结果之前，对每两个来源的GFF3结果调用GFF3_merging_and_removing_redundancy命令的--compare_2gff3_stats参数进行两两比较，得到：各来源各自的非冗余基因数量；两个来源之间CDS重叠比例超过--overlap_coverage阈值的冲突基因数量；这些冲突基因中双方得分较高的比例。程序将所有两两比较的结果汇总（包括每一对来源的详细统计，以及所有来源在全部两两比较中的总体胜出比例），输出到该参数指定的文件中，用于评估哪种方法的预测效果更好、各方法之间的一致性如何。此步骤不影响最终整合结果。每一对来源详细的逐基因冲突记录保留在--tmp_dir目录下的 compare.<来源1>_vs_<来源2>.stats.txt 文件中，供进一步查阅。已完成且输入没有变化的两两比较在续跑时不会重复运行。
+    当--method指定了2个及以上来源（mmseqs、miniprot、spaln这三个来源中的任意组合）时，程序总会在整合各来源结果之前，对每两个来源的GFF3结果调用GFF3_merging_and_removing_redundancy命令的--compare_2gff3_stats参数进行两两比较，并据此计算各来源的预测准确性排序，用于决定后续整合步骤中各来源GFF3文件的输入顺序（详见上文"程序运行流程"第2.5条），该比较无论是否设置本参数都会执行。设置本参数后，程序会额外将两两比较的汇总结果（包括每一对来源的详细统计，以及所有来源在全部两两比较中的总体胜出比例，此比例正是决定整合顺序所依据的准确性排序）输出到该参数指定的文件中，用于评估哪种方法的预测效果更好、各方法之间的一致性如何。每一对来源详细的逐基因冲突记录始终保留在--tmp_dir目录下的 compare.<来源1>_vs_<来源2>.stats.txt 文件中，供进一步查阅，不受本参数是否设置影响。已完成且输入没有变化的两两比较在续跑时不会重复运行。
 
     --overlap_coverage <float>    default: 0.30
     CDS重叠覆盖度阈值，传递给GFF3_merging_and_removing_redundancy的--overlap_coverage和GFF3Clear的--coverage，用于去除CDS有重叠的冗余基因模型；同时传递给miniprot和spaln流程。
@@ -173,18 +158,29 @@ Usage:
     Workflow:
       0. Check the parameters and input files, and check that the commands required by --method can be executed directly in the terminal (if not, the program exits with an error before running anything).
       1. Run the prediction pipeline of each source specified by --method. Each source yields a GFF3 result (containing gene models of classes A~D), a raw GFF3 (the ends are not filled) and a homolog alignment GFF3.
-      2. If there are multiple sources, GFF3_merging_and_removing_redundancy (--first_file_score 0.0, all sources have equal priority) merges the gene models of the sources,
-         and then GFF3Clear removes overlaps and renumbers the genes. The result is results/all.clear.gff3 in the temporary directory (all four classes, before intron filtering).
-      2.5 If --method_comparison_stats is set, before merging, the program compares every two sources with the --compare_2gff3_stats function of GFF3_merging_and_removing_redundancy,
-          and reports the CDS-overlap conflicts and the score comparison between the gene models of the two sources in the file specified by this parameter,
-          which is used to evaluate the prediction performance of the methods and their consistency. This step does not affect the final merged result.
+      2. If there are multiple sources, the program first reorders the sources' GFF3 files by the prediction-accuracy ranking obtained in step 2.5,
+         then GFF3_merging_and_removing_redundancy (--first_file_score 0.0, sources are otherwise equal in priority, but the input order now reflects
+         accuracy from high to low) merges the gene models of the sources, and then GFF3Clear removes overlaps and renumbers the genes.
+         The result is results/all.clear.gff3 in the temporary directory (all four classes, before intron filtering).
+      2.5 As long as there are two or more sources, before merging the program compares every two sources with the --compare_2gff3_stats function of
+          GFF3_merging_and_removing_redundancy, and summarizes each source's overall win proportion across all pairwise comparisons to obtain an
+          accuracy ranking of the sources (mmseqs, miniprot, spaln). The sources are then fed into the step-2 GFF3_merging_and_removing_redundancy
+          command in this order (highest accuracy first): since that command keeps the earlier input file when two gene models tie in score
+          (ties are common with --first_file_score 0.0), placing the more accurate source first means a tied gene model from the more reliable
+          source is kept, improving the merged result. This step itself never changes the gene models of any source, it only affects the order in
+          which they are fed into step 2. If --method_comparison_stats is set, the program additionally writes the summarized pairwise comparison
+          statistics to the file it specifies, for evaluating the prediction performance of the methods and their consistency; if it is not set,
+          the pairwise comparisons still run to determine the accuracy ranking, they just do not produce this extra summary report file (the
+          detailed gene-by-gene conflict records of each pair of sources, and the win proportions the ranking is based on, are still kept in the
+          file compare.<source1>_vs_<source2>.stats.txt in the --tmp_dir directory).
       3. Filter class C and D gene models by the Supported_times of introns: for each source, the threshold_value is calculated from the Supported_times of all introns of its class A and B gene models
          at the quantile given by --threshod_ratio_of_intron_Supported_times (default 0.5, the median).
          Each class C or D gene model of the merged result then uses the threshold of its source (column 2 of the GFF3: gth/exonerate/genewise belong to the mmseqs source, then miniprot and spaln);
          if the Supported_times of all its introns are lower than the threshold, the gene model is removed. Class C/D gene models without an intron (single-exon) are not filtered.
          Class A and B gene models are never filtered. After filtering, GFF3Clear is run again to renumber the genes, and the result is written to STDOUT.
       4. If --output_raw_GFF3 or --output_alignment_GFF3 is specified, the output contains the merged content of all sources:
-         the raw GFF3 is merged by GFF3_merging_and_removing_redundancy and then processed by GFF3Clear; the alignment GFF3 is the combination of the alignment results of all sources, de-duplicated and sorted by genome position.
+         the raw GFF3 is merged by GFF3_merging_and_removing_redundancy (using the same accuracy-based ordering from step 2.5) and then processed
+         by GFF3Clear; the alignment GFF3 is the combination of the alignment results of all sources, de-duplicated and sorted by genome position.
 
     Resuming an interrupted run (--tmp_dir):
       For each step the program records in the temporary directory a signature (content fingerprints of the input files + the relevant parameters, *.sig) and a completion mark (*.ok).
@@ -239,7 +235,7 @@ Usage:
     When outputting the homolog alignment GFF3, the maximum number of homologous proteins output for each gene region of each source.
 
     --method_comparison_stats <string>    default: None
-    Effective when --method specifies two or more sources (any combination of the three sources mmseqs, miniprot and spaln). If this parameter is set, before the results of the sources are merged, the program compares every two sources with the --compare_2gff3_stats parameter of GFF3_merging_and_removing_redundancy, and obtains: the number of non-redundant genes of each source; the number of conflicting genes whose CDS overlap ratio between the two sources exceeds --overlap_coverage; and the proportion of these conflicts in which each side has the higher score. The results of all pairwise comparisons (the details of each pair of sources and the overall win proportion of every source in all pairwise comparisons) are written to the file specified by this parameter, to evaluate which method predicts better and how consistent the methods are. This step does not affect the final merged result. The detailed gene-by-gene conflict records of each pair of sources are kept in the file compare.<source1>_vs_<source2>.stats.txt in the --tmp_dir directory for further reference. Pairwise comparisons that have finished with unchanged input are not repeated when the program is resumed.
+    Effective when --method specifies two or more sources (any combination of the three sources mmseqs, miniprot and spaln). Whenever this is the case, the program always compares every two sources with the --compare_2gff3_stats parameter of GFF3_merging_and_removing_redundancy before merging, and uses the result to compute a prediction-accuracy ranking of the sources that decides the order in which their GFF3 files are fed into the merging step (see item 2.5 of "Workflow" above); this pairwise comparison runs regardless of whether this parameter is set. Setting this parameter additionally writes the summarized pairwise comparison results (the details of each pair of sources, and the overall win proportion of every source in all pairwise comparisons — the very proportion the accuracy ranking is based on) to the file specified by this parameter, to evaluate which method predicts better and how consistent the methods are. The detailed gene-by-gene conflict records of each pair of sources are always kept in the file compare.<source1>_vs_<source2>.stats.txt in the --tmp_dir directory for further reference, regardless of whether this parameter is set. Pairwise comparisons that have finished with unchanged input are not repeated when the program is resumed.
 
     --overlap_coverage <float>    default: 0.30
     The CDS overlap coverage threshold, passed to --overlap_coverage of GFF3_merging_and_removing_redundancy and --coverage of GFF3Clear to remove redundant gene models with overlapping CDS; it is also passed to the miniprot and spaln pipelines.
@@ -589,10 +585,36 @@ my $merge_extra = "--cpu $o{cpu} --first_file_score 0.0 --overlap_coverage $o{ov
 my $clear_extra = "--genome $input_genome --gene_prefix $o{gene_prefix} --coverage $o{overlap_coverage} --cpu $o{cpu}";
 
 ########################################################################
-# 5.5 若设置了--method_comparison_stats，两两比较各来源的基因模型
-#     （仅用于评估各方法预测效果及彼此一致性，不影响最终整合结果）
+# 5.5 两两比较各来源的基因模型，评估各方法的预测准确性并据此排序
+#     （只要来源数量>=2就会执行，不依赖--method_comparison_stats；
+#      --method_comparison_stats仅额外控制是否将详细报告写出到文件）
 ########################################################################
-&run_pairwise_comparisons(\@sources, $merge_extra, $input_genome, $genome_fp, $tmp_dir, $o{method_comparison_stats});
+my @comparison_summary = &compute_pairwise_comparisons(\@sources, $merge_extra, $input_genome, $genome_fp, $tmp_dir);
+if ( defined $o{method_comparison_stats} ) {
+    if ( @sources >= 2 ) {
+        &write_method_comparison_report(\@comparison_summary, $o{method_comparison_stats});
+        print STDERR "Method comparison statistics were written to $o{method_comparison_stats}.\n";
+    }
+    else {
+        print STDERR "\nWarning: --method_comparison_stats needs at least 2 sources with gene models, the comparison is skipped.\n";
+    }
+}
+
+# 根据两两比较得到的胜出比例，对各来源按预测准确性从高到低重新排序：
+# 准确性更高（在冲突基因中得分更高的比例越大）的来源排在更前面，随后将按此顺序把各来源的GFF3文件
+# 依次输入给GFF3_merging_and_removing_redundancy（该程序在多个基因模型得分打平时，优先保留排在前面的
+# 输入文件），从而使打分打平时优先保留预测更可信的来源，得到更好的整合结果。
+my %accuracy_rate;
+if ( @sources >= 2 ) {
+    my ($ranked_sources_ref, $rate_ref) = &rank_sources_by_accuracy(\@sources, \@comparison_summary);
+    @sources = @$ranked_sources_ref;
+    %accuracy_rate = %$rate_ref;
+    print STDERR "Sources ordered by pairwise comparison accuracy (this order is used when feeding sources into the merging step): "
+        . join(" > ", map {
+              my $r = $accuracy_rate{$_->{key}};
+              ( defined $r && $r >= 0 ) ? sprintf("%s (won %.1f%% of conflicts)", $_->{label}, 100 * $r) : "$_->{label} (no conflicts compared)"
+          } @sources) . "\n";
+}
 
 ########################################################################
 # 5. 整合各来源的基因模型
@@ -607,13 +629,15 @@ print STDERR "\n6. merging the gene models from " . scalar(@sources) . " source(
         push @cmds, "$bin_path/GFF3_merging_and_removing_redundancy $merge_extra $input_genome @files > $clear_in 2> $tmp_dir/f.merge.log";
     }
     push @cmds, "$bin_path/GFF3Clear --no_attr_add $clear_extra $clear_in > $res_dir/all.clear.gff3 2> $tmp_dir/f.clear.log";
-    # 各来源结果按内容指纹记录：--method改变导致来源集合变化，或某来源结果重新生成后内容变化，都会触发重新整合。
+    # 各来源结果按内容指纹记录：--method改变导致来源集合变化，或某来源结果重新生成后内容变化，都会触发重新整合；
+    # 来源在@sources中的先后顺序（由上面的准确性排序决定）也直接体现在下面这个签名字符串的拼接顺序里，
+    # 因此排序结果一旦发生变化（例如相关参数变化导致两两比较结果不同），也会自动触发重新整合。
     my $sig = join("|", (map { "$_->{key}=" . &file_fp($_->{gff3}) } @sources),
                    "genome=$genome_fp", "overlap=$o{overlap_coverage}",
                    "genetic_code=$o{genetic_code}", "prefix=$o{gene_prefix}");
     &run_stage(
         name => "f.merge",
-        levels => [ { desc => "the gene models of the sources or the merging parameters", sig => $sig } ],
+        levels => [ { desc => "the gene models of the sources, their input order, or the merging parameters", sig => $sig } ],
         outputs => ["$res_dir/all.clear.gff3"],
         cmds => \@cmds,
     );
@@ -665,7 +689,7 @@ if (defined $o{output_raw_GFF3}) {
                        "out=$o{output_raw_GFF3}");
         &run_stage(
             name => "h.merge_raw",
-            levels => [ { desc => "the raw GFF3 files, the merging parameters or the output path", sig => $sig } ],
+            levels => [ { desc => "the raw GFF3 files, their input order, the merging parameters or the output path", sig => $sig } ],
             outputs => [$o{output_raw_GFF3}],
             cmds => [
                 "$bin_path/GFF3_merging_and_removing_redundancy $merge_extra $input_genome @raws > $res_dir/raw.merged.gff3 2> $tmp_dir/h.merge_raw.log",
@@ -1116,18 +1140,17 @@ sub merge_alignment_gff3 {
 }
 
 # 对@sources中的每一对来源，调用GFF3_merging_and_removing_redundancy命令的--compare_2gff3_stats参数进行两两比较，
-# 解析其统计结果并汇总输出到 $out_file（由--method_comparison_stats指定）。仅当$out_file已定义、且来源数>=2时执行；
-# 该步骤不会影响主流程整合结果——两两比较产生的合并GFF3和详细逐基因日志仅保留在$tmp_dir中供参考。
+# 解析其统计结果并返回汇总数组（每个元素额外带上keyA/keyB/stat_file字段，供调用者用于排序和/或写报告）。
+# 只要来源数量>=2就会执行，不依赖--method_comparison_stats参数：该比较结果既用于生成可选的汇总报告文件，
+# 也用于计算各来源的预测准确性排序，从而决定它们输入GFF3_merging_and_removing_redundancy整合时的先后顺序，
+# 因此不能像早期版本那样仅在设置了--method_comparison_stats时才运行。
+# 该比较本身不会影响每个来源自身的基因模型内容——两两比较产生的合并GFF3和详细逐基因日志仅保留在$tmp_dir中供参考。
 # 每一对比较作为独立的断点步骤：两个来源的结果内容和相关参数都没有变化时，续跑时直接复用已有的统计文件。
-sub run_pairwise_comparisons {
-    my ($sources_ref, $merge_extra, $genome, $genome_fp, $tmp_dir, $out_file) = @_;
-    return unless defined $out_file;
-    unless (@$sources_ref >= 2) {
-        print STDERR "\nWarning: --method_comparison_stats needs at least 2 sources with gene models, the comparison is skipped.\n";
-        return;
-    }
+sub compute_pairwise_comparisons {
+    my ($sources_ref, $merge_extra, $genome, $genome_fp, $tmp_dir) = @_;
+    return () unless @$sources_ref >= 2;
 
-    print STDERR "\n5.5. comparing gene models between each pair of sources (for method evaluation).\n";
+    print STDERR "\n5.5. comparing gene models between each pair of sources (to rank prediction accuracy, and for method evaluation).\n";
     my @summary;
     for (my $i = 0; $i < @$sources_ref; $i ++) {
         for (my $j = $i + 1; $j < @$sources_ref; $j ++) {
@@ -1148,6 +1171,8 @@ sub run_pairwise_comparisons {
             );
             my $parsed = &parse_compare_stats($stat_file, $sA->{label}, $sB->{label});
             if ($parsed) {
+                $parsed->{keyA} = $sA->{key};
+                $parsed->{keyB} = $sB->{key};
                 $parsed->{stat_file} = $stat_file;
                 push @summary, $parsed;
             }
@@ -1156,8 +1181,43 @@ sub run_pairwise_comparisons {
             }
         }
     }
-    &write_method_comparison_report(\@summary, $out_file);
-    print STDERR "Method comparison statistics were written to $out_file.\n";
+    return @summary;
+}
+
+# 根据两两比较的汇总结果，计算每个来源(按其key，如mmseqs/miniprot/spaln)在所有涉及它的比较中的
+# 总体胜出比例(win rate = 该来源得分较高的冲突基因数 / 该来源参与的全部冲突基因数)，并据此对
+# @$sources_ref中的来源按准确性从高到低重新排序，返回 (排序后的来源数组引用, key => win_rate 的哈希引用)。
+# 排序规则：
+#   1) win_rate越高越靠前；
+#   2) 未参与任何冲突比较的来源（win_rate视为-1，即未知），排在所有已知win_rate的来源之后；
+#   3) win_rate相同（含均未知）时，保持来源在@$sources_ref中原有的相对顺序不变，避免排序结果因
+#      浮点数比较的微小差异或键顺序而抖动，保证结果确定、可复现。
+sub rank_sources_by_accuracy {
+    my ($sources_ref, $summary_ref) = @_;
+    my (%win_total, %compare_total);
+    foreach my $s (@$summary_ref) {
+        $win_total{$s->{keyA}} += $s->{winA};
+        $win_total{$s->{keyB}} += $s->{winB};
+        my $total = $s->{winA} + $s->{winB} + $s->{tie};
+        $compare_total{$s->{keyA}} += $total;
+        $compare_total{$s->{keyB}} += $total;
+    }
+
+    my %rate;
+    foreach my $s (@$sources_ref) {
+        my $total = $compare_total{$s->{key}} || 0;
+        $rate{$s->{key}} = $total > 0 ? $win_total{$s->{key}} / $total : -1;
+    }
+
+    my %orig_rank;
+    for my $i (0 .. $#$sources_ref) { $orig_rank{$sources_ref->[$i]{key}} = $i; }
+
+    my @ordered = sort {
+        $rate{$b->{key}} <=> $rate{$a->{key}}
+            or $orig_rank{$a->{key}} <=> $orig_rank{$b->{key}}
+    } @$sources_ref;
+
+    return (\@ordered, \%rate);
 }
 
 # 解析GFF3_merging_and_removing_redundancy的--compare_2gff3_stats输出文件的第一行统计信息。
@@ -1181,7 +1241,8 @@ sub parse_compare_stats {
 }
 
 # 将各对来源的比较结果汇总，写入报告文件：既给出每一对来源的详细数字，也给出所有来源在全部两两比较中的
-# 总体胜出比例，作为"哪种方法预测效果更好、各方法之间一致性如何"的参考依据。
+# 总体胜出比例，作为"哪种方法预测效果更好、各方法之间一致性如何"的参考依据（该总体胜出比例正是
+# rank_sources_by_accuracy用来决定整合时各来源输入顺序所依据的准确性排序）。
 sub write_method_comparison_report {
     my ($summary, $out_file) = @_;
     open my $fh, ">", $out_file or die "Error: can not create file $out_file, $!\n";
@@ -1203,7 +1264,8 @@ sub write_method_comparison_report {
         print $fh "  Detailed per-gene comparison log: $s->{stat_file}\n\n" if $s->{stat_file};
     }
 
-    # 汇总每个来源在所有两两比较中的胜出情况，给出一个总体参考排名（不代表绝对准确性，仅供参考）
+    # 汇总每个来源在所有两两比较中的胜出情况，给出一个总体参考排名（该排名与rank_sources_by_accuracy
+    # 用于决定整合顺序的排名依据一致，只是这里按labelA/labelB而非key做汇总，便于直接展示给用户参考）
     my (%win_total, %compare_total);
     foreach my $s (@$summary) {
         $win_total{$s->{labelA}} += $s->{winA};
@@ -1222,7 +1284,8 @@ sub write_method_comparison_report {
         }
         print $fh "\nNote: a higher win rate suggests this method's gene models more often score higher (longer CDS, more introns, more complete)\n";
         print $fh "when in conflict with another method; it does not by itself prove higher biological accuracy. A high tie ratio between two\n";
-        print $fh "methods indicates good agreement between them.\n";
+        print $fh "methods indicates good agreement between them. This win rate is also what determines the input order used when feeding the\n";
+        print $fh "sources into the final merging step (the source with the higher win rate is placed earlier).\n";
     }
     close $fh;
 }

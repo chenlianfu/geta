@@ -1,19 +1,23 @@
 #!/usr/bin/env perl
 
 use strict;
+use warnings;
 use Getopt::Long;
-use Cwd qw/abs_path getcwd cwd/;
-use File::Basename;
+use Cwd qw/abs_path/;
+use File::Temp qw/tempfile tempdir/;
+use Storable qw/nstore retrieve/;
+use POSIX qw/:sys_wait_h/;
 
 my $usage = <<USAGE;
 Usage:
-    $0 [options] genome.fasta in1.gff3 in2.gff3 in3.gff3 ... > out.gff3 
+    $0 [options] genome.fasta in1.gff3 in2.gff3 in3.gff3 ... > out.gff3
 
     本程序用于将输入的一个或多个GFF3文件中的基因模型，进行去冗余处理，对基因模型进行打分并挑选更可信的结果。
 
     程序运行原理：
     (1) 程序对所有输入的基因模型进行打分。首先，按CDS长度进行打分，每bp长度记1分，得到初步得分S；然后，根据intron数量打分，每增加一个intron，增加一定比例(相对S)得分，第一个intron增加分数最多，后续的intron增加的分数按比例递减，且所有intron增加的得分之和不超过S；然后，按基因完整性打分，5'端完整，增加一定比例(相对S)得分，3'端完整，增加一定比例(相对S)得分；最后，按输入文件的先后顺序，第一个输入文件，增加一定比例(相对S)得分，第二个输入文件分值不变。
-    (2) 当两个基因模型在CDS上有重叠，对其中任意一个基因模型重叠比例超过阈值时，则根据两个基因模型的打分，去除较低得分的基因模型。程序会首先找到两两重叠的基因类群，再对类群中的基因模型按得分从大到小进行去冗余处理。
+    (2) 当输入了多个GFF3文件时，程序会先对每个GFF3文件单独进行去冗余处理（只在该文件内部检测重叠冲突），并在标准错误中输出统计结果（每个文件包含的基因数量，以及去冗余后剩余的基因数量），此步骤仅用于统计展示，不影响最终输出结果。
+    (3) 随后，程序将所有输入文件的基因模型合并，当两个基因模型在CDS上有重叠，对其中任意一个基因模型重叠比例超过阈值时，则根据两个基因模型的打分，去除较低得分的基因模型。程序会按染色体+正负链将基因划分为互不重叠的分区，再对每个分区内两两重叠的基因类群，按得分从大到小进行去冗余处理；不同分区之间互不影响，因此可以安全并行。这是决定最终输出结果的去冗余步骤。若两个基因模型得分完全一致（例如将--first_file_score设为0.0时很容易出现这种情况），则优先保留来自较早输入文件的基因模型（即第一个输入文件 > 第二个输入文件 > ... 依此类推）；若两者恰好来自同一个文件且得分仍然一致（理论上极少见），则再按基因ID的字典序决定，以保证程序运行结果完全确定、可复现。
 
     程序使用须知：
     (1) 程序需要输入基因组序列，用于检测基因模型的完整性。
@@ -30,7 +34,7 @@ Usage:
     设置基因模型在3'端完整时得分增加比例。
 
     --first_file_score <float>    default: 0.5
-    设置第一个输入文件额外增加的得分比例。有利于优先选择第一个输入GFF3文件中的基因模型。
+    设置第一个输入文件额外增加的得分比例。有利于优先选择第一个输入GFF3文件中的基因模型。注意：若将该参数设为0.0（或使多个文件的基因模型在CDS长度、intron数量、完整性上完全一致），不同文件的同类基因模型可能会得到完全相同的分数；此时程序在去冗余时会按输入文件的先后顺序决定取舍，优先保留较早输入文件中的基因模型（详见上文"程序运行原理"第(3)条）。
 
     --overlap_coverage <float>    default: 0.30
     设置一个覆盖度阈值。当两个基因型模型对应转录本的CDS重叠区碱基数 / 较小基因模型CDS去冗余碱基数 > 该覆盖度阈值时， 则需要去除冗余的基因模型。
@@ -40,6 +44,18 @@ Usage:
 
     --stop_codon <string>    default: TAA,TAG,TGA
     设置终止密码子。若有多个终止密码子，则使用逗号分割。
+
+    --cpu <int>    default: 8
+    设置并行worker数量。设为1则完全串行运行，不fork子进程。
+
+    --tmp_dir <string>    default: 系统临时目录下自动创建，程序结束后自动清理
+    并行worker之间交换计算结果所用的临时目录（仅在--cpu > 1且分区数 > 1时使用）。
+
+    --output_delete_info <string>    default: 无（不设置时删除基因信息输出到标准错误）
+    设置一个文件路径，程序会将最终合并去冗余步骤中删除的基因的描述信息，输出到该文件中，而不是输出到标准错误。（各输入文件单独去冗余的统计结果，始终输出到标准错误，不受该参数影响）。
+
+    --compare_2gff3_stats <string>    default: 无
+    仅当输入了恰好两个GFF3文件时生效。设置一个文件路径，程序会将两个GFF3文件的基因模型比较和选择结果输出到该文件中。内容包括：两个文件各自去除文件内部冗余后的基因数量；两个文件之间CDS重叠比例超过--overlap_coverage阈值的基因数量，及这些基因中双方得分高低的统计；以及每一对冲突基因的详细删除描述信息。若两个基因得分一致，则视为第一个文件（setA）得分较高处理，即优先保留第一个文件的基因模型。
 
     --help    default: None
     display this help and exit.
@@ -51,7 +67,7 @@ USAGE
 my $usage_english = &get_usage_english();
 if (@ARGV==0){die $usage_english}
 
-my ($intron_score, $complete5p_score, $complete3p_score, $first_file_score, $overlap_coverage, $start_codon, $stop_codon, $help, $chinese_help);
+my ($intron_score, $complete5p_score, $complete3p_score, $first_file_score, $overlap_coverage, $start_codon, $stop_codon, $cpu, $tmp_dir, $output_delete_info, $compare_2gff3_stats, $help, $chinese_help);
 GetOptions(
     "intron_score:f" => \$intron_score,
     "complete5p_score:f" => \$complete5p_score,
@@ -60,6 +76,10 @@ GetOptions(
     "overlap_coverage:f" => \$overlap_coverage,
     "start_codon:s" => \$start_codon,
     "stop_codon:s" => \$stop_codon,
+    "cpu:i" => \$cpu,
+    "tmp_dir:s" => \$tmp_dir,
+    "output_delete_info:s" => \$output_delete_info,
+    "compare_2gff3_stats:s" => \$compare_2gff3_stats,
     "help" => \$help,
     "chinese_help" => \$chinese_help,
 );
@@ -69,10 +89,13 @@ if ( $help ) { die $usage_english }
 ########### 解析参数 #################
 # 使用绝对路径
 my $input_genome = abs_path(shift @ARGV);
+# 保留用户输入时的原始文件名（未转换为绝对路径），仅用于统计信息展示
+my @input_GFF3_display = @ARGV;
 my @input_GFF3;
 foreach ( @ARGV ) {
     push @input_GFF3, abs_path($_);
 }
+die "Error: 需要至少输入一个GFF3文件\n" unless @input_GFF3;
 
 # 设置参数的默认值
 $intron_score = 0.3 unless defined $intron_score;
@@ -82,12 +105,29 @@ $first_file_score = 0.5 unless defined $first_file_score;
 $overlap_coverage = 0.3 unless defined $overlap_coverage;
 $start_codon ||= "ATG";
 $stop_codon ||= "TAA,TAG,TGA";
+$cpu = 8 unless defined $cpu;
+$cpu = 1 if $cpu < 1;
 my (%start_codon, %stop_codon);
 foreach (split /,/, $start_codon) { $start_codon{$_} = 1; }
 foreach (split /,/, $stop_codon) { $stop_codon{$_} = 1; }
+
+# --compare_2gff3_stats 仅在恰好输入两个GFF3文件时才有意义
+if ( $compare_2gff3_stats && @input_GFF3 != 2 ) {
+    warn "Warning: --compare_2gff3_stats requires exactly 2 input GFF3 files (got " . scalar(@input_GFF3) . "). This option will be ignored.\n";
+    $compare_2gff3_stats = undef;
+}
+
+# 删除基因描述信息的输出目标：若设置了--output_delete_info，则输出到该文件，否则输出到标准错误
+my $delete_info_fh;
+if ( $output_delete_info ) {
+    open ($delete_info_fh, '>', $output_delete_info) or die "Error: Can not create file $output_delete_info, $!";
+}
+else {
+    $delete_info_fh = \*STDERR;
+}
 ###############################
 
-#读取基因组序列
+# 读取基因组序列
 open IN, $input_genome or die "Error: Can not open file $input_genome, $!";
 my (%seq, $seq_id);
 while (<IN>) {
@@ -98,83 +138,66 @@ while (<IN>) {
 close IN;
 
 # 依次分析输入的GFF3文件，得到基因信息
-# %gene_CDS，存放两个文件中所有基因的CDS信息，键是基因ID，值是\n分隔的CDS信息(起始结束正负链用\t分隔)。若基因有多个可变剪接，选择其得分最高转录本的CDS信息。
-# %cds2gene存放每个CDS对应的基因ID信息，是一个多重哈希。染色体名称 -> 正负链 -> 索引位置 -> CDS起始结束 -> 基因ID -> 1。用于找两两重叠的基因。
-# %gene_CDS 和 %cds2gene 用于找有重叠的基因。
+# %gene_CDS，存放所有基因的CDS信息，键是基因ID，值是\n分隔的CDS信息(起始结束正负链用\t分隔)。若基因有多个可变剪接，选择其得分最高转录本的CDS信息。
 # %gene_score，存放基因ID的得分。
 # %chr 和 %strand 存放基因ID对应的染色体和正负链。
 # %gene_CDS_length 存放基因ID对应的CDS长度。若基因有多个可变剪接，选择其得分最高转录本的CDS长度。
-my (%gene_CDS, %cds2gene, %gene_score, %chr, %strand, %gene_CDS_length, %sort1, %sort2, %sort3, %sort4, %gene_info);
+# %gene_file_num，存放基因ID对应的输入文件序号（从1开始）。当多个基因模型得分完全一致时，用于按输入文件先后顺序决定取舍：文件序号越小（即越早输入的文件），优先级越高。
+# @file_gene_ids，索引为输入文件序号（从1开始），值为该文件中所有基因ID组成的数组引用，用于后续对每个文件单独去冗余统计，以及两文件比较。
+my (%gene_CDS, %gene_score, %chr, %strand, %gene_CDS_length, %gene_file_num, %sort1, %sort2, %sort3, %sort4, %gene_info);
+my @file_gene_ids;
 my $input_file_num = 0;
 foreach ( @input_GFF3 ) {
     $input_file_num ++;
 
-    # 读入GFF3内容
     my %GFF3_info = &get_geneModels_from_GFF3($_);
     foreach my $gene_ID ( sort keys %GFF3_info ) {
-        # 分析基因的GFF3信息，做好排序，以利于最终的数据输出
         my @gene_header = split /\t/, $GFF3_info{$gene_ID}{"header"};
         $sort1{$gene_ID} = $gene_header[0];
         $sort2{$gene_ID} = $gene_header[3];
         $sort3{$gene_ID} = $gene_header[4];
         $sort4{$gene_ID} = $gene_header[6];
         $gene_info{$gene_ID} = $GFF3_info{$gene_ID};
+        $gene_file_num{$gene_ID} = $input_file_num;
+        push @{$file_gene_ids[$input_file_num]}, $gene_ID;
 
         my @mRNA_ID = @{$GFF3_info{$gene_ID}{"mRNA_ID"}};
-        # 对每个转录本进行打分，最终每个基因选择其最高分值的转录本作为其CDS信息。
         my (%mRNA_score, %mRNA_CDS, %mRNA_CDS_length);
         foreach my $mRNA_ID ( sort @mRNA_ID ) {
             my $mRNA_info = $GFF3_info{$gene_ID}{"mRNA_info"}{$mRNA_ID};
             my $mRNA_header = $GFF3_info{$gene_ID}{"mRNA_header"}{$mRNA_ID};
             my @mRNA_header = split /\t/, $mRNA_header;
-            # 获得染色体名称和正负链信息
-            my ($chr, $strand) = ($mRNA_header[0], $mRNA_header[6]);
-            $chr{$gene_ID} = $chr; $strand{$gene_ID} = $strand;
+            my ($this_chr, $this_strand) = ($mRNA_header[0], $mRNA_header[6]);
+            $chr{$gene_ID} = $this_chr; $strand{$gene_ID} = $this_strand;
 
-            # 分析转录本的CDS信息
             my (@CDS, $CDS_length);
             foreach ( split /\n/, $mRNA_info ) {
-                @_ = split /\t/;
-                if ( $_[2] eq "CDS" ) {
-                    push @CDS, "$_[3]\t$_[4]\t$_[6]";
-                    $CDS_length += (abs($_[4] - $_[3]) + 1);
-                    my $index1 = int($_[3] / 1000);
-                    my $index2 = int($_[4] / 1000);
-                    foreach ($index1 .. $index2) {
-                        $cds2gene{$chr}{$strand}{$_}{"$_[3]\t$_[4]"}{$gene_ID} = 1;
-                    }
+                my @field = split /\t/;
+                if ( $field[2] eq "CDS" ) {
+                    push @CDS, "$field[3]\t$field[4]\t$field[6]";
+                    $CDS_length += (abs($field[4] - $field[3]) + 1);
                 }
             }
             $mRNA_CDS{$mRNA_ID} = join "\n", @CDS;
             $mRNA_CDS_length{$mRNA_ID} = $CDS_length;
-    
-            # 分析转录本的完整性
-            my $integrity = &analysis_geneModels_integrity(\@CDS, $chr, $strand);
-    
-            # 计算转录本得分
+
+            my $integrity = &analysis_geneModels_integrity(\@CDS, $this_chr, $this_strand);
+
             my $score = $CDS_length;
-            #print STDERR "$mRNA_ID\t$score\n";
-            # 首先根据intron数量，增加得分比例
             if ( @CDS == 1 ) {
-                # 只有一个CDS，则得分就是CDS长度
                 $score = $CDS_length;
             }
             elsif ( @CDS == 2 ) {
-                # 有两个CDS，则得分增加--intron_score参数设定的比例
                 $score += $CDS_length * $intron_score;
             }
             elsif ( @CDS > 2 ) {
-                # 有三个或以上CDS，第一个intron增加--intron_score参数设定的比例
                 my $add_score = $CDS_length * $intron_score;
                 $score += $add_score;
-                # 从第二个intron及往后，增加的分值逐项递减。为上一个intron的 ( 1 - intron_score参数值)。
                 foreach ( 1 .. (@CDS - 2) ) {
                     $add_score = $add_score * ( 1 - $intron_score );
                     $score += $add_score;
                 }
             }
-            #print STDERR "$mRNA_ID\t$score\n";
-            # 再根据基因完整性进行打分
             if ( $integrity eq "5prime_partial" ) {
                 $score += $CDS_length * $complete3p_score;
             }
@@ -184,124 +207,198 @@ foreach ( @input_GFF3 ) {
             elsif ( $integrity eq "complete" ) {
                 $score += $CDS_length * ($complete3p_score + $complete5p_score);
             }
-            #print STDERR "$mRNA_ID\t$score\n";
-            # 若使输入的第一个GFF3文件，则继续增加得分
-            $score += $CDS_length * $first_file_score if $input_file_num == 1; 
-            #print STDERR "$mRNA_ID\t$score\n";
-    
+            $score += $CDS_length * $first_file_score if $input_file_num == 1;
+
             $mRNA_score{$mRNA_ID} = $score;
-    
-            #print STDERR "$mRNA_ID\t$integrity\t$score\n";
         }
-    
-        # 选择得分最高的转录本，其CDS做为基因的信息
+
         @mRNA_ID = sort {$mRNA_score{$b} <=> $mRNA_score{$a} or $a cmp $b} @mRNA_ID;
         $gene_CDS{$gene_ID} = $mRNA_CDS{$mRNA_ID[0]};
         $gene_score{$gene_ID} = sprintf("%d", $mRNA_score{$mRNA_ID[0]});
         $gene_CDS_length{$gene_ID} = $mRNA_CDS_length{$mRNA_ID[0]};
-    
-        #print STDERR "$gene_ID\t$gene_score{$gene_ID}\n$gene_CDS{$gene_ID}\n";
     }
 }
-    
-# 先找到两两有重叠的基因信息
-my %overlap;
+
+# 基因组序列此后不再需要，及时释放内存（尤其在即将fork子进程之前，减少每个子进程继承的常驻内存）
+%seq = ();
+
+##########################################################################################
+# 若输入了多个GFF3文件，先对每个文件单独进行去冗余处理（仅在文件内部检测重叠冲突），
+# 并在标准错误中输出统计信息：每个文件包含的基因数量、去冗余后剩余的基因数量。
+# 此步骤只用于统计展示（以及供--compare_2gff3_stats使用），不会影响最终合并去冗余的结果。
+##########################################################################################
+my @file_survivor_ids; # 索引为输入文件序号（从1开始），值为该文件去除内部冗余后剩余的基因ID数组引用
+if ( @input_GFF3 > 1 ) {
+    print STDERR "# Statistics of redundancy removal within each individual input GFF3 file:\n";
+    for ( my $i = 1; $i <= @input_GFF3; $i ++ ) {
+        my @ids = @{ $file_gene_ids[$i] || [] };
+        my $total = scalar @ids;
+
+        # 按染色体+正负链，将该文件内的基因划分为互不重叠的分区
+        my %file_partition;
+        foreach my $gene_ID ( @ids ) {
+            my $key = "$chr{$gene_ID}\t$strand{$gene_ID}";
+            push @{$file_partition{$key}}, $gene_ID;
+        }
+
+        my %deleted_here;
+        foreach my $key ( keys %file_partition ) {
+            my ($deleted, $log) = &find_redundant_in_partition($file_partition{$key});
+            foreach ( @$deleted ) { $deleted_here{$_} = 1; }
+        }
+
+        my @survivors = grep { ! $deleted_here{$_} } @ids;
+        $file_survivor_ids[$i] = \@survivors;
+
+        my $after = scalar @survivors;
+        print STDERR "File $input_GFF3_display[$i-1]: $total genes in total, $after genes remaining after removing redundancy within this file\n";
+    }
+    print STDERR "\n";
+}
+
+##########################################################################################
+# 当恰好输入两个GFF3文件，且设置了--compare_2gff3_stats参数时，输出两个文件基因模型的比较和选择结果
+##########################################################################################
+if ( $compare_2gff3_stats ) {
+    my @setA = @{ $file_survivor_ids[1] };
+    my @setB = @{ $file_survivor_ids[2] };
+
+    my @pairs = &compare_two_gene_sets_overlap(\@setA, \@setB);
+
+    my (%involvedA, %involvedB);
+    my ($win1, $win2, $tie) = (0, 0, 0);
+    my @compare_log;
+    foreach my $pair ( @pairs ) {
+        my ($geneA, $geneB, $ratio) = @$pair;
+        $involvedA{$geneA} = 1;
+        $involvedB{$geneB} = 1;
+        my $scoreA = $gene_score{$geneA};
+        my $scoreB = $gene_score{$geneB};
+
+        if ( $scoreA > $scoreB ) {
+            $win1 ++;
+            push @compare_log, "Delete gene $geneB (Score: $scoreB), for its CDS coverage ratio with gene $geneA (Score: $scoreA) is: $ratio > $overlap_coverage";
+        }
+        elsif ( $scoreB > $scoreA ) {
+            $win2 ++;
+            push @compare_log, "Delete gene $geneA (Score: $scoreA), for its CDS coverage ratio with gene $geneB (Score: $scoreB) is: $ratio > $overlap_coverage";
+        }
+        else {
+            # 得分一致时，按输入文件先后顺序决定取舍：geneA恒定来自第一个输入文件(setA)，geneB恒定来自第二个输入文件(setB)，
+            # 因此固定优先保留geneA（第一个文件的基因模型），删除geneB。不再按基因ID字典序随意决定。
+            $tie ++;
+            push @compare_log, "Delete gene $geneB (Score: $scoreB), for its CDS coverage ratio with gene $geneA (Score: $scoreA) is: $ratio > $overlap_coverage (tie score, kept gene from earlier input file)";
+        }
+    }
+
+    my $countA = scalar @setA;
+    my $countB = scalar @setB;
+    my $involvedA_num = scalar keys %involvedA;
+    my $involvedB_num = scalar keys %involvedB;
+
+    open (my $CMP, '>', $compare_2gff3_stats) or die "Error: Can not create file $compare_2gff3_stats, $!";
+    print $CMP "$input_GFF3_display[0] 和 $input_GFF3_display[1] 这两个GFF3文件各包含 $countA / $countB 个非冗余基因，前者的 $involvedA_num 个基因和后者的 $involvedB_num 个基因的重叠比例超过 $overlap_coverage，这些冗余基因中，前者得分较高的基因有 $win1 个，后者得分较高的基因有 $win2 个，得分一致的基因有 $tie 个（得分一致时固定优先保留前者，即第一个输入文件的基因模型）\n";
+    foreach my $line ( @compare_log ) {
+        print $CMP "$line\n";
+    }
+    close $CMP;
+}
+
+# 按染色体+正负链将基因划分为互不重叠的分区：CDS重叠只可能发生在同一条染色体、同一条链的基因之间，
+# 因此分区之间互不影响，天然适合并行处理，且并行结果与串行结果完全一致。
+my %partition;
 foreach my $gene_ID ( keys %gene_CDS ) {
-    my ($chr, $strand) = ($chr{$gene_ID}, $strand{$gene_ID});
-    # 对基因的CDS进行分析
-    foreach my $CDS ( split /\n/, $gene_CDS{$gene_ID} ) {
-        my ($start, $end) = split /\t/, $CDS;
-        my $index1 = int($start / 1000);
-        my $index2 = int($end / 1000);
-        # 找到索引处对应的CDS的基因ID
-        foreach my $index ( $index1 .. $index2 ) {
-            foreach ( keys %{$cds2gene{$chr}{$strand}{$index}} ) {
-                my @gene_ID = keys %{$cds2gene{$chr}{$strand}{$index}{$_}};
-                @_ = split /\t/;
-                # 若CDS有重叠
-                if ( $_[1] >= $start && $_[0] <= $end ) {
-                    foreach ( @gene_ID ) {
-                        # 则找到相互重叠的关系
-                        if ( $_ ne $gene_ID ) {
-                            $overlap{$gene_ID}{$_} = 1;
-                            $overlap{$_}{$gene_ID} = 1;
-                        }
-                    }
+    my $key = "$chr{$gene_ID}\t$strand{$gene_ID}";
+    push @{$partition{$key}}, $gene_ID;
+}
+# 优先处理基因数量较多的分区，有利于负载均衡
+my @partition_keys = sort { scalar(@{$partition{$b}}) <=> scalar(@{$partition{$a}}) } keys %partition;
+
+my %all_results;
+
+if ( $cpu <= 1 || @partition_keys <= 1 ) {
+    # 分区数很少或cpu=1时，直接串行处理，省去fork开销，运行更稳定、便于调试
+    foreach my $key ( @partition_keys ) {
+        my ($deleted, $log) = &find_redundant_in_partition($partition{$key});
+        $all_results{$key} = { deleted => $deleted, log => $log };
+    }
+}
+else {
+    my $tmp_dir_created = 0;
+    if ( $tmp_dir ) {
+        $tmp_dir = abs_path($tmp_dir);
+        mkdir $tmp_dir unless -e $tmp_dir;
+    }
+    else {
+        $tmp_dir = tempdir( "GFF3_dedup_XXXXXX", TMPDIR => 1, CLEANUP => 1 );
+        $tmp_dir_created = 1;
+    }
+
+    my @queue = @partition_keys;
+    my %running; # pid => [partition_key, tmpfile]
+
+    while ( @queue || %running ) {
+        while ( @queue && scalar(keys %running) < $cpu ) {
+            my $key = shift @queue;
+            my ($fh, $tmpfile) = tempfile( DIR => $tmp_dir, SUFFIX => ".dat", UNLINK => 0 );
+            close $fh;
+
+            my $pid = fork();
+            die "Error: fork failed: $!" unless defined $pid;
+
+            if ( $pid == 0 ) {
+                # 子进程：只计算，不直接修改父进程数据结构，也不直接打印，结果统一通过临时文件回传
+                my ($deleted, $log) = &find_redundant_in_partition($partition{$key});
+                eval { nstore( { deleted => $deleted, log => $log }, $tmpfile ); };
+                if ($@) {
+                    warn "Warning: worker for partition [$key] failed to write result to $tmpfile: $@";
+                    exit 1;
                 }
+                exit 0;
+            }
+            else {
+                $running{$pid} = [$key, $tmpfile];
             }
         }
-    }
-}
 
-# 将相互有重叠的基因聚成一类
-my %cluster;
-while (%overlap) {
-    my %cluster_one;
-    
-    # 挑出一个重叠的基因ID
-    my @overlap = keys %overlap;
-    my $one = shift @overlap;
-    my @one;
-    push @one, $one;
+        last unless %running;
+        my $finished_pid = waitpid(-1, 0);
+        next if $finished_pid <= 0;
 
-    # 循环找和该基因ID重叠的基因，放入一个聚类中
-    while (@one) {
-        $one = shift @one;
-        $cluster_one{$one} = 1;
-        if (exists $overlap{$one}) {
-            foreach (keys %{$overlap{$one}}) {
-                push @one, $_;
-            }
-            delete $overlap{$one};
+        my $exit_code = $? >> 8;
+        my $info = delete $running{$finished_pid};
+        next unless $info;
+        my ($key, $tmpfile) = @$info;
+
+        if ( $exit_code != 0 ) {
+            warn "Warning: worker process for partition [$key] exited with code $exit_code; its results may be incomplete\n";
+        }
+
+        if ( -e $tmpfile ) {
+            my $data = eval { retrieve($tmpfile) };
+            $all_results{$key} = $data if $data;
+            unlink $tmpfile;
         }
     }
 
-    # 得到有重叠的基因类
-    my $cluster = join "\t", sort keys %cluster_one;
-    $cluster{$cluster} = 1;
+    rmdir $tmp_dir if $tmp_dir_created && -d $tmp_dir;
 }
 
-# 对每类基因按得分从大到小排序，对有重叠的基因进行过滤
-foreach my $cluster ( sort keys %cluster ) {
-    my @genes = split /\t/, $cluster;
-    @genes = sort {$gene_score{$b} <=> $gene_score{$a} or $a cmp $b} @genes;
-    my %genes;
-    foreach (@genes) { $genes{$_} = 1; }
-
-     # 根据基因得分，从大到小删除
-     while (@genes) {
-         # 取出得分最高的基因ID，分析其CDS信息和长度
-         my $gene = shift @genes;
-         my @gene_CDS = split /\n/, $gene_CDS{$gene};
-         my $gene_CDS_length = $gene_CDS_length{$gene};
-         delete $genes{$gene};
-
-         foreach my $target_gene (sort {$gene_score{$b} <=> $gene_score{$a}} keys %genes) {
-             # 分析重叠类群中其它基因的CDS信息和长度
-             my @target_gene_CDS = split /\n/, $gene_CDS{$target_gene};
-             my $target_gene_CDS_length = $gene_CDS_length{$target_gene};
-
-             # 检测两重叠基因重叠的比例
-             my $match_CDS_length = &get_match_length(\@gene_CDS, \@target_gene_CDS);
-             my $ratio1 = $match_CDS_length / $gene_CDS_length;
-             my $ratio2 = $match_CDS_length / $target_gene_CDS_length;
-             my $ratio = $ratio1;
-             $ratio = $ratio2 if $ratio2 > $ratio1;
-
-             if ( $ratio > $overlap_coverage ) {
-                 print STDERR "Delete gene $target_gene (Score: $gene_score{$target_gene}), for its CDS coverage ratio with gene $gene (Score: $gene_score{$gene}) is: $ratio > $overlap_coverage\n";
-                 # 去除得分较低的基因ID
-                 delete $gene_CDS{$target_gene};
-                 delete $genes{$target_gene};
-             }
-         }
-
-         @genes = sort {$gene_score{$b} <=> $gene_score{$a} or $a cmp $b} keys %genes;
-     }
+# 汇总所有分区的去冗余结果：删除被判定为冗余的基因，并按分区顺序输出日志，保证结果可复现
+foreach my $key ( sort keys %all_results ) {
+    my $deleted = $all_results{$key}{"deleted"} || [];
+    my $log = $all_results{$key}{"log"} || [];
+    foreach my $gene_ID ( @$deleted ) {
+        delete $gene_CDS{$gene_ID};
+    }
+    foreach my $line ( @$log ) {
+        print $delete_info_fh "$line\n";
+    }
 }
+close $delete_info_fh if $output_delete_info;
 
 # 按坐标排序输出GFF3结果
-my @gene_ID = sort { $sort1{$a} cmp $sort1{$b} or $sort2{$a} <=> $sort2{$b} or $sort3{$a} <=> $sort3{$b} or $sort4{$a} cmp $sort4{$b} or $a cmp $b } keys %gene_info;
+my @gene_ID = sort { $sort1{$a} cmp $sort1{$b} or $sort2{$a} <=> $sort2{$b} or $sort3{$a} <=> $sort3{$b} or $sort4{$a} cmp $sort4{$b} or$a cmp $b } keys %gene_info;
 foreach my $gene_ID ( @gene_ID ) {
     next unless exists $gene_CDS{$gene_ID};
     print $gene_info{$gene_ID}{"header"};
@@ -311,6 +408,187 @@ foreach my $gene_ID ( @gene_ID ) {
         print $gene_info{$gene_ID}{"mRNA_info"}{$mRNA_ID};
     }
     print "\n";
+}
+
+
+# 对单个分区（同一条染色体、同一条链上的所有基因）做重叠检测与去冗余。
+# 纯函数：只读取全局的 %gene_CDS / %gene_score / %gene_CDS_length / %gene_file_num，不做任何修改、不直接打印，
+# 而是把"应删除的基因ID列表"和"日志文本"作为返回值交给调用者处理。
+# 这样无论是在串行模式下直接调用，还是在子进程中调用后通过Storable回传结果，逻辑完全一致，避免了两套代码。
+# 该函数也被用于对单个输入文件内部做去冗余统计（只传入该文件自身的基因ID即可）。
+#
+# 排序/取舍规则（从高到低优先级）：
+#   1) 得分（$gene_score）越高越优先保留；
+#   2) 若得分相同，则来自越早输入的文件（$gene_file_num 越小）越优先保留；
+#   3) 若前两者都相同（理论上仅可能发生在同一文件内出现两个基因得分完全一致的情况），
+#      再按基因ID的字典序（$a cmp $b）决定，以保证结果完全确定、可复现。
+sub find_redundant_in_partition {
+    my @gene_ids = @{$_[0]};
+    my (%cds2gene, %overlap);
+
+    # 建立分区内局部CDS索引（同一分区内染色体和正负链相同，索引无需再区分chr/strand）
+    foreach my $gene_ID ( @gene_ids ) {
+        foreach my $CDS ( split /\n/, $gene_CDS{$gene_ID} ) {
+            my ($start, $end) = (split /\t/, $CDS)[0,1];
+            my $index1 = int($start / 1000);
+            my $index2 = int($end / 1000);
+            foreach my $index ( $index1 .. $index2 ) {
+                $cds2gene{$index}{"$start\t$end"}{$gene_ID} = 1;
+            }
+        }
+    }
+
+    # 找到两两有重叠的基因
+    foreach my $gene_ID ( @gene_ids ) {
+        foreach my $CDS ( split /\n/, $gene_CDS{$gene_ID} ) {
+            my ($start, $end) = (split /\t/, $CDS)[0,1];
+            my $index1 = int($start / 1000);
+            my $index2 = int($end / 1000);
+            foreach my $index ( $index1 .. $index2 ) {
+                foreach my $region ( keys %{$cds2gene{$index}} ) {
+                    my ($r_start, $r_end) = split /\t/, $region;
+                    next unless ( $r_end >= $start && $r_start <= $end );
+                    foreach my $other_gene ( keys %{$cds2gene{$index}{$region}} ) {
+                        next if $other_gene eq $gene_ID;
+                        $overlap{$gene_ID}{$other_gene} = 1;
+                        $overlap{$other_gene}{$gene_ID} = 1;
+                    }
+                }
+            }
+        }
+    }
+
+    # 将相互有重叠的基因聚成一类
+    my %cluster;
+    while (%overlap) {
+        my %cluster_one;
+        my @stack = ( (keys %overlap)[0] );
+        while (@stack) {
+            my $one = shift @stack;
+            next if $cluster_one{$one};
+            $cluster_one{$one} = 1;
+            if ( exists $overlap{$one} ) {
+                push @stack, keys %{$overlap{$one}};
+                delete $overlap{$one};
+            }
+        }
+        $cluster{ join("\t", sort keys %cluster_one) } = 1;
+    }
+
+    my (@deleted, @log);
+
+    # 对每类基因按得分从大到小排序（得分相同则按输入文件先后顺序，再相同则按基因ID字典序），对有重叠的基因进行过滤
+    foreach my $cluster ( sort keys %cluster ) {
+        my @genes = split /\t/, $cluster;
+        @genes = sort {
+            $gene_score{$b} <=> $gene_score{$a}
+                or $gene_file_num{$a} <=> $gene_file_num{$b}
+                or $a cmp $b
+        } @genes;
+        my %genes = map { $_ => 1 } @genes;
+
+        while (@genes) {
+            my $gene = shift @genes;
+            next unless $genes{$gene};
+            my @gene_CDS_arr = split /\n/, $gene_CDS{$gene};
+            my $gene_len = $gene_CDS_length{$gene};
+            delete $genes{$gene};
+
+            foreach my $target_gene (
+                sort {
+                    $gene_score{$b} <=> $gene_score{$a}
+                        or $gene_file_num{$a} <=> $gene_file_num{$b}
+                        or $a cmp $b
+                } keys %genes
+            ) {
+                my @target_CDS_arr = split /\n/, $gene_CDS{$target_gene};
+                my $target_len = $gene_CDS_length{$target_gene};
+
+                my $match_length = &get_match_length(\@gene_CDS_arr, \@target_CDS_arr);
+                my $ratio1 = $match_length / $gene_len;
+                my $ratio2 = $match_length / $target_len;
+                my $ratio = $ratio1 > $ratio2 ? $ratio1 : $ratio2;
+
+                if ( $ratio > $overlap_coverage ) {
+                    push @log, "Delete gene $target_gene (Score: $gene_score{$target_gene}), for its CDS coverage ratio with gene $gene (Score: $gene_score{$gene}) is: $ratio > $overlap_coverage";
+                    push @deleted, $target_gene;
+                    delete $genes{$target_gene};
+                }
+            }
+            @genes = sort {
+                $gene_score{$b} <=> $gene_score{$a}
+                    or $gene_file_num{$a} <=> $gene_file_num{$b}
+                    or $a cmp $b
+            } keys %genes;
+        }
+    }
+
+    return (\@deleted, \@log);
+}
+
+# 比较两个基因集合（通常分别来自两个不同的输入文件，且各自内部已经去除过冗余）之间的CDS重叠情况。
+# 只寻找"跨集合"的重叠基因对（setA中的基因 vs setB中的基因），不检测同一集合内部的重叠。
+# 返回值为数组，每个元素是 [setA中的基因ID, setB中的基因ID, 重叠比例]，重叠比例已经超过 $overlap_coverage 阈值。
+# 该函数只做重叠关系的检测和报告，不会修改任何全局基因数据，也不代表最终去冗余的真实结果（真实结果以两文件合并后统一去冗余为准）。
+sub compare_two_gene_sets_overlap {
+    my ($setA_ref, $setB_ref) = @_;
+    my @setA = @$setA_ref;
+    my @setB = @$setB_ref;
+
+    # 对setB按 染色体+正负链 以及 分箱 建立索引，便于快速查找与setA中基因可能重叠的setB基因
+    my %indexB;
+    foreach my $gene_ID ( @setB ) {
+        my $key = "$chr{$gene_ID}\t$strand{$gene_ID}";
+        foreach my $CDS ( split /\n/, $gene_CDS{$gene_ID} ) {
+            my ($start, $end) = (split /\t/, $CDS)[0,1];
+            my $index1 = int($start / 1000);
+            my $index2 = int($end / 1000);
+            foreach my $index ( $index1 .. $index2 ) {
+                $indexB{$key}{$index}{"$start\t$end"}{$gene_ID} = 1;
+            }
+        }
+    }
+
+    my (@pairs, %seen_pair);
+    foreach my $gene_ID ( @setA ) {
+        my $key = "$chr{$gene_ID}\t$strand{$gene_ID}";
+        next unless exists $indexB{$key};
+
+        my %candidate;
+        foreach my $CDS ( split /\n/, $gene_CDS{$gene_ID} ) {
+            my ($start, $end) = (split /\t/, $CDS)[0,1];
+            my $index1 = int($start / 1000);
+            my $index2 = int($end / 1000);
+            foreach my $index ( $index1 .. $index2 ) {
+                next unless exists $indexB{$key}{$index};
+                foreach my $region ( keys %{$indexB{$key}{$index}} ) {
+                    my ($r_start, $r_end) = split /\t/, $region;
+                    next unless ( $r_end >= $start && $r_start <= $end );
+                    foreach my $other_gene ( keys %{$indexB{$key}{$index}{$region}} ) {
+                        $candidate{$other_gene} = 1;
+                    }
+                }
+            }
+        }
+
+        foreach my $other_gene ( sort keys %candidate ) {
+            next if $seen_pair{"$gene_ID\t$other_gene"};
+            $seen_pair{"$gene_ID\t$other_gene"} = 1;
+
+            my @CDS_A = split /\n/, $gene_CDS{$gene_ID};
+            my @CDS_B = split /\n/, $gene_CDS{$other_gene};
+            my $match_length = &get_match_length(\@CDS_A, \@CDS_B);
+            my $ratio1 = $match_length / $gene_CDS_length{$gene_ID};
+            my $ratio2 = $match_length / $gene_CDS_length{$other_gene};
+            my $ratio = $ratio1 > $ratio2 ? $ratio1 : $ratio2;
+
+            if ( $ratio > $overlap_coverage ) {
+                push @pairs, [$gene_ID, $other_gene, $ratio];
+            }
+        }
+    }
+
+    return @pairs;
 }
 
 sub get_match_length {
@@ -338,12 +616,13 @@ sub get_match_length {
 
 sub get_gene_CDS_length {
     my @region = @{$_[0]};
-    @region = sort { $a <=> $b } @region;
+    return 0 unless @region;
+    @region = sort { (split /\t/, $a)[0] <=> (split /\t/, $b)[0] } @region;
 
     my $out_length;
     my $last_region = shift @region;
-    @_ = split /\t/, $last_region;
-    $out_length += ($_[1] - $_[0] + 1);
+    my @last = split /\t/, $last_region;
+    $out_length += ($last[1] - $last[0] + 1);
     foreach ( @region ) {
         my @last_region = split /\t/, $last_region;
         my @region = split /\t/;
@@ -370,11 +649,11 @@ sub analysis_geneModels_integrity {
     my ($chr, $strand) = ($_[1], $_[2]);
     my $out;
 
-    @CDS = sort {$a <=> $b} @CDS;
+    @CDS = sort { (split /\t/, $a)[0] <=> (split /\t/, $b)[0] } @CDS;
     my $seq;
     foreach ( @CDS ) {
-        @_ = split /\t/;
-        $seq .= substr($seq{$chr}, $_[0] - 1, $_[1] - $_[0] + 1);
+        my @field = split /\t/;
+        $seq .= substr($seq{$chr}, $field[0] - 1, $field[1] - $field[0] + 1);
     }
     if ( $strand eq "-" ) {
         $seq = reverse $seq;
@@ -445,21 +724,22 @@ sub get_usage_english {
 
 my $usage = <<USAGE;
 Usage:
-    $0 [options] genome.fasta in1.gff3 in2.gff3 in3.gff3 ...  > out.gff3 
+    $0 [options] genome.fasta in1.gff3 in2.gff3 in3.gff3 ...  > out.gff3
 
     This program is designed to get rid of any unnecessary repetition in one or more GFF3 files containing gene models, evaluate the gene models, and choose the most reliable results.
 
     Here's how the program works:
-    (1) It scores all input gene models. First, it gives points based on CDS length, with 1 point for each base pair, resulting in an initial score S. Then, it scores based on intron number, adding a certain percentage (relative to S) for each additional intron. The first intron adds the most points and subsequent ones add fewer proportionally. Also, the total points from all introns cannot exceed S. Next, it scores based on gene integrity by adding a certain percentage (relative to S) for a complete 5' end and another percentage for a complete 3' end. Finally, it adds a certain percentage (relative to S) to the score of the first input file while keeping the second input file's score unchanged. 
-    (2) If two gene models overlap in the CDS and the overlap ratio of either model exceeds the threshold, the lower-scoring gene model will be removed based on their scores. First, the program will find gene clusters that overlap, and then it will remove redundant gene models within those clusters based on their scores from highest to lowest.
+    (1) It scores all input gene models. First, it gives points based on CDS length, with 1 point for each base pair, resulting in an initial score S. Then, it scores based on intron number, adding a certain percentage (relative to S) for each additional intron. The first intron adds the most points and subsequent ones add fewer proportionally. Also, the total points from all introns cannot exceed S. Next, it scores based on gene integrity by adding a certain percentage (relative to S) for a complete 5' end and another percentage for a complete 3' end. Finally, it adds a certain percentage (relative to S) to the score of the first input file while keeping the second input file's score unchanged.
+    (2) When more than one GFF3 file is given, the program first performs redundancy removal independently within each input file (only checking for overlap conflicts inside that single file), and prints statistics to STDERR (the total number of genes in each file, and how many genes remain after this within-file redundancy removal). This step is only for reporting purposes and does not affect the final output.
+    (3) The program then merges the gene models from all input files. If two gene models overlap in the CDS and the overlap ratio of either model exceeds the threshold, the lower-scoring gene model will be removed based on their scores. The program partitions genes by chromosome + strand (overlaps are only possible within the same chromosome and strand), then within each partition finds clusters of mutually overlapping gene models and removes redundant ones from highest score to lowest. Partitions never affect one another, so they can be processed safely in parallel. This merged step is what determines the final output. If two gene models have exactly the same score (which can easily happen, for example, when --first_file_score is set to 0.0), the gene model from the earlier input file is kept in preference (i.e. 1st input file > 2nd input file > ... and so on). If both genes happen to come from the same file and still tie in score (extremely unlikely in practice), the gene ID (lexical order) is used as the final tiebreaker, so that the program's result is always fully deterministic and reproducible.
 
     Usage instructions:
     (1) The program needs a genome sequence as input to check the integrity of gene models.
-    (2) This program can take in a GFF3 file with alternative splicing, score multiple transcripts of a gene, choose the CDS information from the transcript with the highest score as the gene's information, and then compare its overlap and scores with other gene models.
+    (2) This program can take in a GFF3 file with alternative splicing, score multiple transcripts of a gene, choose the CDS informationfrom the transcript with the highest score as the gene's information, and then compare its overlap and scores with other gene models.
     (3) When you input multiple GFF3 files into this program, make sure there are no genes with the same ID, or else the results won't be accurate.
 
     --intron_score <float>    default: 0.3
-    Set introns to increase the score of gene models proportionally. The increase in score of a gene model due to one intron = the parameter value; the increase in score of a gene model due to the second and other introns = (1 - the parameter value) ** (intron index - 1). That is, the increase in score due to multiple introns forms an infinite geometric series, with the first term = the parameter value, common ratio = (1 - the parameter value), and the sum of the infinite geometric series = 1. By default, the first term = 0.3, common ratio = 0.7, so the first intron increases the score by 30%, the second intron by 21%, the third intron by 14.7%, the fourth by 10.29%, and so on, until the increase in score due to all introns does not exceed 100%.
+    Set introns to increase the score of gene models proportionally. The increase in score of a gene model due to one intron = the parameter value; the increase in score of a gene model due to the second and other introns = (1 - the parameter value) ** (intron index - 1). That is, the increase in score due to multiple introns forms an infinite geometric series, with the first term = the parameter value, common ratio = (1 - the parameter value), and the sum of the infinite geometric series = 1. By default, the first term = 0.3, common ratio =0.7, so the first intron increases the score by 30%, the second intron by 21%, the third intron by 14.7%, the fourth by 10.29%, and so on, until the increase in score due to all introns does not exceed 100%.
 
     --complete5p_score <float>    default: 0.5
     Set the gene model to increase the score proportionally when the 5' end is complete.
@@ -468,7 +748,7 @@ Usage:
     Set the gene model to increase the score proportionally when the 3' end is complete.
 
     --first_file_score <float>    default: 0.5
-    Set the additional score percentage for the first input file. This helps prioritize gene models from the first input GFF3 file.
+    Set the additional score percentage for the first input file. This helps prioritize gene models from the first input GFF3 file. Note: if this parameter is set to 0.0 (or otherwise gene models from different files end up identical in CDS length, intron count, and completeness), gene models from different files may receive exactly the same score. In that case, the program breaks the tie by input file order and keeps the gene model from the earlier input file (see item (3) of "Here's how the program works" above).
 
     --overlap_coverage <float>    default: 0.30
     Set a coverage threshold. Suppose the number of base pairs in the overlapping region of CDS between two gene models exceeds the coverage threshold divided by the number of redundant base pairs in the CDS of the smaller gene model. In that case, we need to remove the redundant gene model.
@@ -478,6 +758,18 @@ Usage:
 
     --stop_codon <string>    default: TAA,TAG,TGA
     Set the stop codon. If there are multiple stop codons, separate them with commas.
+
+    --cpu <int>    default: 8
+    Number of parallel worker processes. Set to 1 to run fully serially with no forking.
+
+    --tmp_dir <string>    default: auto-created under the system temp directory, and cleaned up automatically on exit
+    Scratch directory used by worker processes to exchange results (only used when --cpu > 1 and there is more than one partition).
+
+    --output_delete_info <string>    default: none (deleted gene descriptions go to STDERR)
+    Set a file path. The descriptions of genes deleted during the final, merged redundancy-removal step will be written to this file instead of STDERR. (The per-file individual redundancy-removal statistics are always printed to STDERR, regardless of this option.)
+
+    --compare_2gff3_stats <string>    default: none
+    Only takes effect when exactly two GFF3 files are given as input. Set a file path. The program will write a comparison report between the two GFF3 files' gene models to this file: the number of non-redundant genes each file contains after removing its own internal redundancy; how many genes from each file have a CDS overlap ratio with the other file exceeding --overlap_coverage, and how these conflicting genes split by which file's gene scored higher; and, line by line, the detailed description of each deleted gene in these conflicts. If two genes have the same score, the first file's gene (setA) is treated as the winner and kept.
 
     --help    default: None
     display this help and exit.
