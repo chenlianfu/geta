@@ -1,0 +1,2363 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+use Getopt::Long;
+use Cwd qw/abs_path getcwd cwd/;
+use File::Basename;
+use File::Path qw(make_path remove_tree);
+use File::Temp qw(tempfile);
+
+my $command_line = "$0 " . join(" ", @ARGV);
+my $bin_path = dirname($0);
+
+use constant {
+    FLAG_UNMAPPED      => 0x4,
+    FLAG_SECONDARY     => 0x100,
+    FLAG_SUPPLEMENTARY => 0x800,
+};
+
+# 用法说明（合并自 Sam2Transfrag / SplitRNASeqSam / Sam2TransfragLite / alternative_splicing_analysis 四个程序）。
+my $usage_cn = <<'USAGE_CN';
+Usage:
+    __PROG__ [options] input1.sam [input2.sam input3.sam ...] > transfrag.gff3
+    __PROG__ [options] --input_single_sorted_BAM_file hisat2_sorted.bam > transfrag.gff3
+
+    本程序为合并版本的RNA-Seq转录本预测流程，整合了原来的Sam2Transfrag（流程调度）、SplitRNASeqSam（比对区域切分）、Sam2TransfragLite（转录本搜索）和alternative_splicing_analysis（可变剪接分析）四个程序的全部功能，仅需本单一脚本文件即可完成从SAM/BAM比对文件到GFF3转录本结果的完整分析。
+
+    程序流程和工作原理如下：(1) 分析第一个输入SAM/BAM文件的头部信息，得到参考基因组序列长度；(2) 调用samtools merge命令将多个输入SAM/BAM文件合并为一个文件；(3) 调用samtools sort命令对合并结果按坐标排序；(4) 调用samtools index命令建立索引；(5) 调用samtools view命令按染色体对BAM文件进行分割，每份序列总长度不低于--min_genome_length_during_segmentation设定值；(6) 对每份染色体分割文件，在程序内部直接分析比对区域的覆盖空白，将其切分为更多SAM文件，每份代表一个基因的转录区域；(7) 对每个切分区域，在程序内部直接搜索表达量最高的转录本序列；(8) 对每个转录区域，在程序内部直接进行可变剪接分析，鉴定出可变剪接转录本；(9) 输出GFF3格式转录本（基因ID按--gene_prefix和--gene_code_length统一编号），以及可选的intron和exon测序深度信息；随后默认直接删除--tmp_dir指定的整个临时文件夹，若添加--keep_tmp_files参数则保留全部中间文件。
+
+    程序使用须知：(1) 本程序不再依赖SplitRNASeqSam、Sam2TransfragLite、alternative_splicing_analysis和parafly等外部程序，相关切分、转录本搜索和可变剪接分析算法均已直接整合进本脚本内部，仅要求系统中能够直接执行samtools命令；(2) 本程序所有并行化计算均通过Perl自身fork出的worker子进程完成，不再调用外部的parallel或parafly命令；(3) 本程序输入文件可以是一个或多个SAM/BAM格式文件，当输入一个已按坐标排序的BAM文件并添加--input_single_sorted_BAM_file参数后，程序会跳过合并、排序、索引三个步骤；(4) 本程序仅在最后一步才会处理临时文件（默认删除整个--tmp_dir文件夹；添加--keep_tmp_files则全部保留）。在此之前的步骤若运行中断，再次运行程序并使用--tmp_dir参数指定相同的临时文件夹，则程序能接续运行；若程序已正常运行结束且临时文件夹已被删除，则再次运行相当于从头开始；若使用了--keep_tmp_files，则可以使用相同的--tmp_dir重新运行，程序会跳过已完成的步骤并重新输出结果；(5) 默认（未添加--keep_tmp_files）会删除整个--tmp_dir文件夹，因此请不要将--tmp_dir指向已存放有其他重要文件的文件夹，也不要指向当前工作目录、输入文件或输出文件所在的上级目录，程序检测到这类情况会直接报错退出。
+
+参数:
+[输入参数]
+    --input_single_sorted_BAM_file    default: None
+    当添加该参数，表示程序仅接受第一个输入文件，且其必须为已按坐标排序的BAM文件，此时程序会跳过合并、排序、索引三个步骤。
+
+    --strand_specific    default: None
+    程序默认按非链特异性方式处理比对数据：此时不依赖SAM/BAM文件第二列FLAG推断的read1/read2方向信息，而是尝试读取剪接性比对记录中可能存在的XS标签（该标签通常由比对软件根据GT-AG等保守剪接位点自动给出，与建库是否链特异性无关）来获取intron的链信息，若没有XS标签，则该条比对记录的链信息记为无链信息(用.表示)；当添加本参数后，程序改为按常规RF链特异性建库方案，直接根据SAM/BAM文件第二列的FLAG值判断该read是双端测序中的read1还是read2、以及其比对到了参考序列的正义链还是负义链，从而推断出该比对记录所支持的transcript链（read1应比对到transcript的负义链，read2应比对到transcript的正义链；单端测序数据按read1的方式处理），不再依赖比对结果中的XS标签，因此对Hisat2、STAR等不同比对软件得到的比对结果均友好，推荐对链特异性测序数据添加本参数。
+
+[输出参数]
+    --no_alternative_splicing    default: None
+    当添加该参数，程序不再进行可变剪接分析、也不再输出可变剪接转录本，仅输出表达量最高的转录本信息，可加快运行速度。
+
+    --gene_prefix <string>    default: sam2transfrag
+    设置最后输出的GFF3文件中基因ID的前缀。基因ID的格式为<gene_prefix><基因编号>，例如默认情况下为sam2transfrag000001、sam2transfrag000002……；该基因下的mRNA、exon、intron的ID也随之联动，例如sam2transfrag000001.t01、sam2transfrag000001.t01.exon1。前缀中不能含有空白字符、分号、等号、逗号和句点。
+
+    --gene_code_length <int>    default: 6
+    设置基因编号的字符长度（数字位数），不足位数时在左侧补0，需与--gene_prefix联动使用。例如--gene_prefix Gene --gene_code_length 5，则基因ID依次为Gene00001、Gene00002……；若基因总数超过该位数所能表示的范围，编号会自动加宽并给出警告。
+
+    --tmp_dir <string>    default: tmp_$date$pid
+    输入临时文件夹路径。程序正常运行结束后，默认会删除整个临时文件夹（包括其中的所有中间文件）；如需保留，请添加--keep_tmp_files参数。
+
+    --keep_tmp_files    default: None
+    当添加该参数，程序运行结束后保留--tmp_dir指定的临时文件夹中的所有中间文件（包括合并/排序后的BAM文件、按染色体分割的SAM文件、按转录区域切分的SAM文件以及各区域的中间GFF3、intron、base_depth文件、各步骤的.ok标记文件等），不做任何删除；未添加该参数时，程序结束前会直接删除整个--tmp_dir文件夹。注意：若输入的是单个已排序BAM文件且程序需要为其建立索引，该索引文件(.bai)生成在输入BAM文件所在目录，不属于临时文件夹，不会被删除。
+
+    --intron_info_out <String>    default: None
+    设置intron信息文件的输出路径，其中包含程序识别出的可信introns及其测序深度信息（第一列Transcript_region与GFF3中的基因ID一致）。
+
+    --base_depth_out <String>    default: None
+    设置exon上碱基测序深度信息文件的输出路径。
+
+[设置阈值 - 转录本搜索]
+    --min_genome_length_during_segmentation <int>    default: 1000000
+    设置最小基因组序列长度，程序根据染色体将BAM文件进行分割时，让每个SAM文件对应的染色体序列总长度不小于该阈值。
+
+    --fraction <FLOAT>    default: 0.05
+    根据RNA-Seq比对数据分析转录本序列时，程序根据exon上碱基测序深度(expressed_base_depth)和intron测序深度(junction_depth)来打断匹配区域，以获得准确的转录本序列，这两个关键参数的阈值 = 转录本区域的最高碱基测序深度Dmax * 本参数设定值。
+
+    --min_expressed_base_depth <INT>    default: 2
+    与--fraction参数一起决定expressed_base_depth阈值的下限：若Dmax*fraction小于本参数值，则expressed_base_depth阈值取本参数值。
+
+    --max_expressed_base_depth <INT>    default: 50
+    与--fraction参数一起决定expressed_base_depth阈值的上限：若Dmax*fraction大于本参数值，则expressed_base_depth阈值取本参数值。
+
+    --min_junction_depth <INT>    default: 2
+    与--fraction参数一起决定junction_depth阈值的下限：若Dmax*fraction小于本参数值，则junction_depth阈值取本参数值。
+
+    --max_junction_depth <INT>    default: 50
+    与--fraction参数一起决定junction_depth阈值的上限：若Dmax*fraction大于本参数值，则junction_depth阈值取本参数值。
+
+    --min_fragment_count_per_transfrag <INT>    default: 10
+    输出transfrags信息的时候，必须要求transfrags被支持的fragment数目不低于该值。
+
+    --min_split_fragment_length <INT>    default: 100
+    程序在打断比对区域的时候，长度小于该值的连续比对片段会被直接丢弃；若目标是寻找基因内部很短的内嵌基因，可适当调低该参数（例如50），但过低会增加迭代次数和输出噪音。
+
+    --genome_fasta <String>    default: None
+    输入基因组序列Fasta文件；设置后程序会调用samtools faidx命令检测每个intron的剪接位点是否为常规的GT-AG、GC-AG或AT-AC，并删除不属于常规剪接位点的intron信息。
+
+    --min_intron_length <INT>    default: None
+    设置所允许的最小intron长度，设置后会据此对intron进行过滤；若使用Hisat2的结果进行分析，由于Hisat2本身有相应参数（默认20），可不设置此参数。
+
+[设置阈值 - 区域切分]
+    --keep_supplementary    default: None
+    在对比对区域进行切分时，默认会去除FLAG含0x800位的supplementary/嵌合比对结果，添加本参数后则保留这些记录。
+
+[设置阈值 - 可变剪接分析]
+    --min_intron_depth <int>    default: 1
+    设置最小intron测序深度，低于该值的intron证据将被忽略。
+
+    --min_base_depth_ratio_for_ref_specific_intron <float>    default: 0.3
+    对于仅存在于参考转录本中而没有测序证据支持的intron，计算其区域碱基测序深度中位数与基因测序深度的比值，若超过该阈值，则判定为存在Intron Retention(IR)可变剪接事件。
+
+    --min_intron_depth_ratio_for_evidence_specific_intron <float>    default: 0.2
+    对于仅存在于测序证据中而参考转录本没有的intron，计算其intron测序深度与基因测序深度的比值，若超过该阈值，则判定该intron可信。
+
+    --min_base_depth_ratio_for_common_intron <float>    default: 0.2
+    对于参考转录本和测序证据中共有的intron，计算其区域碱基测序深度中位数与基因测序深度的比值，若超过该阈值，则判定为存在IR可变剪接事件。
+
+    --min_gene_depth <int>    default: 10
+    计算上述比值时所用的基因测序深度，若低于该参数值，则用该参数值代替。
+
+    --min_transcript_confidence_for_output <float>    default: 0.05
+    新增的可变剪接转录本所占比例需不低于该阈值，否则不予输出。
+
+    --transcript_num_for_output_when_all_low_confidence <int>    default: 8
+    当一个基因所有新增可变剪接转录本的比例均低于--min_transcript_confidence_for_output时，强制按比例从高到低输出转录本，直至mRNA数量达到该参数设置的值。
+
+    --added_mRNA_ID_prefix <string>    default: t
+    新增可变剪接转录本的ID格式为<geneID>.<prefix><编号>，本参数用于设置其中的<prefix>部分。
+
+[性能参数]
+    --cpu <int>    default: 8
+    设置程序运行时并行使用的worker子进程/CPU线程数；本程序所有并行化步骤均通过Perl自身fork出的worker子进程完成，不再依赖外部parafly或parallel命令。
+
+    --help    default: None
+    display this help and exit.
+
+    --chinese_help    default: None
+    使用该参数后，程序给出中文用法并退出。
+
+USAGE_CN
+
+my $usage_english = <<'USAGE_EN';
+Usage:
+    __PROG__ [options] input1.sam [input2.sam input3.sam ...] > transfrag.gff3
+    __PROG__ [options] --input_single_sorted_BAM_file hisat2_sorted.bam > transfrag.gff3
+
+    This is a merged version of the RNA-Seq transcript prediction pipeline, combining the previously separate Sam2Transfrag (orchestrator), SplitRNASeqSam (region segmentation), Sam2TransfragLite (transcript search) and alternative_splicing_analysis (alternative splicing analysis) programs into a single self-contained script that turns SAM/BAM alignments directly into GFF3 transcripts.
+
+    Workflow: (1) read the header of the first input SAM/BAM file to obtain reference sequence lengths; (2) use samtools merge to combine multiple input SAM/BAM files into one; (3) use samtools sort to coordinate-sort the result; (4) use samtools index to index it; (5) use samtools view to split the BAM file by chromosome so that each piece covers at least --min_genome_length_during_segmentation bp; (6) for each chromosome piece, split it internally at gaps with no read coverage into smaller SAM files, each representing one gene transcription region; (7) for each region, search internally for the transcript sequence with the highest coverage; (8) for each region, perform alternative splicing analysis internally to identify alternatively spliced transcripts; (9) output GFF3-format transcripts (gene IDs are numbered according to --gene_prefix and --gene_code_length), plus optional intron and exon sequencing depth information; afterwards the whole --tmp_dir folder is deleted by default, unless --keep_tmp_files is given, in which case all intermediate files are kept.
+
+    Notes: (1) this program no longer depends on the external SplitRNASeqSam, Sam2TransfragLite, alternative_splicing_analysis or parafly programs -- all of that logic is now built directly into this script, and only the samtools command is required on the system; (2) all parallel computation is performed through worker subprocesses forked by Perl itself, not through an external parallel or parafly command; (3) input may be one or more SAM/BAM files, and adding --input_single_sorted_BAM_file together with a single coordinate-sorted BAM file skips the merge/sort/index steps; (4) the temporary files are handled only at the very last step (the whole --tmp_dir folder is deleted by default; everything is kept with --keep_tmp_files). An interrupted run can be resumed by rerunning with the same --tmp_dir; after a successful run whose --tmp_dir has been deleted, rerunning simply starts from scratch; if --keep_tmp_files was used, rerunning with the same --tmp_dir skips the finished steps and simply regenerates the outputs; (5) because the whole --tmp_dir folder is deleted by default (i.e. without --keep_tmp_files), do not point --tmp_dir to a folder holding other important files, nor to the current working directory or a parent directory of any input/output file -- the program aborts with an error if it detects such a case.
+
+Parameters:
+[INPUT]
+    --input_single_sorted_BAM_file    default: None
+    when set, the program accepts only the first input file, which must already be a coordinate-sorted BAM file, and the merge/sort/index steps are skipped.
+
+    --strand_specific    default: None
+    by default the program treats the data as non-strand-specific: it does not rely on FLAG-derived read1/read2 orientation and instead tries to read an XS tag on spliced alignments (usually assigned by the aligner from GT-AG-like splice signals, independent of library strandedness) to determine intron strand, recording no-strand-information (.) when no XS tag is present; when this option is given, the program instead infers the supported transcript strand directly from the FLAG field following the standard RF strand-specific library convention (read1 maps to the minus strand of the transcript, read2 to the plus strand; single-end data is treated like read1), without relying on any XS tag, so it works well with Hisat2, STAR and other aligners -- recommended for strand-specific sequencing data.
+
+[OUTPUT]
+    --no_alternative_splicing    default: None
+    when set, the program skips alternative splicing analysis entirely and only outputs the single highest-coverage transcript per region, which speeds up the run.
+
+    --gene_prefix <string>    default: sam2transfrag
+    prefix of the gene IDs in the final GFF3 output. A gene ID has the form <gene_prefix><gene number>, e.g. sam2transfrag000001, sam2transfrag000002, ... by default; the IDs of the mRNA, exon and intron features under the gene follow accordingly, e.g. sam2transfrag000001.t01, sam2transfrag000001.t01.exon1. The prefix must not contain whitespace, semicolon, equals sign, comma or period.
+
+    --gene_code_length <int>    default: 6
+    number of digits of the gene number, left-padded with zeros; used together with --gene_prefix. For example, --gene_prefix Gene --gene_code_length 5 gives Gene00001, Gene00002, ... If the number of genes exceeds what this width can hold, the number is automatically widened and a warning is printed.
+
+    --tmp_dir <string>    default: tmp_$date$pid
+    path of the temporary folder. After a successful run the whole folder (with all intermediate files in it) is deleted by default; add --keep_tmp_files to keep it.
+
+    --keep_tmp_files    default: None
+    when set, all intermediate files in the --tmp_dir folder are kept after the run finishes (merged/sorted BAM, per-chromosome SAM files, per-region SAM files, per-region intermediate GFF3/intron/base_depth files, the step .ok marker files, etc.) and nothing is deleted; when not set, the whole --tmp_dir folder is deleted before the program exits. Note: if a single sorted BAM file is given and the program has to index it, the index file (.bai) is written next to the input BAM, outside the temporary folder, and is never deleted.
+
+    --intron_info_out <String>    default: None
+    when set, reliable intron information together with its sequencing depth is written to the given file (the first column, Transcript_region, matches the gene ID in the GFF3).
+
+    --base_depth_out <String>    default: None
+    when set, per-base sequencing depth information for exons is written to the given file.
+
+[THRESHOLDS - transcript search]
+    --min_genome_length_during_segmentation <int>    default: 1000000
+    minimum total reference sequence length per chromosome-split SAM file.
+
+    --fraction <FLOAT>    default: 0.05
+    the expressed_base_depth and junction_depth thresholds used to break alignment regions into accurate transcript sequences are each derived from the maximum single-base sequencing depth (Dmax) of the region multiplied by this fraction.
+
+    --min_expressed_base_depth <INT>    default: 2
+    lower bound for the expressed_base_depth threshold derived from Dmax*fraction.
+
+    --max_expressed_base_depth <INT>    default: 50
+    upper bound for the expressed_base_depth threshold derived from Dmax*fraction.
+
+    --min_junction_depth <INT>    default: 2
+    lower bound for the junction_depth threshold derived from Dmax*fraction.
+
+    --max_junction_depth <INT>    default: 50
+    upper bound for the junction_depth threshold derived from Dmax*fraction.
+
+    --min_fragment_count_per_transfrag <INT>    default: 10
+    a transfrag is only reported if it is supported by at least this many fragments.
+
+    --min_split_fragment_length <INT>    default: 100
+    continuous aligned fragments shorter than this value are discarded during region splitting; lower it (e.g. 50) to find very short genes nested inside another gene's intron, at the cost of more iterations and noisier output.
+
+    --genome_fasta <String>    default: None
+    reference genome FASTA file; when given, samtools faidx is used to check each intron's donor/acceptor sequence against the canonical GT-AG, GC-AG or AT-AC patterns and drop non-canonical introns.
+
+    --min_intron_length <INT>    default: None
+    minimum allowed intron length used to filter introns; not normally needed for Hisat2 output, which already enforces a minimum intron length (default 20) of its own.
+
+[THRESHOLDS - region splitting]
+    --keep_supplementary    default: None
+    by default supplementary/chimeric alignments (FLAG bit 0x800) are removed when splitting regions; set this to keep them.
+
+[THRESHOLDS - alternative splicing]
+    --min_intron_depth <int>    default: 1
+    minimum intron sequencing depth; evidence introns below this depth are ignored.
+
+    --min_base_depth_ratio_for_ref_specific_intron <float>    default: 0.3
+    for an intron present only in the reference transcript (no sequencing evidence), if the ratio of its median base depth to the gene depth exceeds this threshold, it is treated as an Intron Retention (IR) event.
+
+    --min_intron_depth_ratio_for_evidence_specific_intron <float>    default: 0.2
+    for an intron present only in the sequencing evidence (not in the reference transcript), if the ratio of its intron depth to the gene depth exceeds this threshold, the intron is treated as reliable.
+
+    --min_base_depth_ratio_for_common_intron <float>    default: 0.2
+    for an intron present in both the reference transcript and the sequencing evidence, if the ratio of its median base depth to the gene depth exceeds this threshold, it is treated as an IR event.
+
+    --min_gene_depth <int>    default: 10
+    gene sequencing depth used in the three ratios above is floored to this value if it would otherwise be lower.
+
+    --min_transcript_confidence_for_output <float>    default: 0.05
+    a newly added alternatively-spliced transcript is only output if its estimated proportion is at least this value.
+
+    --transcript_num_for_output_when_all_low_confidence <int>    default: 8
+    when every newly added transcript's proportion falls below --min_transcript_confidence_for_output, force-output the highest-ranked transcripts until this many mRNAs have been produced.
+
+    --added_mRNA_ID_prefix <string>    default: t
+    prefix used when assigning IDs (<geneID>.<prefix><number>) to newly added alternatively-spliced transcripts.
+
+[PERFORMANCE]
+    --cpu <int>    default: 8
+    number of worker subprocesses/CPU threads used for every parallel step; all parallelism is implemented with Perl's own fork()-based worker pool, no external parafly or parallel command is used.
+
+    --help    default: None
+    display this help and exit.
+
+    --chinese_help    default: None
+    display the Chinese usage and exit.
+
+USAGE_EN
+
+(my $usage = $usage_cn) =~ s/__PROG__/$0/g;
+($usage_english = $usage_english) =~ s/__PROG__/$0/g;
+
+if (@ARGV == 0) { die $usage_english }
+
+# ============================================================================
+# 解析命令行参数
+# ============================================================================
+my ($input_single_sorted_BAM_file, $strand_specific, $help, $chinese_help,
+    $no_alternative_splicing, $tmp_dir, $keep_tmp_files, $intron_info_out, $base_depth_out,
+    $gene_prefix, $gene_code_length,
+    $min_genome_length_during_segmentation, $fraction,
+    $min_expressed_base_depth, $max_expressed_base_depth,
+    $min_junction_depth, $max_junction_depth,
+    $min_fragment_count_per_transfrag, $min_split_fragment_length,
+    $genome_fasta, $min_intron_length, $keep_supplementary,
+    $min_intron_depth, $min_base_depth_ratio_for_ref_specific_intron,
+    $min_intron_depth_ratio_for_evidence_specific_intron,
+    $min_base_depth_ratio_for_common_intron, $min_gene_depth,
+    $min_transcript_confidence_for_output,
+    $transcript_num_for_output_when_all_low_confidence,
+    $added_mRNA_ID_prefix, $cpu);
+
+GetOptions(
+    "input_single_sorted_BAM_file!" => \$input_single_sorted_BAM_file,
+    "strand_specific!"              => \$strand_specific,
+    "chinese_help!"                 => \$chinese_help,
+    "help!"                         => \$help,
+    "no_alternative_splicing!"      => \$no_alternative_splicing,
+    "gene_prefix=s"                 => \$gene_prefix,
+    "gene_code_length=i"            => \$gene_code_length,
+    "tmp_dir=s"                     => \$tmp_dir,
+    "keep_tmp_files!"               => \$keep_tmp_files,
+    "intron_info_out=s"             => \$intron_info_out,
+    "base_depth_out=s"              => \$base_depth_out,
+    "min_genome_length_during_segmentation=i" => \$min_genome_length_during_segmentation,
+    "fraction=f"                    => \$fraction,
+    "min_expressed_base_depth=i"    => \$min_expressed_base_depth,
+    "max_expressed_base_depth=i"    => \$max_expressed_base_depth,
+    "min_junction_depth=i"          => \$min_junction_depth,
+    "max_junction_depth=i"          => \$max_junction_depth,
+    "min_fragment_count_per_transfrag=i" => \$min_fragment_count_per_transfrag,
+    "min_split_fragment_length=i"   => \$min_split_fragment_length,
+    "genome_fasta=s"                => \$genome_fasta,
+    "min_intron_length=i"           => \$min_intron_length,
+    "keep_supplementary!"           => \$keep_supplementary,
+    "min_intron_depth=i"            => \$min_intron_depth,
+    "min_base_depth_ratio_for_ref_specific_intron=f" => \$min_base_depth_ratio_for_ref_specific_intron,
+    "min_intron_depth_ratio_for_evidence_specific_intron=f" => \$min_intron_depth_ratio_for_evidence_specific_intron,
+    "min_base_depth_ratio_for_common_intron=f" => \$min_base_depth_ratio_for_common_intron,
+    "min_gene_depth=i"              => \$min_gene_depth,
+    "min_transcript_confidence_for_output=f" => \$min_transcript_confidence_for_output,
+    "transcript_num_for_output_when_all_low_confidence=i" => \$transcript_num_for_output_when_all_low_confidence,
+    "added_mRNA_ID_prefix=s"        => \$added_mRNA_ID_prefix,
+    "cpu=i"                         => \$cpu,
+) or die $usage_english;
+
+if ( $chinese_help ) { die $usage }
+if ( $help )         { die $usage_english }
+
+# 在标准错误输出中给出程序的运行命令。
+my $pwd = `pwd`;
+my $programe_name = basename($0);
+print STDERR "\n#################### $programe_name | Start ####################\n";
+print STDERR "PWD: $pwd" . (localtime) . ": CMD: " . $command_line . "\n";
+print STDERR "============================================\n";
+
+# 记录程序启动时的工作目录（后面会chdir进临时文件夹，删除临时文件夹前需要先切回该目录）
+my $orig_cwd = getcwd();
+
+# 使用绝对路径
+my @input_SAM;
+foreach ( @ARGV ) { push @input_SAM, abs_path($_); }
+$intron_info_out = abs_path($intron_info_out) if defined $intron_info_out;
+$base_depth_out = abs_path($base_depth_out) if defined $base_depth_out;
+$genome_fasta = abs_path($genome_fasta) if defined $genome_fasta;
+
+# 设置参数默认值
+$cpu ||= 8;
+$gene_prefix = "sam2transfrag" unless defined $gene_prefix;
+$gene_code_length = 6 unless defined $gene_code_length;
+$min_genome_length_during_segmentation ||= 1000000;
+$fraction = 0.05 unless defined $fraction;
+$min_expressed_base_depth = 2 unless defined $min_expressed_base_depth;
+$max_expressed_base_depth = 50 unless defined $max_expressed_base_depth;
+$min_junction_depth = 2 unless defined $min_junction_depth;
+$max_junction_depth = 50 unless defined $max_junction_depth;
+$min_fragment_count_per_transfrag ||= 10;
+$min_split_fragment_length ||= 100;
+$min_intron_depth = 1 unless defined $min_intron_depth;
+$min_base_depth_ratio_for_ref_specific_intron = 0.3 unless defined $min_base_depth_ratio_for_ref_specific_intron;
+$min_intron_depth_ratio_for_evidence_specific_intron = 0.2 unless defined $min_intron_depth_ratio_for_evidence_specific_intron;
+$min_base_depth_ratio_for_common_intron = 0.2 unless defined $min_base_depth_ratio_for_common_intron;
+$min_gene_depth = 10 unless defined $min_gene_depth;
+$min_transcript_confidence_for_output = 0.05 unless defined $min_transcript_confidence_for_output;
+$transcript_num_for_output_when_all_low_confidence ||= 8;
+$added_mRNA_ID_prefix = "t" unless defined $added_mRNA_ID_prefix;
+
+# 检查基因ID相关参数的合法性
+if ( $gene_prefix eq '' ) {
+    die "Error: --gene_prefix can not be an empty string.\n";
+}
+if ( $gene_prefix =~ m/[\s;=,.]/ ) {
+    die "Error: --gene_prefix (\"$gene_prefix\") must not contain whitespace, ';', '=', ',' or '.' characters, since they would break the GFF3 attribute format or the <geneID>.<mRNA> ID structure.\n";
+}
+if ( $gene_code_length < 1 ) {
+    die "Error: --gene_code_length must be a positive integer (got $gene_code_length).\n";
+}
+
+# 是否为非链特异性数据（内部沿用Sam2TransfragLite原有的$no_strand_specific语义）
+my $no_strand_specific = $strand_specific ? 0 : 1;
+
+# 准备临时文件夹路径
+my $date = `date +%Y%m%d%H%M%S`; chomp($date);
+$tmp_dir ||= "tmp_$date$$";
+$tmp_dir = abs_path($tmp_dir);
+
+# 未添加--keep_tmp_files时，程序结束前会直接删除整个$tmp_dir文件夹。
+# 为避免误删重要数据，在开始运行前先做安全检查：临时文件夹不能是根目录，
+# 也不能是当前工作目录、输入文件、输出文件或基因组fasta文件所在位置的
+# 本身或上级目录。
+unless ( $keep_tmp_files ) {
+    die "Error: --tmp_dir can not be the root directory \"/\" when --keep_tmp_files is not set, since the whole --tmp_dir folder will be deleted at the end.\n" if $tmp_dir eq '/';
+    my @protected_paths = ($orig_cwd, @input_SAM);
+    foreach ( $intron_info_out, $base_depth_out, $genome_fasta ) {
+        push @protected_paths, $_ if defined $_;
+    }
+    foreach my $p ( @protected_paths ) {
+        next unless defined $p;
+        if ( $p eq $tmp_dir || index($p, "$tmp_dir/") == 0 ) {
+            die "Error: --tmp_dir (\"$tmp_dir\") is, or is a parent directory of, \"$p\" (the current working directory, an input file, or an output file). Since the whole --tmp_dir folder is deleted at the end when --keep_tmp_files is not set, please choose a separate temporary folder, or add --keep_tmp_files.\n";
+        }
+    }
+}
+
+mkdir $tmp_dir unless -e $tmp_dir;
+chdir $tmp_dir; print STDERR "PWD: $tmp_dir\n";
+print STDERR "Temporary folder: $tmp_dir (" . ( $keep_tmp_files ? "all intermediate files will be kept" : "the whole folder will be deleted after a successful run" ) . ")\n";
+
+# ============================================================================
+# 1. 分析SAM头部
+# ============================================================================
+print STDERR "\n1. Using the \"samtools view\" command to obtain header of the first input SAM/BAM file. (" . (localtime) . ")\n";
+my @cmdString;
+push @cmdString, "samtools view -H $input_SAM[0] > header.sam";
+
+my $alignment_BAM_file;
+if ( defined $input_single_sorted_BAM_file ) {
+    push @cmdString, "touch 02.samtools_merge.ok 03.samtools_sort.ok 04.samtools_index.ok";
+    $alignment_BAM_file = $input_SAM[0];
+    unless ( -s "$alignment_BAM_file.bai" ) {
+        push @cmdString, "samtools index $alignment_BAM_file";
+    }
+}
+&execute_cmds(@cmdString, "$tmp_dir/01.samtools_view.ok");
+
+# ============================================================================
+# 2. samtools merge
+# ============================================================================
+print STDERR "\n2. Using the \"samtools merge\" command to consolidate multiple input SAM files into a single file. (" . (localtime) . ")\n";
+my $cmdString;
+if ( @input_SAM > 1 ) {
+    $cmdString = "samtools merge -\@ $cpu -O SAM -o alignment.sam " . join(" ", @input_SAM);
+}
+else {
+    $cmdString = "ln -sf $input_SAM[0] alignment.sam";
+}
+&execute_cmds($cmdString, "$tmp_dir/02.samtools_merge.ok");
+
+# ============================================================================
+# 3. samtools sort
+# ============================================================================
+print STDERR "\n3. Using the \"samtools sort\" command to perform coordinate-based sorting on the SAM file. (" . (localtime) . ")\n";
+my $file_size = 0;
+my @stat = stat("$tmp_dir/alignment.sam");
+$file_size = int($stat[7] / 1024) if $stat[7];
+
+my $MemAvailable = &get_MemAvailable();
+my $samtools_sort_memory = $MemAvailable * 0.9;
+$samtools_sort_memory = $file_size * 1.2 if $samtools_sort_memory > $file_size * 1.2;
+$samtools_sort_memory = $samtools_sort_memory / 1024;
+my $samtools_sort_M = int($samtools_sort_memory / $cpu);
+
+$cmdString = "samtools sort -\@ $cpu -m ${samtools_sort_M}M -O BAM -o alignment.bam alignment.sam";
+&execute_cmds($cmdString, "$tmp_dir/03.samtools_sort.ok");
+
+# ============================================================================
+# 4. samtools index
+# ============================================================================
+print STDERR "\n4. Using the \"samtools index\" command to index the SAM file. (" . (localtime) . ")\n";
+$cmdString = "samtools index -\@ $cpu alignment.bam";
+&execute_cmds($cmdString, "$tmp_dir/04.samtools_index.ok");
+$alignment_BAM_file = "$tmp_dir/alignment.bam" unless defined $alignment_BAM_file;
+
+# ============================================================================
+# 5. 按染色体分割BAM文件（并行化：Perl worker子进程代替parafly）
+# ============================================================================
+print STDERR "\n5. Splitting the SAM file by chromosome and its length. If there are multiple sequences that are shorter, merge them until the size exceeds $min_genome_length_during_segmentation bp. (" . (localtime) . ")\n";
+## 说明：染色体分组的计算仅依赖header.sam（第1步已生成的断点文件），
+## 开销很小，因此每次运行都直接重新计算，不再用“列表文件是否已存在”
+## 来判断是否跳过；这样即使程序在第5步执行到一半时中断，重新运行后
+## 也能正确得到@piece_sam_files（包含每份piece的染色体名列表），
+## 而不会导致第5步在续跑时被错误地直接标记为完成却未真正执行。
+my @piece_sam_files;
+my %genome_seq_length;
+open my $HDR, '<', "$tmp_dir/header.sam" or die "Error: Can not open file $tmp_dir/header.sam, $!";
+while (<$HDR>) {
+    if ( m/^\@/ ) {
+        if ( m/^\@SQ\tSN:(\S+)\tLN:(\d+)/ ) {
+            $genome_seq_length{$1} = $2;
+        }
+    }
+    else { last; }
+}
+close $HDR;
+
+my (%piece, @piece, $piece_num, $piece_length, $piece_name);
+foreach ( sort {$genome_seq_length{$b} <=> $genome_seq_length{$a}} keys %genome_seq_length ) {
+    $piece_name .= "$_ ";
+    $piece_length += $genome_seq_length{$_};
+    if ( $piece_length >= $min_genome_length_during_segmentation ) {
+        $piece_num ++;
+        $piece{$piece_name} = $piece_num;
+        push @piece, $piece_name;
+        $piece_name = "";
+        $piece_length = 0;
+    }
+}
+if ( $piece_name ) {
+    $piece_num ++;
+    $piece{$piece_name} = $piece_num;
+    push @piece, $piece_name;
+}
+
+mkdir "$tmp_dir/splitSAM_byChromosome" unless -e "$tmp_dir/splitSAM_byChromosome";
+my $output2 = "$tmp_dir/splitSAM_byChromosome.file_path.list";
+open my $OUT2, '>', $output2 or die "Error: Can not create file $output2, $!";
+foreach ( @piece ) {
+    my $out_sam = "$tmp_dir/splitSAM_byChromosome/piece$piece{$_}.sam";
+    push @piece_sam_files, [$_, $out_sam];
+    print {$OUT2} "$out_sam\n";
+}
+close $OUT2;
+
+unless ( -e "$tmp_dir/05.samtools_view.ok" ) {
+    if (@piece_sam_files) {
+        my @tasks;
+        foreach my $item (@piece_sam_files) {
+            my ($seqnames, $out_sam) = @$item;
+            push @tasks, sub {
+                my $cmd = "samtools view $alignment_BAM_file $seqnames > $out_sam";
+                system($cmd) == 0 or die "Error: failed to execute: $cmd\n";
+            };
+        }
+        &run_parallel_tasks(\@tasks, $cpu, "$tmp_dir/05.samtools_view.ok", "samtools view (chromosome split)");
+    }
+    else {
+        open my $OK, '>', "$tmp_dir/05.samtools_view.ok" or die $!; close $OK;
+    }
+}
+print STDERR (localtime) . ": step 5 done.\n";
+
+# ============================================================================
+# 6. 内部切分比对区域（原SplitRNASeqSam逻辑，Perl worker并行化）
+# ============================================================================
+print STDERR "\n6. Further splitting the SAM file from unaligned region. (" . (localtime) . ")\n";
+open my $PIECE_LIST, '<', "$tmp_dir/splitSAM_byChromosome.file_path.list" or die $!;
+my @pieces = map { chomp; s/\.sam$//; $_ } <$PIECE_LIST>;
+close $PIECE_LIST;
+
+my $splited_sam_out_dir = "$tmp_dir/splited_sam_out";
+mkdir $splited_sam_out_dir unless -e $splited_sam_out_dir;
+
+unless ( -e "$tmp_dir/06.SplitRNASeqSam.ok" ) {
+    my @tasks;
+    foreach my $piece (@pieces) {
+        push @tasks, sub {
+            do_split_rnaseq_sam("$piece.sam", $splited_sam_out_dir, $min_fragment_count_per_transfrag, $keep_supplementary, "$piece.list");
+        };
+    }
+    &run_parallel_tasks(\@tasks, $cpu, "$tmp_dir/06.SplitRNASeqSam.ok", "internal region splitting (SplitRNASeqSam)");
+}
+
+unless ( -e "$tmp_dir/splited_sam_files.list" ) {
+    my $output = "$tmp_dir/splited_sam_out.file_path.list";
+    open my $OUT, '>', $output or die "Error: Can not create file $output, $!";
+    foreach my $piece (@pieces) {
+        if (-e "$piece.list") {
+            open my $IN, '<', "$piece.list" or die "Error: Can not open file $piece.list, $!";
+            print {$OUT} <$IN>;
+            close $IN;
+        }
+    }
+    close $OUT;
+    open my $DONE, '>', "$tmp_dir/splited_sam_files.list" or die $!; close $DONE;
+}
+print STDERR (localtime) . ": step 6 done.\n";
+
+# ============================================================================
+# 7. 内部转录本搜索（原Sam2TransfragLite逻辑，Perl worker并行化）
+# ============================================================================
+print STDERR "\n7. Converting SAM into transcripts for each aligned genomic region. (" . (localtime) . ")\n";
+open my $REGION_LIST, '<', "$tmp_dir/splited_sam_out.file_path.list" or die $!;
+my (@regions, @region_fragment_count);
+while ( <$REGION_LIST> ) {
+    chomp;
+    my ($sam_path, $frag_count) = split /\t/;
+    $frag_count = 0 unless defined $frag_count;
+    $sam_path =~ s/\.sam$//;
+    push @regions, $sam_path;
+    push @region_fragment_count, $frag_count;
+}
+close $REGION_LIST;
+
+# 按区域内read pairs（fragment）数目从大到小排序得到的下标顺序，仅用于决定
+# 第7、8步中并行worker任务的派发（fork）先后顺序：优先派发数据量大、耗时长
+# 的区域，使其尽早开始运行，避免少数大区域在队列末尾才被处理而拖慢整体进度；
+# 注意@regions本身仍保持原始（按染色体坐标切分得到）的顺序，第9步按该顺序
+# 输出结果，因此排序调度不会影响最终GFF3等结果文件中转录本的输出顺序。
+my @task_order = sort { $region_fragment_count[$b] <=> $region_fragment_count[$a] } ( 0 .. $#regions );
+
+my %sam2transfrag_opts = (
+    fraction                          => $fraction,
+    min_expressed_base_depth          => $min_expressed_base_depth,
+    max_expressed_base_depth          => $max_expressed_base_depth,
+    min_junction_depth                => $min_junction_depth,
+    max_junction_depth                => $max_junction_depth,
+    min_fragment_count_per_transfrag  => $min_fragment_count_per_transfrag,
+    min_split_fragment_length         => $min_split_fragment_length,
+    genome_fasta                      => $genome_fasta,
+    min_intron_length                 => $min_intron_length,
+    no_strand_specific                => $no_strand_specific,
+);
+
+unless ( -e "$tmp_dir/07.Sam2TransfragLite.ok" ) {
+    my @tasks;
+    foreach my $idx (@task_order) {
+        my $region = $regions[$idx];
+        push @tasks, sub {
+            do_sam2transfrag_lite($region, \%sam2transfrag_opts);
+        };
+    }
+    &run_parallel_tasks(\@tasks, $cpu, "$tmp_dir/07.Sam2TransfragLite.ok", "internal transcript search (Sam2TransfragLite)");
+}
+print STDERR (localtime) . ": step 7 done.\n";
+
+# ============================================================================
+# 8. 内部可变剪接分析（原alternative_splicing_analysis逻辑，Perl worker并行化）
+# ============================================================================
+print STDERR "\n8. Performing alternative splicing analysis for each aligned genomic region. (" . (localtime) . ")\n";
+my %as_opts = (
+    min_intron_depth => $min_intron_depth,
+    min_base_depth_ratio_for_ref_specific_intron => $min_base_depth_ratio_for_ref_specific_intron,
+    min_intron_depth_ratio_for_evidence_specific_intron => $min_intron_depth_ratio_for_evidence_specific_intron,
+    min_base_depth_ratio_for_common_intron => $min_base_depth_ratio_for_common_intron,
+    min_gene_depth => $min_gene_depth,
+    min_transcript_confidence_for_output => $min_transcript_confidence_for_output,
+    transcript_num_for_output_when_all_low_confidence => $transcript_num_for_output_when_all_low_confidence,
+    added_mRNA_ID_prefix => $added_mRNA_ID_prefix,
+);
+
+unless ( $no_alternative_splicing ) {
+    unless ( -e "$tmp_dir/08.alternative_splicing_analysis.ok" ) {
+        my @tasks;
+        foreach my $idx (@task_order) {
+            my $region = $regions[$idx];
+            push @tasks, sub {
+                do_alternative_splicing_analysis("$region.gff3", "$region.intron", "$region.base_depth", "$region.AS.gff3", \%as_opts);
+            };
+        }
+        &run_parallel_tasks(\@tasks, $cpu, "$tmp_dir/08.alternative_splicing_analysis.ok", "internal alternative splicing analysis");
+    }
+}
+print STDERR (localtime) . ": step 8 done" . ($no_alternative_splicing ? " (skipped)." : ".") . "\n";
+
+# ============================================================================
+# 9. 输出结果并处理临时文件（默认删除整个--tmp_dir；添加--keep_tmp_files则全部保留）
+# ============================================================================
+print STDERR "\n9. Produce the output file containing transcript information in GFF3 format. Meanwhile, it outputs the sequencing depth of introns and exons as needed. Finally, " . ( $keep_tmp_files ? "keep all the intermediate files (--keep_tmp_files)" : "delete the whole temporary folder" ) . ". (" . (localtime) . ")\n";
+unless ( -e "$tmp_dir/09.remove_tmp_file.ok" ) {
+    # 基因ID重命名：把内部临时基因ID（<chr>_<strand>_<start>_<end>）统一替换为
+    # <gene_prefix><按gene_code_length补零的顺序编号>。编号按@regions原始顺序、
+    # 区域文件内基因出现顺序依次递增。该基因下的mRNA/exon/intron的ID及Parent
+    # 属性（形如<oldGeneID>.t01、<oldGeneID>.t01.exon1）随之联动替换。
+    my %gene_id_map;       # 旧基因ID => 新基因ID，也用于同步替换intron信息文件第一列
+    my $gene_counter = 0;
+    my $gene_code_warned = 0;
+
+    foreach my $region ( @regions ) {
+        my $result_file = $no_alternative_splicing ? "$region.gff3" : "$region.AS.gff3";
+        if (-e $result_file) {
+            open my $IN, '<', $result_file or die "Error: Can not open file $result_file, $!";
+            my ($cur_old_id, $cur_new_id);
+            while ( my $line = <$IN> ) {
+                if ( $line =~ m/\tgene\t.*?ID=([^;\s]+)/ ) {
+                    $cur_old_id = $1;
+                    $gene_counter ++;
+                    if ( ! $gene_code_warned && length($gene_counter) > $gene_code_length ) {
+                        print STDERR "Warning: the number of genes exceeds the capacity of --gene_code_length $gene_code_length; gene numbers will be automatically widened.\n";
+                        $gene_code_warned = 1;
+                    }
+                    $cur_new_id = $gene_prefix . sprintf("%0${gene_code_length}d", $gene_counter);
+                    $gene_id_map{$cur_old_id} = $cur_new_id;
+                }
+                if ( defined $cur_old_id ) {
+                    $line =~ s/(ID=|Parent=)\Q$cur_old_id\E(?=[;.\s]|$)/$1$cur_new_id/g;
+                }
+                print $line;
+            }
+            close $IN;
+        }
+    }
+
+    if ( $intron_info_out ) {
+        open my $OUT, '>', $intron_info_out or die "Error: Can not create file $intron_info_out, $!";
+        print {$OUT} "#Transcript_region\tChromosome\tStrand\tIntron_start\tIntron_end\tIntron_depth\tMedian_base_depth_in_intron\n";
+        foreach my $region ( @regions ) {
+            next unless -e "$region.intron";
+            open my $IN, '<', "$region.intron" or die "Error: Can not open file $region.intron, $!";
+            <$IN>;
+            while ( my $line = <$IN> ) {
+                # 第一列为旧的基因区域ID，与GFF3中的新基因ID保持一致。
+                if ( $line =~ m/^([^\t]+)(\t.*)$/s ) {
+                    my ($old_id, $rest) = ($1, $2);
+                    $line = ( exists $gene_id_map{$old_id} ? $gene_id_map{$old_id} : $old_id ) . $rest;
+                }
+                print {$OUT} $line;
+            }
+            close $IN;
+        }
+        close $OUT;
+    }
+    if ( $base_depth_out ) {
+        open my $OUT, '>', $base_depth_out or die "Error: Can not create file $base_depth_out, $!";
+        print {$OUT} "#Chromosome\tStrand\tPosition\tDepth\n";
+        foreach my $region ( @regions ) {
+            next unless -e "$region.base_depth";
+            open my $IN, '<', "$region.base_depth" or die "Error: Can not open file $region.base_depth, $!";
+            <$IN>;
+            print {$OUT} <$IN>;
+            close $IN;
+        }
+        close $OUT;
+    }
+
+    if ( $keep_tmp_files ) {
+        # 保留全部中间文件：不删除任何内容，也不生成09.remove_tmp_file.ok标记文件，
+        # 这样使用相同的--tmp_dir再次运行时，程序会跳过已完成的1~8步并重新输出结果。
+        print STDERR (localtime) . ": --keep_tmp_files is set, all intermediate files are kept in: $tmp_dir\n";
+    }
+    else {
+        # 默认：直接删除整个--tmp_dir文件夹。
+        # 程序当前工作目录位于$tmp_dir内，需先切回启动时的工作目录再删除；
+        # 由于整个文件夹都会被删除，不能再用execute_cmds在其中写.ok标记文件。
+        print STDERR (localtime) . ": Removing the whole temporary folder: $tmp_dir\n";
+        chdir $orig_cwd or die "Error: Can not change directory back to $orig_cwd, $!";
+        my $remove_err;
+        remove_tree($tmp_dir, { error => \$remove_err });
+        if ( $remove_err && @$remove_err ) {
+            foreach my $diag ( @$remove_err ) {
+                my ($file, $message) = %$diag;
+                $file = $tmp_dir if $file eq '';
+                print STDERR "Warning: failed to remove $file: $message\n";
+            }
+            print STDERR "Warning: the temporary folder $tmp_dir was not completely removed, please delete it manually.\n";
+        }
+    }
+}
+print STDERR "============================================\n";
+print STDERR "$programe_name complete successfully! " . "(" . (localtime) . ")" . "\n\n";
+print STDERR "#################### $programe_name | End ####################\n";
+
+
+# ============================================================================
+# ==========================  子程序区  =====================================
+# ============================================================================
+
+# 检测服务器剩余可用内存容量，结果单位是 kB。
+sub get_MemAvailable {
+    open my $IN, '<', "/proc/meminfo" or die "Can not open file /proc/meminfo, $!";
+    my $MemAvailable;
+    while (<$IN>) {
+        if (m/MemAvailable:\s*(\d+)\s*kB/) {
+            $MemAvailable = $1;
+            next;
+        }
+    }
+    close $IN;
+    return $MemAvailable;
+}
+
+# 顺序执行一组外部命令并用ok文件做断点续跑标记（用于必须串行的samtools步骤）。
+sub execute_cmds {
+    my $ok_file = pop @_;
+
+    if ( -e $ok_file ) {
+        foreach ( @_ ) {
+            print STDERR "CMD(Skipped): $_\n";
+        }
+    }
+    else {
+        foreach ( @_ ) {
+            print STDERR (localtime) . ": CMD: $_\n";
+            system($_) == 0 or die "failed to execute: $_\n";
+        }
+        open my $OUT, '>', "$ok_file" or die $!; close $OUT;
+    }
+
+    return 1;
+}
+
+# 基于Perl fork()的worker并行化调度器，代替外部parafly/parallel命令。
+# $tasks: 一个数组引用，每个元素是一个代码引用（coderef），在子进程中被调用执行。
+# $cpu: 最大并发子进程数。
+# $ok_file: 整个并行步骤完成后创建的标记文件，用于断点续跑（若已存在则直接跳过该步骤）。
+# $step_label: 用于日志输出的步骤名称。
+sub run_parallel_tasks {
+    my ($tasks, $cpu_num, $ok_file, $step_label) = @_;
+
+    if ( -e $ok_file ) {
+        print STDERR "Step(Skipped, already done): $step_label\n";
+        return 1;
+    }
+
+    my $max_procs = $cpu_num && $cpu_num > 0 ? $cpu_num : 1;
+    my @queue = @$tasks;
+    my %children;
+    my $has_error = 0;
+    my $total = scalar @queue;
+    my $completed = 0;
+    # 并行进度用 "\r" 原地刷新，而不是每完成一个任务就换行(\n)打印一次；
+    # 并额外用时间节流，保证两次刷新之间至少间隔3秒，避免刷屏。
+    my $progress_interval = 3;
+    my $last_progress_time = 0;
+    my $progress_dangling = 0;    # 上一次STDERR输出是否停在了"\r"刷新的进度行中间(未换行)
+    print STDERR (localtime) . ": Starting parallel step \"$step_label\" with $total task(s), up to $max_procs worker(s).\n";
+
+    while ( @queue || %children ) {
+        while ( @queue && keys(%children) < $max_procs ) {
+            my $task = shift @queue;
+            my $pid = fork();
+            die "Error: fork failed: $!\n" unless defined $pid;
+            if ( $pid == 0 ) {
+                # 子进程(worker)：执行单个任务后退出，不回到父进程的主流程。
+                my $ok = eval { $task->(); 1; };
+                if ( ! $ok ) {
+                    print STDERR "Error in worker process (PID $$) during step \"$step_label\": $@\n";
+                    exit(1);
+                }
+                exit(0);
+            }
+            else {
+                $children{$pid} = 1;
+            }
+        }
+
+        last unless %children;
+        my $pid = wait();
+        last if $pid == -1;
+        if ( exists $children{$pid} ) {
+            if ( $? != 0 ) {
+                $has_error = 1;
+                # 出错信息需要独占一行，若上一条输出是尚未换行的进度行，先补一个换行再打印。
+                print STDERR "\n" if $progress_dangling;
+                $progress_dangling = 0;
+                print STDERR "Error: worker process (PID $pid) failed during step \"$step_label\" (exit code " . ($? >> 8) . ").\n";
+            }
+            delete $children{$pid};
+            $completed ++;
+            my $now = time();
+            my $is_last = ( $completed == $total );
+            if ( $is_last || $now - $last_progress_time >= $progress_interval ) {
+                $last_progress_time = $now;
+                my $percent = $total ? sprintf("%.1f", $completed / $total * 100) : "100.0";
+                my $running = scalar keys %children;
+                print STDERR "\r" . (localtime) . ": Progress of step \"$step_label\": $completed/$total task(s) done ($percent%), $running running, " . scalar(@queue) . " queued.";
+                $progress_dangling = 1;
+            }
+        }
+    }
+
+    # 循环结束后，如果最后一次输出停留在未换行的进度行，补一个换行，避免后续输出接在同一行。
+    print STDERR "\n" if $progress_dangling;
+
+    die "Error: parallel step \"$step_label\" failed, please check the worker error messages above.\n" if $has_error;
+
+    open my $OK, '>', $ok_file or die "Error: Can not create file $ok_file, $!";
+    close $OK;
+    print STDERR (localtime) . ": Parallel step \"$step_label\" complete.\n";
+    return 1;
+}
+
+# ----------------------------------------------------------------------------
+# 以下为原 SplitRNASeqSam 程序的核心算法，整合为可被并行worker调用的子程序。
+# ----------------------------------------------------------------------------
+
+# 根据CIGAR计算该条比对记录在参考序列上占据的长度。
+sub cigar_ref_span {
+    my ($cigar) = @_;
+    my $span = 0;
+    while ($cigar =~ /(\d+)([MIDNSHP=X])/g) {
+        my ($len, $op) = ($1, $2);
+        $span += $len if $op =~ /^[MDN=X]$/;
+    }
+    return $span;
+}
+
+# 判断该条比对记录是否应该保留：已比对上、非secondary，且（默认情况下）非supplementary。
+sub sam_record_is_usable {
+    my ($fields, $keep_supp) = @_;
+    return 0 if $fields->[5] eq '*';
+    my $flag = $fields->[1] + 0;
+    return 0 if $flag & FLAG_UNMAPPED;
+    return 0 if $flag & FLAG_SECONDARY;
+    return 0 if !$keep_supp && ($flag & FLAG_SUPPLEMENTARY);
+    return 1;
+}
+
+# 将一份按坐标排序的SAM文件（无header）按覆盖空白切分为多份区域SAM文件，
+# 输出到 $output_directory 中，并把结果文件路径逐行写入 $list_file。
+sub do_split_rnaseq_sam {
+    my ($input_sam, $output_directory, $min_fragment_per_region, $keep_supp, $list_file) = @_;
+    $min_fragment_per_region ||= 10;
+
+    make_path($output_directory) unless -d $output_directory;
+
+    open my $IN, '<', $input_sam or die "Error: Can not open file $input_sam, $!\n";
+    open my $LIST, '>', $list_file or die "Error: Can not create file $list_file, $!\n";
+
+    my ($region_chrom, $region_start, $region_end, $sam_content);
+    my %fragment_ids;
+    my $region_open = 0;
+    my $line_no = 0;
+
+    my $flush_region = sub {
+        return unless $region_open;
+        my $fragment_num = scalar keys %fragment_ids;
+        if ($fragment_num >= $min_fragment_per_region) {
+            my $end_inclusive = $region_end - 1;
+            my $out_file = "$output_directory/$region_chrom.$region_start-$end_inclusive.sam";
+            open my $OUT, '>', $out_file or die "Error: Can not write $out_file, $!\n";
+            print {$OUT} $sam_content;
+            close $OUT;
+            # 第二列为该区域内比对上的read pairs（fragment）数目，供后续步骤按
+            # 数值从大到小排序，优先调度处理量大、耗时长的区域，避免个别大区域
+            # 拖到最后才开始运行而拖慢整体并行进度。
+            print {$LIST} "$out_file\t$fragment_num\n";
+        }
+    };
+
+    while (my $line = <$IN>) {
+        $line_no++;
+        next if $line =~ /^\@/;
+        chomp $line;
+        next if $line eq '';
+        my @f = split /\t/, $line;
+        next if @f < 11;
+        next unless sam_record_is_usable(\@f, $keep_supp);
+
+        my $chrom = $f[2];
+        my $start = $f[3];
+        my $end   = $start + cigar_ref_span($f[5]);
+
+        if ($region_open && $chrom eq $region_chrom && $start <= $region_end) {
+            if ($start < $region_start) {
+                warn "Warning: line $line_no ($chrom:$start) is out of coordinate order; please make sure the input SAM file is sorted by coordinate.\n";
+            }
+            $sam_content .= "$line\n";
+            $region_end = $end if $end > $region_end;
+            $fragment_ids{$f[0]} = 1;
+        }
+        else {
+            $flush_region->();
+            $region_chrom = $chrom;
+            $region_start = $start;
+            $region_end   = $end;
+            $sam_content  = "$line\n";
+            %fragment_ids = ($f[0] => 1);
+            $region_open  = 1;
+        }
+    }
+    $flush_region->();
+    close $IN;
+    close $LIST;
+    return 1;
+}
+
+# ----------------------------------------------------------------------------
+# 以下为原 Sam2TransfragLite 程序的核心算法。
+# ----------------------------------------------------------------------------
+
+# 对单个区域SAM文件（$sam_prefix.sam）进行转录本搜索，
+# 输出 $sam_prefix.gff3 / $sam_prefix.intron / $sam_prefix.base_depth 三个文件。
+sub do_sam2transfrag_lite {
+    my ($sam_prefix, $opt) = @_;
+
+    my $fraction                         = $opt->{fraction};
+    my $min_expressed_base_depth         = $opt->{min_expressed_base_depth};
+    my $max_expressed_base_depth         = $opt->{max_expressed_base_depth};
+    my $min_junction_depth               = $opt->{min_junction_depth};
+    my $max_junction_depth               = $opt->{max_junction_depth};
+    my $min_fragment_count_per_transfrag = $opt->{min_fragment_count_per_transfrag};
+    my $min_split_fragment_length        = $opt->{min_split_fragment_length};
+    my $genome_fasta                     = $opt->{genome_fasta};
+    my $min_intron_length                = $opt->{min_intron_length};
+    my $no_strand_specific               = $opt->{no_strand_specific};
+
+    my $input_sam = "$sam_prefix.sam";
+    return unless -s $input_sam;
+
+    open my $INTRON_OUT, '>', "$sam_prefix.intron" or die "Can not create file $sam_prefix.intron, $!";
+    print {$INTRON_OUT} "#Transcript_region\tChromosome\tStrand\tIntron_start\tIntron_end\tIntron_depth\tMedian_base_depth_in_intron\n";
+    open my $BASE_DEPTH_OUT, '>', "$sam_prefix.base_depth" or die "Can not create file $sam_prefix.base_depth, $!";
+    print {$BASE_DEPTH_OUT} "#Chromosome\tStrand\tPosition\tDepth\n";
+    open my $GFF3_OUT, '>', "$sam_prefix.gff3" or die "Can not create file $sam_prefix.gff3, $!";
+
+    my (%intron, %depth, %reads);
+    open my $IN, '<', $input_sam or die $!;
+    while (<$IN>) {
+        next if m/^\@/;
+        my @f = split /\t/;
+        my ($read_name, $flag, $scaffold_id, $site, $cigar) = ($f[0], $f[1], $f[2], $f[3], $f[5]);
+
+        if ( ($flag & 1) && ($f[6] ne '=') ) {
+            next;
+        }
+
+        my $strand = '.';
+        if (! $no_strand_specific) {
+            my $is_reverse = ($flag & 16)  ? 1 : 0;
+            my $is_read1   = ($flag & 64)  ? 1 : 0;
+            my $is_read2   = ($flag & 128) ? 1 : 0;
+
+            if ($is_read1) { $strand = $is_reverse ? '+' : '-'; }
+            elsif ($is_read2) { $strand = $is_reverse ? '-' : '+'; }
+            else { $strand = $is_reverse ? '+' : '-'; }
+        }
+        else {
+            if (m/XS:A:([+-])/) { $strand = $1; }
+        }
+
+        my ($depth_plus_ref, $depth_minus_ref, $depth_ref);
+        if ($no_strand_specific) {
+            $depth{$scaffold_id}{"+"} ||= {};
+            $depth{$scaffold_id}{"-"} ||= {};
+            $depth_plus_ref = $depth{$scaffold_id}{"+"};
+            $depth_minus_ref = $depth{$scaffold_id}{"-"};
+        }
+        else {
+            $depth{$scaffold_id}{$strand} ||= {};
+            $depth_ref = $depth{$scaffold_id}{$strand};
+        }
+
+        my $start_site = $site;
+        while ($cigar =~ m/(\d+)(\w)/g) {
+            my ($cigar_len, $cigar_op) = ($1, $2);
+
+            if ($cigar_op eq "M" or $cigar_op eq "D") {
+                my $start = $site;
+                $site += $cigar_len;
+                if ($no_strand_specific) {
+                    foreach ($start..($site-1)) {
+                        $depth_plus_ref->{$_} ++;
+                        $depth_minus_ref->{$_} ++;
+                    }
+                }
+                else {
+                    foreach ($start..($site-1)) { $depth_ref->{$_} ++; }
+                }
+            }
+            elsif ($cigar_op eq "I") { next; }
+            elsif ($cigar_op eq "S") { next; }
+            elsif ($cigar_op eq "N") {
+                my $intron_start = $site;
+                my $intron_end = $intron_start + $cigar_len - 1;
+                $intron{$scaffold_id}{$strand}{$intron_start}{$intron_end} ++ if $strand ne '.';
+
+                my $end_site = $intron_start - 1;
+                my $index1 = int($start_site / 1000);
+                my $index2 = int($end_site / 1000);
+                $reads{$scaffold_id}{$strand}{$index1}{"$start_site\t$end_site"}{$read_name} = 1;
+                $reads{$scaffold_id}{$strand}{$index2}{"$start_site\t$end_site"}{$read_name} = 1;
+
+                $site += $cigar_len;
+                $start_site = $site;
+                next;
+            }
+            else {
+                print STDERR "Other Cigar code: $cigar_op at position $site .\n";
+                next;
+            }
+        }
+        my $end_site = $site - 1;
+        my $index1 = int($start_site / 1000);
+        my $index2 = int($end_site / 1000);
+        $reads{$scaffold_id}{$strand}{$index1}{"$start_site\t$end_site"}{$read_name} = 1;
+        $reads{$scaffold_id}{$strand}{$index2}{"$start_site\t$end_site"}{$read_name} = 1;
+    }
+    close $IN;
+
+    if ($min_intron_length) {
+        my %old_intron = %intron;
+        %intron = ();
+        foreach my $scaffold_id (sort keys %old_intron) {
+            foreach my $strand (sort keys %{$old_intron{$scaffold_id}}) {
+                foreach my $start (sort {$a <=> $b} keys %{$old_intron{$scaffold_id}{$strand}}) {
+                    foreach my $end (sort {$a <=> $b} keys %{$old_intron{$scaffold_id}{$strand}{$start}}) {
+                        $intron{$scaffold_id}{$strand}{$start}{$end} = $old_intron{$scaffold_id}{$strand}{$start}{$end} if ($end - $start + 1) >= $min_intron_length;
+                    }
+                }
+            }
+        }
+    }
+
+    if ($genome_fasta) {
+        my @intron_list;
+        foreach my $scaffold_id (keys %intron) {
+            foreach my $strand (keys %{$intron{$scaffold_id}}) {
+                foreach my $start (keys %{$intron{$scaffold_id}{$strand}}) {
+                    foreach my $end (keys %{$intron{$scaffold_id}{$strand}{$start}}) {
+                        push @intron_list, [$scaffold_id, $strand, $start, $end];
+                    }
+                }
+            }
+        }
+
+        if (@intron_list) {
+            my @regions;
+            foreach my $item (@intron_list) {
+                my ($scaffold_id, $strand, $start, $end) = @$item;
+                my $start1 = $start + 1;
+                my $end1 = $end - 1;
+                push @regions, "$scaffold_id:$start-$start1";
+                push @regions, "$scaffold_id:$end1-$end";
+            }
+
+            my ($rf, $region_file) = tempfile(SUFFIX => '.regions.txt', UNLINK => 1);
+            print $rf join("\n", @regions), "\n";
+            close $rf;
+
+            my $faidx_out = `samtools faidx -r $region_file $genome_fasta`;
+
+            my %region_seq;
+            my @entries = split /\n(?=>)/, $faidx_out;
+            foreach my $entry (@entries) {
+                next unless $entry =~ /^>(\S+)\n(.*)/s;
+                my ($region_name, $seq) = ($1, $2);
+                $seq =~ s/\s+//g;
+                $region_seq{$region_name} = $seq;
+            }
+
+            my %intron_filtered;
+            foreach my $item (@intron_list) {
+                my ($scaffold_id, $strand, $start, $end) = @$item;
+                my $start1 = $start + 1;
+                my $end1 = $end - 1;
+                my $donor = $region_seq{"$scaffold_id:$start-$start1"};
+                my $acceptor = $region_seq{"$scaffold_id:$end1-$end"};
+                next unless defined $donor && defined $acceptor;
+                my $donor_acceptor = "$donor$acceptor";
+                if ($strand eq "-") {
+                    $donor_acceptor = reverse $donor_acceptor;
+                    $donor_acceptor =~ tr/ATCGatcg/TAGCtagc/;
+                }
+                if (($donor_acceptor eq "GTAG") or ($donor_acceptor eq "GCAG") or ($donor_acceptor eq "ATAC")) {
+                    $intron_filtered{$scaffold_id}{$strand}{$start}{$end} = $intron{$scaffold_id}{$strand}{$start}{$end};
+                }
+            }
+            %intron = %intron_filtered;
+        }
+        else { %intron = (); }
+    }
+
+    my (%transfrags, %junction_threshold, %expressed_base_depth_threshold, %max_depth);
+    foreach my $scaffold_id (sort keys %depth) {
+        my @strand = ("+", "-");
+        foreach my $strand (@strand) {
+            my @site;
+            my $depth_href = $depth{$scaffold_id}{$strand} || {};
+            foreach (sort {$a <=> $b} keys %$depth_href) {
+                my $d = $depth_href->{$_};
+                push @site, $_ if $d >= $min_expressed_base_depth;
+                print {$BASE_DEPTH_OUT} "$scaffold_id\t$strand\t$_\t$d\n";
+            }
+            next unless @site;
+
+            my %intron_start;
+            foreach my $intron_start (keys %{$intron{$scaffold_id}{$strand}}) {
+                foreach my $intron_end (keys %{$intron{$scaffold_id}{$strand}{$intron_start}}) {
+                    if ($intron_start >= $site[0] && $intron_end <= $site[-1] && $intron{$scaffold_id}{$strand}{$intron_start}{$intron_end} >= $min_junction_depth) {
+                        $intron_start{$intron_start}{$intron_end} = $intron{$scaffold_id}{$strand}{$intron_start}{$intron_end};
+                    }
+                }
+            }
+
+            my %depth_targetRegion;
+            foreach (@site) { $depth_targetRegion{$_} = $depth{$scaffold_id}{$strand}{$_}; }
+
+            my @intron_start_sorted;
+            foreach my $is (keys %intron_start) {
+                foreach my $ie (keys %{$intron_start{$is}}) {
+                    push @intron_start_sorted, [$is, $ie, $intron_start{$is}{$ie}];
+                }
+            }
+            @intron_start_sorted = sort { $a->[0] <=> $b->[0] } @intron_start_sorted;
+
+            my %split_site = split_aligned_region(\@site, \%intron_start, \%depth_targetRegion, $min_expressed_base_depth, $max_expressed_base_depth, $min_junction_depth, $max_junction_depth, $fraction, $min_split_fragment_length);
+
+            foreach (keys %split_site) {
+                next unless $_;
+                my @split_site = split /\t/;
+                my $expressed_base_depth_threshold = $split_site{$_}{"expressed_base_depth_threshold"};
+                my $junction_depth_threshold = $split_site{$_}{"junction_depth_threshold"};
+                my $max_depth = $split_site{$_}{"max_depth"};
+
+                my $isoform = find_isoforms(\@split_site, \@intron_start_sorted, \%depth_targetRegion, $expressed_base_depth_threshold, $junction_depth_threshold);
+                next unless $isoform;
+                my $strand_out = $strand;
+                if ($no_strand_specific) {
+                    $strand_out = '.' unless ($isoform =~  m/intron/);
+                }
+                $isoform =~ m/exon_start:(\d+).*exon_end:(\d+)/;
+                $transfrags{$scaffold_id}{$strand_out}{"$1\t$2"} = $isoform;
+                $junction_threshold{$scaffold_id}{$strand_out}{"$1\t$2"} = $junction_depth_threshold;
+                $expressed_base_depth_threshold{$scaffold_id}{$strand_out}{"$1\t$2"} = $expressed_base_depth_threshold;
+                $max_depth{$scaffold_id}{$strand_out}{"$1\t$2"} = $max_depth;
+            }
+        }
+    }
+
+    if ($no_strand_specific) {
+        my (%exon_start_end);
+        foreach my $scaffold_id (sort {$a cmp $b} keys %transfrags) {
+            foreach my $strand (sort {$a cmp $b} keys %{$transfrags{$scaffold_id}}) {
+                foreach my $region (sort { (split /\t/, $a)[0] <=> (split /\t/, $b)[0] } keys %{$transfrags{$scaffold_id}{$strand}}) {
+                    my $path = $transfrags{$scaffold_id}{$strand}{$region};
+                    my @feature = split /;/, $path;
+                    foreach (@feature) {
+                        if (m/exon_start:(\d+),exon_end:(\d+)/ && $strand ne '.') {
+                            $exon_start_end{"$1\t$2"} = 1;
+                        }
+                    }
+                }
+            }
+        }
+        foreach my $scaffold_id (sort {$a cmp $b} keys %transfrags) {
+            foreach my $region (sort { (split /\t/, $a)[0] <=> (split /\t/, $b)[0] } keys %{$transfrags{$scaffold_id}{'.'}}) {
+                my $path = $transfrags{$scaffold_id}{'.'}{$region};
+                $path =~ m/exon_start:(\d+),exon_end:(\d+)/;
+                my ($start, $end) = ($1, $2);
+                my $keep = 1;
+                foreach (keys %exon_start_end) {
+                    my @se = split /\t/;
+                    if ($se[0] <= $end && $se[1] >= $start) {
+                        $keep = 0;
+                        last;
+                    }
+                }
+                delete $transfrags{$scaffold_id}{'.'}{$region} if $keep == 0;
+            }
+        }
+    }
+
+    foreach my $scaffold_id (sort {$a cmp $b} keys %transfrags) {
+        foreach my $strand (sort {$a cmp $b} keys %{$transfrags{$scaffold_id}}) {
+            foreach my $region (sort { (split /\t/, $a)[0] <=> (split /\t/, $b)[0] } keys %{$transfrags{$scaffold_id}{$strand}}) {
+                my @region = split /\t/, $region;
+                my %fragment;
+                my $index1 = int($region[0] / 1000);
+                my $index2 = int($region[1] / 1000);
+                foreach my $index ($index1 .. $index2) {
+                    foreach my $read_align_region (keys %{$reads{$scaffold_id}{$strand}{$index}}) {
+                        my @rr = split /\t/, $read_align_region;
+                        if ($rr[1] >= $region[0] && $rr[0] <= $region[1]) {
+                            foreach (keys %{$reads{$scaffold_id}{$strand}{$index}{$read_align_region}}) {
+                                $fragment{$_} = 1;
+                            }
+                        }
+                    }
+                }
+                if ($no_strand_specific) {
+                    %fragment = ();
+                    foreach my $strand1 (keys  %{$reads{$scaffold_id}}) {
+                        foreach my $index ($index1 .. $index2) {
+                            foreach my $read_align_region (keys %{$reads{$scaffold_id}{$strand1}{$index}}) {
+                                my @rr = split /\t/, $read_align_region;
+                                if ($rr[1] >= $region[0] && $rr[0] <= $region[1]) {
+                                    foreach (keys %{$reads{$scaffold_id}{$strand1}{$index}{$read_align_region}}) {
+                                        $fragment{$_} = 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                my $fragment = keys %fragment;
+
+                if ($fragment >= $min_fragment_count_per_transfrag) {
+                    my $strand_name;
+                    if ($strand eq "+") { $strand_name = "plus"; }
+                    elsif ($strand eq "-") { $strand_name = "minus"; }
+                    elsif ($strand eq ".") { $strand_name = "noStrandInfo"; }
+
+                    foreach my $intron_start (sort {$a <=> $b} keys %{$intron{$scaffold_id}{$strand}}) {
+                        foreach my $intron_end (sort {$a <=> $b} keys %{$intron{$scaffold_id}{$strand}{$intron_start}}) {
+                            if ($intron_start >= $region[0] && $intron_end <= $region[-1] && $intron{$scaffold_id}{$strand}{$intron_start}{$intron_end} >= $junction_threshold{$scaffold_id}{$strand}{$region}) {
+                                my @base_depth_in_intron;
+                                foreach ($intron_start .. $intron_end) {
+                                    my $base_depth_in_intron_of_one_base = 0;
+                                    $base_depth_in_intron_of_one_base = $depth{$scaffold_id}{$strand}{$_} if $depth{$scaffold_id}{$strand}{$_};
+                                    push @base_depth_in_intron, $base_depth_in_intron_of_one_base;
+                                }
+                                @base_depth_in_intron = sort {$a <=> $b} @base_depth_in_intron;
+                                my $median_base_depth_in_intron = $base_depth_in_intron[@base_depth_in_intron/2];
+                                print {$INTRON_OUT} "$scaffold_id\_$strand_name\_$region[0]\_$region[1]\t$scaffold_id\t$strand\t$intron_start\t$intron_end\t$intron{$scaffold_id}{$strand}{$intron_start}{$intron_end}\t$median_base_depth_in_intron\n";
+                            }
+                        }
+                    }
+
+                    my ($gff3_out, $mRNA_number);
+                    my $path = $transfrags{$scaffold_id}{$strand}{$region};
+                    my @feature = split /;/, $path;
+                    my %mRNA_start_end;
+                    $mRNA_number ++;
+                    my $feature_out_gff3;
+                    my ($exon_number, $intron_number);
+                    @feature = reverse @feature if $strand eq "-";
+                    my ($last_end, $last_start);
+                    my $feature_number = 0;
+                    foreach (@feature) {
+                        $feature_number ++;
+                        if (m/(\w+)_start:(\d+),\1\_end:(\d+)/) {
+                            $mRNA_start_end{$2} = 1;
+                            $mRNA_start_end{$3} = 1;
+                            print STDERR "Warning: discontinuous\t$input_sam\t$scaffold_id\t$strand\t$region\t$_\n$path\n" if ( $feature_number > 1 && (! (($2 == $last_end + 1) or ($3 == $last_start - 1))) );
+                            $last_end = $3; $last_start = $2;
+                            if ($1 eq "intron") {
+                                $intron_number ++;
+                                my $intron_supported_reads_number = $intron{$scaffold_id}{$strand}{$2}{$3};
+                                $feature_out_gff3 .= "$scaffold_id\tSam2Tranfrag\tintron\t$2\t$3\t$intron_supported_reads_number\t$strand\t\.\tID=$scaffold_id\_$strand_name\_$region[0]\_$region[1].t0$mRNA_number.intron$intron_number;Parent=$scaffold_id\_$strand_name\_$region[0]\_$region[1].t0$mRNA_number;\n";
+                            }
+                            elsif ($1 eq "exon") {
+                                $exon_number ++;
+                                $feature_out_gff3 .= "$scaffold_id\tSam2Tranfrag\texon\t$2\t$3\t\.\t$strand\t\.\tID=$scaffold_id\_$strand_name\_$region[0]\_$region[1].t0$mRNA_number.exon$exon_number;Parent=$scaffold_id\_$strand_name\_$region[0]\_$region[1].t0$mRNA_number;\n";
+                            }
+                            else {
+                                print STDERR "Warning: $input_sam\t$scaffold_id\t$strand\t$region\t$_\n";
+                            }
+                        }
+                        else {
+                            print STDERR "Warning: $input_sam\t$scaffold_id\t$strand\t$region\t$_\n";
+                        }
+                    }
+                    my @mRNA_start_end = sort {$a <=> $b} keys %mRNA_start_end;
+                    $gff3_out .= "$scaffold_id\tSam2Tranfrag\tmRNA\t$mRNA_start_end[0]\t$mRNA_start_end[-1]\t\.\t$strand\t\.\tID=$scaffold_id\_$strand_name\_$region[0]\_$region[1].t0$mRNA_number;Parent=$scaffold_id\_$strand_name\_$region[0]\_$region[1];\n$feature_out_gff3" if $feature_out_gff3;
+
+                    if ($gff3_out) {
+                        print {$GFF3_OUT} "$scaffold_id\tSam2Tranfrag\tgene\t$region\t\.\t$strand\t\.\tID=$scaffold_id\_$strand_name\_$region[0]\_$region[1];FragmentCount=$fragment;JunctionThreshold=$junction_threshold{$scaffold_id}{$strand}{$region};BaseDepthThreshold=$expressed_base_depth_threshold{$scaffold_id}{$strand}{$region};MaxDepth=$max_depth{$scaffold_id}{$strand}{$region};\n$gff3_out\n";
+                    }
+                }
+            }
+        }
+    }
+
+    close $INTRON_OUT;
+    close $BASE_DEPTH_OUT;
+    close $GFF3_OUT;
+    return 1;
+}
+
+sub find_isoforms {
+    my @site_raw = @{$_[0]};
+    my $intron_start_sorted = $_[1];
+    my $depth_raw = $_[2];
+    my $expressed_base_depth_threshold = $_[3];
+    my $junction_depth_threshold = $_[4];
+
+    my (@site, %siteee, %depth);
+    foreach (@site_raw) {
+        if ($depth_raw->{$_} >= $expressed_base_depth_threshold) {
+            push @site, $_;
+            $siteee{$_} = 1;
+            $depth{$_} = $depth_raw->{$_};
+        }
+    }
+    return "" unless @site;
+
+    my (%intron_start, %intron_region_for_filter1, %intron_region_for_filter2);
+    my ($lo, $hi) = (0, scalar(@$intron_start_sorted));
+    while ($lo < $hi) {
+        my $mid = int(($lo + $hi) / 2);
+        if ($intron_start_sorted->[$mid][0] <= $site[0]) { $lo = $mid + 1; }
+        else { $hi = $mid; }
+    }
+    for (my $i = $lo; $i < @$intron_start_sorted; $i++) {
+        my ($intron_start, $intron_end, $intron_depth) = @{$intron_start_sorted->[$i]};
+        last if $intron_start >= $site[-1];
+        next unless $intron_end < $site[-1];
+        if ($intron_depth >= $junction_depth_threshold) {
+            $intron_start{$intron_start}{$intron_end} = $intron_depth;
+            $intron_region_for_filter1{"$intron_start\t$intron_end"} = $intron_start;
+            $intron_region_for_filter2{"$intron_start\t$intron_end"} = $intron_end;
+        }
+    }
+    while (%intron_region_for_filter1) {
+        my $first;
+        foreach my $key (keys %intron_region_for_filter1) {
+            if ( (!defined $first)
+                || $intron_region_for_filter1{$key} < $intron_region_for_filter1{$first}
+                || ( $intron_region_for_filter1{$key} == $intron_region_for_filter1{$first}
+                     && $intron_region_for_filter2{$key} > $intron_region_for_filter2{$first} ) ) {
+                $first = $key;
+            }
+        }
+        my @start_end = grep { $_ ne $first } keys %intron_region_for_filter1;
+        $first =~ m/(\d+)\t(\d+)/;
+        my ($intron_start, $intron_end) = ($1, $2);
+        my $keep = 1;
+        delete $intron_region_for_filter1{$first};
+        delete $intron_region_for_filter2{$first};
+
+        foreach (@start_end) {
+            my @se = split /\t/;
+            if ($intron_start <= ($se[1] + 1) && $intron_end >= ($se[0] - 1) && $intron_start{$intron_start}{$intron_end} < $intron_start{$se[0]}{$se[1]}) {
+                $keep = 0;
+                last;
+            }
+        }
+
+        if ($keep == 1) {
+            foreach (@start_end) {
+                my @se = split /\t/;
+                if ($intron_start <= ($se[1] + 1) && $intron_end >= ($se[0] - 1)) {
+                    delete $intron_start{$se[0]}{$se[1]};
+                    delete $intron_region_for_filter1{"$se[0]\t$se[1]"};
+                    delete $intron_region_for_filter2{"$se[0]\t$se[1]"};
+                }
+            }
+        }
+        else {
+            delete $intron_start{$intron_start}{$intron_end};
+        }
+    }
+
+    foreach my $intron_start (sort {$a <=> $b} keys %intron_start) {
+        foreach my $intron_end(sort {$a <=> $b} keys %{$intron_start{$intron_start}}) {
+            my $intron_depth = $intron_start{$intron_start}{$intron_end};
+            my $intron_keep = 0;
+            my @site_depth;
+            foreach ($intron_start .. $intron_end) {
+                if (! exists $siteee{$_}) {
+                    $intron_keep = 1;
+                    last;
+                }
+                else {
+                    push @site_depth, $depth{$_};
+                }
+            }
+            if ($intron_keep == 0) {
+                @site_depth = sort {$b <=> $a} @site_depth;
+                my $median_site_depth = $site_depth[@site_depth/2];
+                $intron_keep = 1 if $intron_depth >= $median_site_depth;
+            }
+            if ($intron_keep == 0) {
+                delete $intron_start{$intron_start}{$intron_end};
+            }
+            else {
+                foreach ($intron_start .. $intron_end) {
+                    delete $siteee{$_} if exists $siteee{$_};
+                }
+            }
+        }
+    }
+
+    my %intron_end;
+    foreach my $intron_start (sort keys %intron_start) {
+        foreach my $intron_end(sort keys %{$intron_start{$intron_start}}) {
+            $intron_end{$intron_end} = $intron_start;
+        }
+    }
+
+    ## 注意：此处不再用"my"重新声明@site/%depth（这会遮蔽本函数开头
+    ## 已声明的同名变量，触发"masks earlier declaration"警告），而是直接
+    ## 清空后复用它们，根据上面对%siteee的过滤结果（部分位点可能已因
+    ## intron重叠而被delete）重新生成有序的@site及对应的%depth。
+    @site = ();
+    %depth = ();
+    foreach (sort {$a <=> $b} keys %siteee) {
+        if ($depth_raw->{$_} >= $expressed_base_depth_threshold) {
+            push @site, $_;
+            $depth{$_} = $depth_raw->{$_};
+        }
+    }
+
+    my $last_site = $site[0] - 1;
+    my $path="exon_start:$site[0],";
+    my $num = 0;
+    foreach my $site (@site) {
+        $num ++;
+        if (exists $intron_end{$site - 1}) {
+            my $intron_end = $site - 1;
+            $path .= "exon_end:$last_site;intron_start:$intron_end{$intron_end},intron_end:$intron_end;exon_start:$site,";
+        }
+        elsif ($site != $last_site + 1) {
+            # 长intron被过滤后可能出现的不连续情况，忽略。
+        }
+        $last_site = $site;
+
+        if ($num == @site) {
+            $path .= "exon_end:$site";
+        }
+    }
+
+    return $path;
+}
+
+sub split_aligned_region {
+    my @site = @{$_[0]};
+    my %intron_start = %{$_[1]};
+    my %depth = %{$_[2]};
+    my $min_expressed_base_depth = $_[3];
+    my $max_expressed_base_depth = $_[4];
+    my $min_junction_depth = $_[5];
+    my $max_junction_depth = $_[6];
+    my $fraction = $_[7];
+    my $min_split_fragment_length = $_[8];
+
+    my %split_position;
+
+    my %intron_depth_all;
+    foreach my $intron_start (sort {$a <=> $b} keys %intron_start) {
+        foreach my $intron_end (sort {$a <=> $b} keys %{$intron_start{$intron_start}}) {
+            my $intron_depth = $intron_start{$intron_start}{$intron_end};
+            my $start = $intron_start - 1;
+            my $end = $intron_end + 1;
+            $intron_depth_all{"$start\t$end"} = $intron_depth if ($intron_depth >= $min_junction_depth && $intron_start > $site[0] && $intron_end < $site[-1]);
+        }
+    }
+
+    my @intron_intervals = map { my ($s, $e) = split /\t/; [$s, $e, $intron_depth_all{$_}] } keys %intron_depth_all;
+    @intron_intervals = sort { $a->[0] <=> $b->[0] } @intron_intervals;
+    my @active_introns;
+    my $interval_ptr = 0;
+    my $interval_total = @intron_intervals;
+
+    my $last_site = $site[0] - 1;
+    my $arrary_num = 0;
+    foreach my $site (@site) {
+        $arrary_num ++;
+        my $depth;
+        while ($interval_ptr < $interval_total && $intron_intervals[$interval_ptr][0] <= $site) {
+            push @active_introns, $intron_intervals[$interval_ptr];
+            $interval_ptr ++;
+        }
+        @active_introns = grep { $_->[1] >= $site } @active_introns;
+        my $intron_depth = 0;
+        foreach (@active_introns) { $intron_depth = $_->[2] if $_->[2] > $intron_depth; }
+        $depth = $depth{$site};
+        my $next_site = $site[$arrary_num]; # may be undef when $site is the last element of @site
+        if ($site - $last_site == 1) {
+            if ( !defined($next_site) || $next_site - $site > 1 ) {
+                if ($intron_depth < $min_junction_depth) {
+                    $split_position{$next_site} = 1 if defined $next_site;
+                    if ($depth < $min_expressed_base_depth) {
+                        $split_position{$site} = 1;
+                    }
+                }
+            }
+            else {
+                if ($depth < $min_expressed_base_depth && $intron_depth < $min_junction_depth) {
+                    $split_position{$site} = 1;
+                    $split_position{$next_site} = 1 if $next_site;
+                }
+            }
+        }
+        elsif ($site - $last_site > 1) {
+            if ( !defined($next_site) || $next_site - $site > 1 ) {
+                if ($intron_depth < $min_junction_depth) {
+                    $split_position{$site} = 1;
+                    $split_position{$next_site} = 1 if defined $next_site;
+                }
+            }
+            else {
+                if ($intron_depth < $min_junction_depth) {
+                    $split_position{$site} = 1;
+                    $split_position{$next_site} = 1 if ($next_site && ($depth < $min_expressed_base_depth));
+                }
+            }
+        }
+        $last_site = $site;
+    }
+
+    my $split_position_number = -1;
+    my %split_region;
+    while ((keys %split_position) > $split_position_number) {
+        $split_position_number = keys %split_position;
+        my (%split_site, @split_site);
+        foreach (@site) {
+            if (exists $split_position{$_}) {
+                my $split_site = join "\t", @split_site;
+                $split_site{$split_site} = 1 if @split_site >= $min_split_fragment_length;
+                @split_site = ($_);
+            }
+            else {
+                push @split_site, $_;
+            }
+        }
+        my $split_site = join "\t", @split_site;
+        $split_site{$split_site} = 1 if @split_site >= $min_split_fragment_length;
+
+        foreach my $site (keys %split_site) {
+            my @sites = split /\t/, $site;
+            next if @sites < $min_split_fragment_length;
+            if (! exists $split_region{$site}) {
+                my ($max_depth, $expressed_base_depth_threshold, $junction_depth_threshold) = (0, undef, undef);
+                foreach (@sites) {
+                    $max_depth = $depth{$_} if $depth{$_} > $max_depth;
+                }
+                if ($max_depth * $fraction < $min_expressed_base_depth) { $expressed_base_depth_threshold = $min_expressed_base_depth; }
+                elsif ($max_depth * $fraction > $max_expressed_base_depth) { $expressed_base_depth_threshold = $max_expressed_base_depth; }
+                else { $expressed_base_depth_threshold = int($max_depth * $fraction + 0.5); }
+                if ($max_depth * $fraction < $min_junction_depth) { $junction_depth_threshold = $min_junction_depth; }
+                elsif ($max_depth * $fraction > $max_junction_depth) { $junction_depth_threshold = $max_junction_depth; }
+                else { $junction_depth_threshold = int($max_depth * $fraction + 0.5); }
+
+                my ($lo, $hi) = (0, scalar(@intron_intervals));
+                while ($lo < $hi) {
+                    my $mid = int(($lo + $hi) / 2);
+                    if ($intron_intervals[$mid][0] < $sites[0]) { $lo = $mid + 1; }
+                    else { $hi = $mid; }
+                }
+                my @sub_intervals;
+                for (my $i = $lo; $i < @intron_intervals; $i++) {
+                    last if $intron_intervals[$i][0] > $sites[-1];
+                    push @sub_intervals, $intron_intervals[$i] if $intron_intervals[$i][1] <= $sites[-1];
+                }
+                my @active_sub;
+                my $sub_ptr = 0;
+                my $sub_total = @sub_intervals;
+
+                my %low_depth_position;
+                my $last_site = $sites[0] - 1;
+                my $arrary_num = 0;
+                foreach my $site (@sites) {
+                    $arrary_num ++;
+                    my $depth;
+                    while ($sub_ptr < $sub_total && $sub_intervals[$sub_ptr][0] <= $site) {
+                        push @active_sub, $sub_intervals[$sub_ptr];
+                        $sub_ptr ++;
+                    }
+                    @active_sub = grep { $_->[1] >= $site } @active_sub;
+                    my $intron_depth = 0;
+                    foreach (@active_sub) { $intron_depth = $_->[2] if $_->[2] > $intron_depth; }
+                    $depth = $depth{$site};
+                    my $next_site = $sites[$arrary_num]; # may be undef when $site is the last element of @sites
+                    if ($site - $last_site == 1) {
+                        if ( !defined($next_site) || $next_site - $site > 1 ) {
+                            if ($intron_depth < $junction_depth_threshold) {
+                                $low_depth_position{$next_site} = 1 if defined $next_site;
+                                if ($depth < $expressed_base_depth_threshold) {
+                                    $low_depth_position{$site} = 1;
+                                }
+                            }
+                        }
+                        else {
+                            if ($depth < $expressed_base_depth_threshold && $intron_depth < $junction_depth_threshold) {
+                                $low_depth_position{$site} = 1;
+                                $low_depth_position{$next_site} = 1 if $next_site;
+                            }
+                        }
+                    }
+                    elsif ($site - $last_site > 1) {
+                        if ( !defined($next_site) || $next_site - $site > 1 ) {
+                            if ($intron_depth < $junction_depth_threshold) {
+                                $low_depth_position{$site} = 1;
+                                $low_depth_position{$next_site} = 1 if defined $next_site;
+                            }
+                        }
+                        else {
+                            if ($intron_depth < $junction_depth_threshold) {
+                                $low_depth_position{$site} = 1;
+                                $low_depth_position{$next_site} = 1 if ($next_site && ($depth < $expressed_base_depth_threshold));
+                            }
+                        }
+                    }
+                    $last_site = $site;
+                }
+
+                my (%split_sites, @split_sites);
+                foreach (@sites) {
+                    if (exists $low_depth_position{$_}) {
+                        my $split_sites = join "\t", @split_sites;
+                        $split_sites{$split_sites} = 1 if @split_sites >= $min_split_fragment_length;
+                        @split_sites = ($_);
+                    }
+                    else {
+                        push @split_sites, $_;
+                    }
+                }
+                my $split_sites = join "\t", @split_sites;
+                $split_sites{$split_sites} = 1 if @split_sites >= $min_split_fragment_length;
+
+                if ($expressed_base_depth_threshold == $min_expressed_base_depth && $junction_depth_threshold == $min_junction_depth) {
+                    foreach (keys %split_sites) {
+                        $split_region{$_}{"expressed_base_depth_threshold"} = $expressed_base_depth_threshold;
+                        $split_region{$_}{"junction_depth_threshold"} = $junction_depth_threshold;
+                        $split_region{$_}{"max_depth"} = $max_depth;
+                    }
+                    foreach (keys %low_depth_position) {
+                        $split_position{$_} = 1;
+                    }
+                }
+                else {
+                    my %avg_depth;
+                    foreach (keys %split_sites) {
+                        my @split_sites = split /\t/;
+                        my ($total, $base_num);
+                        foreach (@split_sites) {
+                            $base_num ++;
+                            $total += $depth{$_};
+                        }
+                        my $avg = int($total / $base_num + 0.5);
+                        $avg_depth{$_} = $total / $base_num if @split_sites;
+                    }
+                    # %avg_depth can legitimately be empty here: none of the
+                    # candidate sub-fragments produced by %low_depth_position
+                    # reached --min_split_fragment_length. In that case there
+                    # is nothing to promote to %split_region and no new split
+                    # position to add for this $site, so just skip it instead
+                    # of operating on undef values (which previously caused
+                    # repeated "uninitialized value" warnings and could insert
+                    # a bogus undef split position).
+                    if (%avg_depth) {
+                        my @avg_depth = sort {$avg_depth{$b} <=> $avg_depth{$a}} keys %avg_depth;
+                        my @split_sites = split /\t/, $avg_depth[0];
+                        $split_region{$avg_depth[0]}{"expressed_base_depth_threshold"} = $expressed_base_depth_threshold;
+                        $split_region{$avg_depth[0]}{"junction_depth_threshold"} = $junction_depth_threshold;
+                        $split_region{$avg_depth[0]}{"max_depth"} = $max_depth;
+                        $split_position{$split_sites[0]} = 1;
+                        my @sites1 = @site;
+                        while (@sites1) {
+                            my $aaa = shift @sites1;
+                            if ( defined($aaa) && defined($split_sites[-1]) && $aaa == $split_sites[-1] ) {
+                                $aaa = shift @sites1;
+                                $split_position{$aaa} = 1 if defined $aaa;
+                                last;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return %split_region;
+}
+
+# ----------------------------------------------------------------------------
+# 以下为原 alternative_splicing_analysis 程序的核心算法。
+# ----------------------------------------------------------------------------
+
+sub do_alternative_splicing_analysis {
+    my ($gff3_file, $intron_file, $depth_file, $output_file, $opt) = @_;
+
+    return unless -s $gff3_file;
+
+    my $min_intron_depth = $opt->{min_intron_depth};
+    my $min_base_depth_ratio_for_ref_specific_intron = $opt->{min_base_depth_ratio_for_ref_specific_intron};
+    my $min_intron_depth_ratio_for_evidence_specific_intron = $opt->{min_intron_depth_ratio_for_evidence_specific_intron};
+    my $min_base_depth_ratio_for_common_intron = $opt->{min_base_depth_ratio_for_common_intron};
+    my $min_gene_depth = $opt->{min_gene_depth};
+    my $min_transcript_confidence_for_output = $opt->{min_transcript_confidence_for_output};
+    my $transcript_num_for_output_when_all_low_confidence = $opt->{transcript_num_for_output_when_all_low_confidence};
+    my $added_mRNA_ID_prefix = $opt->{added_mRNA_ID_prefix};
+
+    my %gene_info = get_geneModels_from_GFF3($gff3_file);
+
+    open my $OUTFH, '>', $output_file or die "Can not create file $output_file, $!";
+
+    my %intron_index;
+    if (-s $intron_file) {
+        open my $IN, '<', $intron_file or die "Can not open file $intron_file, $!";
+        while (<$IN>) {
+            chomp;
+            next if /^#/;
+            my @f = split /\t/;
+            next unless @f >= 7;
+            next unless $f[5] >= $min_intron_depth;
+            my $index1 = int($f[3] / 1000);
+            my $index2 = int($f[4] / 1000);
+            foreach ($index1 .. $index2) {
+                $intron_index{$f[1]}{$f[2]}{$_}{"$f[3]\t$f[4]\t$f[5]\t$f[6]"} = 1;
+            }
+        }
+        close $IN;
+    }
+
+    my %depth;
+    if (-s $depth_file) {
+        open my $IN, '<', $depth_file or die "Can not open file $depth_file, $!";
+        while (<$IN>) {
+            chomp;
+            next if /^#/;
+            my @f = split /\t/;
+            next unless @f >= 4;
+            $depth{$f[0]}{$f[1]}{$f[2]} = $f[3];
+        }
+        close $IN;
+    }
+
+    foreach my $gene_ID (sort keys %gene_info) {
+        my @gene_header = split /\t/, $gene_info{$gene_ID}{"header"};
+        my ($chr, $source, $gene_start, $gene_end, $strand) = ($gene_header[0], $gene_header[1],  $gene_header[3], $gene_header[4], $gene_header[6]);
+
+        my $index1 = int($gene_start / 1000);
+        my $index2 = int($gene_end  / 1000);
+        my (@intron_evidence, %intron_evidence, %intron_evidence_depth);
+        foreach ($index1 .. $index2) {
+            foreach my $intron_region ( keys %{$intron_index{$chr}{$strand}{$_}} ) {
+                my @ir = split /\t/, $intron_region;
+                if ( $ir[0] > $gene_start && $ir[1] < $gene_end ) {
+                    $intron_evidence{$intron_region} = 1;
+                    $intron_evidence_depth{"$ir[0]\t$ir[1]"} = $ir[2];
+                }
+            }
+        }
+        @intron_evidence = sort { (split /\t/, $a)[0] <=> (split /\t/, $b)[0] } keys %intron_evidence;
+
+        my (%ref_transcript_intron, %intron_ref, %exon_ref, %ref_mRNA_ID);
+        my @mRNA_ID = @{$gene_info{$gene_ID}{"mRNA_ID"} || []};
+        foreach my $ref_mRNA_ID ( @mRNA_ID ) {
+            my $ref_mRNA_info = $gene_info{$gene_ID}{"mRNA_info"}{$ref_mRNA_ID};
+            my @ref_mRNA_exon;
+            foreach ( split /\n/, $ref_mRNA_info ) {
+                if ( m/\texon\t/ ) {
+                    my @ef = split /\t/;
+                    push @ref_mRNA_exon, "$ef[3]\t$ef[4]";
+                    $exon_ref{"$ef[3]\t$ef[4]"} = 1;
+                }
+            }
+            @ref_mRNA_exon = sort { (split /\t/, $a)[0] <=> (split /\t/, $b)[0] } @ref_mRNA_exon;
+            my @ref_mRNA_intron = get_intron_from_exons(\@ref_mRNA_exon, $ref_mRNA_ID);
+
+            my (@ref_mRNA_intron_out, @ref_mRNA_intron_out_without_depth);
+            foreach ( sort { (split /\t/, $a)[0] <=> (split /\t/, $b)[0] } @ref_mRNA_intron ) {
+                my @ii = split /\t/, $_;
+                my ($intron_ref_depth, $intron_ref_base_depth) = (0, 0);
+                $intron_ref_depth = $intron_evidence_depth{"$ii[0]\t$ii[1]"} if exists $intron_evidence_depth{"$ii[0]\t$ii[1]"};
+                my @site_depth;
+                foreach ( $ii[0] .. $ii[1] ) {
+                    my $d = 0;
+                    $d = $depth{$chr}{$strand}{$_} if $depth{$chr}{$strand}{$_};
+                    push @site_depth, $d;
+                }
+                @site_depth = sort {$b <=> $a} @site_depth;
+                $intron_ref_base_depth = $site_depth[@site_depth*0.5] if @site_depth;
+                push @ref_mRNA_intron_out, "$ii[0]\t$ii[1]\t$intron_ref_depth\t$intron_ref_base_depth";
+                push @ref_mRNA_intron_out_without_depth, "$ii[0]\t$ii[1]";
+                $intron_ref{"$ii[0]\t$ii[1]\t$intron_ref_depth\t$intron_ref_base_depth"} = $ii[1];
+            }
+            my $ref_mRNA_intron_out = "No_intron";
+            $ref_mRNA_intron_out = join "\n", @ref_mRNA_intron_out if @ref_mRNA_intron_out;
+            my $ref_mRNA_intron_out_without_depth = "No_intron";
+            $ref_mRNA_intron_out_without_depth = join "\n", @ref_mRNA_intron_out_without_depth if @ref_mRNA_intron_out_without_depth;
+            unless ( exists $ref_transcript_intron{$ref_mRNA_intron_out_without_depth} ) {
+                $ref_transcript_intron{$ref_mRNA_intron_out_without_depth} = $ref_mRNA_ID;
+                $ref_mRNA_ID{$ref_mRNA_ID} = $ref_mRNA_intron_out;
+            }
+        }
+
+        my @intron_ref = sort { (split /\t/, $a)[0] <=> (split /\t/, $b)[0] or $intron_ref{$a} <=> $intron_ref{$b} } keys %intron_ref;
+
+        my (%intron_pos, @depth_exon_base);
+        foreach (@intron_evidence) { my @ie = split /\t/, $_; foreach ( $ie[0] .. $ie[1] ) { $intron_pos{$_} = 1; } }
+        foreach (@intron_ref) { my @ir = split /\t/, $_; foreach ( $ir[0] .. $ir[1] ) { $intron_pos{$_} = 1; } }
+        foreach ( sort { (split /\t/, $a)[0] <=> (split /\t/, $b)[0] } keys %exon_ref ) {
+            my @er = split /\t/, $_;
+            foreach ($er[0] .. $er[1]) {
+                next if exists $intron_pos{$_};
+                my $depth_value = 0;
+                $depth_value = $depth{$chr}{$strand}{$_} if $depth{$chr}{$strand}{$_};
+                push @depth_exon_base, $depth_value;
+            }
+        }
+        @depth_exon_base = sort {$b <=> $a} @depth_exon_base;
+        my $exon_base_depth_median = $depth_exon_base[@depth_exon_base*0.5] // 0;
+        my $GFF3_gene_depth = $exon_base_depth_median;
+        $exon_base_depth_median = $min_gene_depth if $exon_base_depth_median < $min_gene_depth;
+
+        my @intron_ref_specific = intron_specific(\@intron_evidence, \@intron_ref);
+        my @intron_evidence_specific = intron_specific(\@intron_ref, \@intron_evidence);
+        my @intron_common = intron_common(\@intron_ref, \@intron_evidence);
+
+        my %intron_group;
+        my %valid_intron;
+        foreach (@intron_ref_specific) {
+            $valid_intron{$_} = 1;
+            my @f = split /\t/, $_;
+            if ($f[3] >= $exon_base_depth_median * $min_base_depth_ratio_for_ref_specific_intron) {
+                $intron_group{$_} = 1;
+            }
+        }
+
+        foreach (@intron_evidence_specific) {
+            my @f = split /\t/, $_;
+            if ($f[2] >= $exon_base_depth_median * $min_intron_depth_ratio_for_evidence_specific_intron) {
+                $intron_group{$_} = 1; $valid_intron{$_} = 1;
+            }
+        }
+
+        foreach (@intron_common) {
+            $valid_intron{$_} = 1;
+            my @f = split /\t/, $_;
+            if ($f[3] >= $exon_base_depth_median * $min_base_depth_ratio_for_common_intron) {
+                $intron_group{$_} = 1;
+            }
+        }
+        my @valid_intron = sort { (split /\t/, $a)[0] <=> (split /\t/, $b)[0] } keys %valid_intron;
+
+        my %cluster_intron = cluster_intron(\@valid_intron);
+
+        my @cluster_intron = sort { (split /\t/, $a)[0] <=> (split /\t/, $b)[0] } keys %cluster_intron;
+        my %transcript_intron;
+        foreach my $cluster_intron ( @cluster_intron ) {
+            my %intron_splicing;
+            my @introns = split /;/, $cluster_intron;
+
+            if (@introns >= 2) {
+                %intron_splicing = intron_splcing(\@introns, $min_transcript_confidence_for_output);
+            }
+            elsif ( exists $intron_group{$introns[0]} ) {
+                my @f = split /\t/, $introns[0];
+                my ($ratio_intron, $ratio_IR) = (1, 0);
+                if ( $f[2] + $f[3] > 0 ) { $ratio_intron = $f[2] / ($f[2] + $f[3]); $ratio_IR = $f[3] / ($f[2] + $f[3]); }
+                $intron_splicing{$introns[0]} = $ratio_intron;
+                $intron_splicing{"Intron_Retention"} = $ratio_IR;
+            }
+            else {
+                $intron_splicing{$introns[0]} = 1;
+            }
+
+            if (%transcript_intron) {
+                foreach my $transcript_intron ( keys %transcript_intron ) {
+                    my $ratio_transcript_intron = $transcript_intron{$transcript_intron};
+                    foreach my $intron_info ( keys %intron_splicing ) {
+                        $transcript_intron{"$transcript_intron;$intron_info"} = $ratio_transcript_intron * $intron_splicing{$intron_info};
+                    }
+                    delete $transcript_intron{$transcript_intron};
+                }
+            }
+            else {
+                foreach my $intron_info ( keys %intron_splicing ) {
+                    $transcript_intron{$intron_info} = $intron_splicing{$intron_info};
+                }
+            }
+
+            my $max_num_of_transcript = 10000;
+            $max_num_of_transcript = int(1 / $min_transcript_confidence_for_output + 0.5) if $min_transcript_confidence_for_output;
+            if ( %transcript_intron > $max_num_of_transcript ) {
+                my ($num_of_transcript, $min_ratio_of_transcript) = (0, 0);
+                foreach ( sort {$transcript_intron{$b} <=> $transcript_intron{$a}} keys %transcript_intron ) {
+                    $num_of_transcript ++;
+                    if ( $num_of_transcript == $max_num_of_transcript ) {
+                        $min_ratio_of_transcript = $transcript_intron{$_};
+                        last;
+                    }
+                }
+                foreach ( keys %transcript_intron ) {
+                    if ( $transcript_intron{$_} < $min_ratio_of_transcript or $transcript_intron{$_} == 0 ) {
+                        delete $transcript_intron{$_};
+                    }
+                }
+            }
+        }
+        $transcript_intron{"No_intron"} = 1 unless @cluster_intron;
+
+        my (%out_transcript_intron, @out_transcript_ID);
+        my $added_mRNA_num = 0;
+        foreach my $transcript_intron ( sort {$transcript_intron{$b} <=> $transcript_intron{$a}} keys %transcript_intron ) {
+            $added_mRNA_num ++;
+            my $added_mRNA_code = sprintf("%02d", $added_mRNA_num);
+            my $added_mRNA_ID = "$gene_ID." . $added_mRNA_ID_prefix . $added_mRNA_code;
+            while ( exists $ref_mRNA_ID{$added_mRNA_ID} ) {
+                $added_mRNA_num ++;
+                $added_mRNA_code = sprintf("%02d", $added_mRNA_num);
+                $added_mRNA_ID = "$gene_ID." . $added_mRNA_ID_prefix . $added_mRNA_code;
+            }
+
+            my (@out_transcript_intron, @out_transcript_intron_without_depth);
+            foreach ( split /;/, $transcript_intron ) {
+                my @ff = split /\t/, $_;
+                push @out_transcript_intron, $_ if @ff >= 2;
+                push @out_transcript_intron_without_depth, "$ff[0]\t$ff[1]" if @ff >= 2;
+            }
+            my $out_transcript_intron = join "\n", @out_transcript_intron;
+            my $out_transcript_intron_without_depth = join "\n", @out_transcript_intron_without_depth;
+            $out_transcript_intron_without_depth = "No_intron" unless $out_transcript_intron;
+            $out_transcript_intron = "No_intron" unless $out_transcript_intron;
+
+            if ( exists $ref_transcript_intron{$out_transcript_intron_without_depth} ) {
+                $added_mRNA_num --;
+                $added_mRNA_ID = $ref_transcript_intron{$out_transcript_intron_without_depth};
+            }
+
+            push @out_transcript_ID, $added_mRNA_ID unless exists $ref_mRNA_ID{$added_mRNA_ID};
+            $out_transcript_intron{$added_mRNA_ID}{"introns"} = $out_transcript_intron;
+            $out_transcript_intron{$added_mRNA_ID}{"ratio"} = $transcript_intron{$transcript_intron};
+        }
+
+        foreach ( sort keys %ref_mRNA_ID ) {
+            if ( ! exists $out_transcript_intron{$_} ) {
+                $out_transcript_intron{$_}{"introns"} = $ref_mRNA_ID{$_};
+                $out_transcript_intron{$_}{"ratio"} = 0;
+            }
+        }
+
+        my $gene_header_out = $gene_info{$gene_ID}{"header"};
+        $gene_header_out =~ s/;?$/;RNASeq_exon_base_depth_median=$GFF3_gene_depth;/;
+        print {$OUTFH} $gene_header_out;
+
+        my ($out_transcript_number, $out_transcript_valid_ratio_num) = (0, 0);
+        foreach my $mRNA_ID ( sort keys %ref_mRNA_ID ) {
+            $out_transcript_number ++;
+            my $out_mRNA_intron = $out_transcript_intron{$mRNA_ID}{"introns"};
+            my $ratio = $out_transcript_intron{$mRNA_ID}{"ratio"};
+            my $mRNA_header = $gene_info{$gene_ID}{"mRNA_header"}{$mRNA_ID};
+            my $mRNA_info = $gene_info{$gene_ID}{"mRNA_info"}{$mRNA_ID};
+
+            $out_transcript_valid_ratio_num ++ if $ratio >= $min_transcript_confidence_for_output;
+            my $out = get_mRNA_GFF3_info($out_mRNA_intron, $ratio, $chr, $source, $gene_start, $gene_end, $strand, $gene_ID, $mRNA_ID, $mRNA_header, $mRNA_info);
+            print {$OUTFH} "$out";
+        }
+
+        foreach my $mRNA_ID ( @out_transcript_ID ) {
+            my $out_mRNA_intron = $out_transcript_intron{$mRNA_ID}{"introns"};
+            my $ratio = $out_transcript_intron{$mRNA_ID}{"ratio"};
+            if ($ratio >= $min_transcript_confidence_for_output) {
+                my ($mRNA_header, $mRNA_info);
+                my $out = get_mRNA_GFF3_info($out_mRNA_intron, $ratio, $chr, $source, $gene_start, $gene_end, $strand, $gene_ID, $mRNA_ID, $mRNA_header, $mRNA_info);
+                print {$OUTFH} "$out";
+                $out_transcript_valid_ratio_num ++;
+            }
+        }
+
+        if ($out_transcript_valid_ratio_num == 0) {
+            while ($out_transcript_number < $transcript_num_for_output_when_all_low_confidence && @out_transcript_ID >= $transcript_num_for_output_when_all_low_confidence - $out_transcript_number) {
+                my $mRNA_ID = shift @out_transcript_ID;
+                my $out_mRNA_intron = $out_transcript_intron{$mRNA_ID}{"introns"};
+                my $ratio = $out_transcript_intron{$mRNA_ID}{"ratio"};
+                my ($mRNA_header, $mRNA_info);
+                my $out = get_mRNA_GFF3_info($out_mRNA_intron, $ratio, $chr, $source, $gene_start, $gene_end, $strand, $gene_ID, $mRNA_ID, $mRNA_header, $mRNA_info);
+                print {$OUTFH} $out;
+                $out_transcript_number ++;
+            }
+        }
+
+        print {$OUTFH} "\n";
+    }
+
+    close $OUTFH;
+    return 1;
+}
+
+sub get_mRNA_GFF3_info {
+    my ($out_mRNA_intron, $ratio, $chr, $source, $gene_start, $gene_end, $strand, $gene_ID, $mRNA_ID, $mRNA_header, $mRNA_info) = @_;
+
+    $ratio = $ratio * 100;
+    $ratio = sprintf("%.2f%%", $ratio);
+
+    if ($mRNA_header) {
+        $mRNA_header =~ s/;*$/;Transcript_Ratio=$ratio;/;
+        my $out = $mRNA_header;
+
+        # $out_mRNA_intron may legitimately be the literal sentinel string "No_intron"
+        # (an intron-less transcript) rather than real tab-delimited intron records;
+        # skip it here instead of trying to split it into 4 fields, which previously
+        # left $f[1]/$f[2]/$f[3] undefined and triggered repeated "Use of uninitialized
+        # value in concatenation" warnings below.
+        my @intron = $out_mRNA_intron eq "No_intron" ? () : sort { (split /\t/, $a)[0] <=> (split /\t/, $b)[0] } split "\n", $out_mRNA_intron;
+        my %intron_depth;
+        foreach ( @intron ) {
+            my @f = split /\t/, $_;
+            $intron_depth{"$f[0]\t$f[1]"} = "$f[2]\t$f[3]";
+        }
+
+        foreach ( split /\n/, $mRNA_info ) {
+            if ( m/\tintron\t(\d+\t\d+)/ ) {
+                my ($intron_depth, $base_depth_median) = (0, 0);
+                ($intron_depth, $base_depth_median) = split /\t/, $intron_depth{$1};
+                s/(\tintron\t\d+\t\d+)\t\S+/$1\t$intron_depth/;
+                $_ = add_attr($_, "intron_depth=$intron_depth");
+                $_ = add_attr($_, "base_depth_median=$base_depth_median");
+                chomp;
+            }
+            $out .= "$_\n";
+        }
+
+        return $out;
+    }
+
+    if ($out_mRNA_intron eq "No_intron") {
+        my $out = "$chr\t$source\tmRNA\t$gene_start\t$gene_end\t\.\t$strand\t\.\tID=$mRNA_ID;Parent=$gene_ID;Transcript_Ratio=$ratio;\n";
+        $out .= "$chr\t$source\texon\t$gene_start\t$gene_end\t\.\t$strand\t\.\tID=$mRNA_ID.exon1;Parent=$mRNA_ID\n";
+        return $out;
+    }
+    else {
+        my @intron = sort { (split /\t/, $a)[0] <=> (split /\t/, $b)[0] } split "\n", $out_mRNA_intron;
+        my @exon;
+
+        my $first_intron = shift @intron;
+        my ($exon_start, $exon_end);
+        my @fi = split /\t/, $first_intron;
+        if ( $fi[0] > $gene_start ) {
+            $exon_end = $fi[0] - 1;
+            push @exon, "$gene_start\t$exon_end";
+            $exon_start = $fi[1] + 1;
+        }
+        else {
+            warn "Warning: $mRNA_ID 的起始 intron 位置 > 基因起始位置。\n";
+        }
+
+        foreach (@intron) {
+            my @f = split /\t/, $_;
+            $exon_end = $f[0] - 1;
+            push @exon, "$exon_start\t$exon_end";
+            $exon_start = $f[1] + 1;
+        }
+        push @exon, "$exon_start\t$gene_end";
+        unshift @intron, $first_intron;
+
+        my $out = "$chr\t$source\tmRNA\t$gene_start\t$gene_end\t\.\t$strand\t\.\tID=$mRNA_ID;Parent=$gene_ID;Transcript_Ratio=$ratio;\n";
+        my %out;
+
+        if ( $strand eq "-" ) {
+            @intron = sort { (split /\t/, $b)[0] <=> (split /\t/, $a)[0] } @intron;
+            @exon = sort { (split /\t/, $b)[0] <=> (split /\t/, $a)[0] } @exon;
+        }
+        my $num = 0;
+        foreach ( @exon ) {
+            $num ++;
+            my @f = split /\t/, $_;
+            $out{"$chr\t$source\texon\t$f[0]\t$f[1]\t.\t$strand\t\.\tID=$mRNA_ID.exon$num;Parent=$mRNA_ID;\n"} = $f[0];
+        }
+        $num = 0;
+        foreach ( @intron ) {
+            $num ++;
+            my @f = split /\t/, $_;
+            my ($intron_depth, $base_depth_median) = (0, 0);
+            ($intron_depth, $base_depth_median) = ($f[2], $f[3]);
+            $out{"$chr\t$source\tintron\t$f[0]\t$f[1]\t$intron_depth\t$strand\t\.\tID=$mRNA_ID.intron$num;Parent=$mRNA_ID;intron_depth=$intron_depth;base_depth_median=$base_depth_median\n"} = $f[0];
+        }
+
+        my @out = sort {$out{$a} <=> $out{$b}} keys %out;
+        $out .= join "", @out;
+
+        return $out;
+    }
+}
+
+sub intron_splcing {
+    my @intron = @{$_[0]};
+    my $min_transcript_confidence_for_output = $_[1];
+
+    my %sort_intron;
+    foreach (@intron) { my @f = split /\t/, $_; $sort_intron{$_} = $f[1]; }
+    @intron = sort { (split /\t/, $a)[0] <=> (split /\t/, $b)[0] or $sort_intron{$a} <=> $sort_intron{$b} } @intron;
+
+    my %group_intron_end;
+    foreach my $intron (@intron) {
+        my @f = split /\t/, $intron;
+
+        my $group_add_ok = 0;
+        foreach ( keys %group_intron_end ) {
+            if ($f[0] > ($group_intron_end{$_} + 1)) {
+                $group_intron_end{"$_;$intron"} = $f[1];
+                delete $group_intron_end{$_};
+                $group_add_ok = 1;
+            }
+        }
+
+        if ($group_add_ok == 0) {
+            $group_intron_end{$intron} = $f[1];
+        }
+    }
+
+    my (%group_intron_depth, %group_intron_ratio);
+    my $sum_depth = 0;
+    foreach my $group_intron ( keys %group_intron_end ) {
+        my ($total, $num, $average) = (0, 0, 0);
+        foreach ( split /;/, $group_intron ) {
+            my @f = split /\t/, $_;
+            $total += ($f[2] + $f[3]);
+            $num ++;
+        }
+        $average = $total / $num if $num;
+        $group_intron_depth{$group_intron} = $average;
+        $sum_depth += $average;
+    }
+    foreach my $group_intron ( keys %group_intron_end ) {
+        my $ratio = 0;
+        $ratio = $group_intron_depth{$group_intron} / $sum_depth if $sum_depth;
+        $group_intron_ratio{$group_intron} = $ratio;
+    }
+
+    my %intron_splicing;
+    foreach my $group_intron ( keys %group_intron_ratio ) {
+        my (%intron_splicing_end, %intron_splicing_ratio);
+        my $group_intron_ratio = $group_intron_ratio{$group_intron};
+
+        my @IR_intron = split /;/, $group_intron;
+        foreach my $IR_intron ( @IR_intron ) {
+            my @f = split /\t/, $IR_intron;
+            my ($ratio_intron, $ratio_base_depth) = (1, 0);
+            if ( $f[2] + $f[3] > 0 ) { $ratio_intron = $f[2] / ($f[2] + $f[3]); $ratio_base_depth = $f[3] / ($f[2] + $f[3]); }
+
+            my $IR_intron_add_ok = 0;
+            foreach ( keys %intron_splicing_end ) {
+                if ( $f[0] > ($intron_splicing_end{$_} + 1) ) {
+                    $intron_splicing_ratio{"$_;$IR_intron"} = $intron_splicing_ratio{$_} * $ratio_intron;
+                    $intron_splicing_ratio{"$_;Intron_Retention"} = $intron_splicing_ratio{$_} * $ratio_base_depth;
+                    $intron_splicing_end{"$_;$IR_intron"} = $f[1];
+                    $intron_splicing_end{"$_;Intron_Retention"} = $f[1];
+                    delete $intron_splicing_ratio{$_};
+                    delete $intron_splicing_end{$_};
+                    $IR_intron_add_ok = 1;
+                }
+            }
+
+            if ($IR_intron_add_ok == 0) {
+                $intron_splicing_ratio{"$IR_intron"} = $group_intron_ratio * $ratio_intron;
+                $intron_splicing_ratio{"Intron_Retention"} = $group_intron_ratio * $ratio_base_depth;
+                $intron_splicing_end{"$IR_intron"} = $f[1];
+                $intron_splicing_end{"Intron_Retention"} = $f[1];
+            }
+
+            my $max_num_of_transcript = 10000;
+            $max_num_of_transcript = int(1 / $min_transcript_confidence_for_output + 0.5) if $min_transcript_confidence_for_output;
+            if ( %intron_splicing_end > $max_num_of_transcript ) {
+                my ($num_of_transcript, $min_ratio_of_transcript) = (0, 0);
+                foreach ( sort {$intron_splicing_ratio{$b} <=> $intron_splicing_ratio{$a}} keys %intron_splicing_end ) {
+                    $num_of_transcript ++;
+                    if ( $num_of_transcript == $max_num_of_transcript ) {
+                        $min_ratio_of_transcript = $intron_splicing_ratio{$_};
+                        last;
+                    }
+                }
+                foreach ( keys %intron_splicing_end ) {
+                    if ( $intron_splicing_ratio{$_} < $min_ratio_of_transcript or $intron_splicing_ratio{$_} == 0 ) {
+                        delete $intron_splicing_end{$_};
+                        delete $intron_splicing_ratio{$_};
+                    }
+                }
+            }
+        }
+
+        foreach ( keys %intron_splicing_ratio ) {
+            my $value = $intron_splicing_ratio{$_};
+            $_ = "Intron_Retention" if ( m/Intron_Retention/ && (! m/\d/) );
+            $intron_splicing{$_} += $value;
+        }
+    }
+
+    return %intron_splicing;
+}
+
+sub cluster_intron {
+    my @intron = @{$_[0]};
+    @intron = sort { (split /\t/, $a)[0] <=> (split /\t/, $b)[0] } @intron;
+
+    my %out;
+    return %out unless @intron;
+
+    my $intron = shift @intron;
+    my ($last_start, $last_end) = split /\t/, $intron;
+    foreach (@intron) {
+        my ($start, $end) = split /\t/, $_;
+        if ($start > ($last_end + 1)) {
+            $out{$intron} = "$last_start\t$last_end";
+            $intron = $_;
+            ($last_start, $last_end) = ($start, $end);
+        }
+        else {
+            $last_end = $end if $end > $last_end;
+            $intron .= ";$_";
+        }
+    }
+    $out{$intron} = "$last_start\t$last_end" if $intron;
+
+    return %out;
+}
+
+sub intron_common {
+    my @intron_ref = @{$_[0]};
+    my @intron_evidence = @{$_[1]};
+
+    my %intron_ref;
+    foreach (@intron_ref) {
+        my @f = split /\t/;
+        $intron_ref{"$f[0]\t$f[1]"} = 1;
+    }
+
+    my @out;
+    foreach (@intron_evidence) {
+        my @f = split /\t/;
+        push @out, $_ if exists $intron_ref{"$f[0]\t$f[1]"};
+    }
+
+    return @out;
+}
+
+sub intron_specific {
+    my @intron_ref = @{$_[0]};
+    my @intron_evidence = @{$_[1]};
+
+    my %intron_ref;
+    foreach (@intron_ref) {
+        my @f = split /\t/;
+        $intron_ref{"$f[0]\t$f[1]"} = 1;
+    }
+
+    my @out;
+    foreach (@intron_evidence) {
+        my @f = split /\t/;
+        push @out, $_ unless exists $intron_ref{"$f[0]\t$f[1]"};
+    }
+
+    return @out;
+}
+
+sub get_intron_from_exons {
+    my @exon = @{$_[0]};
+    my $mRNA_ID = $_[1];
+    @exon = sort { (split /\t/, $a)[0] <=> (split /\t/, $b)[0] } @exon;
+
+    my @intron;
+    my $first_exon = shift @exon;
+    my ($last_start, $last_end) = split /\t/, $first_exon;
+    foreach ( @exon ) {
+        my ($start, $end) = split /\t/, $_;
+        if ($start > $last_end + 1) {
+            my $intron_start = $last_end + 1;
+            my $intron_stop = $start - 1;
+            push @intron, "$intron_start\t$intron_stop";
+        }
+        ($last_start, $last_end) = ($start, $end);
+    }
+
+    return @intron;
+}
+
+sub get_geneModels_from_GFF3 {
+    my %gene_info;
+    open my $IN1, '<', $_[0] or die "Can not open file $_[0], $!";
+    while (<$IN1>) {
+        if ( m/\tgene\t.*ID=([^;\s]+)/ ) {
+            $gene_info{$1}{"header"} = $_;
+        }
+    }
+    close $IN1;
+
+    my %mRNA_ID2gene_ID;
+    open my $IN2, '<', $_[0] or die "Can not open file $_[0], $!";
+    while (<$IN2>) {
+        if ( m/Parent=([^;\s]+)/ ) {
+            my $parent = $1;
+            if ( exists $gene_info{$parent} ) {
+                if ( m/ID=([^;\s]+)/ ) {
+                    push @{$gene_info{$parent}{"mRNA_ID"}}, $1;
+                    $gene_info{$parent}{"mRNA_header"}{$1} = $_;
+                    $mRNA_ID2gene_ID{$1} = $parent;
+                }
+            }
+        }
+    }
+    close $IN2;
+
+    open my $IN3, '<', $_[0] or die "Can not open file $_[0], $!";
+    while (<$IN3>) {
+        if ( m/Parent=([^;\s]+)/ && exists $mRNA_ID2gene_ID{$1} ) {
+            my $parent = $1;
+            $gene_info{$mRNA_ID2gene_ID{$1}}{"mRNA_info"}{$parent} .= $_;
+        }
+    }
+    close $IN3;
+
+    return %gene_info;
+}
+
+sub add_attr {
+    my $mRNA_header = $_[0];
+    my $add_attr = $_[1];
+    chomp($mRNA_header);
+    $mRNA_header =~ s/(.*)\t(.*)/$1/;
+    my $attr = $2;
+    $attr =~ s/;$//;
+
+    my (%attr, %attr_sort, $sort_num);
+    $sort_num = 0;
+    foreach ( split /;/, $attr ) {
+        if (m/(.*)\=(.*)/) {
+            $sort_num ++;
+            $attr{$1} = $2;
+            $attr_sort{$1} = $sort_num unless exists $attr_sort{$1};
+        }
+    }
+    if ( $add_attr =~ m/(.*)\=(.*)/ ) {
+        $sort_num ++;
+        $attr{$1} = $2;
+        $attr_sort{$1} = $sort_num unless exists $attr_sort{$1};
+    }
+
+    my @out;
+    foreach ( sort { $attr_sort{$a} <=> $attr_sort{$b} } keys %attr ) {
+        push @out, "$_=$attr{$_}";
+    }
+    my $out = join ";", @out;
+    return "$mRNA_header\t$out\n";
+}

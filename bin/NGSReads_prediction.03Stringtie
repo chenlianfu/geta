@@ -1,0 +1,932 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+use Getopt::Long;
+use Cwd qw/abs_path getcwd cwd/;
+use File::Basename;
+use File::Path qw(make_path remove_tree);
+
+my $command_line = "$0 " . join(" ", @ARGV);
+my $bin_path = dirname($0);
+
+my $usage_cn = <<'USAGE_CN';
+Usage:
+    __PROG__ [options] --input_single_sorted_BAM_file hisat2_sorted.bam > transfrag.gff3
+
+    本程序用于调用StringTie对单个已按坐标排序的BAM比对文件进行转录本组装，得到GTF文件后，程序内部直接将其转换为GFF3格式并输出，不再需要额外调用独立的gtfToGff3.pl脚本。输出GFF3文件第2列(source)的值固定为StringTie。本程序不输出intron和exon碱基测序深度信息（如需这些信息，请使用NGSReads_prediction.02Sam2Transfrag）。
+
+    程序流程：(1) 检测输入BAM文件是否已建立索引，若无则调用samtools index建立索引；(2) 调用samtools view获取BAM文件头部信息，得到参考基因组序列长度；(3) 调用samtools view命令按染色体对BAM文件进行分割，每份序列总长度不低于--min_genome_length_during_segmentation设定值；(4) 对每份分割后的BAM文件，并行调用stringtie独立进行转录本组装，得到各自的GTF文件；(5) 将各分割区域组装得到的GTF文件合并为一个GTF文件；(6) 在程序内部直接将合并后的GTF转换为GFF3格式并输出到标准输出，不再需要额外调用独立的gtfToGff3.pl脚本；(7) 程序结束前，若未设置--keep_tmp_files，则直接删除--tmp_dir指定的整个临时文件夹；若设置了该参数，则保留所有中间文件。
+
+    程序使用须知：(1) 本程序仅接受一个输入文件，且其必须为已按坐标排序的BAM文件；(2) 系统中需能够直接执行stringtie和samtools命令，本程序对BAM文件的染色体分割、以及各分割区域的stringtie组装，均通过Perl自身fork出的worker子进程并行完成，不再依赖外部parafly或parallel命令；(3) 若不设置--keep_tmp_files，程序运行到最后一步会删除整个临时文件夹；在此之前的步骤若运行中断，临时文件夹不会被删除，再次运行程序并使用--tmp_dir参数指定相同的临时文件夹，则程序能接续运行；但若程序已运行结束后再次以相同的--tmp_dir重新运行（仅在设置了--keep_tmp_files保留临时文件夹的情况下可能出现），将无法得到正确结果；(4) 请勿将--tmp_dir设置为包含重要文件的已有文件夹（例如当前目录或家目录），因为未设置--keep_tmp_files时该文件夹会被整体删除。
+
+参数:
+[输入参数]
+    --input_single_sorted_BAM_file <string>    default: None (必需)
+    输入的已按坐标排序的BAM文件路径。
+
+    --strand_specific_library <string>    default: none
+    设置建库的链特异性类型，可选值为 none（非链特异性）、rf（常规RF链特异性建库，read1比对到transcript负链）、fr（read1比对到transcript正链）。设置为rf或fr时，程序会在调用stringtie时分别添加--rf或--fr参数。
+
+[StringTie 参数]
+    --stringtie_path <string>    default: stringtie
+    stringtie可执行程序的路径，默认直接从系统PATH中调用。
+
+    --min_isoform_fraction <float>    default: 0.01
+    同一位点上，转录本表达量与最高表达量转录本的最小比值，低于该阈值的转录本会被丢弃（对应stringtie的-f参数）。
+
+    --min_transcript_length <int>    default: 200
+    组装转录本的最小长度（对应stringtie的-m参数）。
+
+    --min_anchor_length <int>    default: None
+    剪接位点两侧read比对锚定的最小长度（对应stringtie的-a参数），不设置则使用stringtie自身默认值。
+
+    --min_junction_coverage <float>    default: None
+    剪接位点的最小测序覆盖度（对应stringtie的-j参数），不设置则使用stringtie自身默认值。
+
+    --min_read_coverage <float>    default: None
+    组装转录本所需的最小测序覆盖度（对应stringtie的-c参数），不设置则使用stringtie自身默认值。
+
+    --min_locus_gap <int>    default: None
+    判定为两个独立位点(bundle)所需的最小间隔（对应stringtie的-g参数），不设置则使用stringtie自身默认值。
+
+    --label <string>    default: stringtie
+    输出转录本ID的前缀标签（对应stringtie的-l参数）；程序会在此基础上为每份染色体分割区域自动追加区域编号后缀，以避免不同区域组装得到的转录本ID相互冲突。
+
+    --other_stringtie_options <string>    default: None
+    用于透传其它未封装的stringtie参数，原样拼接到stringtie命令中，例如 --other_stringtie_options "-e -A gene_abund.tab"。
+
+[设置阈值 - 区域分割]
+    --min_genome_length_during_segmentation <int>    default: 1000000
+    设置最小基因组序列长度，程序根据染色体将BAM文件进行分割时，让每份分割出的BAM文件对应的染色体序列总长度不小于该阈值；每份分割后的BAM文件会被独立并行地提交给stringtie进行转录本组装，组装完成后再合并为一个GTF文件。适当调低该值可增加并行粒度、提高多核利用率，但过低会增加进程调度开销。
+
+[输出参数]
+    --tmp_dir <string>    default: tmp_$date$pid
+    输入临时文件夹路径。若未设置--keep_tmp_files，程序成功运行结束后该文件夹会被整体删除。
+
+    --keep_tmp_files    default: None
+    设置该参数后，程序结束时保留所有中间文件（即保留--tmp_dir指定的整个临时文件夹）；若不设置该参数，则程序结束时直接删除整个--tmp_dir文件夹。
+
+[GTF转GFF3参数]
+    --gene_prefix <string>    default: None
+    若设置该参数，则程序会对基因ID进行重命名，该参数用于设置gene ID前缀；若不设置，则直接使用StringTie输出的gene_id。
+
+    --gene_code_length <int>    default: 6
+    设置基因数字编号的长度，同gtfToGff3.pl中的对应参数；仅在设置了--gene_prefix时生效。
+
+[性能参数]
+    --cpu <int>    default: 8
+    设置程序运行时并行使用的worker子进程/CPU线程数：一方面用于samtools命令自身的多线程参数(-\@)，另一方面用于控制染色体分割、stringtie组装等步骤中同时并行运行的worker子进程数目上限；本程序所有并行化步骤均通过Perl自身fork出的worker子进程完成，不再依赖外部parafly或parallel命令。为避免CPU超订，每个worker子进程内部调用stringtie时固定使用单线程(-p 1)。
+
+    --help    default: None
+    display this help and exit.
+
+    --chinese_help    default: None
+    使用该参数后，程序给出中文用法并退出。
+
+USAGE_CN
+
+(my $usage = $usage_cn) =~ s/__PROG__/$0/g;
+
+if (@ARGV == 0) { die usage_english() }
+
+# ============================================================================
+# 解析命令行参数
+# ============================================================================
+my ($input_single_sorted_BAM_file, $strand_specific_library, $help, $chinese_help,
+    $stringtie_path, $min_isoform_fraction, $min_transcript_length,
+    $min_anchor_length, $min_junction_coverage, $min_read_coverage, $min_locus_gap,
+    $label, $other_stringtie_options, $min_genome_length_during_segmentation, $tmp_dir,
+    $keep_tmp_files,
+    $gene_prefix, $gene_code_length, $cpu);
+
+GetOptions(
+    "input_single_sorted_BAM_file=s" => \$input_single_sorted_BAM_file,
+    "strand_specific_library=s"      => \$strand_specific_library,
+    "chinese_help!"                  => \$chinese_help,
+    "help!"                          => \$help,
+    "stringtie_path=s"               => \$stringtie_path,
+    "min_isoform_fraction=f"         => \$min_isoform_fraction,
+    "min_transcript_length=i"        => \$min_transcript_length,
+    "min_anchor_length=i"            => \$min_anchor_length,
+    "min_junction_coverage=f"        => \$min_junction_coverage,
+    "min_read_coverage=f"            => \$min_read_coverage,
+    "min_locus_gap=i"                => \$min_locus_gap,
+    "label=s"                        => \$label,
+    "other_stringtie_options=s"      => \$other_stringtie_options,
+    "min_genome_length_during_segmentation=i" => \$min_genome_length_during_segmentation,
+    "tmp_dir=s"                      => \$tmp_dir,
+    "keep_tmp_files!"                => \$keep_tmp_files,
+    "gene_prefix=s"                  => \$gene_prefix,
+    "gene_code_length=i"             => \$gene_code_length,
+    "cpu=i"                          => \$cpu,
+) or die usage_english();
+
+if ( $chinese_help ) { die $usage }
+if ( $help )         { die usage_english() }
+die "Error: --input_single_sorted_BAM_file is required.\n\n" . usage_english() unless defined $input_single_sorted_BAM_file;
+
+# 在标准错误输出中给出程序的运行命令。
+my $pwd = `pwd`;
+my $programe_name = basename($0);
+print STDERR "\n#################### $programe_name | Start ####################\n";
+print STDERR "PWD: $pwd" . (localtime) . ": CMD: " . $command_line . "\n";
+print STDERR "============================================\n";
+
+# 记录程序启动时的工作目录（结束删除临时文件夹前需要切回该目录）
+my $orig_cwd = getcwd();
+
+# 使用绝对路径
+$input_single_sorted_BAM_file = abs_path($input_single_sorted_BAM_file);
+die "Error: file $input_single_sorted_BAM_file does not exist.\n" unless -s $input_single_sorted_BAM_file;
+
+# 设置参数默认值
+$strand_specific_library = "none" unless defined $strand_specific_library;
+die "Error: --strand_specific_library must be one of none/rf/fr.\n" unless $strand_specific_library =~ /^(none|rf|fr)$/i;
+$strand_specific_library = lc($strand_specific_library);
+$stringtie_path ||= "stringtie";
+$min_isoform_fraction = 0.01 unless defined $min_isoform_fraction;
+$min_transcript_length = 200 unless defined $min_transcript_length;
+$label = "stringtie" unless defined $label;
+$min_genome_length_during_segmentation ||= 1000000;
+$cpu ||= 8;
+$gene_code_length = 6 unless defined $gene_code_length;
+
+# 准备临时文件夹路径
+my $date = `date +%Y%m%d%H%M%S`; chomp($date);
+$tmp_dir ||= "tmp_$date$$";
+$tmp_dir = abs_path($tmp_dir);
+mkdir $tmp_dir unless -e $tmp_dir;
+chdir $tmp_dir; print STDERR "PWD: $tmp_dir\n";
+
+# ============================================================================
+# 1. 检测/建立BAM索引
+# ============================================================================
+print STDERR "\n1. Checking BAM index for the input file. (" . (localtime) . ")\n";
+my @cmdString;
+unless ( -s "$input_single_sorted_BAM_file.bai" || -s "${\ ($input_single_sorted_BAM_file =~ s/\.bam$/.bai/r)}" ) {
+    push @cmdString, "samtools index -\@ $cpu $input_single_sorted_BAM_file";
+}
+&execute_cmds(@cmdString, "$tmp_dir/01.samtools_index.ok");
+
+# ============================================================================
+# 2. 获取BAM头部信息
+# ============================================================================
+print STDERR "\n2. Using the \"samtools view\" command to obtain header of the input BAM file. (" . (localtime) . ")\n";
+&execute_cmds("samtools view -H $input_single_sorted_BAM_file > header.sam", "$tmp_dir/02.samtools_view_header.ok");
+
+# ============================================================================
+# 3. 按染色体分割BAM文件（并行化：Perl worker子进程代替parafly）
+# ============================================================================
+print STDERR "\n3. Splitting the BAM file by chromosome and its length. If there are multiple sequences that are shorter, merge them until the size exceeds $min_genome_length_during_segmentation bp. (" . (localtime) . ")\n";
+## 说明：染色体分组的计算仅依赖header.sam（第2步已生成），开销很小，因此
+## 每次运行都直接重新计算，不再用“列表文件是否已存在”来判断是否跳过；
+## 这样即使程序在第3步执行到一半时中断，重新运行后也能正确得到
+## @piece_bam_files（包含每份piece的染色体名及其BAM文件路径），而不会
+## 导致第3步在续跑时被错误地直接标记为完成却未真正执行。
+my %genome_seq_length;
+open my $HDR, '<', "$tmp_dir/header.sam" or die "Error: Can not open file $tmp_dir/header.sam, $!";
+while (<$HDR>) {
+    if ( m/^\@/ ) {
+        if ( m/^\@SQ\tSN:(\S+)\tLN:(\d+)/ ) {
+            $genome_seq_length{$1} = $2;
+        }
+    }
+    else { last; }
+}
+close $HDR;
+
+my (%piece, @piece, $piece_num, $piece_length, $piece_name);
+foreach ( sort {$genome_seq_length{$b} <=> $genome_seq_length{$a}} keys %genome_seq_length ) {
+    $piece_name .= "$_ ";
+    $piece_length += $genome_seq_length{$_};
+    if ( $piece_length >= $min_genome_length_during_segmentation ) {
+        $piece_num ++;
+        $piece{$piece_name} = $piece_num;
+        push @piece, $piece_name;
+        $piece_name = "";
+        $piece_length = 0;
+    }
+}
+if ( $piece_name ) {
+    $piece_num ++;
+    $piece{$piece_name} = $piece_num;
+    push @piece, $piece_name;
+}
+
+mkdir "$tmp_dir/splitBAM_byChromosome" unless -e "$tmp_dir/splitBAM_byChromosome";
+my @piece_bam_files;
+my $output3 = "$tmp_dir/splitBAM_byChromosome.file_path.list";
+open my $OUT3, '>', $output3 or die "Error: Can not create file $output3, $!";
+foreach ( @piece ) {
+    my $out_bam = "$tmp_dir/splitBAM_byChromosome/piece$piece{$_}.bam";
+    push @piece_bam_files, [$piece{$_}, $_, $out_bam];
+    print {$OUT3} "$piece{$_}\t$out_bam\n";
+}
+close $OUT3;
+
+unless ( -e "$tmp_dir/03.samtools_view_split.ok" ) {
+    if (@piece_bam_files) {
+        my @tasks;
+        foreach my $item (@piece_bam_files) {
+            my (undef, $seqnames, $out_bam) = @$item;
+            push @tasks, sub {
+                my $cmd = "samtools view -b -o $out_bam $input_single_sorted_BAM_file $seqnames";
+                system($cmd) == 0 or die "Error: failed to execute: $cmd\n";
+            };
+        }
+        &run_parallel_tasks(\@tasks, $cpu, "$tmp_dir/03.samtools_view_split.ok", "samtools view (chromosome split)");
+    }
+    else {
+        open my $OK, '>', "$tmp_dir/03.samtools_view_split.ok" or die $!; close $OK;
+    }
+}
+print STDERR (localtime) . ": step 3 done.\n";
+
+# ============================================================================
+# 4. 对每份分割后的BAM文件并行调用stringtie进行转录本组装
+# ============================================================================
+print STDERR "\n4. Running stringtie in parallel to assemble transcripts for each split BAM file. (" . (localtime) . ")\n";
+my %stringtie_opts = (
+    stringtie_path            => $stringtie_path,
+    strand_specific_library   => $strand_specific_library,
+    min_isoform_fraction      => $min_isoform_fraction,
+    min_transcript_length     => $min_transcript_length,
+    min_anchor_length         => $min_anchor_length,
+    min_junction_coverage     => $min_junction_coverage,
+    min_read_coverage         => $min_read_coverage,
+    min_locus_gap             => $min_locus_gap,
+    other_stringtie_options   => $other_stringtie_options,
+);
+
+unless ( -e "$tmp_dir/04.stringtie.ok" ) {
+    my @tasks;
+    foreach my $item (@piece_bam_files) {
+        my ($piece_id, undef, $out_bam) = @$item;
+        push @tasks, sub {
+            do_stringtie_piece($out_bam, "$tmp_dir/splitBAM_byChromosome/piece$piece_id.gtf", "$label.p$piece_id", \%stringtie_opts);
+        };
+    }
+    &run_parallel_tasks(\@tasks, $cpu, "$tmp_dir/04.stringtie.ok", "stringtie assembly (per chromosome-split BAM file)");
+}
+print STDERR (localtime) . ": step 4 done.\n";
+
+# ============================================================================
+# 5. 合并各分割区域的GTF文件
+# ============================================================================
+print STDERR "\n5. Merging the per-region GTF files into a single combined GTF file. (" . (localtime) . ")\n";
+unless ( -e "$tmp_dir/05.merge_gtf.ok" ) {
+    open my $MERGED, '>', "$tmp_dir/stringtie.gtf" or die "Error: Can not create file $tmp_dir/stringtie.gtf, $!";
+    foreach my $item ( sort { $a->[0] <=> $b->[0] } @piece_bam_files ) {
+        my $piece_id = $item->[0];
+        my $piece_gtf = "$tmp_dir/splitBAM_byChromosome/piece$piece_id.gtf";
+        next unless -e $piece_gtf;
+        open my $IN, '<', $piece_gtf or die "Error: Can not open file $piece_gtf, $!";
+        print {$MERGED} <$IN>;
+        close $IN;
+    }
+    close $MERGED;
+    open my $OK, '>', "$tmp_dir/05.merge_gtf.ok" or die $!; close $OK;
+}
+die "Error: no GTF content was produced by stringtie: $tmp_dir/stringtie.gtf\n" unless -s "$tmp_dir/stringtie.gtf";
+print STDERR (localtime) . ": step 5 done.\n";
+
+# ============================================================================
+# 6. 内部将GTF转换为GFF3（整合自gtfToGff3.pl的算法）
+# ============================================================================
+print STDERR "\n6. Converting the combined GTF file into GFF3 format internally. (" . (localtime) . ")\n";
+unless ( -e "$tmp_dir/06.gtf_to_gff3.ok" ) {
+    my $keep_NonCDS = 1;
+    open my $GFF3_OUT, '>', "$tmp_dir/stringtie.gff3" or die "Error: Can not create file $tmp_dir/stringtie.gff3, $!";
+    convert_gtf_to_gff3("$tmp_dir/stringtie.gtf", $GFF3_OUT, $gene_prefix, $gene_code_length, $keep_NonCDS);
+    close $GFF3_OUT;
+    open my $OK, '>', "$tmp_dir/06.gtf_to_gff3.ok" or die $!; close $OK;
+}
+print STDERR (localtime) . ": step 6 done.\n";
+
+# ============================================================================
+# 7. 输出结果
+# ============================================================================
+print STDERR "\n7. Printing the final GFF3 result to standard output. (" . (localtime) . ")\n";
+unless ( -e "$tmp_dir/07.output.ok" ) {
+    open my $IN, '<', "$tmp_dir/stringtie.gff3" or die "Error: Can not open file $tmp_dir/stringtie.gff3, $!";
+    print <$IN>;
+    close $IN;
+    open my $OK, '>', "$tmp_dir/07.output.ok" or die $!; close $OK;
+}
+else {
+    open my $IN, '<', "$tmp_dir/stringtie.gff3" or die "Error: Can not open file $tmp_dir/stringtie.gff3, $!";
+    print <$IN>;
+    close $IN;
+}
+
+# ============================================================================
+# 8. 处理临时文件：默认删除整个--tmp_dir；设置--keep_tmp_files则全部保留
+# ============================================================================
+if ( $keep_tmp_files ) {
+    print STDERR "\n8. Option --keep_tmp_files is set, all intermediate files are kept in: $tmp_dir (" . (localtime) . ")\n";
+}
+else {
+    print STDERR "\n8. Deleting the whole temporary directory: $tmp_dir (" . (localtime) . ")\n";
+    # 先切回程序启动时的目录，避免删除当前所在目录
+    chdir $orig_cwd or die "Error: can not chdir back to $orig_cwd, $!";
+    if ( $tmp_dir eq '/' or $orig_cwd =~ m/^\Q$tmp_dir\E(?:\/|$)/ ) {
+        print STDERR "Warning: the temporary directory ($tmp_dir) is, or contains, the directory where the program was started; to be safe it is NOT deleted.\n";
+    }
+    else {
+        remove_tree($tmp_dir);
+        print STDERR "Warning: failed to completely remove $tmp_dir\n" if -e $tmp_dir;
+    }
+}
+print STDERR "============================================\n";
+print STDERR "$programe_name complete successfully! " . "(" . (localtime) . ")" . "\n\n";
+print STDERR "#################### $programe_name | End ####################\n";
+
+
+# ============================================================================
+# ==========================  子程序区  =====================================
+# ============================================================================
+
+# 顺序执行一组外部命令并用ok文件做断点续跑标记。
+sub execute_cmds {
+    my $ok_file = pop @_;
+
+    if ( -e $ok_file ) {
+        foreach ( @_ ) {
+            print STDERR "CMD(Skipped): $_\n";
+        }
+    }
+    else {
+        foreach ( @_ ) {
+            next unless $_;
+            print STDERR (localtime) . ": CMD: $_\n";
+            system($_) == 0 or die "failed to execute: $_\n";
+        }
+        open my $OUT, '>', "$ok_file" or die $!; close $OUT;
+    }
+
+    return 1;
+}
+
+# 基于Perl fork()的worker并行化调度器，代替外部parafly/parallel命令。
+# $tasks: 一个数组引用，每个元素是一个代码引用（coderef），在子进程中被调用执行。
+# $cpu: 最大并发子进程数。
+# $ok_file: 整个并行步骤完成后创建的标记文件，用于断点续跑（若已存在则直接跳过该步骤）。
+# $step_label: 用于日志输出的步骤名称。
+sub run_parallel_tasks {
+    my ($tasks, $cpu_num, $ok_file, $step_label) = @_;
+
+    if ( -e $ok_file ) {
+        print STDERR "Step(Skipped, already done): $step_label\n";
+        return 1;
+    }
+
+    my $max_procs = $cpu_num && $cpu_num > 0 ? $cpu_num : 1;
+    my @queue = @$tasks;
+    my %children;
+    my $has_error = 0;
+    my $total = scalar @queue;
+    my $completed = 0;
+    # 并行进度用 "\r" 原地刷新，而不是每完成一个任务就换行(\n)打印一次；
+    # 并额外用时间节流，保证两次刷新之间至少间隔3秒，避免刷屏。
+    my $progress_interval = 3;
+    my $last_progress_time = 0;
+    my $progress_dangling = 0;    # 上一次STDERR输出是否停在了"\r"刷新的进度行中间(未换行)
+    print STDERR (localtime) . ": Starting parallel step \"$step_label\" with $total task(s), up to $max_procs worker(s).\n";
+
+    while ( @queue || %children ) {
+        while ( @queue && keys(%children) < $max_procs ) {
+            my $task = shift @queue;
+            my $pid = fork();
+            die "Error: fork failed: $!\n" unless defined $pid;
+            if ( $pid == 0 ) {
+                # 子进程(worker)：执行单个任务后退出，不回到父进程的主流程。
+                my $ok = eval { $task->(); 1; };
+                if ( ! $ok ) {
+                    print STDERR "Error in worker process (PID $$) during step \"$step_label\": $@\n";
+                    exit(1);
+                }
+                exit(0);
+            }
+            else {
+                $children{$pid} = 1;
+            }
+        }
+
+        last unless %children;
+        my $pid = wait();
+        last if $pid == -1;
+        if ( exists $children{$pid} ) {
+            if ( $? != 0 ) {
+                $has_error = 1;
+                # 出错信息需要独占一行，若上一条输出是尚未换行的进度行，先补一个换行再打印。
+                print STDERR "\n" if $progress_dangling;
+                $progress_dangling = 0;
+                print STDERR "Error: worker process (PID $pid) failed during step \"$step_label\" (exit code " . ($? >> 8) . ").\n";
+            }
+            delete $children{$pid};
+            $completed ++;
+            my $now = time();
+            my $is_last = ( $completed == $total );
+            if ( $is_last || $now - $last_progress_time >= $progress_interval ) {
+                $last_progress_time = $now;
+                my $percent = $total ? sprintf("%.1f", $completed / $total * 100) : "100.0";
+                my $running = scalar keys %children;
+                print STDERR "\r" . (localtime) . ": Progress of step \"$step_label\": $completed/$total task(s) done ($percent%), $running running, " . scalar(@queue) . " queued.";
+                $progress_dangling = 1;
+            }
+        }
+    }
+
+    # 循环结束后，如果最后一次输出停留在未换行的进度行，补一个换行，避免后续输出接在同一行。
+    print STDERR "\n" if $progress_dangling;
+
+    die "Error: parallel step \"$step_label\" failed, please check the worker error messages above.\n" if $has_error;
+
+    open my $OK, '>', $ok_file or die "Error: Can not create file $ok_file, $!";
+    close $OK;
+    print STDERR (localtime) . ": Parallel step \"$step_label\" complete.\n";
+    return 1;
+}
+
+# 对单份分割后的BAM文件（$bam_file）调用stringtie进行转录本组装，输出到
+# $out_gtf；$label为该区域专属的转录本ID前缀（已在调用处附加区域编号后缀，
+# 以避免不同区域之间的转录本ID冲突）。为避免同一时刻大量worker子进程叠加
+# stringtie自身的多线程而导致CPU超订，此处固定让stringtie以单线程(-p 1)运行，
+# 真正的并行度由外层run_parallel_tasks的worker子进程数（--cpu）控制。
+sub do_stringtie_piece {
+    my ($bam_file, $out_gtf, $label, $opt) = @_;
+    return unless -s $bam_file;
+
+    my $stringtie_path          = $opt->{stringtie_path};
+    my $strand_specific_library = $opt->{strand_specific_library};
+    my $min_isoform_fraction    = $opt->{min_isoform_fraction};
+    my $min_transcript_length   = $opt->{min_transcript_length};
+    my $min_anchor_length       = $opt->{min_anchor_length};
+    my $min_junction_coverage   = $opt->{min_junction_coverage};
+    my $min_read_coverage       = $opt->{min_read_coverage};
+    my $min_locus_gap           = $opt->{min_locus_gap};
+    my $other_stringtie_options = $opt->{other_stringtie_options};
+
+    my @stringtie_cmd = ($stringtie_path, $bam_file, "-p", 1, "-o", $out_gtf, "-l", $label, "-f", $min_isoform_fraction, "-m", $min_transcript_length);
+    push @stringtie_cmd, "-a", $min_anchor_length if defined $min_anchor_length;
+    push @stringtie_cmd, "-j", $min_junction_coverage if defined $min_junction_coverage;
+    push @stringtie_cmd, "-c", $min_read_coverage if defined $min_read_coverage;
+    push @stringtie_cmd, "-g", $min_locus_gap if defined $min_locus_gap;
+    push @stringtie_cmd, "--rf" if $strand_specific_library eq "rf";
+    push @stringtie_cmd, "--fr" if $strand_specific_library eq "fr";
+    push @stringtie_cmd, $other_stringtie_options if defined $other_stringtie_options;
+
+    my $cmdString = join(" ", @stringtie_cmd);
+    system($cmdString) == 0 or die "Error: failed to execute: $cmdString\n";
+    return 1;
+}
+
+# ----------------------------------------------------------------------------
+# 以下为整合自 gtfToGff3.pl 的核心转换算法，改写为可被调用的子程序：
+# 从 $gtf_file 读取GTF内容，转换结果写入文件句柄 $OUT。
+# 忽略不包含gene_id的行，以及不属于gene要素但不包含transcript_id的行；
+# 当 $keep_NonCDS 为假值时，仅保留含CDS信息的mRNA/gene。
+# [修改] 输出GFF3的第2列(source)统一固定为 "StringTie"。
+# ----------------------------------------------------------------------------
+sub convert_gtf_to_gff3 {
+    my ($gtf_file, $OUT, $gene_prefix, $gene_code_length, $keep_NonCDS) = @_;
+
+    # [修改] 固定的第2列(source)值
+    my $FIXED_SOURCE = 'StringTie';
+
+    my (%gtf_info, %lines, %geneSort1, %geneSort2, %geneSort3, %geneSort4, %geneSort5,
+        %geneExonPos, %geneCDSPos, %source, %score, %gff3_attr, %mRNAExonPos);
+
+    open my $IN, '<', $gtf_file or die "Can not open file $gtf_file: $!\n";
+    while (<$IN>) {
+        next if /^#/;
+        next if /^\s/;
+        next if exists $lines{$_};
+        $lines{$_} = 1;
+
+        my @f = split /\t/, $_;
+        next if @f < 9;
+        my $attr = pop @f;
+        my $type = $f[2];
+
+        my $gene_id;
+        if ( $attr =~ s/gene_id \"(.*?)\";?// ) {
+            $gene_id = $1;
+        }
+        else {
+            next;
+        }
+
+        my $transcript_id;
+        my $has_tx = ( $attr =~ s/transcript_id \"(.*?)\";?// );
+        $transcript_id = $1 if $has_tx;
+        next if $type ne 'gene' && !$has_tx;
+
+        if ( ($type eq 'gene' || $type eq 'mRNA' || $type eq 'transcript') && $attr =~ /\S/ ) {
+            my $attr_other = '';
+            while ( $attr =~ s/(\S+) \"(.*?)\";?// ) {
+                my ($tag, $value) = ($1, $2);
+                $value =~ s/\s+/\%20/g;
+                $attr_other .= "$tag=$value;";
+            }
+            if ($type eq 'gene') { $gff3_attr{$gene_id} = $attr_other; }
+            else                 { $gff3_attr{$transcript_id} = $attr_other; }
+        }
+
+        unless ( exists $geneSort1{$gene_id} ) {
+            $geneSort1{$gene_id} = $f[0];
+            $geneSort4{$gene_id} = $f[6];
+        }
+        # [修改] source不再取自GTF第2列，统一为固定值
+        $source{$gene_id} = $FIXED_SOURCE if $type eq 'gene';
+        $score{$gene_id}  = $f[5] if $type eq 'gene';
+
+        next if $type eq 'gene';
+
+        $gtf_info{$gene_id}{$transcript_id} .= $_;
+
+        $geneExonPos{$gene_id}{$f[3]} = 1;
+        $geneExonPos{$gene_id}{$f[4]} = 1;
+        $mRNAExonPos{$transcript_id}{$f[3]} = 1;
+        $mRNAExonPos{$transcript_id}{$f[4]} = 1;
+        $geneCDSPos{$gene_id}{$f[3]} = 1 if $type eq 'CDS';
+
+        # [修改] source不再取自GTF第2列，统一为固定值
+        $source{$transcript_id} = $FIXED_SOURCE if ($type eq 'mRNA' or $type eq 'transcript');
+        $score{$transcript_id}  = $f[5] if ($type eq 'mRNA' or $type eq 'transcript');
+    }
+    close $IN;
+
+    foreach my $gene_id ( keys %geneExonPos ) {
+        my @pos = sort {$a <=> $b} keys %{$geneExonPos{$gene_id}};
+        $geneSort2{$gene_id} = $pos[0];
+        $geneSort3{$gene_id} = $pos[-1];
+    }
+    foreach my $gene_id ( keys %geneCDSPos ) {
+        my @pos = sort {$a <=> $b} keys %{$geneCDSPos{$gene_id}};
+        $geneSort5{$gene_id} = $pos[0];
+    }
+
+    my @gene_id = sort {
+           $geneSort1{$a} cmp $geneSort1{$b}
+        or $geneSort2{$a} <=> $geneSort2{$b}
+        or $geneSort3{$a} <=> $geneSort3{$b}
+        or $geneSort4{$a} cmp $geneSort4{$b}
+        or ( ($geneSort5{$a} // 0) <=> ($geneSort5{$b} // 0) )
+    } keys %gtf_info;
+
+    my $geneNum = 0;
+    foreach my $gene_id ( @gene_id ) {
+        unless ($keep_NonCDS) {
+            next unless exists $geneCDSPos{$gene_id};
+        }
+        my $gene_name = $gene_id;
+        if ( $gene_prefix ) {
+            $geneNum ++;
+            my $pad = $gene_code_length - length($geneNum);
+            $pad = 0 if $pad < 0;
+            $gene_name = $gene_prefix . ('0' x $pad) . $geneNum;
+        }
+
+        my ($chr, $strand) = ($geneSort1{$gene_id}, $geneSort4{$gene_id});
+        # [修改] 默认值由 '.' 改为固定的 StringTie（StringTie的GTF无gene行，此前gene行第2列为 '.'）
+        $source{$gene_id} = $FIXED_SOURCE unless defined $source{$gene_id};
+        $score{$gene_id}  = '.' unless defined $score{$gene_id};
+        $gff3_attr{$gene_id} = '' unless defined $gff3_attr{$gene_id};
+        print {$OUT} "$chr\t$source{$gene_id}\tgene\t$geneSort2{$gene_id}\t$geneSort3{$gene_id}\t$score{$gene_id}\t$strand\t\.\tID=$gene_name;$gff3_attr{$gene_id}\n";
+
+        my $mRNA_number = 0;
+        foreach my $mRNA_ID ( sort keys %{$gtf_info{$gene_id}} ) {
+            my $mRNA_info = $gtf_info{$gene_id}{$mRNA_ID};
+
+            unless ($keep_NonCDS) {
+                next unless $mRNA_info =~ m/\tCDS\t/;
+            }
+
+            $mRNA_number ++;
+            my $mRNAID = $mRNA_ID;
+            $mRNAID = "$gene_name.t$mRNA_number" if $gene_prefix;
+            # [修改] 默认值由 '.' 改为固定的 StringTie
+            $source{$mRNA_ID} = $FIXED_SOURCE unless defined $source{$mRNA_ID};
+            $score{$mRNA_ID}  = '.' unless defined $score{$mRNA_ID};
+            $gff3_attr{$mRNA_ID} = '' unless defined $gff3_attr{$mRNA_ID};
+            my @mRNAExonPos = sort {$a <=> $b} keys %{$mRNAExonPos{$mRNA_ID}};
+            my $source = $source{$mRNA_ID};
+            print {$OUT} "$chr\t$source\tmRNA\t$mRNAExonPos[0]\t$mRNAExonPos[-1]\t$score{$mRNA_ID}\t$strand\t\.\tID=$mRNAID;Parent=$gene_name;$gff3_attr{$mRNA_ID}\n";
+
+            my (@CDS, @exon, @intron, @UTR);
+            foreach ( split /\n/, $mRNA_info ) {
+                my @g = split /\t/, $_;
+                push @CDS,    "$g[3]\t$g[4]\t$g[5]\t$g[6]\t$g[7]" if $g[2] eq "CDS";
+                push @exon,   "$g[3]\t$g[4]" if $g[2] eq "exon";
+                push @intron, "$g[3]\t$g[4]" if $g[2] eq "intron";
+                push @UTR, "five_prime_UTR\t$g[3]\t$g[4]"  if $g[2] eq "5UTR";
+                push @UTR, "three_prime_UTR\t$g[3]\t$g[4]" if $g[2] eq "3UTR";
+            }
+            @CDS  = sort { (split /\t/, $a)[0] <=> (split /\t/, $b)[0] } @CDS;
+            @exon = sort { (split /\t/, $a)[0] <=> (split /\t/, $b)[0] } @exon;
+
+            unless ( @exon ) {
+                foreach (@CDS) {
+                    my @g = split /\t/;
+                    push @exon, "$g[0]\t$g[1]";
+                }
+                foreach (@UTR) {
+                    my @g = split /\t/;
+                    push @exon, "$g[1]\t$g[2]";
+                }
+                @exon = merge_intervals(@exon);
+            }
+
+            @intron = get_intron_gtf(\@exon, $mRNA_ID, 1) unless @intron;
+            @UTR = get_UTR_gtf(\@CDS, \@exon, $strand) unless @UTR;
+
+            my (%sort, %sort_UTR, $CDS_num, $exon_num, $intron_num, $UTR3_num, $UTR5_num);
+            if ($strand eq "+") {
+                foreach (sort { (split /\t/, $a)[0] <=> (split /\t/, $b)[0] } @CDS) {
+                    $CDS_num ++;
+                    my $out = "$chr\t$source\tCDS\t$_\tID=$mRNAID.CDS$CDS_num;Parent=$mRNAID;\n";
+                    my @g = split /\t/;
+                    $sort{$out} = $g[0];
+                    $sort_UTR{$out} = 3;
+                }
+                foreach (sort { (split /\t/, $a)[0] <=> (split /\t/, $b)[0] } @exon) {
+                    $exon_num ++;
+                    my $out = "$chr\t$source\texon\t$_\t.\t$strand\t\.\tID=$mRNAID.exon$exon_num;Parent=$mRNAID;\n";
+                    my @g = split /\t/;
+                    $sort{$out} = $g[0];
+                    $sort_UTR{$out} = 2;
+                }
+                foreach (sort { (split /\t/, $a)[0] <=> (split /\t/, $b)[0] } @intron) {
+                    $intron_num ++;
+                    my $out = "$chr\t$source\tintron\t$_\t\.\t$strand\t\.\tID=$mRNAID.intron$intron_num;Parent=$mRNAID;\n";
+                    my @g = split /\t/;
+                    $sort{$out} = $g[0];
+                    $sort_UTR{$out} = 2;
+                }
+                my (%UTR_sort, @UTR5, @UTR3);
+                foreach (@UTR) {
+                    my @g = split /\t/;
+                    $UTR_sort{$_} = $g[1];
+                    push @UTR5, $_ if $g[0] eq "five_prime_UTR";
+                    push @UTR3, $_ if $g[0] eq "three_prime_UTR";
+                }
+                foreach (sort {$UTR_sort{$a} <=> $UTR_sort{$b}} @UTR5) {
+                    $UTR5_num ++;
+                    my $out = "$chr\t$source\t$_\t.\t$strand\t\.\tID=$mRNAID.utr5p$UTR5_num;Parent=$mRNAID;\n";
+                    my @g = split /\t/;
+                    $sort{$out} = $g[1];
+                    $sort_UTR{$out} = 1;
+                }
+                foreach (sort {$UTR_sort{$a} <=> $UTR_sort{$b}} @UTR3) {
+                    $UTR3_num ++;
+                    my $out = "$chr\t$source\t$_\t.\t$strand\t\.\tID=$mRNAID.utr3p$UTR3_num;Parent=$mRNAID;\n";
+                    my @g = split /\t/;
+                    $sort{$out} = $g[1];
+                    $sort_UTR{$out} = 4;
+                }
+                foreach (sort {$sort{$a} <=> $sort{$b} or $sort_UTR{$a} <=> $sort_UTR{$b}} keys %sort) {
+                    print {$OUT} $_;
+                }
+            }
+            elsif ($strand eq "-") {
+                foreach (sort { (split /\t/, $b)[0] <=> (split /\t/, $a)[0] } @CDS) {
+                    $CDS_num ++;
+                    my $out = "$chr\t$source\tCDS\t$_\tID=$mRNAID.CDS$CDS_num;Parent=$mRNAID;\n";
+                    my @g = split /\t/;
+                    $sort{$out} = $g[0];
+                    $sort_UTR{$out} = 3;
+                }
+                foreach (sort { (split /\t/, $b)[0] <=> (split /\t/, $a)[0] } @exon) {
+                    $exon_num ++;
+                    my $out = "$chr\t$source\texon\t$_\t.\t$strand\t\.\tID=$mRNAID.exon$exon_num;Parent=$mRNAID;\n";
+                    my @g = split /\t/;
+                    $sort{$out} = $g[0];
+                    $sort_UTR{$out} = 2;
+                }
+                foreach (sort { (split /\t/, $b)[0] <=> (split /\t/, $a)[0] } @intron) {
+                    $intron_num ++;
+                    my $out = "$chr\t$source\tintron\t$_\t\.\t$strand\t\.\tID=$mRNAID.intron$intron_num;Parent=$mRNAID;\n";
+                    my @g = split /\t/;
+                    $sort{$out} = $g[0];
+                    $sort_UTR{$out} = 2;
+                }
+                my (%UTR_sort, @UTR5, @UTR3);
+                foreach (@UTR) {
+                    my @g = split /\t/;
+                    $UTR_sort{$_} = $g[1];
+                    push @UTR5, $_ if $g[0] eq "five_prime_UTR";
+                    push @UTR3, $_ if $g[0] eq "three_prime_UTR";
+                }
+                foreach (sort {$UTR_sort{$b} <=> $UTR_sort{$a}} @UTR5) {
+                    $UTR5_num ++;
+                    my $out = "$chr\t$source\t$_\t.\t$strand\t\.\tID=$mRNAID.utr5p$UTR5_num;Parent=$mRNAID;\n";
+                    my @g = split /\t/;
+                    $sort{$out} = $g[1];
+                    $sort_UTR{$out} = 1;
+                }
+                foreach (sort {$UTR_sort{$a} <=> $UTR_sort{$b}} @UTR3) {
+                    $UTR3_num ++;
+                    my $out = "$chr\t$source\t$_\t.\t$strand\t\.\tID=$mRNAID.utr3p$UTR3_num;Parent=$mRNAID;\n";
+                    my @g = split /\t/;
+                    $sort{$out} = $g[1];
+                    $sort_UTR{$out} = 4;
+                }
+                foreach (sort {$sort{$b} <=> $sort{$a} or $sort_UTR{$a} <=> $sort_UTR{$b}} keys %sort) {
+                    print {$OUT} $_;
+                }
+            }
+            elsif ($strand eq '.') {
+                foreach (sort { (split /\t/, $b)[0] <=> (split /\t/, $a)[0] } @exon) {
+                    $exon_num ++;
+                    my $out = "$chr\t$source\texon\t$_\t.\t$strand\t\.\tID=$mRNAID.exon$exon_num;Parent=$mRNAID;\n";
+                    my @g = split /\t/;
+                    $sort{$out} = $g[0];
+                    $sort_UTR{$out} = 2;
+                }
+                foreach (sort {$sort{$b} <=> $sort{$a} or $sort_UTR{$a} <=> $sort_UTR{$b}} keys %sort) {
+                    print {$OUT} $_;
+                }
+            }
+            print {$OUT} "\n";
+        }
+    }
+
+    return 1;
+}
+
+# 根据 CDS 与 exon 的坐标计算 UTR。
+sub get_UTR_gtf {
+    my @cds    = @{ $_[0] };
+    my @exon   = @{ $_[1] };
+    my $strand = $_[2];
+
+    my (@utr, %cds_pos);
+    foreach (@cds) {
+        my @g = split /\t/;
+        $cds_pos{$g[0]} = 1;
+        $cds_pos{$g[1]} = 1;
+    }
+    my @cds_pos = sort { $a <=> $b } keys %cds_pos;
+    return () unless @cds_pos;
+    my ($cds_min, $cds_max) = ($cds_pos[0], $cds_pos[-1]);
+
+    foreach (@exon) {
+        my ($start, $end) = split /\t/;
+        my $overlap = 0;
+        foreach my $c (@cds) {
+            my ($cs, $ce) = split /\t/, $c;
+            next unless $cs <= $end && $ce >= $start;
+            $overlap = 1;
+            push @utr, "$start\t" . ($cs - 1) if $start < $cs;
+            push @utr, ($ce + 1) . "\t$end"   if $end   > $ce;
+        }
+        push @utr, "$start\t$end" unless $overlap;
+    }
+
+    my @out;
+    if ($strand eq "+") {
+        @utr = sort { (split /\t/, $a)[0] <=> (split /\t/, $b)[0] } @utr;
+        foreach (@utr) {
+            my @g = split /\t/;
+            if    ( $g[1] <= $cds_min ) { push @out, "five_prime_UTR\t$_"; }
+            elsif ( $g[0] >= $cds_max ) { push @out, "three_prime_UTR\t$_"; }
+        }
+    }
+    elsif ($strand eq "-") {
+        @utr = sort { (split /\t/, $b)[0] <=> (split /\t/, $a)[0] } @utr;
+        foreach (@utr) {
+            my @g = split /\t/;
+            if    ( $g[0] >= $cds_max ) { push @out, "five_prime_UTR\t$_"; }
+            elsif ( $g[1] <= $cds_min ) { push @out, "three_prime_UTR\t$_"; }
+        }
+    }
+
+    return @out;
+}
+
+# 计算 intron (exon 之间的间隔)。
+sub get_intron_gtf {
+    my @exon       = @{ $_[0] };
+    my $mRNA_ID    = $_[1];
+    my $intron_len = $_[2];
+    @exon = sort { (split /\t/, $a)[0] <=> (split /\t/, $b)[0] } @exon;
+
+    my @intron;
+    my $first_exon = shift @exon;
+    my ($last_start, $last_end) = split /\t/, $first_exon;
+    foreach (@exon) {
+        my ($start, $end) = split /\t/, $_;
+        if ($start > $last_end + $intron_len) {
+            my $intron_start = $last_end + 1;
+            my $intron_stop  = $start - 1;
+            push @intron, "$intron_start\t$intron_stop";
+        }
+        else {
+            my $value = $start - $last_end - 1;
+            print STDERR "Warning: an intron length (value is $value) of mRNA $mRNA_ID < $intron_len was detected:\n\tThe former CDS/Exon: $last_start - $last_end\n\tThe latter CDS/Exon: $start - $end\n";
+        }
+        ($last_start, $last_end) = ($start, $end);
+    }
+
+    return @intron;
+}
+
+# 合并有重叠/相邻(间隔<=0)的区间。
+sub merge_intervals {
+    my @intervals = sort { $a->[0] <=> $b->[0] }
+                    map  { [ split /\t/, $_ ] } @_;
+    my @merged;
+    for my $iv (@intervals) {
+        if ( @merged && $iv->[0] <= $merged[-1][1] + 1 ) {
+            $merged[-1][1] = $iv->[1] if $iv->[1] > $merged[-1][1];
+        }
+        else {
+            push @merged, [ @$iv ];
+        }
+    }
+    return map { "$_->[0]\t$_->[1]" } @merged;
+}
+
+# ============================================================================
+# 英文用法说明（放置于程序最尾部；以子程序形式返回，保证在主流程中可被调用）
+# ============================================================================
+sub usage_english {
+    (my $text = <<'USAGE_EN') =~ s/__PROG__/$0/g;
+Usage:
+    __PROG__ [options] --input_single_sorted_BAM_file hisat2_sorted.bam > transfrag.gff3
+
+    This program runs StringTie to assemble transcripts from a single coordinate-sorted BAM file, then converts the resulting GTF into GFF3 format internally and prints it out -- there is no longer any need to call the separate gtfToGff3.pl script. The value of column 2 (source) in every line of the output GFF3 is always "StringTie". This program does NOT output intron or exon base-depth information (use NGSReads_prediction.02Sam2Transfrag if that is needed).
+
+    Workflow: (1) check whether the input BAM file is indexed, and index it with samtools index if not; (2) use samtools view to read the BAM header and obtain reference sequence lengths; (3) use samtools view to split the BAM file by chromosome so that each split file covers at least --min_genome_length_during_segmentation bp; (4) for each split BAM file, run stringtie independently and in parallel to assemble transcripts into its own GTF file; (5) merge the per-region GTF files into a single combined GTF file; (6) convert the combined GTF into GFF3 format internally and print it to standard output, with no need for a separate gtfToGff3.pl script; (7) at the end, unless --keep_tmp_files is set, the whole directory given by --tmp_dir is deleted; if --keep_tmp_files is set, all intermediate files are kept.
+
+    Notes: (1) the program accepts only a single, already coordinate-sorted BAM file as input; (2) both the stringtie and samtools commands must be directly executable on the system; the chromosome-splitting step and the per-region stringtie assembly step are both parallelized through worker subprocesses forked by Perl itself, with no dependency on any external parafly or parallel command; (3) unless --keep_tmp_files is set, the whole temporary directory is removed at the very last step; if a run is interrupted before that, the temporary directory is not deleted and the run can be resumed by rerunning with the same --tmp_dir, but rerunning with the same --tmp_dir after a successful completion (possible only when the directory was kept via --keep_tmp_files) will not produce correct results; (4) do not point --tmp_dir at an existing directory holding important files (e.g. the current or home directory), because without --keep_tmp_files the whole directory will be deleted.
+
+Parameters:
+[INPUT]
+    --input_single_sorted_BAM_file <string>    default: None (required)
+    path of the input coordinate-sorted BAM file.
+
+    --strand_specific_library <string>    default: none
+    strand-specificity of the library: none (unstranded), rf (standard RF strand-specific library, read1 maps to the minus strand of the transcript), or fr (read1 maps to the plus strand). When set to rf or fr, --rf or --fr is passed to stringtie accordingly.
+
+[STRINGTIE OPTIONS]
+    --stringtie_path <string>    default: stringtie
+    path to the stringtie executable; by default it is called directly from PATH.
+
+    --min_isoform_fraction <float>    default: 0.01
+    minimum ratio, at a given locus, between a transcript's abundance and that of the most abundant transcript, below which the transcript is discarded (stringtie's -f option).
+
+    --min_transcript_length <int>    default: 200
+    minimum length of an assembled transcript (stringtie's -m option).
+
+    --min_anchor_length <int>    default: None
+    minimum anchor length for splice junctions (stringtie's -a option); left at stringtie's own default when unset.
+
+    --min_junction_coverage <float>    default: None
+    minimum junction coverage (stringtie's -j option); left at stringtie's own default when unset.
+
+    --min_read_coverage <float>    default: None
+    minimum read coverage allowed for an assembled transcript (stringtie's -c option); left at stringtie's own default when unset.
+
+    --min_locus_gap <int>    default: None
+    minimum locus gap separation value (stringtie's -g option); left at stringtie's own default when unset.
+
+    --label <string>    default: stringtie
+    prefix used for output transcript IDs (stringtie's -l option); the program automatically appends a region-specific suffix to this prefix for each chromosome-split piece, so that transcript IDs assembled from different regions never collide with each other.
+
+    --other_stringtie_options <string>    default: None
+    additional stringtie options not otherwise wrapped by this program, appended verbatim to the stringtie command, e.g. --other_stringtie_options "-e -A gene_abund.tab".
+
+[THRESHOLDS - region splitting]
+    --min_genome_length_during_segmentation <int>    default: 1000000
+    minimum total reference sequence length per chromosome-split BAM file: the program splits the input BAM file by chromosome so that each split file covers at least this many bp; each split BAM file is then submitted to stringtie independently and in parallel, and the resulting GTF files are merged afterwards. Lowering this value increases parallel granularity and multi-core utilization, but setting it too low increases process-scheduling overhead.
+
+[OUTPUT]
+    --tmp_dir <string>    default: tmp_$date$pid
+    path of the temporary folder. Unless --keep_tmp_files is set, this folder is deleted as a whole after the program finishes successfully.
+
+    --keep_tmp_files    default: None
+    keep all intermediate files (i.e. keep the whole folder given by --tmp_dir) when the program finishes; if this option is not set, the whole --tmp_dir folder is deleted at the end.
+
+[GTF-TO-GFF3 CONVERSION]
+    --gene_prefix <string>    default: None
+    when set, gene IDs are renamed using this prefix; when unset, the gene_id produced by StringTie is used as-is.
+
+    --gene_code_length <int>    default: 6
+    length of the numeric gene code, same meaning as in gtfToGff3.pl; only used together with --gene_prefix.
+
+[PERFORMANCE]
+    --cpu <int>    default: 8
+    number of worker subprocesses/CPU threads used by the program: it is used both as the thread count (-\@) for samtools commands, and as the upper limit on the number of worker subprocesses run concurrently during the chromosome-splitting and stringtie-assembly steps; all parallelism is implemented with Perl's own fork()-based worker pool, no external parafly or parallel command is used. To avoid CPU oversubscription, each worker subprocess always calls stringtie with a single thread (-p 1).
+
+    --help    default: None
+    display this help and exit.
+
+    --chinese_help    default: None
+    display the Chinese usage and exit.
+
+USAGE_EN
+    return $text;
+}

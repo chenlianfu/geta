@@ -1,957 +1,1769 @@
 #!/usr/bin/env perl
 
 use strict;
-use Getopt::Long;
-use Cwd qw/abs_path getcwd cwd/;
-use File::Basename;
+use warnings;
+use Getopt::Long qw/GetOptions/;
+use Cwd qw/abs_path getcwd/;
+use File::Basename qw/dirname basename/;
+use File::Path qw/make_path remove_tree/;
+use File::Copy qw/copy/;
+use File::Spec;
+use Digest::MD5 qw/md5_hex/;
+use POSIX ();
 
+my $start_time   = time;
 my $command_line = "$0 " . join(" ", @ARGV);
-my $bin_path = dirname($0);
+my $prog_name    = basename($0);
+# 必须使用绝对路径：程序后面会切换工作目录，相对路径会失效。
+my $bin_path     = dirname(abs_path($0));
 my $software_dir = $bin_path; $software_dir =~ s/\/bin$//;
+my $orig_cwd     = getcwd();
+# 各类别在GFF3第9列Type标签中的取值
+my %gene_type_name = (
+    'A' => 'excellent_gene_models_predicted_by_NGSReads',
+    'B' => 'good_gene_models_predicted_by_NGSReads',
+    'C' => 'fair_gene_models_predicted_by_NGSReads',
+    'D' => 'poor_gene_models_predicted_by_NGSReads',
+);
+my %type_name_to_class = reverse %gene_type_name;
 
-my $usage = <<USAGE;
-Usage:
-    $0 [options] genome_seq.fasta > NGSReads_prediction.gff3
+# 终止密码子表和起始密码子表（按NCBI遗传密码表编号）。
+# 与NGSReads_prediction.04Transfrag2ORF中判断基因模型完整性(Integrity)时使用的密码子表保持一致，
+# 主程序据此确定第5步（合并去冗余）和第7步（末端强制填补）所用的起始/终止密码子。
+my %stop_table = (
+    1  => [qw(TAA TAG TGA)],
+    2  => [qw(TAA TAG AGA AGG)],
+    3  => [qw(TAA TAG)],
+    4  => [qw(TAA TAG)],
+    5  => [qw(TAA TAG)],
+    6  => [qw(TGA)],
+    9  => [qw(TAA TAG)],
+    10 => [qw(TAA TAG)],
+    11 => [qw(TAA TAG TGA)],
+    12 => [qw(TAA TAG TGA)],
+    13 => [qw(TAA TAG)],
+    14 => [qw(TAG)],
+    15 => [qw(TAA TGA)],
+    16 => [qw(TAA TGA)],
+    21 => [qw(TAA TAG)],
+    22 => [qw(TCA TAA TGA)],
+    23 => [qw(TTA TAA TAG TGA)],
+    24 => [qw(TAA TAG)],
+    25 => [qw(TAA TAG)],
+    26 => [qw(TAA TAG TGA)],
+);
+my %start_table = (
+    1  => [qw(ATG)],
+    2  => [qw(ATG ATT ATC ATA GTG)],
+    3  => [qw(ATG ATA GTG)],
+    4  => [qw(ATG TTA TTG CTG ATT ATC ATA GTG)],
+    5  => [qw(ATG TTG ATT ATC ATA GTG)],
+    6  => [qw(ATG)],
+    9  => [qw(ATG GTG)],
+    10 => [qw(ATG)],
+    11 => [qw(ATG TTG CTG ATT ATC ATA GTG)],
+    12 => [qw(ATG CTG)],
+    13 => [qw(ATG ATA GTG TTG)],
+    14 => [qw(ATG)],
+    16 => [qw(ATG)],
+    21 => [qw(ATG GTG)],
+    22 => [qw(ATG)],
+    23 => [qw(ATG ATT GTG)],
+    24 => [qw(ATG TTG CTG GTG)],
+    25 => [qw(ATG TTG CTG GTG)],
+);
 
-    本程序能利用RNA-Seq原始测序数据，对全基因组序列进行基因预测，并在标准输出中输出GFF3格式结果。
+# 传递给子程序的关键参数（统一归为一类），按接收它们的子程序分组（用于校验、传递和日志输出）。
+# 传给01RNASeq2Sam：字符串型参数，含空格或以"-"开头，传递时使用 --name='value' 形式。
+my @align_string_opts = qw/trimmomatic_opts hisat2_opts star_opts/;
+# 传给02Sam2Transfrag：数值型参数（默认值由本程序设置，并显式传给子程序）。
+my @s2t_num_opts = qw/
+    fraction min_expressed_base_depth max_expressed_base_depth min_junction_depth max_junction_depth
+    min_fragment_count_per_transfrag
+/;
+# 03Stringtie不通过本程序传递任何参数，直接使用子程序自身的默认值，stringtie从系统PATH中调用。
+# 传给04Transfrag2ORF的关键参数：--ORF_predictor、--min_protein_length、--genetic_code、--TIdeS_partial/--noTIdeS_partial；
+#   04Transfrag2ORF的其它参数（如TIdeS的可执行程序、训练模型的聚类相似度等）使用子程序自身的默认值。
+# 传给GFF3_merging_and_removing_redundancy的关键参数：--overlap_coverage。
 
-    程序流程和工作原理如下：
-    (1) 首先，调用Trimmomatic软件对输入的FASTQ格式数据(支持多组数据，支持.gz压缩文件)进行质量控制，得到Clean data。
-    (2) 然后，调用HISAT2软件将质控后的二代测序Reads比对到参考基因组序列上，得到SAM比对结果文件。此时也支持输入的SAM/BAM文件。
-    (3) 然后，调用GETA软件中的Sam2Transfrag模块将SAM/BAM文件转换为转录本序列。
-    (4) 然后，调用GETA软件中的Transfrag2ORF模块对转录本序列进行ORF预测得到基因模型。
-    (5) 然后，调用GETA软件中的GFF3_filling_gene_models_Parallel命令，利用同源蛋白的基因模型对转录本预测的基因模型进行末端填补。
-    (6) 然后，调用GETA软件中的GFF3Clear命令，对基因模型去冗余。
-    (7) 然后，调用GETA软件中的fillingEndsOfGeneModels命令，对不完整基因模型的末端进行强制填补。
-    (8) 最后，对基因模型进行分类和统计，并输出结果。
 
-    程序使用须知：
-    (1) 本程序支持双末端测序数据、单端测序数据和SAM/BAM三种不同的数据单独或混合输入。也支持.gz压缩文件作为输入。也支持同一类型多组数据作为输入。
-    (2) 程序调用Trimmomatic、HISAT2和Sam2Transfrag软件进行分析时，可以使用参数配置文件方法调节这三个程序的详细参数。本程序调用这三个软件的默认参数请参照$software_dir/conf_all_defaults.txt文件。
-    (3) 本程序调用Transfrag2ORF命令进行分析时，使用了Transdecoder软件对转录本进行ORF分析。其结果是每个ORF得到一个基因模型，此时可变剪接转录本会导致得到很多冗余基因模型。
-    (4) 本流程第5步是可选步骤，若使用同源蛋白基因模型进行填补，能得到准确的完整基因模型；第7步强制填补后，得到的基因模型不一定准确。
-    (5) 本流程最后将基因模型分成了四类并在标准错误输出中给出统计数量：A (Excellent gene models): 转录本预测或同源蛋白填补后的完整基因模型，且ORF占转录本序列比例>=50%；B (good gene models): 其它转录本预测或同源蛋白填补后的完整基因模型；C (fair gene models): 强制填补后的完整基因模型；Class D (poor gene models): 强制填补后也不完整的基因模型。
-    (6) 在标准输出中给出GFF3结果，文件第9列各标签解读：Form，当前基因模型对应转录本上预测到的ORF数量和当前基因模型对应ORF占转录本序列的比例；Integrity，当前基因模型对应ORF的完整性；Filled_by_homolog=True，表示ORF预测不完整，却经过同源蛋白预测基因模型填补完整；Filling2Complete=True，表示ORF预测不完整，经过强制末端填补完整；Filling2Uncomplete=True，表示ORF预测不完整，经过强制末端填补后依然不完整；FragmentCount，表示当前基因模型支持的reads对数量；JunctionThreshold，获得其转录本时的最低intron测序深度阈值；BaseDepthThreshold，获得其转录本时的最低碱基测序深度阈值；MaxDepth，对应转录本的最高碱基测序深度；RNASeq_exon_base_depth_median，对应转录本的碱基测序深度中位数。
 
-Parameters:
+########################################################################
+# 中文用法说明（位于程序前部；英文用法说明位于程序最尾部）
+########################################################################
+sub usage_cn {
+    (my $t = <<'USAGE_CN') =~ s/__PROG__/$0/g;
+用法:
+    __PROG__ [选项] genome_seq.fasta > NGSReads_prediction.gff3
+
+    本程序利用RNA-Seq测序数据对基因组序列进行基因预测，并将GFF3格式的预测结果输出到标准输出。
+
+    程序流程如下：
+    (1) 调用NGSReads_prediction.01RNASeq2Sam，对输入的RNA-Seq数据进行质量控制（Trimmomatic）、切分并行比对（HISAT2或STAR）、排序与合并，得到一个按坐标排序的BAM文件。输入数据可以是双末端FASTQ、单端FASTQ或SAM/BAM文件（FASTQ支持.gz压缩），三类数据可单独使用，也可混合使用。
+    (2) 调用NGSReads_prediction.02Sam2Transfrag，基于BAM比对结果，采用Sam2Transfrag算法组装转录本（含可变剪接分析），生成GFF3，同时输出intron和exon碱基测序深度信息。
+    (3) 调用NGSReads_prediction.03Stringtie，基于同一BAM文件，采用StringTie算法组装转录本，生成GFF3。
+    (4) 调用NGSReads_prediction.04Transfrag2ORF，分别对Sam2Transfrag和StringTie两种方法得到的转录本进行ORF分析，预测基因模型。这两个分析并行运行，线程数平分，总线程数不超过--cpu；ORF预测软件由--ORF_predictor指定（TransDecoder或TIdeS）；TIdeS必须使用同源蛋白序列作为数据库；使用TIdeS时默认同时预测完整和不完整（5'或3'端缺失）的ORF。
+    (5) 调用GFF3_merging_and_removing_redundancy，整合上述两种方法预测的基因模型并去除冗余（可用--overlap_coverage调节；判断基因完整性所用的起始/终止密码子由--genetic_code自动确定），结果保存为results/merged.ORF.gff3。
+    (6) 根据基因完整性、CDS长度、CDS之间的intron数量和CDS占exon的碱基比例（取自GFF3第9列Form信息），将第5步得到的基因模型按准确性分为A/B/C/D四类，并在GFF3第9列以Type=标记（gene行中Type=紧跟在ID=之后；mRNA行中Type=紧跟在Parent=之后，其后依次为Integrity=、CDS_Length=、CDS_intron_Num=、CDS_exon_Ratio=），结果保存为results/merged_classified.ORF.gff3。
+    (7) 调用fillingEndsOfGeneModels，对第6步分类结果中不完整基因模型的5'端或3'端进行强制补齐（可用--no_filling_ends跳过；起始/终止密码子由--genetic_code自动确定），补齐后的结果保存为results/merged_classified.ORF.fillEnd.gff3；然后将最终的基因模型以GFF3格式输出到标准输出（以##gff-version 3开头，基因ID统一重命名，默认前缀为RNASeqORF），并在标准错误输出中给出基因模型数量、完整性、填补情况、分类结果等统计。
+
+    使用说明：
+    (1) 各类RNA-Seq输入数据的质控、比对、排序与合并均由NGSReads_prediction.01RNASeq2Sam完成，本程序仅将相关参数透传给它。同一类型的数据可输入多个文库，文库之间以逗号分隔。--sam输入的文件必须以.sam、.bam或.cram结尾。
+    (2) 【链特异性】--strand_specific 仅支持常规的RF（dUTP）建库方案，即read1比对到转录本的负义链（Illumina TruSeq Stranded等）。添加后，Sam2Transfrag直接根据SAM第2列FLAG判断链向，StringTie使用--rf；HISAT2会使用--rna-strandness RF；STAR无论是否添加该参数比对参数都相同（仅对剪接reads添加XS标签）。所有输入数据必须具有相同的链特异性类型。
+    (3) 【非链特异性时的--sam输入】未添加--strand_specific时，Sam2Transfrag依赖比对记录中的XS标签判断剪接reads（intron）的链向，缺少XS标签的剪接比对会被忽略。因此通过--sam输入的数据应由HISAT2（--dta）或STAR（--outSAMstrandField intronMotif）等软件比对，并保留XS标签。--sam输入的数据还需已包含所需的双末端信息（FLAG），且参考序列名称与基因组FASTA一致。
+    (4) 【子程序关键参数】本程序不使用配置文件，只保留少量关键参数，直接通过命令行传递给子程序，这些参数统一归为"关键子程序参数"一类，并按接收它们的子程序分组：
+        传递给NGSReads_prediction.01RNASeq2Sam：--pe_used_pair_num、--se_used_read_num、--trimmomatic_opts、--hisat2_opts、--star_opts。其中--trimmomatic_opts、--hisat2_opts、--star_opts一旦设置，就整体替换该软件的内置默认参数（而不是在其基础上追加），因此请写出完整的参数内容；含空格或以"-"开头的值请用引号括起来，例如 --hisat2_opts="--dta -k 5"。仅有--sam输入（不执行质控和比对）时，这三个参数不生效。
+        传递给NGSReads_prediction.02Sam2Transfrag：--fraction、--min_expressed_base_depth、--max_expressed_base_depth、--min_junction_depth、--max_junction_depth、--min_fragment_count_per_transfrag。未设置时使用内置默认值：--fraction 0.05 --min_expressed_base_depth 2 --max_expressed_base_depth 50 --min_junction_depth 2 --max_junction_depth 50 --min_fragment_count_per_transfrag 10，并显式传给子程序。
+        传递给NGSReads_prediction.04Transfrag2ORF：--ORF_predictor、--min_protein_length、--genetic_code、--TIdeS_partial/--noTIdeS_partial。04Transfrag2ORF的其它参数（例如TIdeS可执行程序、训练模型所用的聚类相似度等）使用该子程序自身的默认值。
+        传递给GFF3_merging_and_removing_redundancy：--overlap_coverage（未设置时使用该子程序自身的默认值）。
+        除上述参数外，子程序的其它参数不再通过本程序传递，均使用各子程序自身的默认值；NGSReads_prediction.03Stringtie不接收任何来自本程序的关键参数，stringtie从系统PATH中调用。
+        以下参数由本程序统一设置：--input_single_sorted_BAM_file、--tmp_dir、--cpu、--strand_specific（02）、--strand_specific_library（03）、--intron_info_out、--base_depth_out、--gene_prefix（03、04）、--source（04）、--start_codon与--stop_codon（GFF3_merging_and_removing_redundancy、fillingEndsOfGeneModels）、--keep_tmp_files。其它子程序的详细参数请参见各子程序的--help输出。
+    (5) 在第4步中，每个ORF对应一个基因模型，因此同一基因的可变剪接转录本会产生冗余的基因模型；这些冗余将在第5步中去除。为避免合并时基因ID冲突，两个ORF分析使用不同的基因前缀（Sam2Transfrag_ORF、stringtie_ORF）；最终结果的基因ID默认统一重命名为RNASeqORF000001、RNASeqORF000002 ...，可用--gene_prefix修改前缀。
+    (6) 使用--output_raw_GFF3可获得第6步分类之后、第7步末端强制填补之前的结果（内容与results/merged_classified.ORF.gff3相同，含Type分类标记）。该结果准确度较高，但包含较多不完整的基因模型。第7步强制填补得到的基因模型不一定准确，使用时请注意甄别。
+    (7) TIdeS软件做ORF分析必须输入同源蛋白序列作为数据库。因此，若未提供--homolog_protein参数，则--ORF_predictor会被自动设置为TransDecoder（即使用户指定了TIdeS，也会被改为TransDecoder，并给出警告）。提供了--homolog_protein且未设置--ORF_predictor时，默认使用TIdeS。--min_protein_length对两种软件均有效（TransDecoder：传给-m；TIdeS：乘以3后传给--min-orf）；--genetic_code的遗传密码编号仅对TIdeS的ORF预测有效（但它同时决定第5、7步的起始/终止密码子），--TIdeS_partial/--noTIdeS_partial仅对TIdeS有效。
+        使用TIdeS时，本程序默认给04Transfrag2ORF添加--TIdeS_partial，即tides除了预测完整ORF（有起始和终止密码子）外，还预测5'或3'不完整的ORF（partial ORF）。此时Integrity按基因组序列上的起始/终止密码子判断，基因模型的完整性可以是complete、5prime_partial、3prime_partial、internal，分类时A类与B类的区分同时取决于基因完整性和CDS/exon比例。若只需要完整ORF，请添加--noTIdeS_partial：此时所有基因模型的Integrity都被标注为complete，"基因完整"这一条件对所有模型都成立，A类与B类的区分将只取决于CDS/exon比例。
+    (8) 【断点续跑】每个步骤完成后会在临时文件夹中生成.ok标记文件和记录命令与输入文件信息的.sig签名文件。使用相同的--tmp_dir重新运行时：已完成且参数、输入均未改变的步骤会被跳过；程序中途中断的步骤会由子程序断点续跑；若修改了某步骤的参数或输入（包括是否使用--keep_tmp_files），该步骤及其下游步骤会自动清理后重新运行。基因模型分类在第6步完成，每次运行都会重新计算（耗时很短），修改分类参数无需重跑第1至第5步；分类结果若发生改变，第7步会自动重新运行。
+        【不检查签名】添加--ignore_signature后，不再用.sig签名文件判断参数或输入文件是否改变：只要某步骤已有.ok标记且其输出文件非空，就直接跳过，即使命令行参数、输入文件的路径/大小/修改时间已经改变（例如移动了临时文件夹或输入文件、touch过文件、或只修改了无关紧要的参数）。此时：(a) 中途中断的步骤仍由子程序断点续跑，不会被清理；(b) 若某上游步骤在本次运行中实际重新执行了（如.ok缺失或输出缺失），其下游步骤仍会自动重新运行，以免结果与上游不一致；(c) 第7步仍会检查第6步的分类结果是否改变，改变则重新运行；(d) 已完成步骤不会因参数改变而重跑，若确实需要重跑某一步，请手动删除临时文件夹中对应的.ok文件（或整个步骤的输出），再运行。该参数仅在重新使用已有的--tmp_dir时有意义。
+    (9) 【临时文件】本程序的临时文件夹（--tmp_dir，其中含results目录、日志和.ok/.sig文件）始终保留，主程序不会删除它。NGSReads_prediction.01RNASeq2Sam、02Sam2Transfrag、03Stringtie和04Transfrag2ORF这四个子程序各自的临时文件夹（位于该临时文件夹下）默认由子程序在成功结束后自行删除；添加--keep_tmp_files则这四个子程序都会保留各自的临时文件。results目录中的文件（含体积较大的alignment.bam）不受影响，如不再需要，请在运行结束后手动删除整个临时文件夹（建议先用--alignment_bam_out等参数保存需要的结果）。
+    (10) 由于各子程序拼接命令时不对路径加引号，所有输入、输出和--tmp_dir的路径中不能含空白或shell特殊字符（如 ; & | $ ( ) * ? < > ' " \ 等）。中文等非ASCII字符是允许的。
+    (11) 输出GFF3文件第9列中的常见标签含义：
+        Type：基因模型的准确性类别（见使用说明第13条），标记在gene和mRNA行（gene行中紧跟在ID=之后，mRNA行中紧跟在Parent=之后）；
+        Form：对应转录本上预测到的ORF数量，以及ORF占转录本序列的比例，例如 Form=one_transcript_get_1_gene_model_num1_62.40%，其末尾的百分数即为该比例，分类时用作CDS占exon的比例；
+        Integrity：ORF的完整性（complete、5prime_partial、3prime_partial、internal）；mRNA行中该标签紧跟在Type之后。该标签反映原始预测结果，强制填补不会修改它；
+        CDS_Length：mRNA行的CDS总长度（bp）；
+        CDS_intron_Num：mRNA行的CDS之间的intron数量；
+        CDS_exon_Ratio：mRNA行的CDS占exon的长度比例（0-1，取自Form，与分类所用值一致）；
+        Filling2Complete=True：（标记在mRNA行）ORF原本不完整，经强制末端填补后完整；
+        Filling2Uncomplete=True：（标记在mRNA行）ORF原本不完整，经强制末端填补后仍不完整；
+        FragmentCount：支持该基因模型的reads对数量；
+        JunctionThreshold：获得对应转录本时所用的最低intron测序深度阈值；
+        BaseDepthThreshold：获得对应转录本时所用的最低碱基测序深度阈值；
+        MaxDepth：对应转录本的最高碱基测序深度；
+        RNASeq_exon_base_depth_median：对应转录本碱基测序深度的中位数。
+    (12) 【results目录】各子程序及主要步骤的重要结果统一保存在临时文件夹下的results目录中：
+        NGSReads_prediction.01RNASeq2Sam：alignment.bam、alignment.bam.bai、alignment.stats（alignment.stats仅在有FASTQ输入时产生）；
+        NGSReads_prediction.02Sam2Transfrag：intron.txt、base_depth.txt、Sam2Transfrag.raw.gff3；
+        NGSReads_prediction.03Stringtie：stringtie.raw.gff3；
+        NGSReads_prediction.04Transfrag2ORF：Sam2Transfrag.ORF.gff3、stringtie.ORF.gff3；使用--output_alignment_GFF3时，还会产生Sam2Transfrag.alignment.gff3和stringtie.alignment.gff3（保存在results目录中，并合并、按染色体名称/每份数据的起始-结束坐标/正负链排序后输出到--output_alignment_GFF3指定的文件）；
+        第5步：merged.ORF.gff3（整合并去冗余后的基因模型）；
+        第6步：merged_classified.ORF.gff3（加入Type分类标记后的基因模型）；
+        第7步：merged_classified.ORF.fillEnd.gff3（末端强制填补后的基因模型，基因ID仍为流程内部ID；使用--no_filling_ends时不产生）。
+        若通过--intron_info_out、--base_depth_out指定了其它输出路径，results目录中会同时保留一份硬链接。compare_2gff3_stats.txt及日志文件位于临时文件夹根目录。使用旧版本程序产生的临时文件夹续跑时，由于文件路径已改变，相关步骤会被判定为参数改变而重新运行，旧版本遗留在临时文件夹根目录的merged.ORF.gff3、merged_classified.ORF.fillEnd.gff3等文件会被自动清理。
+    (13) 【基因模型分类】第6步根据以下四个指标，将基因模型按准确性分为四类，并在GFF3第9列的gene和mRNA行以Type=标记（gene行中Type=紧跟在ID=之后；mRNA行中Type=紧跟在Parent=之后，其后依次添加Integrity=、CDS_Length=、CDS_intron_Num=、CDS_exon_Ratio=四个标签，分别表示该mRNA的完整性、CDS长度、CDS之间的intron数量、CDS占exon的长度比例）：
+        指标：基因是否完整（即Integrity=complete；分类在末端强制填补之前进行，因此完整性指原始预测结果的完整性）；CDS长度（bp）；CDS之间的intron数量（相邻CDS片段之间的间隔数，不是exon之间的间隔数）；CDS占exon的比例（取自GFF3第9列Form值末尾的百分数，例如62.40%对应0.6240；mRNA行没有可解析的Form时改用gene行的Form；两处均没有时，退回使用CDS碱基数与exon碱基数计算，并给出警告）。若一个基因含多个mRNA，则取CDS最长的mRNA计算指标。
+        A类 Type=excellent_gene_models_predicted_by_NGSReads：基因完整，且 CDS长度>=较长阈值、CDS间intron数>=较大阈值、CDS占exon比例>=较大阈值，四个条件同时满足。
+        B类 Type=good_gene_models_predicted_by_NGSReads：不要求完整性；CDS长度>=较长阈值、CDS间intron数>=较大阈值、CDS占exon比例>=较小阈值，三个条件同时满足（且不属于A类）。
+        C类 Type=fair_gene_models_predicted_by_NGSReads：不要求完整性；CDS长度>=较短阈值、CDS间intron数>=较小阈值、CDS占exon比例>=较小阈值，三个条件同时满足（且不属于A、B类）。
+        D类 Type=poor_gene_models_predicted_by_NGSReads：除A、B、C类以外的其它基因模型。
+        阈值的确定：未用--cds_length_high等参数手动指定时，CDS长度和CDS间intron数的阈值根据--quantile_high、--quantile_low自动计算。计算所用的参考基因模型，来自临时文件夹中的compare_2gff3_stats.txt（第5步产生）：选取Sam2Transfrag和StringTie两种算法的基因模型有重叠、且在去冗余后被保留下来的基因模型（这些基因模型有两种方法相互印证，可信度较高），使用其在第5步整合去冗余之后的CDS长度和CDS间intron数，按分位数计算阈值。自动计算出的全部阈值及参考基因模型数量会输出到日志（标准错误输出）中。若compare_2gff3_stats.txt不存在或未能提取到参考基因模型，则改用第5步结果中的全部基因模型作为参考，并给出警告。CDS占exon比例的阈值不自动计算，由--cds_ratio_high（仅用于A类）和--cds_ratio_low（用于B、C类）指定。
+    (14) 【起始/终止密码子】第5步（合并去冗余时判断基因完整性并计分）和第7步（末端强制填补）所用的起始密码子和终止密码子，由本程序根据--genetic_code自动确定，并通过--start_codon、--stop_codon传给GFF3_merging_and_removing_redundancy和fillingEndsOfGeneModels，与第4步（04Transfrag2ORF判断Integrity）所用的密码子完全一致，因此不再需要（也不提供）--start_codon、--stop_codon参数。使用TIdeS时按--genetic_code选择NCBI遗传密码表（内置了常用的密码表，如1、2、3、4、5、6、9、10、11、12、13、14、15、16、21-26；未内置的编号会使用标准密码子并在日志中给出提示）；使用TransDecoder时只支持标准遗传密码（表1）：起始密码子ATG，终止密码子TAA、TAG、TGA。实际使用的密码子会输出到日志（标准错误输出）。注意：部分非标准遗传密码表含有多个起始密码子，此时第7步补齐5'端时，会定位到上游终止密码子之后的第一个起始密码子。
+
+参数:
 [输入参数]
-    --pe1 <string> --pe2 <string>    default: None
-    输入二代双末端测序的两个FASTQ格式文件。参数支持输入多对数据文件，使用逗号对不同文库的FASTQ文件路径进行分隔即可。参数也支持输入.gz格式的压 缩文件。
+    --pe1 <string> --pe2 <string>    默认值: 无
+    二代双末端测序的两个FASTQ文件。可输入多对文件，不同文库的文件路径以逗号分隔（--pe1与--pe2中的文件顺序须一一对应，数量须相等）。支持.gz压缩文件。
 
-    --se <string>    default: None
-    输入二代单端测序的FASTQ格式文件。参数支持输入多个数据文件，使用逗号对不同文库的FASTQ文件路径进行分隔即可。参数也支持输入.gz格式的压缩文件 。
+    --se <string>    默认值: 无
+    二代单端测序的FASTQ文件。可输入多个文件，路径以逗号分隔。支持.gz压缩文件。
 
-    --sam <string>    default: None
-    输入二代测序SAM格式数据文件。参数支持输入多个数据文件，使用逗号对不同的SAM文件路径进行分隔即可。参数也支持输入.bam格式的压缩文件。此外，程序支持--pe1/--pe2、--se和--sam这三个参数全部或部分使用，则利用所有输入的数据进行基因组比对，再获取转录本序列进行基因预测。
+    --sam <string>    默认值: 无
+    已比对好的二代测序SAM或BAM文件（.sam/.bam/.cram）。可输入多个文件，路径以逗号分隔。它们会与FASTQ的比对结果一起排序合并。
+    --pe1/--pe2、--se和--sam可全部或部分使用，程序将合并所有输入数据，再据此组装转录本并预测基因。
 
-    --strand_specific    default: None
-    添加该参数后，则认为所有输入的二代数据是链特异性测序数据，程序则仅在转录本正义链上预测基因。使用链特异性测序数据并设置本参数后，当两相邻基因有重叠时，能准确预测其边界。
+    --aligner <hisat2|star>    默认值: star
+    指定比对软件。该参数会透传给NGSReads_prediction.01RNASeq2Sam。
 
-    --config <string>    default: None
-    输入一个参数配置文件路径，用于设置本程序调用的Trimmomatic、HISAT2和Sam2Transfrag软件的详细参数。若不输入该参数，则调用以上三个软件时，采用了本程序内置的默认参数，能适合大部分情形。
+    --strand_specific    默认值: 无
+    指定所有输入数据均为RF（dUTP）链特异性测序数据，此时程序仅在转录本的正义链上预测基因。对于存在重叠的相邻基因，使用该参数可更准确地确定基因边界。详见"使用说明"第2、3条。
 
-    --homolog_gene_models <string>    default: None
-    输入同源蛋白预测的基因模型GFF3文件，用于对不完整基因模型末端进行填补。
+    --homolog_protein <string>    默认值: 无
+    同源蛋白的FASTA序列文件，用作TIdeS的蛋白质数据库。使用TIdeS做ORF预测时必须提供该文件。
 
 [输出参数]
-    --help    default: None
-    display this help and exit.
+    --tmp_dir <string>    默认值: tmp_$date$pid
+    指定临时文件夹路径。各步骤完成后会在其中生成.ok和.sig文件，程序重新运行时据此续跑（详见"使用说明"第8条）。各步骤的重要结果保存在其中的results目录（详见"使用说明"第12条）。该文件夹始终保留。
 
-    --chinese_help    default: None
-    使用该参数后，程序给出中文用法并退出。
+    --keep_tmp_files    默认值: 无
+    保留各子程序（NGSReads_prediction.01RNASeq2Sam、02Sam2Transfrag、03Stringtie、04Transfrag2ORF）各自的临时文件。默认情况下，这些子程序会在成功结束后删除各自的临时文件夹（详见"使用说明"第9条）。
 
-    --tmp_dir <string>    default: tmp_\$date\$pid
-    设置零时文件夹路径。
+    --gene_prefix <string>    默认值: RNASeqORF
+    最终结果的基因ID统一重命名为<gene_prefix><编号>（mRNA、exon、CDS的ID及Parent联动修改，例如RNASeqORF000001、RNASeqORF000001.t01），编号按输出顺序递增。前缀中不能含空白、分号、等号、逗号和句点。
 
-    --output_alignment_GFF3 <string>    default: None
-    输出一个转录本和参考基因组的比对文件，非标准GFF3文件。
+    --gene_code_length <int>    默认值: 6
+    设置基因编号的位数，不足时左侧补0。
 
-    --output_raw_GFF3 <string>    default: None
-    输出利用转录本序列进行基因预测的初步结果，即本流程中第6步后的结果。该GFF3文件中的基因模型未经过末端强制填补，其结果是非常准确的，但会包含较多的不完整基因模型。
+    --output_alignment_GFF3 <string>    默认值: 无
+    输出转录本与参考基因组的比对结果（非标准GFF3格式）。Sam2Transfrag和StringTie两种方法的比对结果会整合到这一个文件中。每个转录本的比对结果是一份数据（同一份数据内各行第9列的ID相同），各份数据之间以空行分隔；所有数据按染色体名称（自然排序）、该份数据cDNA_match的起始-结束坐标（最小起始坐标、最大结束坐标）、正负链（+在前，-其次，.最后）排序，同一份数据内部各行保持原有顺序。
 
-    --intron_info_out <String>
-    设置intron信息文件的输出路径，其中包含可信的introns。
+    --output_raw_GFF3 <string>    默认值: 无
+    输出第6步分类之后、第7步末端强制填补之前的基因预测结果（内容与results/merged_classified.ORF.gff3相同）。该文件含Type分类标记，基因ID为流程内部ID。
 
-    --base_depth_out <String>
-    设置exon上碱基测序深度信息文件的输出路径。
+    --intron_info_out <string>    默认值: results/intron.txt (位于临时文件夹中)
+    指定可信intron信息文件的输出路径（由Sam2Transfrag产生，第一列与GFF3中Sam2Transfrag的基因区域对应）。指定后，results目录中也会保留一份硬链接。
 
+    --base_depth_out <string>    默认值: results/base_depth.txt (位于临时文件夹中)
+    指定exon碱基测序深度信息文件的输出路径。指定后，results目录中也会保留一份硬链接。
 
-[阈值参数]
-    --pe_used_pair_num <int>    default: 100000000
-    设置程序利用的最大双末端测序read对数量。当输入的数据较多时，最多使用此数量的read对。若输入了多组数据，则从每组前面取相同比例的数据量。程序默认最大使用100M的read对。若按照PE150bp测序，则使用的数据量为30 Gb。
+    --alignment_bam_out <string>    默认值: 无
+    将第1步得到的已排序BAM文件（results/alignment.bam）保存到指定路径（优先使用硬链接，无额外磁盘占用）。
 
-    --se_used_read_num <int>    default: 100000000
-    设置程序利用的最大单端测序read数量。当输入的数据较多时，最多使用此数量的read。若输入了多组数据，则从每组前面取相同比例的数据量。程序默认最大使用100M的read。若按照SE150bp测序，则使用的数据量为15 Gb。
+    --alignment_stats_out <string>    默认值: 无
+    将比对统计信息（各分片汇总结果，默认位于临时文件夹的results/alignment.stats）保存到指定路径。仅在有FASTQ输入时有效。
 
-    --min_protein_length <int>    default: 100
-    设置鉴定ORF时最小的protein长度。
+[关键子程序参数：传递给子程序的关键参数，其它参数则使用子程序自身的默认值]
+传递给NGSReads_prediction.01RNASeq2Sam的关键参数：
+    --pe_used_pair_num <int>    默认值: 100000000
+    设置使用的双末端reads对数量上限（约相当于PE150测序30 Gb数据）。数据量超过时，若输入了多个文库，则从每个文库前面按相同比例截取。该参数透传给NGSReads_prediction.01RNASeq2Sam。
 
-    --genetic_code <int>    default: 1
-    设置遗传密码。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。本参数主要生效于同源蛋白进行基因预测的步骤，或对基因模型首尾进行强制补齐时使用的起始密码子和终止密码子信息的情形。
-    该参数在本流程第5和7个步骤中对不完整基因模型进行末端填补时，设置起始和终止密码时产生效力。
+    --se_used_read_num <int>    默认值: 100000000
+    设置使用的单端reads数量上限（约相当于SE150测序15 Gb数据），规则同上。
+
+    --trimmomatic_opts <string>    默认值: "LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:50 TOPHRED33"
+    NGSReads_prediction.01RNASeq2Sam中设置Trimmomatic在ILLUMINACLIP（接头去除，使用子程序默认设置）之后的其它质控步骤及参数。设置后整体替换默认值；含空格或以"-"开头的值请加引号。仅有--sam输入时不生效。
+
+    --hisat2_opts <string>    默认值: "--min-intronlen 20 --max-intronlen 200000 --dta --score-min L,0.0,-0.4 -k 1"
+    传递给hisat2（比对）的参数。仅在--aligner为hisat2时有效。设置后整体替换默认值，例如 --hisat2_opts="--dta -k 5"。
+
+    --star_opts <string>    默认值: "--alignIntronMax 200000 --alignMatesGapMax 200000 --outFilterType BySJout --outFilterMultimapNmax 20 --alignSJoverhangMin 8 --alignSJDBoverhangMin 1 --outFilterMismatchNmax 999 --outFilterMismatchNoverReadLmax 0.04"
+    传递给STAR（比对）的参数。仅在--aligner为star时有效。设置后整体替换默认值。
+
+传递给NGSReads_prediction.02Sam2Transfrag的关键参数：
+    --fraction <float>    默认值: 0.05
+    打断比对区域时，exon碱基测序深度和intron测序深度两个阈值 = 转录本区域最高碱基测序深度 * 本参数。范围(0, 1]。
+
+    --min_expressed_base_depth <int>    默认值: 2
+    exon碱基测序深度阈值的下限。
+
+    --max_expressed_base_depth <int>    默认值: 50
+    exon碱基测序深度阈值的上限。
+
+    --min_junction_depth <int>    默认值: 2
+    intron测序深度阈值的下限。
+
+    --max_junction_depth <int>    默认值: 50
+    intron测序深度阈值的上限。
+
+    --min_fragment_count_per_transfrag <int>    默认值: 10
+    输出转录本时，要求支持该转录本的fragment数目不低于该值。
+
+传递给NGSReads_prediction.04Transfrag2ORF的关键参数：
+    --ORF_predictor <string>    默认值: TIdeS (提供了--homolog_protein时); TransDecoder (未提供--homolog_protein时)
+    设置用于ORF预测的软件，可选TransDecoder或TIdeS（不区分大小写）。由于TIdeS必须以同源蛋白序列作为数据库，若未提供--homolog_protein参数，则该参数的值会被修改为TransDecoder。
+
+    --min_protein_length <int>    默认值: 100
+    设置鉴定ORF时蛋白质序列的最小长度（氨基酸数）。TransDecoder：传给TransDecoder.LongOrfs的-m；TIdeS：乘以3后传给tides的--min-orf。
+
+    --genetic_code <int>    默认值: 1
+    设置遗传密码，编号参见NCBI遗传密码表: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi 。该参数有两方面作用：(a) 传递给04Transfrag2ORF的--TIdeS_genetic_code，用于TIdeS的ORF预测（TransDecoder目前不支持，只使用标准遗传密码）；(b) 本程序据此自动确定起始密码子和终止密码子，并同时传给第5步（GFF3_merging_and_removing_redundancy）和第7步（fillingEndsOfGeneModels）的--start_codon和--stop_codon（详见使用说明第14条）。使用TransDecoder时，起始/终止密码子固定为标准密码子（ATG；TAA,TAG,TGA）。
+
+    --TIdeS_partial / --noTIdeS_partial    默认值: 启用--TIdeS_partial
+    默认情况下，本程序给04Transfrag2ORF添加--TIdeS_partial，即使用TIdeS时同时预测完整ORF和5'或3'不完整的ORF（Integrity按基因组序列上的起始/终止密码子判断）。添加--noTIdeS_partial可关闭该功能，此时TIdeS只报告完整ORF，所有基因模型的Integrity均为complete（详见使用说明第7条）。仅在使用TIdeS时生效。
+
+传递给GFF3_merging_and_removing_redundancy的关键参数：
+    --overlap_coverage <float>    默认值: 0.30
+    第5步中，两个基因模型CDS重叠碱基数占较小基因模型CDS碱基数的比例超过该阈值时，去除得分较低者。取值范围(0, 1]。
+
+[基因模型分类参数]
+    --quantile_high <float>    默认值: 0.80
+    计算"较大"阈值（CDS长度、CDS间intron数量）所用的分位数：参考基因模型从大到小排序后，取排在该比例位置处的值，即至少该比例的参考基因模型满足该阈值。取值范围(0, 1]。
+
+    --quantile_low <float>    默认值: 0.95
+    计算"较小"阈值所用的分位数，规则同上。须不小于--quantile_high。
+
+    --cds_length_high <int>    默认值: 自动计算
+    A、B类要求的CDS最小长度（bp）。指定后不再自动计算。
+
+    --cds_length_low <int>    默认值: 自动计算
+    C类要求的CDS最小长度（bp）。指定后不再自动计算。
+
+    --cds_intron_high <int>    默认值: 自动计算
+    A、B类要求的CDS之间最少intron数量。指定后不再自动计算。
+
+    --cds_intron_low <int>    默认值: 自动计算
+    C类要求的CDS之间最少intron数量。指定后不再自动计算。
+
+    --cds_ratio_high <float>    默认值: 0.6
+    A类要求的CDS占exon的最小比例（0-1），该比例取自GFF3第9列Form信息末尾的百分数。
+
+    --cds_ratio_low <float>    默认值: 0.3
+    B、C类要求的CDS占exon的最小比例（0-1），该比例取自GFF3第9列Form信息末尾的百分数。须不大于--cds_ratio_high。
+
+[高级参数]
+    --no_filling_ends    默认值: 无
+    跳过第7步中的末端强制填补，以第6步分类后的结果作为最终结果。
+
+    --ignore_signature    默认值: 无
+    断点续跑时不检查.sig签名文件：已有.ok标记且输出文件非空的步骤，即使参数或输入文件信息（路径、大小、修改时间）已改变也直接跳过。仅在重新使用已有的--tmp_dir时有意义，详见"使用说明"第8条。
 
 [性能参数]
-    --cpu <int>    default: 8
-    设置程序使用的CPU线程数。
+    --cpu <int>    默认值: 8
+    设置整个流程使用的CPU线程数。该值会传递给流程中调用的全部程序（各程序自身的--cpu参数）以及所调用的samtools等软件，各步骤中的具体用法如下：
+      第1步 NGSReads_prediction.01RNASeq2Sam：传入--cpu值，用于质控、基因组索引构建、各分片比对（每个比对命令使用--cpu/--chunk_num个线程）、samtools排序与合并；索引构建与质控并行进行，此阶段实际占用的线程数会暂时超过--cpu；
+      第2步 NGSReads_prediction.02Sam2Transfrag：传入--cpu值，作为并行处理染色体分块和转录区域的worker子进程数；
+      第3步 NGSReads_prediction.03Stringtie：传入--cpu值，作为并行运行stringtie的worker子进程数（每个stringtie使用1个线程）；
+      第4步 NGSReads_prediction.04Transfrag2ORF：Sam2Transfrag和StringTie两个转录本文件的ORF分析同时并行运行，因此--cpu由两者平分（各约一半，至少为1），保证总线程数不超过--cpu；只有TIdeS使用该线程数（TransDecoder为单线程），且每个TIdeS最多使用24个线程；
+      第5步 GFF3_merging_and_removing_redundancy：传入--cpu值，作为按染色体和正负链分区并行去冗余的worker进程数；
+      第7步 fillingEndsOfGeneModels：传入--cpu值，基因模型被平均切分为--cpu份并行填补。
+    各步骤是依次运行的（仅第4步内部的两个分析同时运行），所以整个流程同一时刻占用的线程数不会超过--cpu（第1步索引构建与质控并行的阶段除外）。
 
-    --put_massive_temporary_data_into_memory    default: None
-    设置将海量的临时文件存放到内存中。这样能避免磁盘I/O不足而造成程序运行减缓，但需要消耗更多内存。本流程在很多步骤中对数据进行了分割，再通过 并行化来加速计算，但这对磁盘形成了极大的I/O负荷。因此，当磁盘性能较差时会严重影响计算速度。若系统内存充足，推荐添加本参数，从而将海量的临时数 据存放到代表内存的/dev/shm文件夹下，以加速程序运行。此外，程序在数据分割和并行化步骤运行完毕后，会自动删除/dev/shm中的临时数据以释放内存。
-    该参数主要用于运行Sam2Transfrag模块时生效。
+    --chunk_num <int>    默认值: min(--cpu, 10)
+    质控后的Clean data被切分成的份数，各分片同时并行比对，每个比对命令使用--cpu/--chunk_num个线程（不足1按1计）。STAR每个进程都需要载入一份基因组索引，内存消耗随分片数增加；同时提供双末端和单端FASTQ时（STAR不能混合比对），并行进程数最多为分片数的2倍。建议不超过--cpu，内存较小时请调低。
 
-USAGE
-my $usage_english = &get_usage_english();
-if (@ARGV==0){die $usage_english}
+[帮助参数]
+    --help    默认值: 无
+    Display the English usage and exit.
 
-my ($pe1, $pe2, $single_end, $sam, $cpu, $homolog_gene_models, $tmp_dir, $strand_specific, $config, $help, $chinese_help, $cmdString, $pe_used_pair_num, $se_used_read_num, $min_protein_length, $genetic_code, $output_alignment_GFF3, $output_raw_GFF3, $intron_info_out, $base_depth_out, $put_massive_temporary_data_into_memory);
-GetOptions(
-    "pe1:s" => \$pe1,
-    "pe2:s" => \$pe2,
-    "se:s" => \$single_end,
-    "sam:s" => \$sam,
-    "cpu:i" => \$cpu,
-    "homolog_gene_models:s" => \$homolog_gene_models,
-    "tmp_dir:s" => \$tmp_dir,
-    "strand_specific" => \$strand_specific,
-    "config:s" => \$config,
-    "pe_used_pair_num:i" => \$pe_used_pair_num,
-    "se_used_read_num:i" => \$se_used_read_num,
-    "min_protein_length:i" => \$min_protein_length,
-    "genetic_code:i" => \$genetic_code,
-    "output_alignment_GFF3:s" => \$output_alignment_GFF3,
-    "output_raw_GFF3:s" => \$output_raw_GFF3,
-    "intron_info_out:s" => \$intron_info_out,
-    "base_depth_out:s" => \$base_depth_out,
-    "put_massive_temporary_data_into_memory!" => \$put_massive_temporary_data_into_memory,
-    "help" => \$help,
-    "chinese_help" => \$chinese_help,
-);
-if ( $chinese_help ) { die $usage }
-if ( $help ) { die $usage_english }
+    --chinese_help    默认值: 无
+    显示中文用法并退出。
+
+依赖:
+    需要__BIN__目录下的NGSReads_prediction.01RNASeq2Sam、NGSReads_prediction.02Sam2Transfrag、NGSReads_prediction.03Stringtie、NGSReads_prediction.04Transfrag2ORF、GFF3_merging_and_removing_redundancy和fillingEndsOfGeneModels可执行；系统PATH中需有samtools和stringtie；有FASTQ输入时还需java、比对软件（STAR或hisat2/hisat2-build）以及__SW__/Trimmomatic-0.38；使用TransDecoder时需__SW__/TransDecoder-v5.5.0（修改过的版本），使用TIdeS时需tides命令（tides.py或tides，及其依赖DIAMOND、CD-HIT等）。程序启动时会检查这些依赖。
+
+USAGE_CN
+    $t =~ s/__SW__/$software_dir/g;
+    $t =~ s/__BIN__/$bin_path/g;
+    return $t;
+}
 
 
-# 在标准错误输出中给出程序的运行命令。
-my $pwd = `pwd`;
-my $programe_name = basename($0);
-print STDERR "\n#################### $programe_name | Start ####################\n";
-print STDERR "PWD: $pwd" . (localtime) . ": CMD: " . $command_line . "\n";
-print STDERR "============================================\n";
+if (@ARGV == 0) { print STDERR usage_en(); exit 1; }
 
-########### 解析参数 #################
-$genetic_code ||= 1;
-$cpu ||= 8;
-$pe_used_pair_num ||= 100000000;
-$se_used_read_num ||= 100000000;
-$min_protein_length ||= 100;
+########################################################################
+# 1. 解析并检查参数
+########################################################################
+my %o;
+GetOptions(\%o,
+    'pe1=s', 'pe2=s', 'se=s', 'sam=s',
+    'aligner=s', 'strand_specific', 'homolog_protein=s',
+    'tmp_dir=s', 'keep_tmp_files',
+    'gene_prefix=s', 'gene_code_length=i',
+    'output_alignment_GFF3=s', 'output_raw_GFF3=s',
+    'intron_info_out=s', 'base_depth_out=s',
+    'alignment_bam_out=s', 'alignment_stats_out=s',
+    # 关键子程序参数：传给01RNASeq2Sam
+    'pe_used_pair_num=i', 'se_used_read_num=i',
+    'trimmomatic_opts=s', 'hisat2_opts=s', 'star_opts=s',
+    # 关键子程序参数：传给02Sam2Transfrag
+    'fraction=f', 'min_expressed_base_depth=i', 'max_expressed_base_depth=i',
+    'min_junction_depth=i', 'max_junction_depth=i',
+    'min_fragment_count_per_transfrag=i',
+    # 关键子程序参数：传给04Transfrag2ORF
+    'ORF_predictor=s', 'min_protein_length=i', 'genetic_code=i', 'TIdeS_partial!',
+    # 关键子程序参数：传给GFF3_merging_and_removing_redundancy
+    'overlap_coverage=f',
+    # 基因模型分类参数
+    'quantile_high=f', 'quantile_low=f',
+    'cds_length_high=i', 'cds_length_low=i',
+    'cds_intron_high=i', 'cds_intron_low=i',
+    'cds_ratio_high=f', 'cds_ratio_low=f',
+    'no_filling_ends', 'ignore_signature',
+    'cpu=i', 'chunk_num=i',
+    'help|h', 'chinese_help',
+) or do { print STDERR "\nRun '$prog_name --help' for usage.\n"; exit 1; };
 
-# 使用绝对路径
+if ($o{chinese_help}) { print usage_cn(); exit 0; }
+if ($o{help})         { print usage_en(); exit 0; }
+
+# 记录用户在命令行中显式设置了哪些参数（在填充默认值之前），用于给出"该参数不生效"的警告
+my %user_set = map { $_ => 1 } keys %o;
+
+$o{aligner}           = lc($o{aligner} // 'star');
+$o{cpu}               //= 8;
+$o{pe_used_pair_num}  //= 100000000;
+$o{se_used_read_num}  //= 100000000;
+$o{min_protein_length} //= 100;
+$o{genetic_code}      //= 1;
+$o{gene_prefix}       //= 'RNASeqORF';
+$o{gene_code_length}  //= 6;
+# 使用TIdeS时默认启用--TIdeS_partial（同时预测5'或3'不完整的ORF）；--noTIdeS_partial可关闭
+$o{TIdeS_partial}     //= 1;
+$o{quantile_high}     //= 0.80;
+$o{quantile_low}      //= 0.95;
+$o{cds_ratio_high}    //= 0.6;
+$o{cds_ratio_low}     //= 0.3;
+# Sam2Transfrag的六个关键阈值：由本程序设置默认值，并显式传给02Sam2Transfrag
+$o{fraction}                         //= 0.05;
+$o{min_expressed_base_depth}         //= 2;
+$o{max_expressed_base_depth}         //= 50;
+$o{min_junction_depth}               //= 2;
+$o{max_junction_depth}               //= 50;
+$o{min_fragment_count_per_transfrag} //= 10;
+# 01RNASeq2Sam 会把所有分片同时并行比对（STAR每个进程都要载入一份基因组索引，内存消耗大），
+# 因此默认分片数取 min(--cpu, 10)，而不是子程序自身的默认值10。
+$o{chunk_num}         //= ( $o{cpu} < 10 ? $o{cpu} : 10 );
+
+die "Error: --aligner must be either 'hisat2' or 'star'.\n" unless $o{aligner} eq 'hisat2' || $o{aligner} eq 'star';
+foreach my $k (qw/cpu chunk_num pe_used_pair_num se_used_read_num min_protein_length genetic_code gene_code_length/) {
+    die "Error: --$k must be a positive integer.\n" if $o{$k} < 1;
+}
+# ---- Sam2Transfrag 参数检查 ----
+{
+    foreach my $k (qw/min_expressed_base_depth max_expressed_base_depth min_junction_depth max_junction_depth
+                      min_fragment_count_per_transfrag/) {
+        die "Error: --$k must be a positive integer.\n" if $o{$k} < 1;
+    }
+    die "Error: --fraction must be in the range (0, 1].\n" unless $o{fraction} > 0 && $o{fraction} <= 1;
+    die "Error: --min_expressed_base_depth ($o{min_expressed_base_depth}) must not be larger than --max_expressed_base_depth ($o{max_expressed_base_depth}).\n"
+        if $o{min_expressed_base_depth} > $o{max_expressed_base_depth};
+    die "Error: --min_junction_depth ($o{min_junction_depth}) must not be larger than --max_junction_depth ($o{max_junction_depth}).\n"
+        if $o{min_junction_depth} > $o{max_junction_depth};
+}
+# ---- 合并去冗余参数检查 ----
+if ( defined $o{overlap_coverage} ) {
+    die "Error: --overlap_coverage must be in the range (0, 1].\n" unless $o{overlap_coverage} > 0 && $o{overlap_coverage} <= 1;
+}
+# ---- 基因模型分类参数检查 ----
+foreach my $k (qw/quantile_high quantile_low/) {
+    die "Error: --$k must be in the range (0, 1].\n" unless $o{$k} > 0 && $o{$k} <= 1;
+}
+die "Error: --quantile_low ($o{quantile_low}) must not be smaller than --quantile_high ($o{quantile_high}).\n" if $o{quantile_low} < $o{quantile_high};
+foreach my $k (qw/cds_ratio_high cds_ratio_low/) {
+    die "Error: --$k must be in the range [0, 1].\n" unless $o{$k} >= 0 && $o{$k} <= 1;
+}
+die "Error: --cds_ratio_low ($o{cds_ratio_low}) must not be larger than --cds_ratio_high ($o{cds_ratio_high}).\n" if $o{cds_ratio_low} > $o{cds_ratio_high};
+foreach my $k (qw/cds_length_high cds_length_low/) {
+    die "Error: --$k must be a positive integer.\n" if defined $o{$k} && $o{$k} < 1;
+}
+foreach my $k (qw/cds_intron_high cds_intron_low/) {
+    die "Error: --$k must be a non-negative integer.\n" if defined $o{$k} && $o{$k} < 0;
+}
+die "Error: --cds_length_low ($o{cds_length_low}) must not be larger than --cds_length_high ($o{cds_length_high}).\n"
+    if defined $o{cds_length_low} && defined $o{cds_length_high} && $o{cds_length_low} > $o{cds_length_high};
+die "Error: --cds_intron_low ($o{cds_intron_low}) must not be larger than --cds_intron_high ($o{cds_intron_high}).\n"
+    if defined $o{cds_intron_low} && defined $o{cds_intron_high} && $o{cds_intron_low} > $o{cds_intron_high};
+
+die "Error: exactly one genome sequence file (FASTA) should be provided.\n" unless @ARGV == 1;
+die "Error: Can not find the genome sequence file $ARGV[0], or it is empty.\n" unless -e $ARGV[0] && -s $ARGV[0];
+die "Error: --pe1 and --pe2 must be set together.\n" if ( $o{pe1} xor $o{pe2} );
+die "The RNA-Seq reads should be provided by parameters --pe1 --pe2 or --se or --sam .\n"
+    unless ( ($o{pe1} && $o{pe2}) || $o{se} || $o{sam} );
+die "Error: --gene_prefix can not be empty and must not contain whitespace, ';', '=', ',' or '.'.\n"
+    if $o{gene_prefix} eq '' || $o{gene_prefix} =~ m/[\s;=,.]/;
+
+# --ignore_signature 只在重新使用已有临时文件夹续跑时有意义
+if ( $o{ignore_signature} ) {
+    if ( !defined $o{tmp_dir} ) {
+        print STDERR "Warning: --ignore_signature has no effect without --tmp_dir (a new temporary directory is created, so there is nothing to resume).\n";
+    }
+    elsif ( !-d $o{tmp_dir} ) {
+        print STDERR "Warning: --ignore_signature has no effect because the temporary directory $o{tmp_dir} does not exist yet.\n";
+    }
+}
+
+# 解析 --ORF_predictor（不区分大小写）。TIdeS必须以同源蛋白作为数据库，未提供--homolog_protein时强制使用TransDecoder。
+my $ORF_predictor;
+if ( defined $o{ORF_predictor} && $o{ORF_predictor} ne '' ) {
+    if    ( lc($o{ORF_predictor}) eq 'transdecoder' ) { $ORF_predictor = 'TransDecoder'; }
+    elsif ( lc($o{ORF_predictor}) eq 'tides' )        { $ORF_predictor = 'TIdeS'; }
+    else { die "Error: --ORF_predictor must be either 'TransDecoder' or 'TIdeS' (case-insensitive).\n"; }
+}
+if ( $o{homolog_protein} ) {
+    $ORF_predictor = 'TIdeS' unless defined $ORF_predictor;
+}
+else {
+    if ( defined $ORF_predictor && $ORF_predictor eq 'TIdeS' ) {
+        print STDERR "Warning: TIdeS requires homologous proteins as its database, but --homolog_protein is not provided. --ORF_predictor is changed to TransDecoder.\n";
+    }
+    $ORF_predictor = 'TransDecoder';
+}
+if ( $ORF_predictor eq 'TransDecoder' ) {
+    print STDERR "Warning: --genetic_code only takes effect when the ORF predictor is TIdeS; TransDecoder uses the standard genetic code, so the standard start/stop codons are also used in step 5 and step 7.\n" if $o{genetic_code} != 1;
+    print STDERR "Warning: --TIdeS_partial/--noTIdeS_partial only takes effect when the ORF predictor is TIdeS; it is ignored.\n" if $user_set{TIdeS_partial};
+}
+else {
+    # 04Transfrag2ORF不给tides加--partial时，TIdeS只报告完整ORF，Integrity均标注为complete
+    print STDERR "Note: --noTIdeS_partial is set, so TIdeS reports only complete ORFs and all gene models are labeled Integrity=complete (the default is to also predict 5'/3' partial ORFs).\n"
+        unless $o{TIdeS_partial};
+}
+
+# ---- 根据--genetic_code确定起始/终止密码子（第5步合并去冗余、第7步末端强制填补使用） ----
+# 使用TransDecoder时只支持标准遗传密码（表1）；使用TIdeS时按--genetic_code选择。
+# 密码子表与04Transfrag2ORF判断Integrity时所用的表一致。
+my $codon_table_id = ( $ORF_predictor eq 'TIdeS' ) ? $o{genetic_code} : 1;
+my (@start_codons, @stop_codons);
+{
+    if ( !( exists $stop_table{$codon_table_id} && exists $start_table{$codon_table_id} ) ) {
+        print STDERR "Note: genetic code $codon_table_id has no complete built-in start/stop codon list; the standard codons (start ATG; stop TAA,TAG,TGA) are used where the list is missing.\n";
+    }
+    @start_codons = @{ $start_table{$codon_table_id} || [ 'ATG' ] };
+    @stop_codons  = @{ $stop_table{$codon_table_id}  || $stop_table{1} };
+}
+my $start_codon_str = join(",", @start_codons);
+my $stop_codon_str  = join(",", @stop_codons);
+
+print STDERR "Warning: --chunk_num ($o{chunk_num}) is larger than --cpu ($o{cpu}); all chunks are aligned at the same time, so CPU (and, for STAR, memory) may be oversubscribed.\n"
+    if $o{chunk_num} > $o{cpu};
+
+# ---- 输入文件：全部转为绝对路径，并在运行前检查其存在性 ----
+sub abs_list {
+    my ($list, $what) = @_;
+    my @out;
+    foreach my $x ( split /,/, $list ) {
+        $x =~ s/^\s+|\s+$//g;
+        next if $x eq '';
+        die "Error: $what file $x does not exist or is empty.\n" unless -e $x && -s $x;
+        push @out, abs_path($x);
+    }
+    die "Error: no file was found in the $what parameter.\n" unless @out;
+    return @out;
+}
+sub abs_out {    # 输出文件：自动创建其所在目录，返回绝对路径
+    my ($f) = @_;
+    my $d = dirname($f);
+    make_path($d) unless -d $d;
+    die "Error: can not create the directory of output file $f\n" unless -d $d;
+    return abs_path($d) . '/' . basename($f);
+}
+
 my $input_genome = abs_path($ARGV[0]);
-$homolog_gene_models = abs_path($homolog_gene_models) if $homolog_gene_models;
-$output_alignment_GFF3 = abs_path($output_alignment_GFF3) if $output_alignment_GFF3;
-$output_raw_GFF3 = abs_path($output_raw_GFF3) if $output_raw_GFF3;
-$intron_info_out = abs_path($intron_info_out) if defined $intron_info_out;
-$base_depth_out = abs_path($base_depth_out) if defined $base_depth_out;
+my (@pe1, @pe2, @se, @sam);
+if ( $o{pe1} && $o{pe2} ) {
+    @pe1 = abs_list($o{pe1}, '--pe1');
+    @pe2 = abs_list($o{pe2}, '--pe2');
+    die "Error: the number of files in --pe1 (" . scalar(@pe1) . ") and --pe2 (" . scalar(@pe2) . ") must be equal.\n" unless @pe1 == @pe2;
+}
+@se  = abs_list($o{se},  '--se')  if $o{se};
+@sam = abs_list($o{sam}, '--sam') if $o{sam};
+# 01RNASeq2Sam 要求--sam输入文件以.sam/.bam/.cram结尾，这里提前检查，避免运行到第1步才报错
+foreach my $f (@sam) {
+    die "Error: --sam input $f should be a .sam, .bam or .cram file.\n" unless $f =~ m/\.(?:sam|bam|cram)$/i;
+}
+my $need_alignment = ( @pe1 || @se ) ? 1 : 0;
+my $homolog_protein = $o{homolog_protein} ? do { die "Error: can not find the homolog protein file $o{homolog_protein}, or it is empty.\n" unless -e $o{homolog_protein} && -s $o{homolog_protein}; abs_path($o{homolog_protein}) } : undef;
 
-# 准备RNA-Seq输入数据路径
-my (%pe_reads, %se_reads, %SAM_files);
-if ($pe1 && $pe2) {
-    my @pe1 = split /,/, $pe1;
-    my @pe2 = split /,/, $pe2;
-    my $pe1_num = @pe1;
-    my $pe2_num = @pe2;
-    if ($pe1_num != $pe2_num) { die "the input file number of -1 was not equal to -2.\n" };
-    foreach (@pe1) {
-        $_ = abs_path($_);
-        my $pe_file = $_;
-        $_ = shift @pe2;
-        $_ = abs_path($_);
-        $pe_file .= "\t$_";
-        $pe_reads{$pe_file} = 1;
+# 仅有--sam输入时，质控与比对参数不生效
+if ( !$need_alignment ) {
+    foreach my $k (@align_string_opts) {
+        print STDERR "Warning: --$k is ignored because no quality control/alignment is performed (only --sam input is given).\n" if $user_set{$k};
     }
 }
-if ($single_end) {
-    my @se = split /,/, $single_end;
-    foreach (@se) {
-        $_ = abs_path($_);
-        $se_reads{$_} = 1;
-    }
+
+my %out_path;    # 用户显式指定的输出文件（绝对路径）
+foreach my $k (qw/output_alignment_GFF3 output_raw_GFF3 intron_info_out base_depth_out alignment_bam_out alignment_stats_out/) {
+    $out_path{$k} = abs_out($o{$k}) if defined $o{$k};
 }
-if ($sam) {
-    my @sam = split /,/, $sam;
-    foreach (@sam) {
-        $_ = abs_path($_);
-        $SAM_files{$_} = 1;
-    }
-}
-unless (($pe1 && $pe2) or $single_end or $sam) {
-    die "The RNA-Seq reads should be provided by parameters --pe1 --pe2 or --se or --sam .\n";
+if ( defined $out_path{alignment_stats_out} && !$need_alignment ) {
+    print STDERR "Warning: --alignment_stats_out is ignored because no alignment is performed (only --sam input is given).\n";
+    delete $out_path{alignment_stats_out};
 }
 
-# 准备本程序调用程序的详细参数
-my %config = (
-    'trimmomatic' => 'TruSeq3-PE-2.fa:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:50 TOPHRED33',
-    'hisat2' => '--min-intronlen 20 --max-intronlen 20000 --dta --score-min L,0.0,-0.4 -k 1',
-    'Sam2Transfrag' => '--fraction 0.05 --min_expressed_base_depth 2 --max_expressed_base_depth 50 --min_junction_depth 2 --max_junction_depth 50 --min_fragment_count_per_transfrag 10',
-);
-if ($config) {
-    open IN, $config or die "Can not open file $config, $!\n";
-    my $tag;
-    while (<IN>) {
-        next if m/^#/;
-        next if m/^\s*$/;
-        s/^\s+//;
-        s/\n/ /;
-        if (/\[(.*)\]/) { $tag = $1; delete $config{$1}; }
-        else { $config{$tag} .= $_; }
+# ---- 路径字符检查：各子程序拼接shell命令时不对路径加引号，因此路径中不能有空白或shell特殊字符 ----
+# 本脚本没有 use utf8，路径按字节处理；\x80-\xFF 即UTF-8编码的非ASCII字符（如中文），它们在shell中可直接使用，不需要引号，
+# 因此予以允许。空白字符和 shell 特殊字符（; & | $ ( ) * ? < > ' " \ 等）仍然被禁止。
+{
+    my $tmp_target = defined $o{tmp_dir} ? $o{tmp_dir} : "tmp_x";
+    my @check = ( $bin_path, $input_genome, @pe1, @pe2, @se, @sam, File::Spec->rel2abs($tmp_target), values %out_path );
+    push @check, $homolog_protein if defined $homolog_protein;
+    foreach my $p (@check) {
+        die "Error: the path \"$p\" contains whitespace or special shell characters, which the sub-programs can not handle. Please rename or move it (allowed: letters, digits, non-ASCII characters such as Chinese, and . / _ + = @ % ~ : -).\n"
+            unless $p =~ m{^[\w./+=@%~:\-\x80-\xFF]+$};
     }
-    close IN;
 }
 
-# 准备临时文件夹路径
-my $date = `date +%Y%m%d%H%M%S`; chomp($date);
-$tmp_dir ||= "tmp_$date$$";
-$tmp_dir = abs_path($tmp_dir);
-mkdir $tmp_dir unless -e $tmp_dir;
-chdir $tmp_dir; print STDERR "\nPWD: $tmp_dir\n";
-###############################
-
-# 检测剩余可用内存量
-my $MemAvailable = 0;
-$MemAvailable = &get_MemAvailable();
-
-
-# 1. 使用Trimmomatic软件对RNA-Seq reads进行质控
-print STDERR "\nStep 1. Quality control of RNA-Seq reads by Trimmomatic software " . "(" . (localtime) . ")" . "\n";
-my (@paired_end_reads_prefix, @single_end_reads_prefix);
-unless (-e "01.trimmomatic.ok") {
-    mkdir "$tmp_dir/a.trimmomatic" unless -e "$tmp_dir/a.trimmomatic";
-    chdir "$tmp_dir/a.trimmomatic"; print STDERR "PWD: $tmp_dir/a.trimmomatic\n";
-
-    # 计算Trimmomatic并行化数，同时考虑到单个Trimmomatic命令消耗16G内存。
-    my $MemAvailable = &get_MemAvailable();
-    my $paraFly_CPU = 1;
-    $paraFly_CPU = $cpu / 8 if $paraFly_CPU < ($cpu / 8);
-    $paraFly_CPU = $MemAvailable / 16000000 if $paraFly_CPU > ($MemAvailable / 16000000);
-    $paraFly_CPU = 1 if $paraFly_CPU < 1;
-
-    if ($pe1 && $pe2) {
-        # 对双末端测序数据进行质控
-        my @pe_reads = sort keys %pe_reads;
-        my $pe_reads_num = @pe_reads;
-        my $number = 0;
-        open OUT, ">", "command.trimmomatic_pe.list" or die "Can not create file command.trimmomatic_pe.list, $!";
-        print STDERR (localtime) . ": create file command.trimmomatic_pe.list.\n";
-        foreach (@pe_reads) {
-            $number ++;
-            my $code = "0" x ( length($pe_reads_num) - length($number) ) . $number;
-            @_ = split /\t/;
-            if ( -s $_[0] && -s $_[1] ) {
-                push @paired_end_reads_prefix, "reads$code";
-                print OUT "java -jar $software_dir/Trimmomatic-0.38/trimmomatic-0.38.jar PE -threads 16 $_[0] $_[1] reads$code.1.fastq reads$code.1.unpaired.fastq reads$code.2.fastq reads$code.2.unpaired.fastq ILLUMINACLIP:$software_dir/Trimmomatic-0.38/adapters/$config{'trimmomatic'} &> reads$code.trimmomatic.log\n";
-            }
-        }
-        close OUT;
-        $cmdString = "ParaFly -c command.trimmomatic_pe.list -CPU $paraFly_CPU &> /dev/null";
-        print STDERR (localtime) . ": CMD: $cmdString\n";
-
-        unless ( system("$cmdString") == 0 ) {
-            # 特殊情况下 Fastq 文件中碱基质量全部为固定的值时，Trimmomatic不能自动检测phred格式而运行失败。于是强制指定为phred33，符合常规情况。
-            $cmdString = "perl -pe 's/ PE / PE -phred33 /' FailedCommands > command.trimmomatic_phred33; rm FailedCommands";
-            print STDERR (localtime) . ": CMD: $cmdString\n";
-            system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-
-            $cmdString = "ParaFly -c command.trimmomatic_phred33 -CPU $paraFly_CPU &> /dev/null";
-            print STDERR (localtime) . ": CMD: $cmdString\n";
-            system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-        }
-
-        # 检测双末端测序数据质控后的有效数据量
-        my $toal_pair_num = 0;
-        my %lib_pair_num;
-        foreach my $prefix ( @paired_end_reads_prefix ) {
-            open IN, "$prefix.trimmomatic.log" or die "Error: Can not open file $prefix.trimmomatic.log, $!";
-            while (<IN>) {
-                if ( m/Surviving:\s*(\d+)/ ) {
-                    $lib_pair_num{$prefix} = $1;
-                    $toal_pair_num += $1;
-                }
-            }
-            close IN;
-        }
-
-        # 最多输出一定的数据量
-        open OUT1, ">", "PE_reads.1.fastq" or die "Error: Can not create file PE_reads.1.fastq, $!";
-        open OUT2, ">", "PE_reads.2.fastq" or die "Error: Can not create file PE_reads.2.fastq, $!";
-        foreach my $prefix ( @paired_end_reads_prefix ) {
-            # 计算最大输出的行数
-            my $max_line_num = int($pe_used_pair_num / $toal_pair_num * $lib_pair_num{$prefix}) * 4;
-            # 输出read1中的数据
-            open IN, "$prefix.1.fastq" or die "Error: Can not open file $prefix.1.fastq, $!";
-            my $line_num = 0;
-            while (<IN>) {
-                $line_num ++;
-                last if $line_num > $max_line_num;
-                print OUT1;
-            }
-            close IN;
-            # 输出read2中的数据
-            open IN, "$prefix.2.fastq" or die "Error: Can not open file $prefix.2.fastq, $!";
-            my $line_num = 0;
-            while (<IN>) {
-                $line_num ++;
-                last if $line_num > $max_line_num;
-                print OUT2;
-            }
-            close IN;
-        }
-        close OUT1; close OUT2;
-    }
-    if ($single_end) {
-        # 对单端数据进行质控
-        my @se_reads = sort keys %se_reads;
-        my $se_reads_num = @se_reads;
-        my $number = 0;
-        open OUT, ">", "command.trimmomatic_se.list" or die "Can not create file command.trimmomatic_se.list, $!";
-        foreach (@se_reads) {
-            $number ++;
-            my $code = "0" x ( length($se_reads_num) - length($number) ) . $number;
-            push @single_end_reads_prefix, "reads$code";
-            @_ = split /\t/;
-            print OUT "java -jar $software_dir/Trimmomatic-0.38/trimmomatic-0.38.jar SE -threads $cpu $single_end reads$code.fastq ILLUMINACLIP:$software_dir/Trimmomatic-0.38/adapters/$config{'trimmomatic'} &> reads$code.trimmomatic.log\n";
-        }
-        close OUT;
-        $cmdString = "ParaFly -c command.trimmomatic_pe.list -CPU $paraFly_CPU &> /dev/null";
-        print STDERR (localtime) . ": CMD: $cmdString\n";
-
-        unless ( system("$cmdString") == 0 ) {
-            $cmdString = "perl -pe 's/ SE / SE -phred33 /' FailedCommands > command.trimmomatic_phred33; rm FailedCommands";
-            print STDERR (localtime) . ": CMD: $cmdString\n";
-            system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-
-            $cmdString = "ParaFly -c command.trimmomatic_phred33 -CPU $paraFly_CPU &> /dev/null";
-            print STDERR (localtime) . ": CMD: $cmdString\n";
-            system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-        }
-
-        # 检测单端测序数据质控后的有效数据量
-        my $toal_read_num = 0;
-        my %lib_read_num;
-        foreach my $prefix ( @single_end_reads_prefix ) {
-            open IN, "$prefix.trimmomatic.log" or die "Error: Can not open file $prefix.trimmomatic.log, $!";
-            while (<IN>) {
-                if ( m/Surviving:\s*(\d+)/ ) {
-                    $lib_read_num{$prefix} = $1;
-                    $toal_read_num += $1;
-                }
-            }
-            close IN;
-        }
-
-        # 最多输出一定的数据量
-        open OUT, ">", "SE_reads.fastq" or die "Error: Can not create file SE_reads.fastq, $!";
-        foreach my $prefix ( @single_end_reads_prefix ) {
-            # 计算最大输出的行数
-            my $max_line_num = int($se_used_read_num / $toal_read_num * $lib_read_num{$prefix}) * 4;
-            # 输出read中的数据
-            open IN, "$prefix.fastq" or die "Error: Can not open file $prefix.fastq, $!";
-            my $line_num = 0;
-            while (<IN>) {
-                $line_num ++;
-                last if $line_num > $max_line_num;
-                print OUT;
-            }
-            close IN;
-        }
-        close OUT;
-    }
-    chdir "../";
-    open OUT, ">", "01.trimmomatic.ok" or die $!; close OUT;
-}
-else {
-    print STDERR "Skip Step 1 for the file 1.trimmomatic.ok exists\n";
+########################################################################
+# 2. 组装传递给各子程序的关键参数字符串（取代原来的配置文件）
+########################################################################
+# 对shell命令中的参数值加单引号（以 --name='value' 形式传递字符串参数，
+# 避免以"--"开头的值被getopt当作下一个选项，也避免值中的空白被shell拆分）
+sub shq {
+    my ($s) = @_;
+    $s =~ s/'/'\\''/g;
+    return "'$s'";
 }
 
-
-# 2. HISAT2比对
-print STDERR "\nStep 2: Aligning NGS reads to genome by HISAT2 " . "(" . (localtime) . ")" . "\n";
-mkdir "$tmp_dir/b.hisat2" unless -e "$tmp_dir/b.hisat2";
-unless (-e "02.hisat2.ok") {
-    chdir "$tmp_dir/b.hisat2"; print STDERR "PWD: $tmp_dir/b.hisat2\n";
-
-    # 构建基因组hisat2索引数据库
-    my $hisat2build_cpu = $cpu;
-    $hisat2build_cpu = 80 if $hisat2build_cpu > 80;
-    $cmdString = "hisat2-build -p $hisat2build_cpu $input_genome genome &> hisat2-build.log\n";
-    unless (-e "hisat2-build.ok") {
-        print STDERR (localtime) . ": CMD: $cmdString\n";
-        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-        open OUT, ">", "hisat2-build.ok" or die $!; close OUT;
+# 2.1 01RNASeq2Sam：质控与比对参数（只传递用户设置了的参数，未设置则使用01RNASeq2Sam内置默认值）
+my @align_param_list;
+if ( $need_alignment ) {
+    foreach my $k (@align_string_opts) {
+        push @align_param_list, "--$k=" . &shq($o{$k}) if defined $o{$k};
     }
-    else {
-        print STDERR "CMD(Skipped): $cmdString\n";
-    }
-
-    # 将RNA-Seq reads比对到参考基因组
-    # 能处理单端，双端，链特异性与链非特异性数据
-    my $input;
-    if ($pe1 && $pe2) {
-        $input = "-1 ../a.trimmomatic/PE_reads.1.fastq -2 ../a.trimmomatic/PE_reads.2.fastq";
-    }
-    if ($single_end) {
-        $input .= " -U ../1.trimmomatic/SE_reads.fastq"
-    }
-    if ($input && $strand_specific) {
-        $input .= " --rna-strandness RF";
-    }
-    if ( $input ) {
-        $cmdString = "hisat2 -x genome -p $cpu $input -S alignment.sam $config{'hisat2'} 2> hisat2.log";
-        unless (-e "hisat2.ok") {
-            print STDERR (localtime) . ": CMD: $cmdString\n";
-            system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-            open OUT, ">", "hisat2.ok" or die $!; close OUT;
-        }
-        else {
-            print STDERR "CMD(Skipped): $cmdString\n";
-        }
-        $SAM_files{"alignment.sam"} = 1;
-    }
-
-    # 对SAM文件进行排序，整合处理。
-    # samtools sort 命令最多消耗80%可用内存，并尽可能使用较多的CPU线程。
-    $MemAvailable = &get_MemAvailable();
-    my $samtools_sort_CPU = 1;
-    $samtools_sort_CPU = $cpu if $cpu > 1;
-    $samtools_sort_CPU = ($MemAvailable * 0.8 / 768 / 1024) if $samtools_sort_CPU > ($MemAvailable * 0.8 / 768 / 1024);
-    $samtools_sort_CPU = 1 if $samtools_sort_CPU < 1;
-    open OUT, ">", "command.samtools_sort.list" or die "Can not create file command.samtools_sort.list, $!";
-    my (@sam_out, $sam_file_code);
-    foreach ( sort keys %SAM_files ) {
-        $sam_file_code ++; push @sam_out, "sam_input$sam_file_code.bam";
-        $cmdString = "samtools sort -\@ $samtools_sort_CPU -o sam_input$sam_file_code.bam -O BAM $_";
-        print OUT "$cmdString\n";
-        print STDERR (localtime) . ": CMDs will be performed: $cmdString\n";
-    }
-    close OUT;
-
-    $cmdString = "rm -rf *.bam.tmp* *.sorted.sam.tmp*";
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-    $cmdString = "ParaFly -c command.samtools_sort.list -CPU 1 &> /dev/null";
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-
-    $cmdString = "samtools merge -\@ $samtools_sort_CPU -O BAM alignment.bam " . join(" ", @sam_out);
-    $cmdString = "ln -s sam_input1.bam alignment.bam" if @sam_out == 1;
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-
-    $cmdString = "samtools index -\@ $cpu alignment.bam";
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-
-    chdir "../";
-    open OUT, ">", "02.hisat2.ok" or die $!; close OUT;
 }
-else {
-    print STDERR "Skip Step 2 for the file 02.hisat2.ok exists\n";
+my $align_params = join(" ", @align_param_list);
+
+# 2.2 02Sam2Transfrag：六个数值参数（均有默认值，显式传递）
+my @s2t_param_list;
+foreach my $k (@s2t_num_opts) {
+    push @s2t_param_list, "--$k $o{$k}";
+}
+my $sam2transfrag_params = join(" ", @s2t_param_list);
+
+# 2.3 03Stringtie：不传递任何参数，使用子程序自身的默认值
+
+########################################################################
+# 3. 检查依赖程序
+########################################################################
+&check_dependencies();
+
+########################################################################
+# 4. 准备临时文件夹和results目录
+########################################################################
+# 主程序的临时文件夹（含results目录、日志、.ok/.sig文件）始终保留，不会被主程序删除。
+# 各子程序（01、02、03、04）自己的临时文件夹默认由子程序在成功结束后删除；使用--keep_tmp_files时保留。
+my $tmp_dir_given  = defined $o{tmp_dir} ? 1 : 0;
+my $tmp_dir_target = $tmp_dir_given ? $o{tmp_dir} : "tmp_" . POSIX::strftime("%Y%m%d%H%M%S", localtime) . $$;
+make_path($tmp_dir_target) unless -d $tmp_dir_target;
+my $tmp_dir = abs_path($tmp_dir_target);
+die "Error: can not create the temporary directory $tmp_dir_target.\n" unless defined $tmp_dir && -d $tmp_dir;
+chdir $tmp_dir or die "Error: can not enter $tmp_dir, $!\n";
+
+# 各步骤的重要结果文件统一放在临时文件夹的 results 目录下
+my $results_dir = "$tmp_dir/results";
+make_path($results_dir) unless -d $results_dir;
+die "Error: can not create the results directory $results_dir.\n" unless -d $results_dir;
+
+# 清理旧版本程序遗留在临时文件夹根目录中的文件（新版本这些文件只放在results目录中，或已更名）
+foreach my $old_file ( "$tmp_dir/merged.ORF.gff3", "$tmp_dir/merged.ORF.fillEnd.gff3",
+                       "$tmp_dir/merged_classified.ORF.fillEnd.gff3",
+                       "$tmp_dir/Sam2Transfrag.alignment.gff3", "$tmp_dir/stringtie.alignment.gff3" ) {
+    unlink $old_file if -e $old_file;
 }
 
+my $intron_info_out = $out_path{intron_info_out} // "$results_dir/intron.txt";
+my $base_depth_out  = $out_path{base_depth_out}  // "$results_dir/base_depth.txt";
+my $keep_opt        = $o{keep_tmp_files} ? " --keep_tmp_files" : "";
 
-# 3. 根据RNA-Seq比对的SAM结果转换得到转录本序列
-print STDERR "\nStep 3: We convert the transcript sequences based on the SAM results from RNA-Seq alignment." . "(" . (localtime) . ")" . "\n";
-chdir $tmp_dir; print STDERR "\nPWD: $tmp_dir\n"; 
-
-my @input_parameter =();
-push @input_parameter, "--put_massive_temporary_data_into_memory" if defined $put_massive_temporary_data_into_memory;
-push @input_parameter, "--strand_specific" if defined $strand_specific;
-push @input_parameter, "--intron_info_out $intron_info_out"if defined $intron_info_out;
-push @input_parameter, "--base_depth_out $base_depth_out" if defined $base_depth_out;
-my $input_parameter = join " ", @input_parameter;
-$cmdString = "$bin_path/Sam2Transfrag $config{'Sam2Transfrag'} $input_parameter --input_single_sorted_BAM_file --tmp_dir $tmp_dir/c.Sam2Transfrag --cpu $cpu --intron_info_out intron.txt --base_depth_out base_depth.txt $tmp_dir/b.hisat2/alignment.bam > transfrag.raw.gff3";
-
-&execute_cmds($cmdString, "$tmp_dir/03.Sam2Transfrag.ok");
-
-
-# 4. 调用Transdecoder软件对转录本序列进行ORF分析，得到编码蛋白转录本在基因组上的结构注释信息，并输出GFF3格式结果。
-print STDERR "\nStep 4: Use the Transdecoder software to perform ORF analysis on transcript sequences, obtain structural annotation information of the coding protein transcripts on the genome, and output the results in GFF3 format. Please note that each ORF predicted on transcript is a separate gene model. Multiple alternative splicing of a single gene can result in multiple redundant gene models. (" . (localtime) . ")\n";
-chdir $tmp_dir; print STDERR "\nPWD: $tmp_dir\n";
-
-my @input_parameter =();
-push @input_parameter, "--output_alignment_GFF3 $output_alignment_GFF3" if defined $output_alignment_GFF3;
-push @input_parameter, "--min_protein_length $min_protein_length" if defined $min_protein_length;
-my $input_parameter = join " ", @input_parameter;
-$cmdString = "$bin_path/Transfrag2ORF --tmp_dir d.Transfrag2ORF $input_parameter $input_genome $tmp_dir/transfrag.raw.gff3 > transfrag.ORF.gff3";
-
-&execute_cmds($cmdString, "$tmp_dir/04.Transfrag2ORF.ok");
-
-
-# 5. 使用同源蛋白的基因预测结果对转录本预测的基因模型进行填补
-print STDERR "\nStep 5: Use the gene prediction results of homologous proteins to fill in the ends of the gene model for transcript prediction. (" . (localtime) . ")\n";
-@_ = &codon_table("$tmp_dir/codon.table");
-my (%start_codon, %stop_codon, $start_codon, $stop_codon);
-%start_codon = %{$_[1]};
-%stop_codon = %{$_[2]};
-$start_codon = join ",", sort keys %start_codon;
-$stop_codon = join ",", sort keys %stop_codon;
-if ( $homolog_gene_models ) {
-    # 若使用了--homolog_gene_models参数，则额外有05.FillingGeneModelsByHomolog.yes文件，用于删除后续步骤的.ok文件。
-    $cmdString = "rm -rf 05.FillingGeneModelsByHomolog.ok 06.GFF3Clear.ok 07.fillingEndsOfGeneModelsfillingEndsOfGeneModels.ok";
-    &execute_cmds($cmdString, "$tmp_dir/05.FillingGeneModelsByHomolog.yes");
-
-    $cmdString = "GFF3_filling_gene_models_Parallel --cpu $cpu --tmp_dir e.FillingGeneModelsByHomolog --ouput_filling_detail_tab e.FillingGeneModelsByHomolog.tab --start_codon $start_codon --stop_codon $stop_codon --attribute_for_filling_complete Filled_by_homolog=True $input_genome $tmp_dir/transfrag.ORF.gff3 $homolog_gene_models > transfrag.ORF_filledByHomolog.gff3";
-}
-else {
-    $cmdString = "cp -a $tmp_dir/transfrag.ORF.gff3 transfrag.ORF_filledByHomolog.gff3";
-}
-
-&execute_cmds($cmdString, "$tmp_dir/05.FillingGeneModelsByHomolog.ok");
-
-
-# 6. 对转录本预测的基因模型去冗余。
-print STDERR "\nStep 6: Cut down on the repetitive gene models predicted from transcriptome data. (" . (localtime) . ")\n";
-my @cmdString = ();
-push @cmdString, "$bin_path/GFF3_merging_and_removing_redundancy_Parallel --cpu $cpu $input_genome --first_file_score 0.0 transfrag.ORF_filledByHomolog.gff3 > transfrag.gff3 2> /dev/null";
-push @cmdString,  "$bin_path/GFF3Clear --GFF3_source NGSReads --genome $input_genome --gene_prefix transfrag --no_attr_add transfrag.gff3 > transfrag.genome.gff3 2> /dev/null";
-push @cmdString, "rm -rf transfrag.gff3";
-
-&execute_cmds(@cmdString, "$tmp_dir/06.removing_redundancy.ok");
-
-if ( $output_raw_GFF3 ) {
-    my $output_raw_GFF3_info;
-    open IN, "transfrag.genome.gff3" or die "Error: Can note open file transfrag.genome.gff3, $!";
-    $output_raw_GFF3_info = join "", <IN>;
-    close IN;
-    open OUT, ">", $output_raw_GFF3 or die "Error: Can not create file $output_raw_GFF3, $!";
-    foreach ( split /\n\n/, $output_raw_GFF3_info ) {
-        if (m/Integrity=complete/ && m/Form=.*?_([\d\.]+)\%/ && $1 >= 50) {
-            s/(\tgene\t.*ID=[^;]+)/$1;Type=excellent_gene_models_predicted_by_NGSReads/;
-        }
-        print OUT "$_\n\n";
-    }
-    close OUT;
-}
-
-
-# 7. 对基因模型的5'或3'端进行强制补齐
-print STDERR "\nStep 7: Enforcing padding at the 5' or 3' end of the gene model. (" . (localtime) . ")\n";
-$cmdString = "$bin_path/fillingEndsOfGeneModels --start_codon $start_codon --stop_codon $stop_codon $input_genome transfrag.genome.gff3 > transfrag.genome_fillEnd.gff3 2> fillingEndsOfGeneModels.log";
-
-&execute_cmds($cmdString, "$tmp_dir/07.fillingEndsOfGeneModels.ok");
-
-
-# 8. 对基因模型进行分析，并输出结果。
-print STDERR "\nStep 8: Diveding geng modelse into 4 classes. (" . (localtime) . ")\n";
-print STDERR "Class A (Excellent gene models): Complete gene models predicted by transcripts, or filled in by homolog, meanwhile the ORF occupies at least 50% of the transcript sequence.\n";
-print STDERR "Class B (good gene models): Other Complete gene models predicted by transcripts, or filled in by homolog.\n";
-print STDERR "Class C (fair gene models): Complete gene models after enforcing padding at the 5' or 3' end of the gene model.\n";
-print STDERR "Class D (poor gene models): Uncomplete gene models.\n";
-
-open IN, "transfrag.genome_fillEnd.gff3" or die "Can not open file transfrag.genome_fillEnd.gff3, $!";
-my ( $num0, $num1, $num2, $num3, $num4 ) = (0, 0, 0, 0, 0);
-$/ = "\n\n";
-while (<IN>) {
-    $num0 ++;
-    if (m/Integrity=complete/ or m/Filled_by_homolog=True/) {
-        if (m/Form=.*?_([\d\.]+)\%/ && $1 >= 50) {
-            s/(\tgene\t.*ID=[^;]+)/$1;Type=excellent_gene_models_predicted_by_NGSReads/;
-            $num1 ++;
-        }
-        else {
-            s/(\tgene\t.*ID=[^;]+)/$1;Type=good_gene_models_predicted_by_NGSReads/;
-            $num2 ++;
-        }
-    }
-    elsif ( m/Filling2Complete=True/ ) {
-        s/(\tgene\t.*ID=[^;]+)/$1;Type=fair_gene_models_predicted_by_NGSReads/;
-        $num3 ++;
-    }
-    elsif ( m/Filling2Uncomplete=True/ ) {
-        s/(\tgene\t.*ID=[^;]+)/$1;Type=poor_gene_models_predicted_by_NGSReads/;
-        $num4 ++;
-    }
-    print;
-}
-close IN;
-print STDERR "\nFinally, total $num0 gene models were divided into 4 classes : A, $num1; B, $num2; C, $num3; D, $num4.\n";
-
+print STDERR "\n#################### $prog_name | Start ####################\n";
+print STDERR "PWD: $orig_cwd\n" . &now() . ": CMD: $command_line\n";
+print STDERR "Temporary directory: $tmp_dir" . ( $tmp_dir_given ? " (existing records are checked; finished steps with unchanged parameters are skipped)" : "" ) . "\n";
+print STDERR "Important results of the steps are saved in: $results_dir\n";
+print STDERR "To resume after an interruption, run the same command with: --tmp_dir $tmp_dir\n" unless $tmp_dir_given;
+print STDERR "--keep_tmp_files is set: the sub-programs will keep their own temporary directories.\n" if $o{keep_tmp_files};
+print STDERR "--ignore_signature is set: the .sig signature files are NOT checked; finished steps (.ok present and outputs non-empty) are skipped even if their parameters or inputs changed.\n" if $o{ignore_signature};
+print STDERR "ORF predictor: $ORF_predictor" . ( $ORF_predictor eq 'TIdeS' ? " (" . ( $o{TIdeS_partial} ? "with" : "without" ) . " --TIdeS_partial)" : "" ) . "; aligner: " . uc($o{aligner}) . "; cpu: $o{cpu} (passed to every sub-program)\n";
+print STDERR "Genetic code table: $codon_table_id; start codons: $start_codon_str; stop codons: $stop_codon_str (used by step 5 and step 7)\n";
+print STDERR "01RNASeq2Sam options set by the user: " . ( $align_params ne '' ? $align_params : "(none; built-in defaults are used)" ) . "\n" if $need_alignment;
+print STDERR "02Sam2Transfrag options: $sam2transfrag_params\n";
+print STDERR "03Stringtie options: (none; the defaults of the sub-program are used)\n";
 print STDERR "============================================\n";
-print STDERR "$programe_name complete successfully! " . "(" . (localtime) . ")" . "\n\n";
-print STDERR "#################### $programe_name | End ####################\n";
 
+my %reran;    # 记录本次运行中已重新执行的步骤，用于让下游步骤失效
 
-# 检测服务器剩余可用内存容量，结果单位是 kB。
-sub get_MemAvailable {
-    open IN, "/proc/meminfo" or die "Can not open file /proc/meminfo, $!";
-    my $MemAvailable;
-    while (<IN>) {
-        if (m/MemAvailable:\s*(\d+)\s*kB/) {
-            $MemAvailable = $1;
-            next;
+########################################################################
+# Step 1. 质控 + 比对 + 排序合并
+########################################################################
+my $align_tmp_dir = "$tmp_dir/a.RNASeq2Sam";
+my $align_bam     = "$results_dir/alignment.bam";
+my $align_bai     = "$results_dir/alignment.bam.bai";
+my $align_stats   = "$results_dir/alignment.stats";
+{
+    my $name = 'a.RNASeq2Sam';
+    my @p;
+    push @p, "--pe1 " . join(",", @pe1) . " --pe2 " . join(",", @pe2) if @pe1;
+    push @p, "--se " . join(",", @se)   if @se;
+    push @p, "--sam " . join(",", @sam) if @sam;
+    push @p, "--aligner $o{aligner}";
+    push @p, "--strand_specific" if $o{strand_specific};
+    push @p, $align_params if $align_params ne '';
+    push @p, "--pe_used_pair_num $o{pe_used_pair_num}", "--se_used_read_num $o{se_used_read_num}";
+    push @p, "--chunk_num $o{chunk_num}";
+    # 注意：01RNASeq2Sam 在只有--sam输入（不执行比对）时设置--alignment_stats会报错，因此仅在有FASTQ输入时传递。
+    push @p, "--alignment_stats $align_stats" if $need_alignment;
+    my $cmd = "$bin_path/NGSReads_prediction.01RNASeq2Sam " . join(" ", @p)
+            . " --cpu $o{cpu} --tmp_dir $align_tmp_dir --genome $input_genome --out $align_bam --output_type BAM" . "$keep_opt 2> $tmp_dir/a.RNASeq2Sam.log";
+    my @extra = map { &file_sig($_) } ( $input_genome, @pe1, @pe2, @se, @sam );
+    my @outs = ($align_bam);
+    print STDERR "\nStep 1. Quality control, alignment and sorting/merging of RNA-Seq reads by NGSReads_prediction.01RNASeq2Sam (" . &now() . ")\n";
+    if ( &prepare_step($name, md5_hex(join("\n", $cmd, @extra)), [], [$align_tmp_dir], \@outs) ) {
+        &run_cmds($name, [$cmd], \@outs, "$tmp_dir/a.RNASeq2Sam.log");
+    }
+    else { print STDERR "Step 1: already finished, skipped.\n"; }
+
+    # 确保results目录中有BAM索引：不存在，或比BAM旧（BAM被重新生成）时，用samtools重新建立。
+    {
+        my $need_index = 1;
+        if ( -s $align_bai ) {
+            my $t_bam = (stat($align_bam))[9] // 0;
+            my $t_bai = (stat($align_bai))[9] // 0;
+            $need_index = 0 if $t_bai >= $t_bam;
+        }
+        if ($need_index) {
+            unlink $align_bai if -e $align_bai;
+            my $icmd = "samtools index -@ $o{cpu} $align_bam";
+            print STDERR &now() . ": CMD: $icmd\n";
+            system($icmd) == 0 or die "Error: failed to index $align_bam :\n  $icmd\n";
+            die "Error: the BAM index $align_bai was not created.\n" unless -s $align_bai;
         }
     }
-    close IN;
-    return $MemAvailable;
+
+    # 按需保留比对结果和比对统计
+    &keep_copy($align_bam,   $out_path{alignment_bam_out})   if defined $out_path{alignment_bam_out};
+    &keep_copy($align_stats, $out_path{alignment_stats_out}) if defined $out_path{alignment_stats_out} && -s $align_stats;
 }
 
-sub codon_table {
-    my %code = (
-        "TTT" => "F",
-        "TTC" => "F",
-        "TTA" => "L",
-        "TTG" => "L",
-        "TCT" => "S",
-        "TCC" => "S",
-        "TCA" => "S",
-        "TCG" => "S",
-        "TAT" => "Y",
-        "TAC" => "Y",
-        "TAA" => "X",
-        "TAG" => "X",
-        "TGT" => "C",
-        "TGC" => "C",
-        "TGA" => "X",
-        "TGG" => "W",
-        "CTT" => "L",
-        "CTC" => "L",
-        "CTA" => "L",
-        "CTG" => "L",
-        "CCT" => "P",
-        "CCC" => "P",
-        "CCA" => "P",
-        "CCG" => "P",
-        "CAT" => "H",
-        "CAC" => "H",
-        "CAA" => "Q",
-        "CAG" => "Q",
-        "CGT" => "R",
-        "CGC" => "R",
-        "CGA" => "R",
-        "CGG" => "R",
-        "ATT" => "I",
-        "ATC" => "I",
-        "ATA" => "I",
-        "ATG" => "M",
-        "ACT" => "T",
-        "ACC" => "T",
-        "ACA" => "T",
-        "ACG" => "T",
-        "AAT" => "N",
-        "AAC" => "N",
-        "AAA" => "K",
-        "AAG" => "K",
-        "AGT" => "S",
-        "AGC" => "S",
-        "AGA" => "R",
-        "AGG" => "R",
-        "GTT" => "V",
-        "GTC" => "V",
-        "GTA" => "V",
-        "GTG" => "V",
-        "GCT" => "A",
-        "GCC" => "A",
-        "GCA" => "A",
-        "GCG" => "A",
-        "GAT" => "D",
-        "GAC" => "D",
-        "GAA" => "E",
-        "GAG" => "E",
-        "GGT" => "G",
-        "GGC" => "G",
-        "GGA" => "G",
-        "GGG" => "G",
-    );
-    my %start_codon;
-    $start_codon{"ATG"} = 1;
-    if ( $genetic_code == 1 ) {
-        # The Standard Code
-        #$start_codon{"TTG"} = 1;
-        #$start_codon{"CTG"} = 1;
+########################################################################
+# Step 2. Sam2Transfrag 组装转录本
+########################################################################
+my $sam2transfrag_raw = "$results_dir/Sam2Transfrag.raw.gff3";
+{
+    my $name = 'b.Sam2Transfrag';
+    my $work = "$tmp_dir/b.Sam2Transfrag";
+    my @p;
+    push @p, "--strand_specific" if $o{strand_specific};
+    push @p, "--intron_info_out $intron_info_out", "--base_depth_out $base_depth_out";
+    my $cmd = "$bin_path/NGSReads_prediction.02Sam2Transfrag $sam2transfrag_params " . join(" ", @p)
+            . " --input_single_sorted_BAM_file --tmp_dir $work --cpu $o{cpu}$keep_opt $align_bam > $sam2transfrag_raw 2> $tmp_dir/b.Sam2Transfrag.log";
+    my @outs = ( $sam2transfrag_raw, $intron_info_out, $base_depth_out );
+    print STDERR "\nStep 2. Sam2Transfrag method: assembling transcripts from the BAM file (" . &now() . ")\n";
+    if ( &prepare_step($name, md5_hex($cmd), ['a.RNASeq2Sam'], [$work], \@outs) ) {
+        &run_cmds($name, [$cmd], \@outs, "$tmp_dir/b.Sam2Transfrag.log");
     }
-    elsif ( $genetic_code == 2 ) {
-        # The Vertebrate Mitochondrial Code
-        $code{"AGA"} = "X";
-        $code{"AGG"} = "X";
-        $code{"ATA"} = "M";
-        $code{"TGA"} = "W";
-        $start_codon{"ATA"} = 1;
-        $start_codon{"ATT"} = 1;
-        $start_codon{"ATC"} = 1;
-        $start_codon{"GTG"} = 1;
-    }
-    elsif ( $genetic_code == 3 ) {
-        # The Yeast Mitochondrial Code
-        $code{"ATA"} = "M";
-        $code{"CTT"} = "T";
-        $code{"CTC"} = "T";
-        $code{"CTA"} = "T";
-        $code{"CTG"} = "T";
-        $code{"TGA"} = "W";
-        $start_codon{"ATA"} = 1;
-        $start_codon{"GTG"} = 1;
-    }
-    elsif ( $genetic_code == 4 ) {
-        # The Mold, Protozoan, and Coelenterate Mitochondrial Code and the Mycoplasma/Spiroplasma Code
-        $code{"TGA"} = "W";
-        $start_codon{"ATA"} = 1;
-        $start_codon{"ATT"} = 1;
-        $start_codon{"ATC"} = 1;
-        $start_codon{"GTG"} = 1;
-        $start_codon{"CTG"} = 1;
-        $start_codon{"TTA"} = 1;
-        $start_codon{"TTG"} = 1;
-    }
-    elsif ( $genetic_code == 5 ) {
-        # The Invertebrate Mitochondrial Code
-        $code{"AGA"} = "S";
-        $code{"AGG"} = "S";
-        $code{"ATA"} = "M";
-        $code{"TGA"} = "W";
-        $start_codon{"ATA"} = 1;
-        $start_codon{"ATT"} = 1;
-        $start_codon{"ATC"} = 1;
-        $start_codon{"GTG"} = 1;
-        $start_codon{"TTG"} = 1;
-    }
-    elsif ( $genetic_code == 6 ) {
-        # The Ciliate, Dasycladacean and Hexamita Nuclear Code
-        $code{"TAA"} = "Q";
-        $code{"TAG"} = "Q";
-    }
-    elsif ( $genetic_code == 9 ) {
-        # The Echinoderm and Flatworm Mitochondrial Code
-        $code{"AAA"} = "N";
-        $code{"AGA"} = "S";
-        $code{"AGG"} = "S";
-        $code{"TGA"} = "W";
-        $start_codon{"GTG"} = 1;
-    }
-    elsif ( $genetic_code == 10 ) {
-        # The Euplotid Nuclear Code
-        $code{"TGA"} = "C";
-    }
-    elsif ( $genetic_code == 11 ) {
-        # The Bacterial, Archaeal and Plant Plastid Code
-        $start_codon{"ATA"} = 1;
-        $start_codon{"ATT"} = 1;
-        $start_codon{"ATC"} = 1;
-        $start_codon{"GTG"} = 1;
-        $start_codon{"CTG"} = 1;
-        $start_codon{"TTG"} = 1;
-    }
-    elsif ( $genetic_code == 12 ) {
-        # The Alternative Yeast Nuclear Code
-        $code{"CTG"} = "S";
-        $start_codon{"CTG"} = 1;
-    }
-    elsif ( $genetic_code == 13 ) {
-        # The Ascidian Mitochondrial Code
-        $code{"AGA"} = "G";
-        $code{"AGG"} = "G";
-        $code{"ATA"} = "M";
-        $code{"TGA"} = "W";
-        $start_codon{"ATA"} = 1;
-        $start_codon{"GTG"} = 1;
-        $start_codon{"TTG"} = 1;
-    }
-    elsif ( $genetic_code == 14 ) {
-        # The Alternative Flatworm Mitochondrial Code
-        $code{"AAA"} = "N";
-        $code{"AGA"} = "S";
-        $code{"AGG"} = "S";
-        $code{"TAA"} = "Y";
-        $code{"TGA"} = "W";
-    }
-    elsif ( $genetic_code == 16 ) {
-        # Chlorophycean Mitochondrial Code
-        $code{"TAG"} = "L";
-    }
-    elsif ( $genetic_code == 21 ) {
-        # Trematode Mitochondrial Code
-        $code{"TGA"} = "W";
-        $code{"ATA"} = "M";
-        $code{"AGA"} = "S";
-        $code{"AGG"} = "S";
-        $code{"AAA"} = "N";
-        $start_codon{"GTG"} = 1;
-    }
-    elsif ( $genetic_code == 22 ) {
-        # Scenedesmus obliquus Mitochondrial Code
-        $code{"TCA"} = "X";
-        $code{"TAG"} = "L";
-    }
-    elsif ( $genetic_code == 23 ) {
-        # Thraustochytrium Mitochondrial Code
-        $code{"TTA"} = "X";
-        $start_codon{"ATT"} = 1;
-        $start_codon{"GTG"} = 1;
-    }
-    elsif ( $genetic_code == 24 ) {
-        # Rhabdopleuridae Mitochondrial Code
-        $code{"AGA"} = "S";
-        $code{"AGG"} = "K";
-        $code{"TGA"} = "W";
-        $start_codon{"GTG"} = 1;
-        $start_codon{"CTG"} = 1;
-        $start_codon{"TTG"} = 1;
-    }
-    elsif ( $genetic_code == 25 ) {
-        # Candidate Division SR1 and Gracilibacteria Code
-        $code{"TGA"} = "G";
-        $start_codon{"GTG"} = 1;
-        $start_codon{"TTG"} = 1;
-    }
-    elsif ( $genetic_code == 26 ) {
-        # Pachysolen tannophilus Nuclear Code
-        # warning: The descritpions of initiation codons by 2 methods are confict according to the NCBI web site.
-        $code{"CTG"} = "A";
-        $start_codon{"GTG"} = 1;
-        $start_codon{"TTG"} = 1;
-    }
-    elsif ( $genetic_code == 27 ) {
-        # Karyorelict Nuclear Code
-        $code{"TAG"} = "Q";
-        $code{"TAA"} = "Q";
-    }
-    elsif ( $genetic_code == 29 ) {
-        # Mesodinium Nuclear Code
-        $code{"TAA"} = "Y";
-        $code{"TAG"} = "Y";
-    }
-    elsif ( $genetic_code == 30 ) {
-        # Peritrich Nuclear Code
-        $code{"TAA"} = "E";
-        $code{"TAG"} = "E";
-    }
-    elsif ( $genetic_code == 31 ) {
-        # Blastocrithidia Nuclear Code
-        $code{"TGA"} = "W";
-    }
-    elsif ( $genetic_code == 33 ) {
-        # Cephalodiscidae Mitochondrial UAA-Tyr Code
-        $code{"TAA"} = "Y";
-        $code{"TGA"} = "Y";
-        $code{"AGA"} = "S";
-        $code{"AGG"} = "K";
-    }
+    else { print STDERR "Step 2: already finished, skipped.\n"; }
 
-    my %stop_codon;
-    foreach ( keys %code ) {
-        $stop_codon{$_} = 1 if $code{$_} eq "X";
-    }
-
-    return (\%code, \%start_codon, \%stop_codon);
+    # 用户指定了其它输出路径时，在results目录中也保留一份（硬链接，无额外磁盘占用）
+    &keep_copy($intron_info_out, "$results_dir/intron.txt")    if $intron_info_out ne "$results_dir/intron.txt";
+    &keep_copy($base_depth_out,  "$results_dir/base_depth.txt") if $base_depth_out  ne "$results_dir/base_depth.txt";
 }
 
+########################################################################
+# Step 3. Stringtie 组装转录本
+########################################################################
+my $stringtie_raw = "$results_dir/stringtie.raw.gff3";
+{
+    my $name = 'c.stringtie';
+    my $work = "$tmp_dir/c.stringtie";
+    my @p;
+    push @p, "--strand_specific_library rf" if $o{strand_specific};
+    my $cmd = "$bin_path/NGSReads_prediction.03Stringtie " . join(" ", @p)
+            . " --input_single_sorted_BAM_file $align_bam --tmp_dir $work --gene_prefix stringtie --cpu $o{cpu}$keep_opt > $stringtie_raw 2> $tmp_dir/c.stringtie.log";
+    my @outs = ( $stringtie_raw );
+    print STDERR "\nStep 3. Stringtie method: assembling transcripts from the BAM file (" . &now() . ")\n";
+    if ( &prepare_step($name, md5_hex($cmd), ['a.RNASeq2Sam'], [$work], \@outs) ) {
+        &run_cmds($name, [$cmd], \@outs, "$tmp_dir/c.stringtie.log");
+    }
+    else { print STDERR "Step 3: already finished, skipped.\n"; }
+}
 
-# 子程序，用于执行调用的Linux命令，同时生成.ok文件。
-sub execute_cmds {
-    my $ok_file = pop @_;
+########################################################################
+# Step 4. 两种转录本分别做ORF分析（并行）
+########################################################################
+my $sam2transfrag_orf = "$results_dir/Sam2Transfrag.ORF.gff3";
+my $stringtie_orf     = "$results_dir/stringtie.ORF.gff3";
+print STDERR "\nStep 4. ORF analysis (predictor: $ORF_predictor) of the transcripts from Sam2Transfrag and Stringtie in parallel by NGSReads_prediction.04Transfrag2ORF. Each ORF is a separate gene model, so alternative isoforms of one gene yield redundant models, which are removed in step 5. (" . &now() . ")\n";
+my @alignment_parts;    # 两种方法各自的转录本比对结果（--output_alignment_GFF3），保存在results目录中，随后合并排序为一个文件
+{
+    # 两个ORF分析同时并行运行，--cpu由两者平分，保证总线程数不超过--cpu
+    my $cpu_1 = int( ($o{cpu} + 1) / 2 );
+    my $cpu_2 = $o{cpu} - $cpu_1; $cpu_2 = 1 if $cpu_2 < 1;
+    print STDERR "The two ORF analyses run at the same time, --cpu $o{cpu} is divided between them: Sam2Transfrag gets $cpu_1, StringTie gets $cpu_2 (only TIdeS uses the threads; TransDecoder is single-threaded).\n";
+    my @jobs;
+    foreach my $job ( [ 'Sam2Transfrag', $cpu_1, 'b.Sam2Transfrag' ], [ 'stringtie', $cpu_2, 'c.stringtie' ] ) {
+        my ($name, $job_cpu, $dep) = @$job;
+        my @p;
+        if ( defined $out_path{output_alignment_GFF3} ) {
+            my $part = "$results_dir/$name.alignment.gff3";
+            push @p, "--output_alignment_GFF3 $part";
+            push @alignment_parts, $part;
+        }
+        # 两个任务使用不同的基因前缀，避免合并时基因ID冲突
+        push @p, "--gene_prefix ${name}_ORF";
+        push @p, "--source $name";
+        push @p, "--min_protein_length $o{min_protein_length}";
+        push @p, "--cpu $job_cpu";
+        push @p, "--ORF_predictor $ORF_predictor";
+        push @p, "--keep_tmp_files" if $o{keep_tmp_files};
+        if ( $ORF_predictor eq 'TIdeS' ) {
+            push @p, "--TIdeS_genetic_code $o{genetic_code}";
+            push @p, "--TIdeS_protein_database $homolog_protein";
+            # 默认启用--TIdeS_partial：同时预测5'或3'不完整的ORF；--noTIdeS_partial时不添加
+            push @p, "--TIdeS_partial" if $o{TIdeS_partial};
+            # TIdeS的其它参数（可执行程序、训练模型的聚类相似度、最小序列长度等）使用04Transfrag2ORF自身的默认值
+        }
+        my $work = "$tmp_dir/d.Transfrag2ORF_$name";
+        my $log  = "$tmp_dir/d.Transfrag2ORF_$name.log";
+        my $in_gff3  = "$results_dir/$name.raw.gff3";
+        my $out_gff3 = "$results_dir/$name.ORF.gff3";
+        my $cmd  = "$bin_path/NGSReads_prediction.04Transfrag2ORF --tmp_dir $work " . join(" ", @p)
+                 . " $input_genome $in_gff3 > $out_gff3 2> $log";
+        my @extra = ( &file_sig($input_genome) );
+        push @extra, &file_sig($homolog_protein) if $ORF_predictor eq 'TIdeS';
+        push @jobs, { name => "d.Transfrag2ORF_$name", sig => md5_hex(join("\n", $cmd, @extra)), deps => [$dep],
+                      work => [$work], outs => [$out_gff3], cmds => [$cmd], log => $log };
+    }
+    &run_parallel_jobs(@jobs);
+}
 
-    if ( -e $ok_file ) {
-        foreach ( @_ ) {
-            print STDERR "CMD(Skipped): $_\n";
+# 将两种方法的转录本比对结果整合到用户指定的一个文件中：
+# 以空行分隔各份数据，并按染色体名称、每份数据cDNA_match的起始-结束坐标、正负链排序
+if ( defined $out_path{output_alignment_GFF3} ) {
+    &merge_sort_alignment_gff3($out_path{output_alignment_GFF3}, @alignment_parts);
+    print STDERR "The transcript alignments of the two methods were merged and sorted (by chromosome name, start-end coordinates of the cDNA_match records of each entry, and strand) into $out_path{output_alignment_GFF3} .\n";
+}
+
+########################################################################
+# Step 5. 整合两种方法的结果并去冗余（结果保存在results目录）
+########################################################################
+my $merged        = "$results_dir/merged.ORF.gff3";
+my $compare_stats = "$tmp_dir/compare_2gff3_stats.txt";
+{
+    my $name = 'e.merging_and_removing_redundancy';
+    my $log  = "$tmp_dir/e.merging_and_removing_redundancy.log";
+    my @mp;
+    push @mp, "--overlap_coverage $o{overlap_coverage}" if defined $o{overlap_coverage};
+    # 起始/终止密码子由--genetic_code自动确定
+    push @mp, "--start_codon $start_codon_str", "--stop_codon $stop_codon_str";
+    my $mp = " " . join(" ", @mp);
+    my $cmd = "$bin_path/GFF3_merging_and_removing_redundancy --cpu $o{cpu} --first_file_score 0.0 --compare_2gff3_stats $compare_stats$mp $input_genome $sam2transfrag_orf $stringtie_orf > $merged 2> $log";
+    my @outs = ($merged);
+    print STDERR "\nStep 5. Merging the gene models predicted from the two transcript assembly methods and removing redundancy (" . &now() . ")\n";
+    if ( &prepare_step($name, md5_hex(join("\n", $cmd, &file_sig($input_genome))), ['d.Transfrag2ORF_Sam2Transfrag', 'd.Transfrag2ORF_stringtie'], [], \@outs) ) {
+        &run_cmds($name, [$cmd], \@outs, $log);
+    }
+    else { print STDERR "Step 5: already finished, skipped.\n"; }
+}
+
+########################################################################
+# Step 6. 基因模型分类（A/B/C/D），结果保存在results目录
+########################################################################
+# 分类每次运行都会重新计算（耗时很短），因此修改分类参数无需重跑前面的步骤。
+my $classified = "$results_dir/merged_classified.ORF.gff3";
+{
+    print STDERR "\nStep 6. Classifying the gene models of step 5 into classes A/B/C/D, the CDS/exon ratio is taken from the Form tag (" . &now() . ")\n";
+    # 6.1 确定分类阈值（自动阈值基于第5步中两种方法相互印证并保留的基因模型）
+    my $thr = &determine_thresholds($merged, $compare_stats);
+
+    # 6.2 计算每个基因模型的指标并分类（同时得到每个mRNA的指标，用于在mRNA行输出）
+    my ($models, $order, $mrna_info) = &parse_gene_models($merged);
+    die "Error: no gene model was found in $merged .\n" unless @$order;
+    my $n_noform = scalar( grep { !$models->{$_}{form_ok} } @$order );
+    print STDERR "  Warning: the CDS/exon ratio of $n_noform gene models could not be obtained from the Form tag, it was calculated from the CDS and exon bases instead.\n" if $n_noform;
+    my (%class, %class_count);
+    foreach my $g (@$order) {
+        my $c = &classify_model($models->{$g}, $thr);
+        $class{$g} = $c;
+        $class_count{$c} ++;
+    }
+
+    # 6.3 输出：gene行Type=紧跟ID=之后；mRNA行Type=紧跟Parent=之后，并添加Integrity=、CDS_Length=、CDS_intron_Num=、CDS_exon_Ratio=
+    # （基因ID保持流程内部ID，重命名在最终输出时进行）
+    &write_classified_gff3($merged, $classified, \%class, $mrna_info);
+    die "Error: the classified result $classified is missing or empty.\n" unless -s $classified;
+
+    my $n_gene = scalar @$order;
+    print STDERR "  Classification of $n_gene gene models:\n";
+    foreach my $c (qw/A B C D/) {
+        my $n = $class_count{$c} // 0;
+        printf STDERR "    %s (%s): %d (%.2f%%)\n", $c, $gene_type_name{$c}, $n, 100 * $n / $n_gene;
+    }
+    print STDERR "  The classified gene models were saved to $classified\n";
+
+    # 6.4 按需输出分类之后、末端强制填补之前的结果（拷贝自results/merged_classified.ORF.gff3）
+    if ( defined $out_path{output_raw_GFF3} ) {
+        copy($classified, $out_path{output_raw_GFF3}) or die "Error: can not create file $out_path{output_raw_GFF3}, $!\n";
+        print STDERR "The classified result before forced end filling was saved to $out_path{output_raw_GFF3} .\n";
+    }
+}
+
+########################################################################
+# Step 7. 强制补齐不完整基因模型的末端，统一重命名基因ID，输出最终结果并统计
+########################################################################
+my $final_gff3 = $classified;
+if ( $o{no_filling_ends} ) {
+    print STDERR "\nStep 7. Forced end filling skipped (--no_filling_ends): the classified result of step 6 is used as the final result.\n";
+}
+else {
+    my $name = 'g.fillingEndsOfGeneModels';
+    my $log  = "$tmp_dir/fillingEndsOfGeneModels.log";
+    $final_gff3 = "$results_dir/merged_classified.ORF.fillEnd.gff3";
+    my @fp;
+    push @fp, "--cpu $o{cpu}";
+    # 起始/终止密码子由--genetic_code自动确定
+    push @fp, "--start_codon $start_codon_str", "--stop_codon $stop_codon_str";
+    my $cmd = "$bin_path/fillingEndsOfGeneModels " . join(" ", @fp) . " $input_genome $classified > $final_gff3 2> $log";
+    my @outs = ($final_gff3);
+    print STDERR "\nStep 7. Enforcing padding at the 5' or 3' end of incomplete gene models (" . &now() . ")\n";
+    # 分类文件每次运行都会重新生成，其内容（md5）改变时，本步骤也要重新运行。
+    # 该md5同时作为"硬签名"传入：即使使用了--ignore_signature，分类结果改变时本步骤仍会重新运行。
+    my $classified_md5 = "classified_md5=" . &file_md5($classified);
+    my $sig = md5_hex(join("\n", $cmd, &file_sig($input_genome), $classified_md5));
+    if ( &prepare_step($name, $sig, ['e.merging_and_removing_redundancy'], [], \@outs, $classified_md5) ) {
+        &run_cmds($name, [$cmd], \@outs, $log);
+    }
+    else { print STDERR "Step 7: already finished, skipped.\n"; }
+}
+
+{
+    print STDERR "Writing the final gene models to standard output (gene IDs are renamed) ...\n";
+    # 分类结果：若填补程序输出的基因行中没有Type标签，则按基因ID从分类文件中补上
+    my %type_of = &read_gene_types($classified);
+
+    my ($n_gene, %integrity, %class_count, %fill_mrna, %fill_gene) = (0);
+    my $n_final_complete = 0;
+    my ($old_id, $new_id, $cur_type, $in_gene, $cur_integrity, $cur_fc, $cur_fu);
+    # 每个基因结束时统计其填补情况（fillingEndsOfGeneModels把Filling2Complete/Filling2Uncomplete标记在mRNA行上，
+    # 基因中任意一个转录本成功填补即认为该基因填补成功）
+    my $flush_gene = sub {
+        return unless $in_gene;
+        if    ($cur_fc) { $fill_gene{Filling2Complete} ++; }
+        elsif ($cur_fu) { $fill_gene{Filling2Uncomplete} ++; }
+        $n_final_complete ++ if ( ( $cur_integrity // '' ) eq 'complete' ) || $cur_fc;
+    };
+
+    print "##gff-version 3\n";
+    open my $in, "<", $final_gff3 or die "Can not open file $final_gff3, $!\n";
+    while ( my $line = <$in> ) {
+        next if $line =~ m/^##gff-version/;
+        my $is_gene = ( $line =~ m/^[^\t]*\t[^\t]*\tgene\t/ ) ? 1 : 0;
+        my $is_mrna = ( $line =~ m/^[^\t]*\t[^\t]*\tmRNA\t/ ) ? 1 : 0;
+        if ($is_gene) {
+            $flush_gene->();
+            $in_gene = 1;
+            ($cur_fc, $cur_fu) = (0, 0);
+            undef $cur_integrity;
+            $n_gene ++;
+            undef $cur_type;
+            if ( $line =~ m/Integrity=([^;\s]+)/ ) { $cur_integrity = $1; $integrity{$1} ++; }
+            $cur_fc = 1 if $line =~ m/(?:^|;)Filling2Complete=True/;
+            $cur_fu = 1 if $line =~ m/(?:^|;)Filling2Uncomplete=True/;
+            if ( $line =~ m/(?:^|\t|;)ID=([^;\s]+)/ ) {
+                $old_id = $1;
+                $new_id = $o{gene_prefix} . sprintf("%0$o{gene_code_length}d", $n_gene);
+                if    ( $line =~ m/(?:^|;)Type=([^;\s]+)/ ) { $cur_type = $1; }
+                else                                       { $cur_type = $type_of{$old_id} // $gene_type_name{'D'}; }
+                $class_count{ $type_name_to_class{$cur_type} // 'D' } ++;
+            }
+            $line = &add_type_tag($line, $cur_type, 'gene') if defined $cur_type;
+        }
+        elsif ( $is_mrna ) {
+            if ( $line =~ m/(?:^|;)Filling2Complete=True/ )   { $fill_mrna{Filling2Complete} ++;   $cur_fc = 1; }
+            if ( $line =~ m/(?:^|;)Filling2Uncomplete=True/ ) { $fill_mrna{Filling2Uncomplete} ++; $cur_fu = 1; }
+            $line = &add_type_tag($line, $cur_type, 'mRNA') if defined $cur_type;
+        }
+        if ( defined $old_id ) {
+            $line =~ s/(ID=|Parent=)\Q$old_id\E(?=[;.\s]|$)/$1$new_id/g;
+        }
+        print $line;
+    }
+    close $in;
+    $flush_gene->();
+    die "Error: no gene model was found in the final result $final_gff3 .\n" unless $n_gene;
+    print STDERR "Total gene models: $n_gene\n";
+    print STDERR "  Integrity (of the originally predicted gene models, before end filling): " . join(", ", map { "$_=$integrity{$_}" } sort keys %integrity) . "\n" if %integrity;
+    unless ( $o{no_filling_ends} ) {
+        print STDERR "  Filling (gene level, any transcript filled): " . join(", ", map { "$_=" . ( $fill_gene{$_} // 0 ) } qw/Filling2Complete Filling2Uncomplete/) . "\n";
+        print STDERR "  Filling (mRNA level): " . join(", ", map { "$_=" . ( $fill_mrna{$_} // 0 ) } qw/Filling2Complete Filling2Uncomplete/) . "\n";
+        printf STDERR "  Complete gene models after end filling: %d (%.2f%%)\n", $n_final_complete, 100 * $n_final_complete / $n_gene;
+    }
+    print STDERR "  Classification of gene models (based on the models before end filling):\n";
+    foreach my $c (qw/A B C D/) {
+        my $n = $class_count{$c} // 0;
+        printf STDERR "    %s (%s): %d (%.2f%%)\n", $c, $gene_type_name{$c}, $n, 100 * $n / $n_gene;
+    }
+    print STDERR "  Gene IDs were renamed to $o{gene_prefix}" . ( '0' x ($o{gene_code_length} - 1) ) . "1 ...\n";
+}
+
+########################################################################
+# 收尾（主程序不删除临时文件夹）
+########################################################################
+print STDERR "\nImportant intermediate results are saved in $results_dir :\n";
+foreach my $f ( "alignment.bam", "alignment.bam.bai", "alignment.stats", "intron.txt", "base_depth.txt",
+                "Sam2Transfrag.raw.gff3", "stringtie.raw.gff3", "Sam2Transfrag.ORF.gff3", "stringtie.ORF.gff3",
+                "Sam2Transfrag.alignment.gff3", "stringtie.alignment.gff3",
+                "merged.ORF.gff3", "merged_classified.ORF.gff3", "merged_classified.ORF.fillEnd.gff3" ) {
+    print STDERR "  $f\n" if -e "$results_dir/$f";
+}
+print STDERR "The temporary directory $tmp_dir was kept; delete it manually if it is no longer needed.\n";
+print STDERR "============================================\n";
+printf STDERR "$prog_name complete successfully! (%s), elapsed %d min.\n\n", &now(), int((time - $start_time) / 60);
+print STDERR "#################### $prog_name | End ####################\n";
+exit 0;
+
+
+########################################################################
+# 子程序
+########################################################################
+
+sub now { return scalar localtime; }
+
+sub file_sig {
+    my ($f) = @_;
+    my @s = stat($f);
+    return "$f\t" . ( $s[7] // 0 ) . "\t" . ( $s[9] // 0 );
+}
+
+sub file_md5 {
+    my ($f) = @_;
+    open my $fh, "<", $f or return 'NA';
+    binmode $fh;
+    my $md5 = Digest::MD5->new->addfile($fh)->hexdigest;
+    close $fh;
+    return $md5;
+}
+
+sub find_in_path {
+    my ($cmd) = @_;
+    return ( -f $cmd && -x _ ) ? $cmd : undef if $cmd =~ m{/};
+    foreach my $d ( split /:/, ( $ENV{PATH} // "" ) ) {
+        next if $d eq "";
+        return "$d/$cmd" if -f "$d/$cmd" && -x _;
+    }
+    return;
+}
+
+sub check_dependencies {
+    my @missing;
+    foreach my $p (qw/NGSReads_prediction.01RNASeq2Sam NGSReads_prediction.02Sam2Transfrag NGSReads_prediction.03Stringtie NGSReads_prediction.04Transfrag2ORF GFF3_merging_and_removing_redundancy fillingEndsOfGeneModels/) {
+        push @missing, "$bin_path/$p (not found or not executable)" unless -f "$bin_path/$p" && -x "$bin_path/$p";
+    }
+    push @missing, "samtools" unless &find_in_path("samtools");
+    push @missing, "stringtie" unless &find_in_path("stringtie");
+    if ( $need_alignment ) {
+        push @missing, "java (required by Trimmomatic)" unless &find_in_path("java");
+        if ( $o{aligner} eq 'hisat2' ) {
+            push @missing, "hisat2" unless &find_in_path("hisat2");
+            push @missing, "hisat2-build" unless &find_in_path("hisat2-build");
+        }
+        else { push @missing, "STAR" unless &find_in_path("STAR"); }
+        push @missing, "$software_dir/Trimmomatic-0.38/trimmomatic-0.38.jar" unless -e "$software_dir/Trimmomatic-0.38/trimmomatic-0.38.jar";
+        push @missing, "$software_dir/Trimmomatic-0.38/adapters (directory)" unless -d "$software_dir/Trimmomatic-0.38/adapters";
+    }
+    if ( $ORF_predictor eq 'TransDecoder' ) {
+        foreach my $p (qw/TransDecoder.LongOrfs TransDecoder.Predict/) {
+            push @missing, "$software_dir/TransDecoder-v5.5.0/$p (the modified TransDecoder is required)" unless -e "$software_dir/TransDecoder-v5.5.0/$p";
         }
     }
     else {
-        foreach ( @_ ) {
-            print STDERR (localtime) . ": CMD: $_\n";
-            system($_) == 0 or die "failed to execute: $_\n";
-        }
-        open OUT, ">", "$ok_file" or die $!; close OUT;
+        # TIdeS的可执行程序名由04Transfrag2ORF自身的默认值决定，这里接受 tides.py 或 tides 任一存在于PATH中
+        push @missing, "tides.py or tides (TIdeS)" unless &find_in_path('tides.py') || &find_in_path('tides');
     }
+    die "Error: the following required programs/files are missing:\n  - " . join("\n  - ", @missing) . "\n" if @missing;
+}
 
+# 判断一个步骤是否需要（重新）运行。
+# 逻辑（默认模式）：
+#   - 上游步骤本次重新运行过、参数签名改变、或已完成但输出缺失 => 清理该步骤工作目录后重跑（避免子程序自身的.ok断点导致修改不生效）；
+#   - 仅仅是中断（有签名、无.ok）=> 保留工作目录，让子程序断点续跑；
+#   - 已完成且签名一致且输出完整 => 跳过。
+# 使用--ignore_signature时：
+#   - 不再比较.sig签名；只要有.ok且输出完整，就跳过（签名文件缺失/不一致都不影响）；
+#   - 上游步骤本次重新运行过、.ok存在但输出缺失，仍然重跑（清理后从头开始）；
+#   - 中断的步骤仍保留工作目录，由子程序断点续跑；
+#   - 可选的第6个参数 $hard_sig（"硬签名"）始终会被比较（保存在.hsig文件中），不受--ignore_signature影响，
+#     用于第7步检测分类结果是否改变。
+sub prepare_step {
+    my ($name, $sig, $deps, $workdirs, $outputs, $hard_sig) = @_;
+    my $ok    = "$tmp_dir/$name.ok";
+    my $sigf  = "$tmp_dir/$name.sig";
+    my $hsigf = "$tmp_dir/$name.hsig";
+    my $ignore_sig = $o{ignore_signature} ? 1 : 0;
+    my $dirty = scalar( grep { $reran{$_} } @$deps ) ? 1 : 0;
+    my ($old, $old_hard);
+    if ( -e $sigf )  { open my $fh, "<", $sigf  or die $!; local $/; $old      = <$fh>; close $fh; }
+    if ( -e $hsigf ) { open my $fh, "<", $hsigf or die $!; local $/; $old_hard = <$fh>; close $fh; }
+    my $outs_ok = scalar( grep { !( -s $_ ) } @$outputs ) ? 0 : 1;
+    # 硬签名改变（或此前没有记录）=> 必须重跑
+    my $hard_changed = ( defined $hard_sig && ( !defined $old_hard || $old_hard ne $hard_sig ) ) ? 1 : 0;
+
+    if ( !$dirty && -e $ok && $outs_ok && !$hard_changed ) {
+        if ($ignore_sig) {
+            # 不检查.sig：直接跳过。签名文件缺失时补写一份，方便之后不带--ignore_signature续跑；已有的.sig不改动。
+            print STDERR "Step $name: signature check ignored (--ignore_signature).\n" if defined $old && $old ne $sig;
+            unless ( defined $old ) { open my $fh, ">", $sigf or die $!; print $fh $sig; close $fh; }
+            return 0;
+        }
+        return 0 if defined $old && $old eq $sig;
+        unless ( defined $old ) {    # 旧版本流程留下的.ok文件，没有签名：直接沿用
+            open my $fh, ">", $sigf or die $!; print $fh $sig; close $fh;
+            return 0;
+        }
+    }
+    my $sig_changed = ( !$ignore_sig && defined $old && $old ne $sig ) ? 1 : 0;
+    if ( $dirty || -e $ok || $sig_changed || $hard_changed ) {
+        print STDERR "Step $name: upstream results or parameters changed (or outputs are missing), re-running it from scratch.\n";
+        foreach my $d (@$workdirs) { remove_tree($d) if -d $d; }
+        unlink $ok if -e $ok;
+        foreach my $f (@$outputs) { unlink $f if -e $f; }
+    }
+    open my $fh, ">", $sigf or die "Can not create file $sigf, $!\n";
+    print $fh $sig; close $fh;
+    if ( defined $hard_sig ) {
+        open my $hfh, ">", $hsigf or die "Can not create file $hsigf, $!\n";
+        print $hfh $hard_sig; close $hfh;
+    }
+    $reran{$name} = 1;
     return 1;
 }
 
+sub print_log_tail {
+    my ($log, $n) = @_;
+    return unless defined $log && -s $log;
+    open my $fh, "<", $log or return;
+    my @l = <$fh>; close $fh;
+    my @t = @l > $n ? @l[ -$n .. -1 ] : @l;
+    print STDERR "---- last lines of $log ----\n", @t, "----------------------------\n";
+}
 
-sub get_usage_english {
-my $usage = <<USAGE;
+# 顺序执行命令，检查输出文件非空，并写入.ok标记文件。
+sub run_cmds {
+    my ($name, $cmds, $outputs, $log) = @_;
+    foreach my $c (@$cmds) {
+        print STDERR &now() . ": CMD: $c\n";
+        if ( system($c) != 0 ) {
+            &print_log_tail($log, 20);
+            die "Error: step $name failed while executing:\n  $c\n";
+        }
+    }
+    foreach my $f (@$outputs) {
+        next if -s $f;
+        &print_log_tail($log, 20);
+        die "Error: step $name finished but its output file $f is missing or empty (e.g. no transcript/gene model was obtained; please check the input data and the logs).\n";
+    }
+    open my $ok, ">", "$tmp_dir/$name.ok" or die "Can not create .ok file for $name, $!\n";
+    print $ok &now() . "\n"; close $ok;
+    return 1;
+}
+
+# 并行运行多个相互独立的步骤：全部启动后等待全部结束；只要有一个失败，就在全部结束后报错退出。
+sub run_parallel_jobs {
+    my @jobs = @_;
+    my %running;
+    foreach my $j (@jobs) {
+        unless ( &prepare_step($j->{name}, $j->{sig}, $j->{deps}, $j->{work}, $j->{outs}) ) {
+            print STDERR "Job $j->{name}: already finished, skipped.\n";
+            next;
+        }
+        my $pid = fork();
+        die "Error: failed to fork the process for job '$j->{name}': $!\n" unless defined $pid;
+        if ( $pid == 0 ) {
+            my $ok = eval { &run_cmds($j->{name}, $j->{cmds}, $j->{outs}, $j->{log}); 1 };
+            unless ($ok) { print STDERR "Error: job '$j->{name}' failed: $@"; POSIX::_exit(1); }
+            POSIX::_exit(0);
+        }
+        $running{$pid} = $j->{name};
+    }
+    my @failed;
+    while ( %running ) {
+        my $pid = wait();
+        last if $pid == -1;
+        my $name = delete $running{$pid};
+        next unless defined $name;
+        if ( $? == 0 ) { print STDERR &now() . ": Job '$name' finished.\n"; }
+        else { push @failed, $name; }
+    }
+    die "Error: the following parallel job(s) failed: " . join(", ", @failed) . "\n" if @failed;
+    return 1;
+}
+
+# 自然排序比较两个字符串（chr2 排在 chr10 之前）：数字段按数值比较，其余按字符串比较。
+sub natural_cmp {
+    my ($s, $t) = @_;
+    my @x = $s =~ m/(\d+|\D+)/g;
+    my @y = $t =~ m/(\d+|\D+)/g;
+    while ( @x && @y ) {
+        my ($p, $q) = ( shift @x, shift @y );
+        my $c;
+        if ( $p =~ m/^\d/ && $q =~ m/^\d/ ) { $c = ( $p <=> $q ) || ( length($p) <=> length($q) ); }
+        else                                { $c = $p cmp $q; }
+        return $c if $c;
+    }
+    return ( @x <=> @y ) || ( $s cmp $t );
+}
+
+# 将多个转录本比对结果文件（伪GFF3格式）合并为一个文件。
+# 输入文件中，每份数据（一个转录本的比对结果，由若干cDNA_match行组成）之间以空行（\n\n）分隔，
+# 同一份数据内各行第9列的ID相同。为稳妥起见，即使缺少空行，第9列ID发生变化时也视为新的一份数据。
+# 每份数据作为一个整体参与排序，排序依据依次为：
+#   1. 染色体名称（自然排序）；
+#   2. 该份数据cDNA_match的起始坐标（各行中的最小起始坐标）；
+#   3. 该份数据cDNA_match的结束坐标（各行中的最大结束坐标）；
+#   4. 染色体正负链（+ 在前，- 其次，. 最后；多行时取第一个+/-）；
+#   5. 输入顺序（保证结果稳定）。
+# 每份数据内部各行保持原有顺序。输出时各份数据之间以一个空行分隔。
+# 输入文件中的空行和以#开头的注释行不输出，仅保留各文件开头的"##"指令行（如##gff-version 3，去重后写在文件最前面）。
+sub merge_sort_alignment_gff3 {
+    my ($dst, @src) = @_;
+    foreach my $s (@src) {
+        die "Error: the file $s is missing, can not merge the transcript alignments into $dst (if step 4 was skipped as already finished, it was finished without --output_alignment_GFF3; delete the corresponding d.Transfrag2ORF_*.ok files in the temporary directory and run again).\n" unless -e $s;
+    }
+    my (@blocks, @headers, %seen_header);
+    my $idx = 0;
+    foreach my $s (@src) {
+        open my $in, "<", $s or die "Error: can not open file $s, $!\n";
+        my ($cur, $data_seen) = (undef, 0);
+        while ( my $line = <$in> ) {
+            $line =~ s/\r?\n$//;
+            if ( $line =~ m/^\s*$/ ) {    # 空行：当前这份数据结束
+                undef $cur;
+                next;
+            }
+            if ( $line =~ m/^#/ ) {
+                if ( !$data_seen && $line =~ m/^##/ && !$seen_header{$line}++ ) { push @headers, $line; }
+                next;
+            }
+            $data_seen = 1;
+            my @f = split /\t/, $line, 9;
+            my $id = ( @f >= 9 && $f[8] =~ m/(?:^|;)ID=([^;\s]+)/ ) ? $1 : '';
+            # 没有当前数据，或第9列ID与当前数据不同（缺少空行分隔的情况），则开始新的一份数据
+            if ( !defined $cur || ( $id ne '' && $cur->{id} ne '' && $cur->{id} ne $id ) ) {
+                $cur = { id => $id, chr => ( $f[0] // '' ), start => undef, end => undef,
+                         strand => '.', idx => $idx ++, lines => [] };
+                push @blocks, $cur;
+            }
+            $cur->{id} = $id if $cur->{id} eq '' && $id ne '';
+            push @{ $cur->{lines} }, $line;
+            # 更新这份数据的起始-结束坐标（所有cDNA_match行中的最小起始坐标和最大结束坐标）
+            if ( defined $f[3] && defined $f[4] && $f[3] =~ m/^\d+$/ && $f[4] =~ m/^\d+$/ ) {
+                my ($a, $b) = $f[3] <= $f[4] ? ( $f[3], $f[4] ) : ( $f[4], $f[3] );
+                $cur->{start} = $a if !defined $cur->{start} || $a < $cur->{start};
+                $cur->{end}   = $b if !defined $cur->{end}   || $b > $cur->{end};
+            }
+            # 正负链：取第一个+/-（单外显子数据的第7列可能是"."）
+            if ( $cur->{strand} eq '.' && defined $f[6] && ( $f[6] eq '+' || $f[6] eq '-' ) ) {
+                $cur->{strand} = $f[6];
+            }
+        }
+        close $in;
+    }
+    foreach my $b (@blocks) {
+        $b->{start} //= 0;
+        $b->{end}   //= 0;
+    }
+    my %strand_rank = ( '+' => 0, '-' => 1 );
+    my @sorted = sort {
+           natural_cmp( $a->{chr}, $b->{chr} )
+        || $a->{start} <=> $b->{start}
+        || $a->{end}   <=> $b->{end}
+        || ( $strand_rank{ $a->{strand} } // 2 ) <=> ( $strand_rank{ $b->{strand} } // 2 )
+        || $a->{idx}   <=> $b->{idx}
+    } @blocks;
+    open my $out, ">", $dst or die "Error: can not create file $dst, $!\n";
+    print $out "$_\n" foreach @headers;
+    print $out "\n" if @headers && @sorted;
+    # 各份数据之间以一个空行（即 \n\n）分隔
+    print $out join( "\n\n", map { join( "\n", @{ $_->{lines} } ) } @sorted ), "\n" if @sorted;
+    close $out or die "Error: can not write file $dst, $!\n";
+    return 1;
+}
+
+# 复制（优先硬链接）文件到用户指定的输出位置。
+sub keep_copy {
+    my ($src, $dst) = @_;
+    return unless -e $src;
+    return if $src eq $dst;
+    unlink $dst if -e $dst;
+    return if link($src, $dst);
+    copy($src, $dst) or die "Error: can not create file $dst, $!\n";
+}
+
+
+########################################################################
+# 基因模型分类相关子程序
+########################################################################
+
+# 在GFF3行的第9列中添加 Type=xxx 标签（该行已有Type标签时不再重复添加）。
+#   $kind = 'gene' ：Type= 插入到 ID= 标签之后；
+#   $kind = 'mRNA' ：Type= 插入到 Parent= 标签之后。
+# $extra（可选，数组引用）：紧跟在Type=之后依次插入的其它标签（如 Integrity=、CDS_Length=...）；
+#   若该行原本已有同名标签，则先删除旧标签，再按新位置插入。
+# 找不到ID=/Parent=标签时，追加到第9列末尾。
+sub add_type_tag {
+    my ($line, $type, $kind, $extra) = @_;
+    return $line if $line =~ m/(?:^|\t|;)Type=/;
+    $line =~ s/\r?\n$//;
+    my @f = split /\t/, $line, 9;
+    return $line . ";Type=$type\n" if @f < 9;
+    my $anchor = ( defined $kind && $kind eq 'mRNA' ) ? 'Parent' : 'ID';
+    my @a = grep { $_ ne '' } split /;/, $f[8];
+    my @new = ("Type=$type");
+    if ( $extra && @$extra ) {
+        my %skip;
+        foreach my $e (@$extra) { $skip{$1} = 1 if $e =~ m/^([^=]+)=/; }
+        @a = grep { !( $_ =~ m/^([^=]+)=/ && $skip{$1} ) } @a;
+        push @new, @$extra;
+    }
+    my $pos = -1;
+    for my $i ( 0 .. $#a ) {
+        if ( $a[$i] =~ m/^\Q$anchor\E=/ ) { $pos = $i; last; }
+    }
+    if ( $pos < 0 ) { push @a, @new; }
+    else            { splice( @a, $pos + 1, 0, @new ); }
+    $f[8] = join( ";", @a );
+    return join( "\t", @f ) . "\n";
+}
+
+# 从第9列的Form信息中提取ORF占转录本的比例（0-1）。
+# Form示例：Form=one_transcript_get_1_gene_model_num1_62.40%  ，取末尾的百分数并除以100。
+# 无法提取时返回undef。
+sub form_ratio {
+    my ($attr) = @_;
+    return undef unless defined $attr && $attr =~ m/(?:^|;)Form=([^;\s]+)/;
+    my $v = $1;
+    return undef unless $v =~ m/_(\d+(?:\.\d+)?)%(?:25)?$/;
+    my $r = $1 / 100;
+    $r = 1 if $r > 1;
+    return $r;
+}
+
+# 计算一个mRNA的CDS总长度、CDS之间的intron数量（相邻CDS片段之间的间隔数）、CDS占exon碱基的比例（由碱基数计算，仅在Form不可用时作为备用）
+sub model_metrics {
+    my ($cds, $exon) = @_;
+    my @c = sort { $a->[0] <=> $b->[0] || $a->[1] <=> $b->[1] } @{ $cds || [] };
+    my ($len, $intron, $prev_end) = (0, 0);
+    foreach my $x (@c) {
+        $len += $x->[1] - $x->[0] + 1;
+        $intron ++ if defined $prev_end && $x->[0] > $prev_end + 1;
+        $prev_end = $x->[1] if !defined $prev_end || $x->[1] > $prev_end;
+    }
+    my $exon_len = 0;
+    $exon_len += $_->[1] - $_->[0] + 1 foreach @{ $exon || [] };
+    my $ratio = $exon_len > 0 ? $len / $exon_len : ( $len > 0 ? 1 : 0 );
+    $ratio = 1 if $ratio > 1;
+    return ($len, $intron, $ratio);
+}
+
+# 解析GFF3文件，返回 (\%models, \@gene_order, \%mrna_info)。
+# $models->{gene_id} = { complete => 0/1, cds_len => int, cds_intron => int, cds_ratio => float, form_ok => 0/1 }
+# cds_ratio优先取自mRNA行Form信息末尾的百分数，其次取自gene行的Form信息，都没有时才由CDS和exon碱基数计算（form_ok=0）。
+# 一个基因含多个mRNA时，取CDS最长的mRNA计算指标。
+# $mrna_info->{mrna_id} = { integrity => str, cds_len => int, cds_intron => int, cds_ratio => float }
+# 为每个mRNA各自的指标（用于在mRNA行输出Integrity/CDS_Length/CDS_intron_Num/CDS_exon_Ratio）；
+# 完整性优先取mRNA行的Integrity，其次取gene行的Integrity；比例的取值规则与上面相同。
+sub parse_gene_models {
+    my ($file) = @_;
+    my (%gene, @order, %mrna2gene, %mrna_integrity, %mrna_parts, %mrna_form);
+    open my $fh, "<", $file or die "Can not open file $file, $!\n";
+    while ( my $line = <$fh> ) {
+        next if $line =~ m/^#/;
+        $line =~ s/\r?\n$//;
+        my @f = split /\t/, $line, 9;
+        next unless @f >= 9;
+        my ($type, $s, $e, $attr) = @f[2, 3, 4, 8];
+        if ( $type eq 'gene' ) {
+            next unless $attr =~ m/(?:^|;)ID=([^;\s]+)/;
+            my $id = $1;
+            push @order, $id unless exists $gene{$id};
+            my %g;
+            $g{integrity} = $1 if $attr =~ m/(?:^|;)Integrity=([^;\s]+)/;
+            my $fr = &form_ratio($attr);
+            $g{form} = $fr if defined $fr;
+            $gene{$id} = \%g;
+        }
+        elsif ( $type eq 'mRNA' ) {
+            next unless $attr =~ m/(?:^|;)ID=([^;\s]+)/;
+            my $id = $1;
+            my ($parent) = $attr =~ m/(?:^|;)Parent=([^;\s,]+)/;
+            $mrna2gene{$id} = $parent if defined $parent;
+            $mrna_integrity{$id} = $1 if $attr =~ m/(?:^|;)Integrity=([^;\s]+)/;
+            my $fr = &form_ratio($attr);
+            $mrna_form{$id} = $fr if defined $fr;
+        }
+        elsif ( $type eq 'exon' || $type eq 'CDS' ) {
+            next unless $attr =~ m/(?:^|;)Parent=([^;\s]+)/;
+            foreach my $p ( split /,/, $1 ) { push @{ $mrna_parts{$p}{$type} }, [ $s, $e ]; }
+        }
+    }
+    close $fh;
+
+    my (%models, %mrna_info);
+    foreach my $g (@order) { $models{$g} = { cds_len => 0, cds_intron => 0, cds_ratio => 0, complete => 0, form_ok => 0 }; }
+    foreach my $m ( sort keys %mrna2gene ) {
+        my $g = $mrna2gene{$m};
+        next unless exists $models{$g};
+        my ($len, $intron, $calc_ratio) = &model_metrics( $mrna_parts{$m}{CDS}, $mrna_parts{$m}{exon} );
+        # 每个mRNA自己的指标
+        {
+            my $r_m = $mrna_form{$m} // $gene{$g}{form} // $calc_ratio;
+            my $i_m = $mrna_integrity{$m} // $gene{$g}{integrity} // 'NA';
+            $mrna_info{$m} = { integrity => $i_m, cds_len => $len, cds_intron => $intron, cds_ratio => $r_m };
+        }
+        if ( $len > $models{$g}{cds_len} ) {
+            my $r = $mrna_form{$m} // $gene{$g}{form};
+            my $form_ok = defined $r ? 1 : 0;
+            $r = $calc_ratio unless defined $r;
+            @{ $models{$g} }{qw/cds_len cds_intron cds_ratio form_ok/} = ($len, $intron, $r, $form_ok);
+            $models{$g}{mrna_integrity} = $mrna_integrity{$m};
+        }
+    }
+    foreach my $g (@order) {
+        my $integrity = $gene{$g}{integrity} // $models{$g}{mrna_integrity} // '';
+        $models{$g}{complete} = ( $integrity eq 'complete' ) ? 1 : 0;
+        # 没有任何CDS的基因（异常情况），仍尝试使用gene行的Form
+        if ( !$models{$g}{form_ok} && defined $gene{$g}{form} ) {
+            $models{$g}{cds_ratio} = $gene{$g}{form};
+            $models{$g}{form_ok}   = 1;
+        }
+    }
+    return ( \%models, \@order, \%mrna_info );
+}
+
+# 分位数阈值：从大到小排序后，取排在 ceil(q*N) 位置的值，即至少 q 比例的元素>=该值。
+sub quantile_threshold {
+    my ($vals, $q) = @_;
+    my @s = sort { $b <=> $a } @$vals;
+    my $n = scalar @s;
+    my $idx = POSIX::ceil( $q * $n - 1e-9 ) - 1;
+    $idx = 0 if $idx < 0;
+    $idx = $n - 1 if $idx > $n - 1;
+    return $s[$idx];
+}
+
+# 确定基因模型分类所用的全部阈值。
+# 手动指定的阈值直接使用；未指定的CDS长度、CDS间intron数量阈值，根据分位数从参考基因模型中自动计算。
+# 参考基因模型：compare_2gff3_stats.txt中，Sam2Transfrag与stringtie两种算法有重叠并被保留（未再被删除）的基因模型，
+# 其指标取自第5步整合去冗余后的结果。
+sub determine_thresholds {
+    my ($merged_gff3, $stats_file) = @_;
+    my %t = (
+        cds_length_high => $o{cds_length_high},
+        cds_length_low  => $o{cds_length_low},
+        cds_intron_high => $o{cds_intron_high},
+        cds_intron_low  => $o{cds_intron_low},
+        cds_ratio_high  => $o{cds_ratio_high},
+        cds_ratio_low   => $o{cds_ratio_low},
+    );
+    my @need = grep { !defined $t{$_} } qw/cds_length_high cds_length_low cds_intron_high cds_intron_low/;
+    print STDERR "  Gene model classification: quantile_high=$o{quantile_high}, quantile_low=$o{quantile_low}\n";
+    if (@need) {
+        my ($models) = &parse_gene_models($merged_gff3);
+        my (%kept, %deleted);
+        if ( -s $stats_file ) {
+            open my $fh, "<", $stats_file or die "Can not open file $stats_file, $!\n";
+            while (<$fh>) {
+                # 区间类型默认为CDS
+                next unless m/^Delete gene (\S+) \(Score:[^)]*\), for its (?:CDS|exon) coverage ratio with gene (\S+) \(Score:/;
+                my ($del, $keep) = ($1, $2);
+                $deleted{$del} = 1;
+                (my $p1 = $del)  =~ s/\d+$//;
+                (my $p2 = $keep) =~ s/\d+$//;
+                next if $p1 eq $p2;    # 只使用两种算法之间相互重叠的基因模型
+                $kept{$keep} = 1;
+            }
+            close $fh;
+        }
+        my @ref = grep { !$deleted{$_} && exists $models->{$_} } sort keys %kept;
+        my $ref_desc = "gene models predicted by both Sam2Transfrag and stringtie (overlapping and retained)";
+        if ( !@ref ) {
+            print STDERR "  Warning: no reference gene model was extracted from $stats_file (missing or empty); all gene models after step 5 are used as the reference instead.\n";
+            @ref = sort keys %$models;
+            $ref_desc = "all gene models after step 5";
+        }
+        die "Error: no gene model was found in $merged_gff3 to calculate the classification thresholds.\n" unless @ref;
+        print STDERR "  Warning: only " . scalar(@ref) . " reference gene models are available, the automatic thresholds may be unreliable.\n" if @ref < 100;
+        print STDERR "  Reference gene models for the automatic thresholds: " . scalar(@ref) . " ($ref_desc)\n";
+        my @lens    = map { $models->{$_}{cds_len} }    @ref;
+        my @introns = map { $models->{$_}{cds_intron} } @ref;
+        $t{cds_length_high} //= &quantile_threshold(\@lens,    $o{quantile_high});
+        $t{cds_length_low}  //= &quantile_threshold(\@lens,    $o{quantile_low});
+        $t{cds_intron_high} //= &quantile_threshold(\@introns, $o{quantile_high});
+        $t{cds_intron_low}  //= &quantile_threshold(\@introns, $o{quantile_low});
+    }
+    die "Error: the CDS length threshold of class C ($t{cds_length_low}) is larger than that of class A/B ($t{cds_length_high}); please check --cds_length_high/--cds_length_low.\n"
+        if $t{cds_length_low} > $t{cds_length_high};
+    die "Error: the CDS intron number threshold of class C ($t{cds_intron_low}) is larger than that of class A/B ($t{cds_intron_high}); please check --cds_intron_high/--cds_intron_low.\n"
+        if $t{cds_intron_low} > $t{cds_intron_high};
+    print STDERR "  Thresholds of class A (excellent) : complete gene, CDS length >= $t{cds_length_high} bp, CDS introns >= $t{cds_intron_high}, CDS/exon ratio (Form) >= $t{cds_ratio_high}\n";
+    print STDERR "  Thresholds of class B (good)      : CDS length >= $t{cds_length_high} bp, CDS introns >= $t{cds_intron_high}, CDS/exon ratio (Form) >= $t{cds_ratio_low}\n";
+    print STDERR "  Thresholds of class C (fair)      : CDS length >= $t{cds_length_low} bp, CDS introns >= $t{cds_intron_low}, CDS/exon ratio (Form) >= $t{cds_ratio_low}\n";
+    print STDERR "  Class D (poor): all the other gene models\n";
+    return \%t;
+}
+
+# 将一个基因模型分类为 A / B / C / D
+#   A：完整，且 CDS长度>=较长阈值、CDS间intron数>=较大阈值、CDS占exon比例>=较大阈值
+#   B：CDS长度>=较长阈值、CDS间intron数>=较大阈值、CDS占exon比例>=较小阈值（不要求完整性，且不属于A）
+#   C：CDS长度>=较短阈值、CDS间intron数>=较小阈值、CDS占exon比例>=较小阈值（不属于A、B）
+#   D：其它
+sub classify_model {
+    my ($m, $t) = @_;
+    my $eps = 1e-9;
+    # CDS长度和CDS间intron数均达到"较大"阈值
+    my $len_intron_high = ( $m->{cds_len} >= $t->{cds_length_high} && $m->{cds_intron} >= $t->{cds_intron_high} ) ? 1 : 0;
+    return 'A' if $len_intron_high && $m->{complete} && $m->{cds_ratio} + $eps >= $t->{cds_ratio_high};
+    return 'B' if $len_intron_high && $m->{cds_ratio} + $eps >= $t->{cds_ratio_low};
+    return 'C' if $m->{cds_len} >= $t->{cds_length_low} && $m->{cds_intron} >= $t->{cds_intron_low} && $m->{cds_ratio} + $eps >= $t->{cds_ratio_low};
+    return 'D';
+}
+
+# 读取输入GFF3，写入输出文件（基因ID不变）：
+#   gene行：Type=标签紧跟在ID=标签之后；
+#   mRNA行：Type=标签紧跟在Parent=标签之后，其后依次为
+#           Integrity=（完整性）、CDS_Length=（CDS长度）、CDS_intron_Num=（CDS intron数量）、CDS_exon_Ratio=（CDS/exon长度比例）。
+sub write_classified_gff3 {
+    my ($src, $dst, $class, $mrna_info) = @_;
+    $mrna_info ||= {};
+    open my $in,  "<", $src or die "Can not open file $src, $!\n";
+    open my $out, ">", $dst or die "Can not create file $dst, $!\n";
+    my $cur_type;
+    while ( my $line = <$in> ) {
+        my $is_gene = ( $line =~ m/^[^\t]*\t[^\t]*\tgene\t/ ) ? 1 : 0;
+        my $is_mrna = ( $line =~ m/^[^\t]*\t[^\t]*\tmRNA\t/ ) ? 1 : 0;
+        if ($is_gene) {
+            undef $cur_type;
+            if ( $line =~ m/(?:^|\t|;)ID=([^;\s]+)/ ) {
+                $cur_type = $gene_type_name{ $class->{$1} // 'D' };
+            }
+            $line = &add_type_tag($line, $cur_type, 'gene') if defined $cur_type;
+        }
+        elsif ( $is_mrna && defined $cur_type ) {
+            my $extra;
+            if ( $line =~ m/(?:^|\t|;)ID=([^;\s]+)/ && exists $mrna_info->{$1} ) {
+                my $mi = $mrna_info->{$1};
+                $extra = [
+                    "Integrity=$mi->{integrity}",
+                    "CDS_Length=$mi->{cds_len}",
+                    "CDS_intron_Num=$mi->{cds_intron}",
+                    sprintf( "CDS_exon_Ratio=%.4f", $mi->{cds_ratio} ),
+                ];
+            }
+            $line = &add_type_tag($line, $cur_type, 'mRNA', $extra);
+        }
+        print $out $line;
+    }
+    close $in;
+    close $out or die "Error: can not write file $dst, $!\n";
+    return 1;
+}
+
+# 读取已分类GFF3中各gene行的Type标签，返回 (gene_id => type_name) 哈希。
+sub read_gene_types {
+    my ($file) = @_;
+    my %h;
+    open my $fh, "<", $file or die "Can not open file $file, $!\n";
+    while (<$fh>) {
+        next if /^#/;
+        my @f = split /\t/, $_, 9;
+        next unless @f >= 9 && $f[2] eq 'gene';
+        next unless $f[8] =~ m/(?:^|;)ID=([^;\s]+)/;
+        my $id = $1;
+        if ( $f[8] =~ m/(?:^|;)Type=([^;\s]+)/ ) { $h{$id} = $1; }
+    }
+    close $fh;
+    return %h;
+}
+
+
+########################################################################
+# 英文用法说明（位于程序最尾部；中文用法说明位于程序前部）
+########################################################################
+sub usage_en {
+    (my $t = <<'USAGE_EN') =~ s/__PROG__/$0/g;
 Usage:
-    $0 [options] genome_seq.fasta > NGSReads_prediction.gff3
+    __PROG__ [options] genome_seq.fasta > NGSReads_prediction.gff3
 
-    This program can use RNA-Seq data (fastq/fq.gz/sam/bam format) to predict gene models for your species' whole genome sequence, and then output the results in GFF3 format to standard output.
+    This program predicts gene models for a genome sequence using RNA-Seq data, and writes the results in GFF3 format to standard output.
 
-    The process and how it works are as follows: 
-    (1) First, we use the Trimmomatic software to preprocess the input FASTQ format data (it supports multiple datasets and .gz compressed files) in order to obtain clean data. 
-    (2) Then, we use HISAT2 software to align the quality-controlled second-generation sequencing reads with the reference genome sequence to get a SAM alignment result file. It also supports input SAM/BAM files at this stage. 
-    (3) Next, we utilize the Sam2Transfrag module in GETA software to convert the SAM/BAM file into transcript sequences. 
-    (4) After that, we employ the Transfrag2ORF module in GETA software for ORF prediction on transcript sequences to obtain gene models. 
-    (5) Subsequently, we apply GFF3_filling_gene_models_Parallel command in GETA software for filling in ends of predicted gene models using homologous protein gene models. 
-    (6) We then use GFF3Clear command in GETA software for removing duplicate gene models. 
-    (7) Following that, we utilize fillingEndsOfGeneModels command in GETA software for forcefully completing ends of incomplete gene models. 
-    (8) Finally, we classify and statistically analyze the gene models and output results.
+    Workflow:
+    (1) Call NGSReads_prediction.01RNASeq2Sam to perform quality control (Trimmomatic), chunked parallel alignment (HISAT2 or STAR), and sorting/merging of the RNA-Seq data into one coordinate-sorted BAM file. The input can be paired-end FASTQ, single-end FASTQ, or SAM/BAM files (FASTQ may be .gz compressed), used alone or in any combination.
+    (2) Call NGSReads_prediction.02Sam2Transfrag to assemble transcripts (including alternative splicing analysis) from the BAM file with the Sam2Transfrag algorithm, producing a GFF3 file plus intron and exon base-depth information.
+    (3) Call NGSReads_prediction.03Stringtie to assemble transcripts from the same BAM file with StringTie, producing a GFF3 file.
+    (4) Call NGSReads_prediction.04Transfrag2ORF to perform ORF analysis on the transcripts from Sam2Transfrag and StringTie separately and predict gene models. The two analyses run in parallel, sharing the threads so that the total does not exceed --cpu. The ORF predictor is chosen by --ORF_predictor (TransDecoder or TIdeS); TIdeS requires homologous proteins as its database; with TIdeS, complete and partial (5'/3' incomplete) ORFs are both predicted by default.
+    (5) Call GFF3_merging_and_removing_redundancy to merge the gene models of the two methods and remove redundancy (adjustable with --overlap_coverage; the start/stop codons used to judge gene completeness are determined automatically from --genetic_code); the result is saved as results/merged.ORF.gff3.
+    (6) Classify the gene models of step 5 into four accuracy classes A/B/C/D according to gene completeness, CDS length, the number of introns between CDSs and the proportion of exon bases that are CDS (taken from the Form information in column 9 of the GFF3 file), and mark the class with a Type= tag in column 9 (on gene lines the Type= tag directly follows ID=; on mRNA lines it directly follows Parent=, and is followed by Integrity=, CDS_Length=, CDS_intron_Num= and CDS_exon_Ratio=). The result is saved as results/merged_classified.ORF.gff3.
+    (7) Call fillingEndsOfGeneModels to forcibly fill in the 5' or 3' ends of the incomplete gene models in the classified result of step 6 (can be skipped with --no_filling_ends; the start/stop codons are determined automatically from --genetic_code); the filled result is saved as results/merged_classified.ORF.fillEnd.gff3. Then write the final gene models in GFF3 format to standard output (starting with ##gff-version 3; gene IDs are uniformly renamed, default prefix RNASeqORF), and report statistics (number of gene models, integrity, filling, classification, ...) to standard error.
 
-    Usage instructions:
-    (1) This program can handle paired-end sequencing data, single-end sequencing data, and SAM/BAM data in single or a mix of these. It also supports .gz compressed files and multiple groups of the same type of data. 
-    (2) When running Trimmomatic, HISAT2, and Sam2Transfrag for analysis, you can adjust their detailed parameters using a configuration file method. The default parameters are found in $software_dir/conf_all_defaults.txt. 
-    (3) When using Transfrag2ORF for analysis, it uses Transdecoder software to analyze transcripts for ORFs. Each ORF gets a gene model; however, alternative splicing may lead to redundant gene models. 
-    (4) Step 5 is optional; if homologous protein gene models are used for filling in, accurate complete gene models can be obtained. However, step 7 forces filling in and may not always result in accurate gene models. 
-    (5) In the final step of this workflow, gene models are divided into four categories with statistical numbers provided: A (Excellent):  Complete gene models predicted by transcripts, or filled in by homolog, meanwhile the ORF occupies at least 50% of the transcript sequence; B (Good): Other Complete gene models predicted by transcripts, or filled in by homolog; C (Fair): Complete gene models after enforcing padding at the 5' or 3' end of the gene model; D (Poor): Gene models that remain incomplete even after being forced to fill them out.
-    (6) GFF3 results are provided in the standard output, and The interpretation of the labels in the ninth column of the GFF3 file is as follows: Form, which indicates the number of ORFs predicted on the transcript corresponding to the current gene model and the pertange of ORF in transcript sequence; Integrity, representing the completeness of the predicted ORF for this gene model; Filled_by_homolog=True, indicating that although there was an incomplete ORF prediction, it has been filled in by a homologous protein prediction gene model; illing2Complete=True, showing that despite an incomplete ORF prediction, it has been completed through forced terminal filling; Filling2Uncomplete=True, signifying that even after being filled by forced terminal filling due to an incomplete ORF prediction, it remains incomplete; FragmentCount reveals how many read pairs support each gene model; JunctionThreshold denotes the lowest intron sequencing depth threshold used to obtain its transcript; BaseDepthThreshold represents the minimum base sequencing depth threshold used to obtain its transcript; BaseDepthThreshold is the minimum sequencing depth required to obtain its transcript; MaxDepth represents the highest sequencing depth for the corresponding transcript; RNASeq_exon_base_depth_median indicates the median sequencing depth for the corresponding transcript.
-
+    Usage notes:
+    (1) Quality control, alignment and sorting/merging are all done by NGSReads_prediction.01RNASeq2Sam; this program only passes the parameters through. Multiple libraries of the same type can be given, separated by commas. Files given by --sam must end with .sam, .bam or .cram.
+    (2) [Strandedness] --strand_specific supports only the standard RF (dUTP) library type, i.e. read1 maps to the minus strand of the transcript (Illumina TruSeq Stranded etc.). When set, Sam2Transfrag infers the strand directly from the SAM FLAG, StringTie is run with --rf, and HISAT2 is run with --rna-strandness RF; STAR uses identical alignment parameters whether or not it is set (XS tags are added to spliced reads only). All input data must have the same strandedness.
+    (3) [--sam input when not strand-specific] Without --strand_specific, Sam2Transfrag relies on the XS tag of spliced alignments to determine intron strand; spliced alignments without XS are ignored. Therefore, alignments given by --sam should be produced by HISAT2 (--dta) or STAR (--outSAMstrandField intronMotif) or similar, keeping the XS tag. The reference names must match the genome FASTA.
+    (4) [Key parameters of the sub-programs] This program uses no configuration file. Only a few key parameters are kept and passed directly to the sub-programs; they are grouped together as one category, "Key parameters of the sub-programs", and organized by the sub-program that receives them:
+        Passed to NGSReads_prediction.01RNASeq2Sam: --pe_used_pair_num, --se_used_read_num, --trimmomatic_opts, --hisat2_opts, --star_opts. Once --trimmomatic_opts, --hisat2_opts or --star_opts is set, it REPLACES the built-in default parameters of that software as a whole (it is not appended to them), so write out the complete parameter string; values that contain spaces or start with "-" must be quoted, e.g. --hisat2_opts="--dta -k 5". These three options have no effect when only --sam input is given (no quality control or alignment is performed).
+        Passed to NGSReads_prediction.02Sam2Transfrag: --fraction, --min_expressed_base_depth, --max_expressed_base_depth, --min_junction_depth, --max_junction_depth, --min_fragment_count_per_transfrag. Built-in defaults when not set: --fraction 0.05 --min_expressed_base_depth 2 --max_expressed_base_depth 50 --min_junction_depth 2 --max_junction_depth 50 --min_fragment_count_per_transfrag 10; they are always passed to the sub-program explicitly.
+        Passed to NGSReads_prediction.04Transfrag2ORF: --ORF_predictor, --min_protein_length, --genetic_code, --TIdeS_partial/--noTIdeS_partial. The other options of 04Transfrag2ORF (e.g. the TIdeS executable, the clustering identity used for model training, ...) use the defaults of that sub-program.
+        Passed to GFF3_merging_and_removing_redundancy: --overlap_coverage (the default of that sub-program is used when it is not set).
+        All the other options of the sub-programs are no longer passed through this program and use the defaults of the sub-programs themselves; NGSReads_prediction.03Stringtie receives no key parameters from this program, and stringtie is called from PATH.
+        The following options are set by this program itself: --input_single_sorted_BAM_file, --tmp_dir, --cpu, --strand_specific (02), --strand_specific_library (03), --intron_info_out, --base_depth_out, --gene_prefix (03, 04), --source (04), --start_codon and --stop_codon (GFF3_merging_and_removing_redundancy, fillingEndsOfGeneModels), --keep_tmp_files. For the detailed options of the sub-programs, see the --help output of each of them.
+    (5) In step 4 each ORF yields one gene model, so alternative isoforms of the same gene produce redundant models, which are removed in step 5. To avoid gene ID collisions when merging, the two ORF analyses use different gene prefixes (Sam2Transfrag_ORF, stringtie_ORF); the gene IDs of the final result are uniformly renamed to RNASeqORF000001, RNASeqORF000002 ... by default; use --gene_prefix to change the prefix.
+    (6) Use --output_raw_GFF3 to obtain the result of step 6, i.e. after classification and before the forced end filling of step 7 (identical to results/merged_classified.ORF.gff3, with the Type classification tags). These are highly accurate but contain more incomplete gene models. Gene models completed by forced end filling in step 7 are not necessarily accurate; please examine them with care.
+    (7) TIdeS requires homologous proteins as its database. If --homolog_protein is not provided, --ORF_predictor is automatically set to TransDecoder (with a warning if TIdeS was requested). If --homolog_protein is provided and --ORF_predictor is not set, TIdeS is used. --min_protein_length applies to both predictors (TransDecoder: passed to -m; TIdeS: multiplied by 3 and passed to --min-orf); the genetic code table number of --genetic_code only applies to the ORF prediction of TIdeS (but it also determines the start/stop codons of steps 5 and 7), and --TIdeS_partial/--noTIdeS_partial only applies to TIdeS.
+        When TIdeS is used, this program passes --TIdeS_partial to 04Transfrag2ORF by default, i.e. tides predicts 5'/3' partial ORFs in addition to complete ORFs (with start and stop codons). Integrity is then judged from the start/stop codons on the genome sequence, so gene models can be complete, 5prime_partial, 3prime_partial or internal, and classes A and B are distinguished by both gene completeness and the CDS/exon ratio. If only complete ORFs are wanted, add --noTIdeS_partial: every gene model is then labeled Integrity=complete, the "complete gene" condition of the classification is satisfied by all models, and classes A and B are distinguished only by the CDS/exon ratio.
+    (8) [Resuming] When a step finishes, a .ok marker and a .sig signature file (recording the command and input file information) are written to the temporary directory. When re-run with the same --tmp_dir: finished steps whose parameters and inputs are unchanged are skipped; a step interrupted midway is resumed by its sub-program; if the parameters or inputs of a step were changed (including whether --keep_tmp_files is used), that step and all downstream steps are cleaned and re-run automatically. The gene model classification is done in step 6 and is recalculated in every run (it takes very little time), so changing the classification parameters does not require re-running steps 1 to 5; if the classified result changes, step 7 is re-run automatically.
+        [Ignoring signatures] With --ignore_signature the .sig signature files are no longer used to decide whether parameters or inputs changed: any step that has a .ok marker and non-empty output files is skipped, even if its command-line parameters or the path/size/modification time of its input files have changed (e.g. the temporary directory or input files were moved, files were touched, or only unimportant parameters were changed). In this mode: (a) a step interrupted midway is still resumed by its sub-program and is not cleaned; (b) if an upstream step was actually re-executed in this run (e.g. its .ok or output file was missing), its downstream steps are still re-run, so that results stay consistent with the upstream; (c) step 7 still checks whether the classified result of step 6 has changed, and is re-run if so; (d) finished steps are NOT re-run when parameters change; to force a step to re-run, delete its .ok file (or its outputs) in the temporary directory manually. This option is only meaningful when an existing --tmp_dir is reused.
+    (9) [Temporary files] The temporary directory of this program (--tmp_dir, holding the results directory, logs and .ok/.sig files) is always kept; the main program never deletes it. The temporary directories of the four sub-programs NGSReads_prediction.01RNASeq2Sam, 02Sam2Transfrag, 03Stringtie and 04Transfrag2ORF (located inside it) are removed by the sub-programs themselves after a successful run by default; with --keep_tmp_files all four sub-programs keep their temporary files. The files in the results directory (including the large alignment.bam) are not affected; if they are no longer needed, delete the whole temporary directory manually after the run (use --alignment_bam_out etc. first to save what you want to keep).
+    (10) Because the sub-programs do not quote paths in the commands they build, the paths of all inputs, outputs and --tmp_dir must not contain whitespace or special shell characters (such as ; & | $ ( ) * ? < > ' " \). Non-ASCII characters such as Chinese are allowed.
+    (11) Common tags in the ninth column of the output GFF3 file:
+        Type: the accuracy class of the gene model (see usage note 13), marked on the gene and mRNA lines (directly after ID= on gene lines, and directly after Parent= on mRNA lines);
+        Form: the number of ORFs predicted on the transcript, and the proportion of the transcript occupied by the ORF, e.g. Form=one_transcript_get_1_gene_model_num1_62.40% ; the percentage at the end is this proportion and is used as the CDS/exon ratio in the classification;
+        Integrity: completeness of the ORF (complete, 5prime_partial, 3prime_partial, internal); on mRNA lines this tag directly follows Type. It describes the originally predicted result and is not modified by the forced end filling;
+        CDS_Length: total CDS length (bp) of the mRNA line;
+        CDS_intron_Num: the number of introns between CDSs of the mRNA line;
+        CDS_exon_Ratio: the CDS/exon length ratio (0-1) of the mRNA line (taken from Form; the same value as used in the classification);
+        Filling2Complete=True: (on mRNA lines) the ORF was incomplete but was completed by forced end filling;
+        Filling2Uncomplete=True: (on mRNA lines) the ORF was incomplete and remains incomplete after forced end filling;
+        FragmentCount: the number of read pairs supporting the gene model;
+        JunctionThreshold: the minimum intron depth threshold used to obtain the transcript;
+        BaseDepthThreshold: the minimum base depth threshold used to obtain the transcript;
+        MaxDepth: the maximum base depth of the transcript;
+        RNASeq_exon_base_depth_median: the median base depth of the transcript.
+    (12) [The results directory] The important results of the sub-programs and main steps are collected in the "results" directory inside the temporary directory:
+        NGSReads_prediction.01RNASeq2Sam: alignment.bam, alignment.bam.bai, alignment.stats (alignment.stats is produced only with FASTQ input);
+        NGSReads_prediction.02Sam2Transfrag: intron.txt, base_depth.txt, Sam2Transfrag.raw.gff3;
+        NGSReads_prediction.03Stringtie: stringtie.raw.gff3;
+        NGSReads_prediction.04Transfrag2ORF: Sam2Transfrag.ORF.gff3, stringtie.ORF.gff3; with --output_alignment_GFF3, Sam2Transfrag.alignment.gff3 and stringtie.alignment.gff3 are also produced (kept in the results directory, and merged, sorted by chromosome name / start-end coordinates of each entry / strand, into the file given by --output_alignment_GFF3);
+        Step 5: merged.ORF.gff3 (the merged gene models after redundancy removal);
+        Step 6: merged_classified.ORF.gff3 (the gene models with the Type classification tags);
+        Step 7: merged_classified.ORF.fillEnd.gff3 (the gene models after forced end filling, gene IDs still the internal IDs of the pipeline; not produced with --no_filling_ends).
+        If other output paths are given by --intron_info_out or --base_depth_out, a hard link is also kept in the results directory. compare_2gff3_stats.txt and the log files stay in the top level of the temporary directory. When resuming from a temporary directory created by an older version of this program, the related steps are re-run because the file paths have changed, and files such as merged.ORF.gff3 and merged_classified.ORF.fillEnd.gff3 left in the top level by the older version are removed automatically.
+    (13) [Gene model classification] In step 6 the gene models are divided into four accuracy classes by the following four indices, and marked with a Type= tag on the gene and mRNA lines in column 9 of the GFF3 file (on gene lines Type= directly follows ID=; on mRNA lines Type= directly follows Parent=, and is followed by four more tags Integrity=, CDS_Length=, CDS_intron_Num= and CDS_exon_Ratio=, giving the completeness, the CDS length, the number of introns between CDSs and the CDS/exon length ratio of that mRNA):
+        Indices: whether the gene is complete (i.e. Integrity=complete; the classification is done before forced end filling, so completeness refers to the originally predicted result); CDS length (bp); the number of introns between CDSs (the gaps between adjacent CDS segments, NOT the gaps between exons); the proportion of exon bases that are CDS (taken from the percentage at the end of the Form value in column 9 of the GFF3 file, e.g. 62.40% means 0.6240; if the mRNA line has no parsable Form, the Form of the gene line is used; if neither has one, the ratio is calculated from the CDS and exon bases and a warning is given). If a gene has several mRNAs, the mRNA with the longest CDS is used.
+        Class A, Type=excellent_gene_models_predicted_by_NGSReads: the gene is complete, and CDS length >= the higher threshold, CDS intron number >= the higher threshold, CDS/exon ratio >= the higher threshold; all four conditions must be met.
+        Class B, Type=good_gene_models_predicted_by_NGSReads: completeness is not required; CDS length >= the higher threshold, CDS intron number >= the higher threshold, CDS/exon ratio >= the lower threshold; all three conditions must be met (and the model is not class A).
+        Class C, Type=fair_gene_models_predicted_by_NGSReads: completeness is not required; CDS length >= the lower threshold, CDS intron number >= the lower threshold, CDS/exon ratio >= the lower threshold; all three conditions must be met (and the model is neither class A nor B).
+        Class D, Type=poor_gene_models_predicted_by_NGSReads: all the other gene models.
+        Thresholds: unless given manually (--cds_length_high etc.), the thresholds of CDS length and CDS intron number are calculated automatically from --quantile_high and --quantile_low. The reference gene models are taken from compare_2gff3_stats.txt in the temporary directory (produced in step 5): the gene models that overlap between the Sam2Transfrag and StringTie methods and were retained after redundancy removal (these are supported by both methods and are more reliable). Their CDS lengths and CDS intron numbers after step 5 are used to calculate the quantiles. All the thresholds and the number of reference gene models are reported in the log (standard error). If compare_2gff3_stats.txt is missing or no reference gene model can be extracted, all gene models after step 5 are used as the reference, with a warning. The CDS/exon ratio thresholds are not calculated automatically; they are set by --cds_ratio_high (used by class A only) and --cds_ratio_low (used by classes B and C).
+    (14) [Start/stop codons] The start and stop codons used in step 5 (merging; gene completeness is judged with them for scoring) and step 7 (end filling) are determined automatically by this program from --genetic_code and passed as --start_codon and --stop_codon to GFF3_merging_and_removing_redundancy and fillingEndsOfGeneModels. They are exactly the codons that 04Transfrag2ORF uses to judge Integrity in step 4, so the --start_codon and --stop_codon options are no longer needed (and no longer provided). With TIdeS the NCBI genetic code table given by --genetic_code is used (the common tables are built in, e.g. 1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 21-26; for a number that is not built in, the standard codons are used and a note is logged). With TransDecoder only the standard genetic code (table 1) is supported: start codon ATG, stop codons TAA, TAG, TGA. The codons actually used are reported in the log (standard error). Note: some non-standard genetic code tables have several start codons; step 7 then fills the 5' end up to the first start codon after the upstream stop codon.
 
 Parameters:
-[INPUT]
+[Input]
     --pe1 <string> --pe2 <string>    default: None
-    Enter one or more pairs of FASTQ format files from Paired-End next-generation sequencing technology. This parameter supports the input of multiple pairs of FASTQ files, using commas to separate the FASTQ file paths of different libraries. This parameter also accepts compressed files in .gz format.
+    The two FASTQ files of paired-end data. Multiple pairs can be given, comma-separated (the order and number of files in --pe1 and --pe2 must correspond). .gz files are supported.
 
     --se <string>    default: None
-    Enter one or more FASTQ format files from Single-End next-generation sequencing technology. This parameter supports the input of multiple Single-End FASTQ files, using commas to separate the FASTQ file paths of different libraries. This parameter also accepts compressed files in .gz format.
+    FASTQ files of single-end data, comma-separated. .gz files are supported.
 
     --sam <string>    default: None
-    Enter one or more SAM format files from the output of alignment software such as HISTA2. This parameter supports the input of multiple SAM files, using commas to separate the SAM file paths. This parameter also accepts compressed files in .bam format. In addition, the program allows for the full or partial use of the three parameters --pe1/--pe2, --se, and --sam, then all of the input data are used for genome alignment to generate the transcript sequence for gene model prediction.
+    Already-aligned SAM or BAM (.sam/.bam/.cram) files, comma-separated. They are sorted and merged together with the alignments of the FASTQ data.
+    --pe1/--pe2, --se and --sam can be used in full or in part; all data are combined for transcript assembly and gene prediction.
+
+    --aligner <hisat2|star>    default: star
+    The aligner to use. Passed through to NGSReads_prediction.01RNASeq2Sam.
 
     --strand_specific    default: None
-    When this parameter is added, all input next-generation sequencing data are treated as strand-specific, and the program will predict gene models only on the forward strand of the transcript. When two neighboring genes overlap in the genome, strand-specific sequencing data and this parameter can help accurately estimate gene borders.
+    Treat all input data as RF (dUTP) strand-specific data; genes are then predicted only on the sense strand of transcripts, which helps determine the boundaries of overlapping neighboring genes. See usage notes 2 and 3.
 
-    --config <string>    default: None
-    Enter a parameter configuration file path to set the detailed parameters for the Trimmomatic, HISAT2, and Sam2Transfrag software used by this program. If no parameter configuration file is input, the default parameters built into this program will be used when calling the above three software, which are suitable for most cases.
+    --homolog_protein <string>    default: None
+    FASTA file of homologous proteins, used as the protein database of TIdeS. Required when TIdeS is used.
 
-    --homolog_gene_models <string>    default: None
-    Enter a GFF3 format files from the gene prediction by homologous proteins, which can be used for filling end of gene models predicted by NGS reads.
+[Output]
+    --tmp_dir <string>    default: tmp_$date$pid
+    Temporary directory. .ok and .sig files are written here for resuming (see usage note 8). The important results of the steps are saved in its "results" sub-directory (see usage note 12). This directory is always kept.
 
-[OUTPUT]
-    --help    default: None
-    display this help and exit.
+    --keep_tmp_files    default: None
+    Keep the temporary files of the sub-programs (NGSReads_prediction.01RNASeq2Sam, 02Sam2Transfrag, 03Stringtie, 04Transfrag2ORF). By default these sub-programs delete their own temporary directories after a successful run (see usage note 9).
 
-    --chinese_help    default: None
-    display the chinese usage and exit.
+    --gene_prefix <string>    default: RNASeqORF
+    The gene IDs of the final result are renamed to <gene_prefix><number> (the IDs and Parents of mRNA/exon/CDS follow, e.g. RNASeqORF000001, RNASeqORF000001.t01), numbered in output order. The prefix must not contain whitespace, ';', '=', ',' or '.'.
 
-    --tmp_dir <string>    default: tmp_\$date\$pid
-    Enter the path of temporary folder.
+    --gene_code_length <int>    default: 6
+    Number of digits of the gene number, left-padded with zeros.
 
     --output_alignment_GFF3 <string>    default: None
-    Output a transcript sequence alignment file in non-standard GFF3 format.
+    Output the alignments of transcripts to the reference genome (non-standard GFF3). The alignments of the two assembly methods (Sam2Transfrag and StringTie) are merged into this single file. The alignment of each transcript is one entry (all lines of an entry have the same ID in column 9), and entries are separated by a blank line. All entries are sorted by chromosome name (natural order), the start-end coordinates of the cDNA_match records of the entry (smallest start and largest end) and strand ('+' first, then '-', then '.'); the lines inside an entry keep their original order.
 
     --output_raw_GFF3 <string>    default: None
-    Output preliminary GFF3 format of gene models predicted by transcripts. These gene models do not have forced filling of their ends, and the results are credible, but they contain more incomplete genome models.
+    Output the preliminary predictions after step 6 (classification) and before the forced end filling of step 7 (identical to results/merged_classified.ORF.gff3). This file has the Type classification tags, and its gene IDs are the internal IDs of the pipeline.
 
-    --intron_info_out <String>
-    When this parameter is set, the reliable intron information will be stored in the specified file.
+    --intron_info_out <string>    default: results/intron.txt (in the temporary directory)
+    Output file of reliable intron information (produced by Sam2Transfrag). When given, a hard link is also kept in the results directory.
 
-    --base_depth_out <String>
-    When this parameter is set, the sequencing depth information for all bases will be output to a specified file.
+    --base_depth_out <string>    default: results/base_depth.txt (in the temporary directory)
+    Output file of exon base sequencing depth. When given, a hard link is also kept in the results directory.
 
-[Threshold]
+    --alignment_bam_out <string>    default: None
+    Save the sorted BAM file of step 1 (results/alignment.bam) to this path (a hard link is preferred, so no extra disk space is used).
+
+    --alignment_stats_out <string>    default: None
+    Save the aggregated alignment statistics (results/alignment.stats in the temporary directory) to this path. Only effective with FASTQ input.
+
+[Key sub-program parameters: key parameters passed to the sub-programs; all other parameters use the defaults of the sub-programs]
+Key parameters passed to NGSReads_prediction.01RNASeq2Sam:
     --pe_used_pair_num <int>    default: 100000000
-    The program uses the maximum number of paired-end sequencing reads available. When there's a lot of input data, it uses this number of read pairs at most. If multiple datasets are provided, an equal portion of data is taken from the start of each dataset. By default, the program utilizes up to 100 million read pairs. For PE150bp sequencing, it processes around 30 gigabytes of data.
+    Maximum number of paired-end read pairs to use (about 30 Gb for PE150). With multiple libraries, the same proportion is taken from the beginning of each. Passed to NGSReads_prediction.01RNASeq2Sam.
 
     --se_used_read_num <int>    default: 100000000
-    The program uses the maximum number of single-end sequencing reads available. When there's a lot of input data, it uses this number of read at most. If multiple datasets are provided, an equal portion of data is taken from the start of each dataset. By default, the program utilizes up to 100 million read. For SE150bp sequencing, it processes around 15 gigabytes of data.
+    Maximum number of single-end reads to use (about 15 Gb for SE150); same rule as above.
+
+    --trimmomatic_opts <string>    default: "LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:50 TOPHRED33"
+    The Trimmomatic quality-control steps and their parameters that follow ILLUMINACLIP (adapter removal uses the default of the sub-program) in NGSReads_prediction.01RNASeq2Sam. When set, it replaces the default as a whole; quote values that contain spaces or start with "-". No effect with --sam input only.
+
+    --hisat2_opts <string>    default: "--min-intronlen 20 --max-intronlen 200000 --dta --score-min L,0.0,-0.4 -k 1"
+    Parameters passed to hisat2 (alignment). Only effective when --aligner is hisat2. When set, it replaces the default as a whole, e.g. --hisat2_opts="--dta -k 5".
+
+    --star_opts <string>    default: "--alignIntronMax 200000 --alignMatesGapMax 200000 --outFilterType BySJout --outFilterMultimapNmax 20 --alignSJoverhangMin 8 --alignSJDBoverhangMin 1 --outFilterMismatchNmax 999 --outFilterMismatchNoverReadLmax 0.04"
+    Parameters passed to STAR (alignment). Only effective when --aligner is star. When set, it replaces the default as a whole.
+
+Key parameters passed to NGSReads_prediction.02Sam2Transfrag:
+    --fraction <float>    default: 0.05
+    When breaking alignment regions, the exon base depth threshold and the intron depth threshold = the maximum base depth of the transcript region * this value. Range (0, 1].
+
+    --min_expressed_base_depth <int>    default: 2
+    Lower bound of the exon base depth threshold.
+
+    --max_expressed_base_depth <int>    default: 50
+    Upper bound of the exon base depth threshold.
+
+    --min_junction_depth <int>    default: 2
+    Lower bound of the intron depth threshold.
+
+    --max_junction_depth <int>    default: 50
+    Upper bound of the intron depth threshold.
+
+    --min_fragment_count_per_transfrag <int>    default: 10
+    A transcript is only reported if it is supported by at least this many fragments.
+
+Key parameters passed to NGSReads_prediction.04Transfrag2ORF:
+    --ORF_predictor <string>    default: TIdeS (if --homolog_protein is provided); TransDecoder (otherwise)
+    Software for ORF prediction: TransDecoder or TIdeS (case-insensitive). Since TIdeS needs homologous proteins as its database, it is changed to TransDecoder if --homolog_protein is not provided.
 
     --min_protein_length <int>    default: 100
-    Set the minimum protein length for identifying ORFs.
+    Minimum protein length (amino acids) when identifying ORFs. TransDecoder: passed to -m; TIdeS: multiplied by 3 and passed to --min-orf.
 
     --genetic_code <int>    default: 1
-    Enter the genetic code. The values for this parameter can be found on the NCBI Genetic Codes website at: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi. This parameter is mainly effective for the gene prediction steps through homologous proteins, as well as the situation where start and stop codon information is used for filling the end of incomplete gene models.
+    Genetic code, see NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi . It has two effects: (a) it is passed to --TIdeS_genetic_code of 04Transfrag2ORF for the ORF prediction of TIdeS (TransDecoder is not supported and always uses the standard code); (b) this program derives the start and stop codons from it and passes them as --start_codon and --stop_codon to both step 5 (GFF3_merging_and_removing_redundancy) and step 7 (fillingEndsOfGeneModels) (see usage note 14). With TransDecoder the start/stop codons are always the standard ones (ATG; TAA,TAG,TGA).
+
+    --TIdeS_partial / --noTIdeS_partial    default: --TIdeS_partial is enabled
+    By default this program passes --TIdeS_partial to 04Transfrag2ORF, so with TIdeS both complete ORFs and 5'/3' partial ORFs are predicted (Integrity is judged from the start/stop codons on the genome sequence). Add --noTIdeS_partial to turn it off: TIdeS then reports only complete ORFs and all gene models get Integrity=complete (see usage note 7). Only effective with TIdeS.
+
+Key parameters passed to GFF3_merging_and_removing_redundancy:
+    --overlap_coverage <float>    default: 0.30
+    In step 5, when the overlapping CDS bases of two gene models divided by the CDS bases of the smaller model exceeds this threshold, the lower-scoring model is removed. Range: (0, 1].
+
+[Gene model classification]
+    --quantile_high <float>    default: 0.80
+    Quantile used to calculate the "higher" thresholds (CDS length and CDS intron number): the reference gene models are sorted in descending order and the value at this proportion of the ranking is taken, i.e. at least this proportion of the reference gene models meet the threshold. Range: (0, 1].
+
+    --quantile_low <float>    default: 0.95
+    Quantile used to calculate the "lower" thresholds; same rule as above. Must not be smaller than --quantile_high.
+
+    --cds_length_high <int>    default: calculated automatically
+    Minimum CDS length (bp) required by class A and B. When given, it is not calculated automatically.
+
+    --cds_length_low <int>    default: calculated automatically
+    Minimum CDS length (bp) required by class C. When given, it is not calculated automatically.
+
+    --cds_intron_high <int>    default: calculated automatically
+    Minimum number of introns between CDSs required by class A and B. When given, it is not calculated automatically.
+
+    --cds_intron_low <int>    default: calculated automatically
+    Minimum number of introns between CDSs required by class C. When given, it is not calculated automatically.
+
+    --cds_ratio_high <float>    default: 0.6
+    Minimum proportion (0-1) of exon bases that are CDS, required by class A. The proportion is taken from the percentage at the end of the Form information in column 9 of the GFF3 file.
+
+    --cds_ratio_low <float>    default: 0.3
+    Minimum proportion (0-1) of exon bases that are CDS, required by classes B and C. The proportion is taken from the percentage at the end of the Form information in column 9 of the GFF3 file. Must not be larger than --cds_ratio_high.
+
+[Advanced]
+    --no_filling_ends    default: None
+    Skip the forced end filling of step 7; the classified result of step 6 is the final result.
+
+    --ignore_signature    default: None
+    When resuming, do not check the .sig signature files: a step that has a .ok marker and non-empty outputs is skipped even if its parameters or input file information (path, size, modification time) has changed. Only meaningful when an existing --tmp_dir is reused; see usage note 8.
 
 [Performance]
     --cpu <int>    default: 8
-    Enter the number of CPU threads.
+    Number of CPU threads for the whole pipeline. The value is passed to every program called by the pipeline (the --cpu option of each sub-program) and to the tools they call, such as samtools. How it is used in each step:
+      Step 1 NGSReads_prediction.01RNASeq2Sam: gets the --cpu value; used for quality control, genome index building, the alignment of each chunk (each alignment command uses --cpu/--chunk_num threads), and samtools sorting/merging; index building runs in parallel with quality control, so the number of threads in use may temporarily exceed --cpu during that phase;
+      Step 2 NGSReads_prediction.02Sam2Transfrag: gets the --cpu value; number of worker processes processing chromosome pieces and transcript regions in parallel;
+      Step 3 NGSReads_prediction.03Stringtie: gets the --cpu value; number of worker processes running stringtie in parallel (each stringtie uses one thread);
+      Step 4 NGSReads_prediction.04Transfrag2ORF: the ORF analyses of the Sam2Transfrag and StringTie transcripts run at the same time, so --cpu is divided between them (about half each, at least 1), keeping the total within --cpu; only TIdeS uses the threads (TransDecoder is single-threaded), and each TIdeS uses at most 24 threads;
+      Step 5 GFF3_merging_and_removing_redundancy: gets the --cpu value; number of worker processes removing redundancy in parallel over chromosome/strand partitions;
+      Step 7 fillingEndsOfGeneModels: gets the --cpu value; the gene models are split evenly into --cpu parts that are filled in parallel.
+    The steps run one after another (only the two analyses inside step 4 run at the same time), so the number of threads in use at any moment does not exceed --cpu (except for the phase in step 1 where index building runs alongside quality control).
 
-    --put_massive_temporary_data_into_memory    default: None
-    Set up massive temporary files to be stored in memory. This prevents the program from running slowly due to insufficient disk I/O, but it requires more RAM. Many steps in this pipeline would split the input data into numerous pieces and then parallelize its command lines to speed up the computation, although this results in a significant I/O load on the disk. Therefore, low disk performance has a significant impact on computation speed. If your system memory is sufficient, you are advised to add this parameter so that massive temporary data can be stored in the /dev/shm folder, which represents the memory, to speed up program execution. In addition, the program automatically deletes temporary data in /dev/shm to free up memory after the data splitting and parallelization steps are completed.
+    --chunk_num <int>    default: min(--cpu, 10)
+    Number of chunks the clean data is split into; all chunks are aligned at the same time, each alignment command using --cpu/--chunk_num threads (at least 1). STAR loads one copy of the genome index per process, so memory grows with the chunk number; with both paired-end and single-end FASTQ (STAR cannot mix them) up to twice as many processes run. Keep it not larger than --cpu and lower it if memory is limited.
 
-USAGE
+[HELP]
+    --help    default: None
+    Display the English usage and exit.
 
-return $usage;
+    --chinese_help    default: None
+    显示中文用法并退出。
+
+Dependencies:
+    The programs NGSReads_prediction.01RNASeq2Sam, NGSReads_prediction.02Sam2Transfrag, NGSReads_prediction.03Stringtie, NGSReads_prediction.04Transfrag2ORF, GFF3_merging_and_removing_redundancy and fillingEndsOfGeneModels in __BIN__ must be executable; samtools and stringtie must be available in PATH; with FASTQ input, java, the aligner (STAR or hisat2/hisat2-build) and __SW__/Trimmomatic-0.38 are also required; TransDecoder needs __SW__/TransDecoder-v5.5.0 (the modified version), TIdeS needs the tides command (tides.py or tides, and its dependencies DIAMOND, CD-HIT, ...). These are checked at start-up.
+
+USAGE_EN
+    $t =~ s/__SW__/$software_dir/g;
+    $t =~ s/__BIN__/$bin_path/g;
+    return $t;
 }

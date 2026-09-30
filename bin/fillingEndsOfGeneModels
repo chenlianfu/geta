@@ -4,6 +4,7 @@ use strict;
 use Getopt::Long;
 use Cwd qw/abs_path getcwd cwd/;
 use File::Basename;
+use File::Temp qw/tempdir/;
 
 my $usage = <<USAGE;
 Usage:
@@ -27,24 +28,32 @@ Usage:
     --stop_codon <string>    default: TAA,TAG,TGA
     设置终止密码子。若有多个终止密码子，则使用逗号分割。
 
+    --cpu <int>    default: 1
+    设置并行计算使用的CPU线程（进程）数。由于各个基因模型（gene model）的首尾填补计算相互独立，程序会将所有基因模型按ID排序后尽量平均切分为--cpu指定的份数，
+    分别fork多个子进程并行处理，处理完成后父进程再按照基因模型原有顺序合并各子进程结果并输出，因此最终输出结果与单线程运行完全一致，只是运行速度更快。
+
     --help    default: None
     display this help and exit.
 
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($help_flag, $start_codon, $stop_codon, $nonCompletedGeneModels, $filling_need_transcriptID);
+my ($help_flag, $start_codon, $stop_codon, $nonCompletedGeneModels, $filling_need_transcriptID, $cpu_num);
 GetOptions(
     "help" => \$help_flag,
     "start_codon:s" => \$start_codon,
     "stop_codon:s" => \$stop_codon,
     "nonCompletedGeneModels:s" => \$nonCompletedGeneModels,
     "filling_need_transcriptID:s" => \$filling_need_transcriptID,
+    "cpu:i" => \$cpu_num,
 );
 
 if ( $help_flag ) { die $usage }
 $start_codon ||= "ATG";
 $stop_codon ||= "TAA,TAG,TGA";
+$cpu_num ||= 1;
+$cpu_num = 1 if $cpu_num < 1;
+
 if ($nonCompletedGeneModels) {
     open OUT, ">", $nonCompletedGeneModels or die "Can not create file $nonCompletedGeneModels, $!";
 }
@@ -57,26 +66,190 @@ foreach (split /,/, $start_codon) { $start_codon{$_} = 1; }
 foreach (split /,/, $stop_codon) { $stop_codon{$_} = 1; }
 
 # 读取基因组序列
-my %seq = &read_genome($ARGV[0]);
-#foreach (keys %seq) { print ">$_\n$seq{$_}\n"; } 
+my $seq = &read_genome($ARGV[0]);
+#foreach (keys %$seq) { print ">$_\n$seq->{$_}\n"; }
 
 # 读取GFF3文件
-my %gene_info = &get_geneModels_from_GFF3($ARGV[1]);
+my $gene_info = &get_geneModels_from_GFF3($ARGV[1]);
 
-# 对每个基因模型进行分析
+# 对基因模型ID进行排序，固定处理顺序（保证多进程并行运行后合并出的结果顺序与单线程运行完全一致）。
+my @gene_IDs = sort keys %$gene_info;
+my $total_gene_num = scalar @gene_IDs;
+
+# 根据 --cpu 参数和基因模型总数，确定实际需要fork的子进程数量（不超过基因模型总数，不小于1）。
+my $worker_num = $cpu_num;
+$worker_num = $total_gene_num if $worker_num > $total_gene_num;
+$worker_num = 1 if $worker_num < 1;
+
+# 创建临时目录，用于存放各个子进程处理结果的中间文件。程序退出时会自动清理。
+my $tmpdir = tempdir( CLEANUP => 1 );
+
+# 将所有基因模型按顺序尽量平均切分为$worker_num份，每份对应一个子进程要处理的[起始下标, 结束下标]区间。
+my @chunks;
+for (my $i = 0; $i < $worker_num; $i ++) {
+    my $chunk_start = int( $total_gene_num * $i / $worker_num );
+    my $chunk_end = int( $total_gene_num * ($i + 1) / $worker_num ) - 1;
+    push @chunks, [$chunk_start, $chunk_end];
+}
+
+# 多进程并行处理：每个子进程独立处理自己负责的一段基因模型，并将结果写入临时文件；
+# 各子进程之间没有共享数据的写操作（互不干扰），因此不需要加锁。
+my @pids;
+for (my $i = 0; $i < $worker_num; $i ++) {
+    my ($chunk_start, $chunk_end) = @{$chunks[$i]};
+    next if $chunk_end < $chunk_start;    # 该子进程没有分配到任何基因模型，跳过。
+
+    my $pid = fork();
+    die "Can not fork: $!" unless defined $pid;
+
+    if ( $pid == 0 ) {
+        # 子进程：处理完毕后写文件并退出，不再执行后面父进程的合并逻辑。
+        &worker_process($i, $chunk_start, $chunk_end, \@gene_IDs, $gene_info, $seq, $tmpdir);
+        exit(0);
+    }
+    else {
+        push @pids, $pid;
+    }
+}
+# 父进程等待所有子进程运行结束
+foreach my $pid ( @pids ) {
+    waitpid($pid, 0);
+}
+
+# 父进程按照子进程编号（即基因模型原有排序顺序）依次读取并合并各个子进程的输出结果，保证最终输出顺序与单线程运行一致。
 my ($num_total, $num_complete, $num_partial, $num_filled, $num_not_filled) = (0, 0, 0, 0, 0);
-foreach my $gene_ID ( sort keys %gene_info ) {
-    $num_total ++;
-    my @gene_header = split /\t/, $gene_info{$gene_ID}{"header"};
+for (my $i = 0; $i < $worker_num; $i ++) {
+    my ($chunk_start, $chunk_end) = @{$chunks[$i]};
+    next if $chunk_end < $chunk_start;
+
+    # 合并标准输出内容
+    my $main_out_file = "$tmpdir/main.$i";
+    open (my $fh_main, "<", $main_out_file) or die "Can not open file $main_out_file, $!";
+    print while (<$fh_main>);
+    close $fh_main;
+
+    # 合并 --nonCompletedGeneModels 输出内容
+    if ($nonCompletedGeneModels) {
+        my $filtered_out_file = "$tmpdir/filtered.$i";
+        open (my $fh_filtered, "<", $filtered_out_file) or die "Can not open file $filtered_out_file, $!";
+        print OUT while (<$fh_filtered>);
+        close $fh_filtered;
+    }
+
+    # 合并 --filling_need_transcriptID 输出内容
+    if ($filling_need_transcriptID) {
+        my $transcriptID_out_file = "$tmpdir/transcriptID.$i";
+        open (my $fh_tid, "<", $transcriptID_out_file) or die "Can not open file $transcriptID_out_file, $!";
+        print OUT1 while (<$fh_tid>);
+        close $fh_tid;
+    }
+
+    # 合并统计信息
+    my $stat_file = "$tmpdir/stats.$i";
+    open (my $fh_stat, "<", $stat_file) or die "Can not open file $stat_file, $!";
+    my $stat_line = <$fh_stat>;
+    close $fh_stat;
+    chomp $stat_line;
+    my ($total, $complete, $partial, $filled, $not_filled) = split /\t/, $stat_line;
+    $num_total += $total;
+    $num_complete += $complete;
+    $num_partial += $partial;
+    $num_filled += $filled;
+    $num_not_filled += $not_filled;
+}
+
+close OUT if $nonCompletedGeneModels;
+close OUT1 if $filling_need_transcriptID;
+print STDERR "共有 $num_total 个基因模型进行了分析；其中有 $num_complete 个完整的基因模型；有 $num_partial 个不完整的基因模型；
+对其中 $num_filled 个基因模型成功进行了首尾填补（基因的任意一个转录本成功填补即可）；有 $num_not_filled 个基因模型未能进行完整填补（基因所有包含CDS信息的转录本都未能成功填补）。\n";
+
+
+# 子程序，子进程执行的工作函数：处理分配给自己的一段基因模型（[$chunk_start, $chunk_end]区间下标对应的@gene_IDs），并将处理结果写入临时文件。
+sub worker_process {
+    my ($worker_idx, $chunk_start, $chunk_end, $gene_IDs_ref, $gene_info, $seq, $tmpdir) = @_;
+
+    my ($w_num_total, $w_num_complete, $w_num_partial, $w_num_filled, $w_num_not_filled) = (0, 0, 0, 0, 0);
+    my ($main_out, $filtered_out, $transcriptID_out) = ("", "", "");
+
+    for (my $idx = $chunk_start; $idx <= $chunk_end; $idx ++) {
+        my $gene_ID = $gene_IDs_ref->[$idx];
+        my $result = &process_one_gene($gene_ID, $gene_info, $seq);
+
+        $w_num_total ++;
+        if ( $result->{"gene_fill_need"} == 0 ) {
+            $w_num_complete ++;
+        }
+        else {
+            $w_num_partial ++;
+            if ( $result->{"gene_fill_ok"} == 0 ) {
+                $w_num_not_filled ++;
+            }
+            else {
+                $w_num_filled ++;
+            }
+        }
+
+        $transcriptID_out .= $result->{"transcriptID_out"} if $filling_need_transcriptID;
+
+        # 若添加了 --nonCompletedGeneModels 参数，则将完整基因和不完整基因分别输出到main_out和filtered_out
+        if ($nonCompletedGeneModels) {
+            if ( $result->{"gene_fill_need"} == 0 ) {
+                $main_out .= $result->{"gene_out"};
+            }
+            else {
+                if ( $result->{"gene_fill_ok"} == 0 ) {
+                    $filtered_out .= $result->{"gene_out_filtered"};
+                }
+                else {
+                    $main_out .= $result->{"gene_out"};
+                }
+            }
+        }
+        else {
+            $main_out .= $result->{"gene_out"};
+        }
+    }
+
+    open (my $fh_main, ">", "$tmpdir/main.$worker_idx") or die "Can not create file $tmpdir/main.$worker_idx, $!";
+    print $fh_main $main_out;
+    close $fh_main;
+
+    if ($nonCompletedGeneModels) {
+        open (my $fh_filtered, ">", "$tmpdir/filtered.$worker_idx") or die "Can not create file $tmpdir/filtered.$worker_idx, $!";
+        print $fh_filtered $filtered_out;
+        close $fh_filtered;
+    }
+
+    if ($filling_need_transcriptID) {
+        open (my $fh_tid, ">", "$tmpdir/transcriptID.$worker_idx") or die "Can not create file $tmpdir/transcriptID.$worker_idx, $!";
+        print $fh_tid $transcriptID_out;
+        close $fh_tid;
+    }
+
+    open (my $fh_stat, ">", "$tmpdir/stats.$worker_idx") or die "Can not create file $tmpdir/stats.$worker_idx, $!";
+    print $fh_stat "$w_num_total\t$w_num_complete\t$w_num_partial\t$w_num_filled\t$w_num_not_filled\n";
+    close $fh_stat;
+
+    return;
+}
+
+# 子程序，对单个基因模型（gene_ID）进行首尾填补处理，返回处理结果（GFF3输出内容、统计标志等）的哈希引用。
+# 该子程序是从原来主循环中对单个基因的处理逻辑直接抽取出来的，逻辑与原来完全一致，只是把"直接print"改为"拼接字符串后返回"，
+# 以便父进程（单进程时）和各个子进程（多进程并行时）都能复用同一套处理代码。
+sub process_one_gene {
+    my ($gene_ID, $gene_info, $seq) = @_;
+
+    my @gene_header = split /\t/, $gene_info->{$gene_ID}{"header"};
     my ($gene_fill_need, $gene_fill_ok) = (0, 0);
     my ($gene_start, $gene_end) = ($gene_header[3], $gene_header[4]);
     my $mRNA_out;
+    my $transcriptID_out = "";
 
     # 分别对每个mRNA进行修正
-    foreach my $mRNA_ID ( @{$gene_info{$gene_ID}{"mRNA_ID"}} ) {
-        my $mRNA_header = $gene_info{$gene_ID}{"mRNA_header"}{$mRNA_ID};
+    foreach my $mRNA_ID ( @{$gene_info->{$gene_ID}{"mRNA_ID"}} ) {
+        my $mRNA_header = $gene_info->{$gene_ID}{"mRNA_header"}{$mRNA_ID};
         my @mRNA_header = split /\t/, $mRNA_header;
-        my $mRNA_info = $gene_info{$gene_ID}{"mRNA_info"}{$mRNA_ID};
+        my $mRNA_info = $gene_info->{$gene_ID}{"mRNA_info"}{$mRNA_ID};
 
         # 不对没有CDS信息的转录本进行修正。
         unless ( $mRNA_info =~ m/\tCDS\t/ ) {
@@ -84,12 +257,12 @@ foreach my $gene_ID ( sort keys %gene_info ) {
             next;
         }
 
-        my $genome_seq = $seq{$gene_header[0]};
+        my $genome_seq = $seq->{$gene_header[0]};
         my $strand = $gene_header[6];
         my ($fill_need, $fill_ok, $mRNA_CDSs, $mRNA_exons, %gff3_score_attr) = &fillingEnd($mRNA_info, $genome_seq, $strand, $mRNA_ID);
         $gene_fill_need = 1 if $fill_need == 1;
         $gene_fill_ok = 1 if $fill_ok == 1;
-        print OUT1 "$mRNA_ID\n" if $fill_need == 1;
+        $transcriptID_out .= "$mRNA_ID\n" if ( $fill_need == 1 );
 
         my ($mRNA_start, $mRNA_end, $mRNA_content) = &get_mRNA_info($mRNA_CDSs, $mRNA_exons, $mRNA_ID, $mRNA_header[0], $strand, $mRNA_header[1], \%gff3_score_attr);
         $mRNA_header[3] = $mRNA_start;
@@ -118,56 +291,31 @@ foreach my $gene_ID ( sort keys %gene_info ) {
     # 输出GFF3
     $gene_header[3] = $gene_start;
     $gene_header[4] = $gene_end;
-    # 若添加了 --nonCompletedGeneModels 参数，则将完整基因和不完整基因分别输出
-    if ($nonCompletedGeneModels) {
-        if ( $gene_fill_need == 0 ) {
-            print (join "\t", @gene_header);
-            print "$mRNA_out\n";
-        }
-        else {
-            if ( $gene_fill_ok == 0 ) {
-                my $nonCompletedGeneModels_gene_header = join "\t", @gene_header;
-                $nonCompletedGeneModels_gene_header = &add_attr($nonCompletedGeneModels_gene_header, "Filtered_for_Filling2Uncomplete=True");
-                print OUT $nonCompletedGeneModels_gene_header;
-                print OUT "$mRNA_out\n";
-            }
-            else {
-                print (join "\t", @gene_header);
-                print "$mRNA_out\n";
-            }
-        }
-    }
-    else {
-        print (join "\t", @gene_header);
-        print "$mRNA_out\n";
+
+    my $gene_out = (join "\t", @gene_header) . "$mRNA_out\n";
+
+    my $gene_out_filtered = "";
+    if ( $gene_fill_need == 1 && $gene_fill_ok == 0 ) {
+        my $filtered_gene_header = join "\t", @gene_header;
+        $filtered_gene_header = &add_attr($filtered_gene_header, "Filtered_for_Filling2Uncomplete=True");
+        $gene_out_filtered = "$filtered_gene_header$mRNA_out\n";
     }
 
-    # 统计
-    if ($gene_fill_need == 0) {
-        $num_complete ++;
-    }
-    else {
-        $num_partial ++;
-        if ($gene_fill_ok == 0) {
-            $num_not_filled ++;
-            #print STDERR "TEST: $gene_ID\n";
-        }
-        else {
-            $num_filled ++;
-        }
-    }
+    return {
+        "gene_out" => $gene_out,
+        "gene_out_filtered" => $gene_out_filtered,
+        "transcriptID_out" => $transcriptID_out,
+        "gene_fill_need" => $gene_fill_need,
+        "gene_fill_ok" => $gene_fill_ok,
+    };
 }
-close OUT;
-close OUT1;
-print STDERR "共有 $num_total 个基因模型进行了分析；其中有 $num_complete 个完整的基因模型；有 $num_partial 个不完整的基因模型；
-对其中 $num_filled 个基因模型成功进行了首尾填补（基因的任意一个转录本成功填补即可）；有 $num_not_filled 个基因模型未能进行完整填补（基因所有包含CDS信息的转录本都未能成功填补）。\n";
 
 
 # 子程序，根据输入的CDSs和exons信息，返回mRNA起始结束位置和详细内容
 sub get_mRNA_info {
     my ($mRNA_CDSs, $mRNA_exons, $mRNA_ID, $chr, $strand, $source) = @_;
     my %gff3_score_attr = %{$_[-1]};
-    
+
     # 根据CDS边界对exon边界进行修正；得到mRNA边界；得到intron信息；得到UTR信息。
     my (@CDS, @exon);
     foreach ( split /\n/, $mRNA_CDSs ) { push @CDS, $_; }
@@ -180,7 +328,7 @@ sub get_mRNA_info {
 
     # 对mRNA内容进行排序
     my $mRNA_content = &sort_mRNA_info($chr, $strand, $mRNA_ID, $mRNA_start, $mRNA_end, $mRNA_CDSs, $mRNA_exons,$mRNA_introns, $mRNA_UTR, $source, \%gff3_score_attr);
-    
+
     #print "TEST: $mRNA_ID\t$mRNA_start\t$mRNA_end\n";
     return ($mRNA_start, $mRNA_end, $mRNA_content);
 }
@@ -481,7 +629,7 @@ sub fillingEnd {
         $fill_ok = 0 if $CDS[0] == 0; shift @CDS;
     }
     #foreach (@CDS) { print "$_\t$strand\n"; }
-    
+
     my $CDS_out = join "\n", @CDS;
     my $exon_out = join "\n", @exon;
     return ($fill_need, $fill_ok, $CDS_out, $exon_out, %gff3_score_attr);
@@ -490,9 +638,8 @@ sub fillingEnd {
 # 子程序，返回修复了终止密码子的CDS信息
 sub modify_stop {
     # 获取CDS、基因组序列和strand信息
-    $_ = shift @_;
-    my @CDS = @{$_};
-    my ($genome_seq, $strand, $mRNA_ID) = @_;
+    my ($CDS_ref, $genome_seq, $strand, $mRNA_ID) = @_;
+    my @CDS = @$CDS_ref;
     @CDS = sort {$a <=> $b} @CDS;
     my $fill_ok = 0;
     my $genome_seq_length = length($genome_seq);
@@ -545,10 +692,9 @@ sub modify_stop {
 
 # 子程序，返回修复了起始密码子的CDS信息。
 sub modify_start {
-    # 获取CDS、基因组序列和strand信息
-    $_ = shift @_;
-    my @CDS = @{$_};
-    my ($genome_seq, $strand, $mRNA_ID) = @_;
+    # 获取CDS、基因组序列和strand信息（优化：同modify_stop，改为直接对参数命名）。
+    my ($CDS_ref, $genome_seq, $strand, $mRNA_ID) = @_;
+    my @CDS = @$CDS_ref;
     @CDS = sort {$a <=> $b} @CDS;
     my @CDS_orig = @CDS;
     my $fill_ok = 0;
@@ -629,10 +775,10 @@ sub modify_start {
 
 # 子程序，定位起始密码子，返回mRNA的CDS信息
 sub locating_start_codon {
-    # 获取CDS、基因组序列和strand信息
-    $_ = shift @_;
-    my @CDS = @{$_};
-    my ($genome_seq, $strand, $mRNA_ID) = @_;
+    # 获取CDS、基因组序列和strand信息（优化：同modify_stop，改为直接对参数命名；
+    # 同时把内部循环里复用全局@_做临时变量的写法也改成了具名数组，更清晰）。
+    my ($CDS_ref, $genome_seq, $strand, $mRNA_ID) = @_;
+    my @CDS = @$CDS_ref;
     @CDS = sort {$a <=> $b} @CDS;
     my $fill_ok = 0;
     my $genome_seq_length = length($genome_seq);
@@ -640,8 +786,8 @@ sub locating_start_codon {
     # 根据CDS位置信息获取序列
     my $seq_CDS;
     foreach ( @CDS ) {
-        @_ = split /\t/, $_;
-        $seq_CDS .= substr($genome_seq, $_[0] - 1, $_[1] - $_[0] + 1);
+        my @fields = split /\t/, $_;
+        $seq_CDS .= substr($genome_seq, $fields[0] - 1, $fields[1] - $fields[0] + 1);
     }
     if ( $strand eq "-" ) {
         $seq_CDS = reverse $seq_CDS;
@@ -668,11 +814,11 @@ sub locating_start_codon {
     if ( $strand eq "+" ) {
         while ( $removed_base_num ) {
             my $CDS = shift @CDS;
-            @_ = split /\t/, $CDS;
-            my $CDS_length = $_[1] - $_[0] + 1;
+            my @fields = split /\t/, $CDS;
+            my $CDS_length = $fields[1] - $fields[0] + 1;
             if ($CDS_length > $removed_base_num) {
-                $_[0] = $_[0] + $removed_base_num;
-                unshift @CDS, "$_[0]\t$_[1]\t0";
+                $fields[0] = $fields[0] + $removed_base_num;
+                unshift @CDS, "$fields[0]\t$fields[1]\t0";
                 $removed_base_num = 0;
             }
             else {
@@ -683,11 +829,11 @@ sub locating_start_codon {
     elsif ( $strand eq "-" ) {
         while ( $removed_base_num ) {
             my $CDS = pop @CDS;
-            @_ = split /\t/, $CDS;
-            my $CDS_length = $_[1] - $_[0] + 1;
+            my @fields = split /\t/, $CDS;
+            my $CDS_length = $fields[1] - $fields[0] + 1;
             if ($CDS_length > $removed_base_num) {
-                $_[1] = $_[1] - $removed_base_num;
-                push @CDS, "$_[0]\t$_[1]\t0";
+                $fields[1] = $fields[1] - $removed_base_num;
+                push @CDS, "$fields[0]\t$fields[1]\t0";
                 $removed_base_num = 0;
             }
             else {
@@ -702,17 +848,16 @@ sub locating_start_codon {
 
 # 子程序，返回mRNA的起始和终止密码子
 sub get_start_and_stop_codon {
-    # 获取CDS、基因组序列和strand信息
-    $_ = shift @_;
-    my @CDS = @{$_};
-    my ($genome_seq, $strand) = @_;
-    
+    # 获取CDS、基因组序列和strand信息（优化：同modify_stop，改为直接对参数命名）。
+    my ($CDS_ref, $genome_seq, $strand) = @_;
+    my @CDS = @$CDS_ref;
+
     # 得到CDS序列
     @CDS = sort {$a <=> $b} @CDS;
     my $CDS_seq;
     foreach ( @CDS ) {
-        @_ = split /\t/, $_;
-        $CDS_seq .= substr($genome_seq, $_[0] - 1, $_[1] - $_[0] + 1);
+        my @fields = split /\t/, $_;
+        $CDS_seq .= substr($genome_seq, $fields[0] - 1, $fields[1] - $fields[0] + 1);
     }
     if ( $strand eq "-" ) {
         $CDS_seq = reverse $CDS_seq;
@@ -742,18 +887,20 @@ sub get_start_and_stop_codon {
 # gene_ID => "mRNA_info" => mRNA_ID => mRNA_Info
 sub get_geneModels_from_GFF3 {
     my %gene_info;
-    # 第一轮，找gene信息
+
     open IN, $_[0] or die "Can not open file $_[0], $!";
-    while (<IN>) {
+    my @lines = <IN>;
+    close IN;
+
+    # 第一轮，找gene信息
+    foreach ( @lines ) {
         if ( m/\tgene\t.*ID=([^;\s]+)/ ) {
             $gene_info{$1}{"header"} = $_;
         }
     }
-    close IN;
     # 第二轮，找Parent值是geneID的信息，包含但不限于 mRNA 信息
     my %mRNA_ID2gene_ID;
-    open IN, $_[0] or die "Can not open file $_[0], $!";
-    while (<IN>) {
+    foreach ( @lines ) {
         if ( m/Parent=([^;\s]+)/ ) {
             my $parent = $1;
             if ( exists $gene_info{$parent} ) {
@@ -765,18 +912,16 @@ sub get_geneModels_from_GFF3 {
             }
         }
     }
-    close IN;
     # 第三轮，找Parent值不是geneID的信息
-    open IN, $_[0] or die "Can not open file $_[0], $!";
-    while (<IN>) {
+    foreach ( @lines ) {
         if ( m/Parent=([^;\s]+)/ && exists $mRNA_ID2gene_ID{$1} ) {
             my $parent = $1;
             $gene_info{$mRNA_ID2gene_ID{$1}}{"mRNA_info"}{$parent} .= $_;
         }
     }
-    close IN;
 
-    return %gene_info;
+    # 优化：返回哈希引用而不是整个哈希，避免调用方再做一次全量拷贝（基因模型数据量可能很大）。
+    return \%gene_info;
 }
 
 
@@ -794,7 +939,9 @@ sub read_genome {
             $seq{$seq_id} .= $_;
         }
     }
-    return %seq;
+    close IN;
+    # 返回哈希引用而不是整个哈希，避免调用方再做一次全量拷贝（基因组序列数据体积可能很大）。
+    return \%seq;
 }
 
 sub get_attr {
@@ -849,12 +996,16 @@ sub correct_ends_of_transcript_and_exon {
     my $out;
 
     # 解析转录本ID。有些转录本Feature Name可能不是mRNA，同时输入数据中不包含Gene Feature Name，因此使用parent信息来确定转录本ID。
+    # 修正bug：原代码用字符串"null"作为ID/Parent未匹配到时的哨兵默认值，而"null"在Perl中是
+    # 真值，导致 "if ($ID && $parent)" 这一判断实际上恒为真（不论是否真的匹配到ID/Parent），
+    # 可能把"null"=>"null"这样的伪造键值对混入%parent中。这里改为使用undef并显式用defined()
+    # 判断，语义更准确，避免引入无意义的哨兵条目。
     my (%parent, %transcript_ID);
     foreach ( split /\n/, $transcript_info ) {
-        my ($ID, $parent) = ("null", "null");
+        my ($ID, $parent);
         $ID = $1 if m/ID=([^;]+)/;
         $parent = $1 if m/Parent=([^;]+)/;
-        $parent{$ID} = $parent if ($ID && $parent);
+        $parent{$ID} = $parent if ( defined($ID) && defined($parent) );
     }
     foreach ( keys %parent ) {
         $transcript_ID{$_} = 1 unless exists $parent{$parent{$_}};
@@ -863,13 +1014,13 @@ sub correct_ends_of_transcript_and_exon {
     # 解析得到各个转录本的内容和头部信息
     my (%transcript_content, %transcript_header);
     foreach ( split /\n/, $transcript_info ) {
-        my ($ID, $parent) = ("null", "null");
+        my ($ID, $parent);
         $ID = $1 if m/ID=([^;]+)/;
         $parent = $1 if m/Parent=([^;]+)/;
-        if ( exists $transcript_ID{$ID} ) {
+        if ( defined($ID) && exists $transcript_ID{$ID} ) {
             $transcript_header{$ID} = $_;
         }
-        elsif ( exists $transcript_ID{$parent} ) {
+        elsif ( defined($parent) && exists $transcript_ID{$parent} ) {
             $transcript_content{$parent} .= "$_\n";
         }
     }
@@ -891,14 +1042,25 @@ sub correct_ends_of_transcript_and_exon {
             @_ = split /\t/;
             push @exon, "$_[3]\t$_[4]" if $_[2] eq "exon";
         }
-        @exon = sort {$a <=> $b} @exon;
-        my @exon_first = split /\t/, $exon[0];
-        my @exon_last = split /\t/, $exon[-1];
-        my ($exon_start, $exon_end) = ($exon_first[0], $exon_last[-1]);
+        # 修正bug：原代码在@exon为空（该转录本没有任何exon feature行，理论上不应出现，但属于
+        # 未做防御的异常输入场景）时，仍然执行"split /\t/, $exon[0]"，$exon[0]为undef，会
+        # 导致$exon_start/$exon_end变成undef，进而在后面的正则替换里插入空字符串，产生非预期
+        # 的匹配/替换结果。这里改为先判断@exon是否非空，为空时跳过exon边界的改写（但仍正常
+        # 输出该转录本原有的内容），并给出警告提示。
+        my ($exon_start, $exon_end);
+        if ( @exon ) {
+            @exon = sort {$a <=> $b} @exon;
+            my @exon_first = split /\t/, $exon[0];
+            my @exon_last = split /\t/, $exon[-1];
+            ($exon_start, $exon_end) = ($exon_first[0], $exon_last[-1]);
+        }
+        else {
+            print STDERR "Warning: transcript $transcript_ID has no exon feature lines; skip exon boundary correction.\n";
+        }
         # 在对转录本内容中的exon进行修改
         foreach ( split /\n/, $transcript_content{$transcript_ID} ) {
             @_ = split /\t/;
-            if ( $_[2] eq "exon" ) {
+            if ( $_[2] eq "exon" && defined($exon_start) ) {
                 s/\texon\t$exon_start\t/\texon\t$geneStart\t/;
                 s/\texon\t(\d+)\t$exon_end\t/\texon\t$1\t$geneEnd\t/;
             }

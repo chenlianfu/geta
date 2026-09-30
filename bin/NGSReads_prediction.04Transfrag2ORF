@@ -1,0 +1,1260 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+use Getopt::Long;
+use Cwd qw/abs_path getcwd/;
+use File::Basename;
+use File::Path qw(remove_tree);
+use File::Spec;
+
+my $command_line = "$0 " . join(" ", @ARGV) . "\n";
+# 程序所在目录必须使用绝对路径：后面会 chdir 到临时文件夹，相对路径会失效。
+my $bin_path = abs_path(dirname($0));
+my $software_dir = $bin_path; $software_dir =~ s/\/bin$//;
+
+# TIdeS 正式ORF分析步骤（模型训练完成之后）固定使用的 --id 值（序列聚类的相似度百分比），同时用于拼接聚类结果文件名（*.100pid.Cluster.fas）。
+my $tides_formal_identity = 100;
+
+########################################################################
+#                          中文用法说明（程序前部）
+########################################################################
+my $usage = <<USAGE;
+用法:
+    $0 [options] genome.fasta transfrag.gff3 > ORF.gff3
+
+    本程序通过调用TransDecoder或TIdeS软件对输入的转录本序列进行ORF分析，得到编码蛋白转录本在基因组上的结构注释信息，并输出GFF3格式结果。
+
+    程序流程和工作原理如下：
+    (1) 根据输入转录本GFF3文件，转换得到转录本序列，并按转录本的链向信息分为两个文件：
+        transfrag.strand.fasta   ：链向已知（GFF3第7列为+或-）的转录本序列。负链转录本已反向互补，所有序列均已按转录本方向排列，只需在正链上搜索ORF。
+        transfrag.noStrand.fasta ：链向未知（GFF3第7列为.）的转录本序列（例如非链特异性测序得到的单外显子转录本），序列按基因组从左到右方向排列，需要在两条链上搜索ORF。
+        若输入的GFF3文件来源于链特异性测序数据（所有转录本链向已知），则后者为空文件。
+    (2) 调用TransDecoder或TIdeS对转录本序列进行ORF分析，通过--ORF_predictor参数二选一。无论使用哪种软件，ORF在输入转录本序列上的坐标信息都会保存为临时文件夹中的中间标准GFF3文件（transfrag.TransDecoder.gff3或transfrag.TIdeS.gff3，以转录本序列为坐标系，包含gene/mRNA/exon/UTR/CDS特征），第3步从该文件读取ORF坐标。
+    (3) 将转录本序列上的ORF结果转化为基因组上的基因预测结果，直接输出标准的GFF3文件。
+    (4) 程序成功结束后，默认直接删除--tmp_dir指定的整个临时文件夹（包括其中所有中间文件）以节省磁盘空间；若添加--keep_tmp_files参数，则保留该临时文件夹及其中所有中间数据。程序运行失败或被中断时，不会删除临时文件夹，以便使用相同的--tmp_dir断点续跑。
+
+    程序使用须知：
+    (1) 程序接受输入的GFF3文件中包含可变剪接转录本，然后提取所有的转录本序列进行ORF分析。最终每个预测得到的ORF均获得一个基因编号。因此，程序获得的全基因组基因中有一些是冗余的，可以考虑后期使用GFF3_filling_gene_models或GFF3Clear命令进行去冗余处理。输入GFF3中的转录本行可以是mRNA或transcript类型，exon行通过Parent属性关联到转录本（支持逗号分隔的多个Parent）。
+    (2) 若使用TransDecoder进行ORF预测（--ORF_predictor TransDecoder），本程序的运行需要程序文件所在的上一级目录存在TransDecoder-v5.5.0文件夹，它是修改过代码的TransDecoder软件，给TransDecoder.Predict命令增加了--train参数。需注意本程序不能使用原版TransDecoder软件。--min_protein_length参数的值会传递给TransDecoder.LongOrfs命令的-m参数。
+    (3) 若使用TIdeS进行ORF预测（--ORF_predictor TIdeS，默认），需要预先安装好TIdeS软件（及其依赖的DIAMOND、CD-HIT等软件）并将tides命令加入环境变量PATH（或通过--TIdeS_bin指定路径），同时必须通过--TIdeS_protein_database参数提供一个参考蛋白质数据库。--min_protein_length参数的值乘以3之后，会传递给tides命令的--min-orf参数（模型训练和正式ORF分析两个步骤均会传递）。默认情况下不给tides命令添加--partial参数，此时TIdeS只报告完整ORF（有起始密码子和终止密码子），输出GFF3中的Integrity均为complete；如需同时预测5'或3'不完整的ORF，请添加--TIdeS_partial参数（此时Integrity根据基因组序列上的起始/终止密码子判断）。TIdeS对输入序列按长度、rRNA和相似性进行了过滤（并聚类去冗余），且完全修改了序列ID，其结果是transfrag_strand_TIdeS/transfrag_strand.TIdeS.fasta和transfrag_noStrand_TIdeS/transfrag_noStrand.TIdeS.fasta两个ORF核酸序列文件（不是GFF3）。本程序先单独训练模型，模型训练完成后，再对全部序列进行正式的ORF分析（此时固定使用--id 100）。本程序的处理方法是：
+        a. 解析ORF序列头部（例如 ">transfrag_strand|Transcript_1_Len_484.pORF1 orf_type:complete orf_length:303 transfrag_strand|Transcript_1_Len_484:38-340(+)"）末尾的"TIdeS转录本ID:起点-终点(链)"，得到ORF在TIdeS转录本序列上的坐标；
+        b. 从transfrag_strand_TIdeS/Filter_Steps/Clustering/transfrag_strand.300bp.100pid.Cluster.fas（noStrand则为transfrag_noStrand_TIdeS/Filter_Steps/Clustering/transfrag_noStrand.300bp.100pid.Cluster.fas）中取出该TIdeS转录本的碱基序列（文件名中的300对应TIdeS的最小序列长度，见--TIdeS_min_length；100对应正式分析时固定使用的--id 100）；
+        c. 在输入的transfrag.strand.fasta（或transfrag.noStrand.fasta）中查找与该序列完全一致的全部转录本，这些转录本的ORF结果是一致的，均给出相同的CDS坐标（对noStrand，还会识别与之互为反向互补的转录本，并相应翻转坐标和链）。若找不到与之一致的转录本序列，则在标准错误输出中给出警告信息。
+        d. 将得到的ORF在输入转录本序列上的坐标写入临时文件夹中的中间文件transfrag.TIdeS.gff3（标准GFF3格式，以转录本序列为坐标系，包含gene/mRNA/exon/UTR/CDS特征，与TransDecoder的中间GFF3文件格式一致），随后程序再从该文件读取ORF坐标。
+    序列名称本身不用于关联，只依赖序列内容；也不通过ORF(CDS)序列去查找。经TIdeS过滤掉的转录本（以及聚类时被去除的转录本）不会有ORF结果。
+    (4) 输出GFF3结果中，gene Feature行中最后一列attribute包含一些信息：Form标签显示了当前基因模型对应的转录本序列预测的ORF数量和当前基因模型CDS占转录本序列的百分比；Integrity标签显示了基因模型的完整性。Integrity的判断方法：在拼接后的转录本序列上截取整条CDS（因此起始/终止密码子被内含子隔开时也能正确判断），检查其首个密码子是否为起始密码子（ATG；使用非标准遗传密码表时，还接受该密码表允许的其它起始密码子）、末个密码子是否为终止密码子（若CDS末尾不是终止密码子但紧邻的下一个密码子是终止密码子，即ORF坐标不含终止密码子，也认为3'端完整）；终止密码子根据--TIdeS_genetic_code确定（使用TransDecoder时为标准密码子TAA/TAG/TGA）。使用TIdeS且未添加--TIdeS_partial时，TIdeS只输出完整ORF，因此Integrity直接标注为complete（同时程序会在标准错误输出中统计其与序列判断结果不一致的数量）。
+    (5) 若一个transcript序列中有多个ORF结果，则给出多个基因模型，且相邻基因模型之间共用exon，即在UTR区是有重叠的。如下图所示：
+    基因组序列    ==========================================================================================
+    转录本序列          ===========----==========---==========---===========----======---============>
+    基因模型1           ======+++++----++++++++++---++=======>
+    基因模型2                                       =======+++---+++++++====----=====>
+    基因模型3                                                                   ======--- ==+++++++==>
+    (6) 对于已知链向（GFF3中链为+或-）的转录本，其转录本序列已按转录本方向排列，因此只保留位于转录本序列正链上的ORF；仅对链向未知（.）的转录本才接受反向链上的ORF。
+    (7) 由于程序成功结束后默认会删除整个--tmp_dir文件夹，请不要将--tmp_dir指向已存放有其他重要文件的文件夹。为避免误删，若该文件夹是根目录或家目录、当前工作目录位于该文件夹之内、该文件夹包含了输入文件（genome.fasta、transfrag.gff3、--output_alignment_GFF3、--TIdeS_protein_database）或本程序所在目录，或者该文件夹已存在、非空且不像是本程序生成的临时文件夹，程序会在运行前直接报错退出（此时可改用其它--tmp_dir，或添加--keep_tmp_files）。
+    (8) 基因组序列中的小写（软屏蔽）碱基会被转换为大写，因此不影响转录本序列的提取和起始/终止密码子的判断。输入GFF3中引用了基因组中不存在的序列、或外显子坐标超出序列长度的转录本，会在标准错误输出中给出警告并被跳过。
+
+参数说明:
+[输出参数]
+    --tmp_dir <字符串>    默认值: tmp_\$date\$pid（即"tmp_"加日期时间再加进程号）
+    设置临时文件夹路径。程序成功结束后，默认会删除整个临时文件夹（包括其中的所有中间文件）；如需保留，请添加--keep_tmp_files参数。指定已有的临时文件夹重新运行时，已完成的步骤会被跳过（断点续跑）；注意修改输入文件或参数后请使用新的--tmp_dir，或手动删除其中相应的.ok文件。
+
+    --keep_tmp_files    默认值: 无
+    添加该参数后，程序成功结束后保留--tmp_dir指定的临时文件夹及其中所有临时数据（包括转录本序列FASTA文件、TransDecoder/TIdeS的结果和日志、中间GFF3文件、各步骤的.ok标记文件等），不做任何删除；不添加该参数时，程序成功结束后会直接删除整个--tmp_dir文件夹。
+
+    --output_alignment_GFF3 <字符串>    默认值: 无
+    设置输出文件名，输出转录本序列比对结果（非标准GFF3格式，使用cDNA_match特征记录每个转录本的各外显子在基因组上的位置及其在转录本序列上的Target区间）。
+
+    --gene_prefix <字符串>    默认值: transfrag
+    设置输出GFF3文件中基因名称的前缀。
+
+    --source <字符串>    默认值: .
+    设置输出GFF3文件第二列（source列）的字符串，该值会用于gene、mRNA、exon和CDS所有特征行。默认为"."（即不指定来源）。字符串中不能包含制表符或换行符，也不建议包含空白字符。
+
+[ORF预测软件参数]
+    --ORF_predictor <字符串>    默认值: TIdeS
+    设置用于ORF预测的软件，可选TransDecoder或TIdeS（不区分大小写）。
+
+    --min_protein_length <整数>    默认值: 100
+    设置鉴定ORF时最小的蛋白质长度（氨基酸数）。使用TransDecoder时，该参数值传递给TransDecoder.LongOrfs命令的-m参数；使用TIdeS时，该参数值乘以3（即最小ORF核苷酸长度）后传递给tides命令的--min-orf参数。请不要在--TIdeS_extra_options中再传递--min-orf参数。
+
+    --TIdeS_bin <字符串>    默认值: tides.py
+    设置TIdeS软件可执行程序（tides命令）的路径或名称，默认认为其已经加入了环境变量PATH。仅在--ORF_predictor为TIdeS时生效。
+
+    --TIdeS_protein_database <字符串>    默认值: 无
+    设置TIdeS进行ORF预测时所需要的参考蛋白质数据库（FASTA或DIAMOND格式均可）。当--ORF_predictor设置为TIdeS时，本参数为必需参数。
+
+    --TIdeS_genetic_code <字符串>    默认值: 1
+    设置TIdeS进行ORF预测和翻译时使用的遗传密码表编号，与NCBI translation table编号一致；同时用于判断基因模型完整性时的起始密码子和终止密码子。仅在--ORF_predictor为TIdeS时生效。
+
+    --TIdeS_partial    默认值: 无
+    添加该参数后，给tides命令加上--partial参数，即同时预测5'或3'不完整的ORF。默认不添加，此时TIdeS只报告完整ORF，输出GFF3的Integrity均为complete。仅在--ORF_predictor为TIdeS时生效。
+
+    --TIdeS_identity_for_training_model <整数>    默认值: 97
+    传递给tides命令第一轮训练模型步骤（--taxon for_model）的--id参数值（序列聚类的相似度百分比）。模型是单独训练的；模型训练完成后，本程序对全部序列进行正式的ORF分析时，tides命令的--id固定为100，因此没有单独的参数用于设置正式分析步骤的--id（聚类结果文件名中的100pid也对应该固定值）。请不要在--TIdeS_extra_options中再传递--id参数。仅在--ORF_predictor为TIdeS时生效。
+
+    --TIdeS_min_length <整数>    默认值: 300
+    TIdeS过滤序列时使用的最小序列长度，仅用于拼接聚类结果文件名（*.300bp.*.Cluster.fas），本参数不会传递给tides命令，请保证其与TIdeS实际使用的值一致（TIdeS默认值为300；若通过--TIdeS_extra_options修改了最小长度，请同时修改本参数）。找不到精确文件名时，程序会自动用通配符查找。仅在--ORF_predictor为TIdeS时生效。
+
+    --TIdeS_extra_options <字符串>    默认值: 无
+    设置需要额外传递给tides命令的其它命令行参数，程序会将该字符串原样添加到tides命令末尾。仅在--ORF_predictor为TIdeS时生效。
+
+[性能参数]
+    --cpu <整数>    默认值: 1
+    设置TIdeS软件运行时可使用的线程数。仅在--ORF_predictor为TIdeS时生效。注意：传递给tides命令的--threads参数值最大为24（实践发现超过32容易导致TIdeS运行失败），即使设置的--cpu大于24，也只使用24个线程。
+
+[帮助参数]
+    --help    默认值: 无
+    display this help (English) and exit.
+
+    --chinese_help    默认值: 无
+    使用该参数后，程序给出中文用法并退出。
+
+USAGE
+my $usage_english = &get_usage_english();
+
+########################################################################
+#                              解析命令行参数
+########################################################################
+if (@ARGV==0) { print STDERR $usage_english; exit 1; }
+
+my ($help, $chinese_help, $tmp_dir, $keep_tmp_files, $output_alignment_GFF3, $gene_prefix, $gff_source, $min_protein_length);
+my ($ORF_predictor, $TIdeS_bin, $TIdeS_protein_database, $TIdeS_genetic_code, $TIdeS_partial, $TIdeS_identity_for_training_model, $TIdeS_min_length, $TIdeS_extra_options, $cpu);
+my @cmdString;
+GetOptions(
+    "help" => \$help,
+    "chinese_help" => \$chinese_help,
+    "tmp_dir=s" => \$tmp_dir,
+    "keep_tmp_files" => \$keep_tmp_files,
+    "output_alignment_GFF3=s" => \$output_alignment_GFF3,
+    "gene_prefix=s" => \$gene_prefix,
+    "source=s" => \$gff_source,
+    "min_protein_length=i" => \$min_protein_length,
+    "ORF_predictor=s" => \$ORF_predictor,
+    "TIdeS_bin=s" => \$TIdeS_bin,
+    "TIdeS_protein_database=s" => \$TIdeS_protein_database,
+    "TIdeS_genetic_code=s" => \$TIdeS_genetic_code,
+    "TIdeS_partial" => \$TIdeS_partial,
+    "TIdeS_identity_for_training_model=i" => \$TIdeS_identity_for_training_model,
+    "TIdeS_min_length=i" => \$TIdeS_min_length,
+    "TIdeS_extra_options=s" => \$TIdeS_extra_options,
+    "cpu=i" => \$cpu,
+) or do { print STDERR "\nError: invalid command line option(s). Use --help (English) or --chinese_help (中文) to see the usage.\n"; exit 1; };
+if ( $chinese_help ) { print STDERR $usage; exit 0; }
+if ( $help ) { print STDERR $usage_english; exit 0; }
+if ( @ARGV != 2 ) {
+    print STDERR "Error: exactly two input files are required (genome.fasta and transfrag.gff3), but " . scalar(@ARGV) . " were given.\n\n" . $usage_english;
+    exit 1;
+}
+
+# 在标准错误输出中给出程序的运行命令。
+my $programe_name = basename($0);
+print STDERR "\n#################### $programe_name | Start ####################\n";
+print STDERR "PWD: " . getcwd() . "\n" . (localtime) . ": CMD: " . $command_line . "\n";
+print STDERR "============================================\n";
+
+########### 解析参数 #################
+$gene_prefix = "transfrag" unless ( defined $gene_prefix && $gene_prefix ne "" );
+$gff_source = "." unless ( defined $gff_source && $gff_source ne "" );
+die "Error: --source can not contain tab or newline characters.\n" if $gff_source =~ m/[\t\r\n]/;
+$min_protein_length = 100 unless defined $min_protein_length;
+die "Error: --min_protein_length should be a positive integer, but you set: $min_protein_length\n" if $min_protein_length < 1;
+# 使用TIdeS时，最小ORF长度（核苷酸数）= 最小蛋白质长度（氨基酸数）* 3，传递给tides命令的 --min-orf 参数。
+my $min_orf_length = $min_protein_length * 3;
+my $min_orf_option = " --min-orf $min_orf_length";
+$ORF_predictor ||= "TIdeS";
+$TIdeS_bin ||= "tides.py";
+$TIdeS_genetic_code = 1 unless ( defined $TIdeS_genetic_code && $TIdeS_genetic_code ne "" );
+die "Error: --TIdeS_genetic_code should be a positive integer (NCBI translation table number), but you set: $TIdeS_genetic_code\n" unless $TIdeS_genetic_code =~ m/^\d+$/;
+$TIdeS_identity_for_training_model ||= 97;
+$TIdeS_min_length ||= 300;
+$cpu ||= 1;
+die "Error: --cpu should be a positive integer.\n" if $cpu < 1;
+print STDERR "Warning: --id was found in --TIdeS_extra_options; it will conflict with the --id set by this program, please remove it.\n" if ( defined $TIdeS_extra_options && $TIdeS_extra_options =~ m/(^|\s)--id(\s|=|$)/ );
+print STDERR "Warning: --min-orf was found in --TIdeS_extra_options; it will conflict with the --min-orf set by this program (from --min_protein_length), please remove it.\n" if ( defined $TIdeS_extra_options && $TIdeS_extra_options =~ m/(^|\s)--min-orf(\s|=|$)/ );
+
+# 标准化并检查 --ORF_predictor 参数
+if ( lc($ORF_predictor) eq "transdecoder" ) {
+    $ORF_predictor = "TransDecoder";
+    die "Error: the modified TransDecoder was not found: $software_dir/TransDecoder-v5.5.0/TransDecoder.LongOrfs\n" unless -e "$software_dir/TransDecoder-v5.5.0/TransDecoder.LongOrfs";
+}
+elsif ( lc($ORF_predictor) eq "tides" ) {
+    $ORF_predictor = "TIdeS";
+    die "Error: --TIdeS_protein_database must be specified when --ORF_predictor is set to TIdeS.\n" unless $TIdeS_protein_database;
+    die "Error: the protein database file $TIdeS_protein_database does not exist.\n" unless -e $TIdeS_protein_database;
+    $TIdeS_protein_database = abs_path($TIdeS_protein_database);
+    # 若 --TIdeS_bin 含有路径，则转为绝对路径（程序之后会切换工作目录）。
+    if ( $TIdeS_bin =~ m{/} ) {
+        my $p = abs_path($TIdeS_bin);
+        $TIdeS_bin = $p if defined $p;
+    }
+}
+else {
+    die "Error: --ORF_predictor should be TransDecoder or TIdeS, but you set: $ORF_predictor\n";
+}
+
+# 是否给tides命令添加 --partial 参数：默认不添加，只有指定 --TIdeS_partial 才添加。
+my $partial_option = $TIdeS_partial ? " --partial" : "";
+# 使用TIdeS且没有添加 --partial 时，TIdeS只报告完整ORF，因此Integrity直接标注为complete。
+my $force_complete = ( $ORF_predictor eq "TIdeS" && !$TIdeS_partial ) ? 1 : 0;
+
+# 终止密码子表（按NCBI遗传密码表编号）。使用TIdeS时按 --TIdeS_genetic_code 选择；TransDecoder以及未收录的编号使用标准密码表。
+my %stop_table = (
+    1  => [qw(TAA TAG TGA)],
+    2  => [qw(TAA TAG AGA AGG)],
+    3  => [qw(TAA TAG)],
+    4  => [qw(TAA TAG)],
+    5  => [qw(TAA TAG)],
+    6  => [qw(TGA)],
+    9  => [qw(TAA TAG)],
+    10 => [qw(TAA TAG)],
+    11 => [qw(TAA TAG TGA)],
+    12 => [qw(TAA TAG TGA)],
+    13 => [qw(TAA TAG)],
+    14 => [qw(TAG)],
+    15 => [qw(TAA TGA)],
+    16 => [qw(TAA TGA)],
+    21 => [qw(TAA TAG)],
+    22 => [qw(TCA TAA TGA)],
+    23 => [qw(TTA TAA TAG TGA)],
+    24 => [qw(TAA TAG)],
+    25 => [qw(TAA TAG)],
+    26 => [qw(TAA TAG TGA)],
+);
+# 起始密码子表（按NCBI遗传密码表编号）。未收录的编号仅接受ATG。
+my %start_table = (
+    1  => [qw(ATG)],
+    2  => [qw(ATG ATT ATC ATA GTG)],
+    3  => [qw(ATG ATA GTG)],
+    4  => [qw(ATG TTA TTG CTG ATT ATC ATA GTG)],
+    5  => [qw(ATG TTG ATT ATC ATA GTG)],
+    6  => [qw(ATG)],
+    9  => [qw(ATG GTG)],
+    10 => [qw(ATG)],
+    11 => [qw(ATG TTG CTG ATT ATC ATA GTG)],
+    12 => [qw(ATG CTG)],
+    13 => [qw(ATG ATA GTG TTG)],
+    14 => [qw(ATG)],
+    16 => [qw(ATG)],
+    21 => [qw(ATG GTG)],
+    22 => [qw(ATG)],
+    23 => [qw(ATG ATT GTG)],
+    24 => [qw(ATG TTG CTG GTG)],
+    25 => [qw(ATG TTG CTG GTG)],
+);
+my $stop_list_ref  = $stop_table{1};
+my $start_list_ref = $start_table{1};
+if ( $ORF_predictor eq "TIdeS" ) {
+    if ( $stop_table{$TIdeS_genetic_code} ) { $stop_list_ref = $stop_table{$TIdeS_genetic_code}; }
+    else { print STDERR "Note: genetic code $TIdeS_genetic_code has no built-in stop codon list, the standard stop codons (TAA, TAG, TGA) are used to judge gene model integrity.\n"; }
+    $start_list_ref = $start_table{$TIdeS_genetic_code} if $start_table{$TIdeS_genetic_code};
+}
+my %is_stop_codon  = map { $_ => 1 } @{$stop_list_ref};
+my %is_start_codon = map { $_ => 1 } @{$start_list_ref};
+
+# 统计Integrity的判断情况
+my ($n_integrity_total, $n_integrity_override) = (0, 0);
+
+# TIdeS 的 --threads 参数值最大为 24：实践发现该值超过32后极易导致TIdeS运行失败，故取 24 和 $cpu 中的较小值。
+my $tides_max_threads = 24;
+my $tides_threads = ( $cpu > $tides_max_threads ) ? $tides_max_threads : $cpu;
+if ( $ORF_predictor eq "TIdeS" && $cpu > $tides_max_threads ) {
+    print STDERR "Note: --cpu $cpu is larger than $tides_max_threads, TIdeS will only use $tides_threads threads (values greater than 32 easily cause TIdeS to fail).\n";
+}
+
+# 使用绝对路径（先检查输入文件是否存在）
+foreach my $f ( @ARGV ) { die "Error: input file $f does not exist.\n" unless -e $f; }
+my $input_genome = abs_path($ARGV[0]);
+my $input_GFF3 = abs_path($ARGV[1]);
+if ( defined $output_alignment_GFF3 ) {
+    my $abs = abs_path($output_alignment_GFF3);
+    $output_alignment_GFF3 = defined $abs ? $abs : File::Spec->rel2abs($output_alignment_GFF3);
+}
+
+# 记录程序启动时的工作目录，程序结束删除临时文件夹之前需要先切换回该目录。
+my $original_dir = getcwd();
+
+# 准备临时文件夹路径
+my $date = `date +%Y%m%d%H%M%S`; chomp($date);
+$tmp_dir = "tmp_$date$$" unless ( defined $tmp_dir && $tmp_dir ne "" );
+{
+    my $abs = abs_path($tmp_dir);
+    $tmp_dir = defined $abs ? $abs : File::Spec->rel2abs($tmp_dir);
+}
+
+# 未添加 --keep_tmp_files 时，程序成功结束后会删除整个临时文件夹，因此在做任何事情之前先检查其安全性。
+unless ( $keep_tmp_files ) {
+    my @protected_files = ( $input_genome, $input_GFF3 );
+    push @protected_files, $output_alignment_GFF3 if $output_alignment_GFF3;
+    push @protected_files, $TIdeS_protein_database if ( $ORF_predictor eq "TIdeS" && $TIdeS_protein_database );
+    &check_tmp_dir_safety($tmp_dir, $original_dir, $bin_path, \@protected_files);
+}
+
+mkdir $tmp_dir unless -e $tmp_dir;
+chdir $tmp_dir or die "Error: can not enter the temporary folder $tmp_dir, $!";
+print STDERR "PWD: $tmp_dir\n";
+###############################
+
+# 读取输入转录本GFF3文件（第1步和第3步共用）。
+my $gff = &read_transfrag_gff3($input_GFF3);
+my %transcript_exon = %{$gff->{exon}};
+my %sort1 = %{$gff->{chr}};
+my %sort4 = %{$gff->{strand}};
+my %score = %{$gff->{score}};
+my %source = %{$gff->{source}};
+my %attribute = %{$gff->{attr}};
+my @transcript_ID = @{$gff->{ids}};
+die "Error: no transcript (mRNA/transcript feature with exon children) was found in $input_GFF3.\n" unless @transcript_ID;
+print STDERR scalar(@transcript_ID) . " transcripts were read from $input_GFF3.\n";
+
+
+# 1. 根据输入转录本GFF3文件，转换得到转录本序列：链向已知（+/-）的转录本存入transfrag.strand.fasta，链向未知（.）的转录本存入transfrag.noStrand.fasta。
+print STDERR "\n1. Using the input transcriptome GFF3 file, we convert the transcript sequences into two files: transfrag.strand.fasta for transcripts with a known strand (+ or -; sequences are oriented in the transcript direction) and transfrag.noStrand.fasta for transcripts with an unknown strand (.; sequences are in the genome forward direction). If all transcripts have a known strand, the latter file is empty. (" . (localtime) . ")\n";
+if ( -e "01.transfrag2Seq.ok" && -e "transfrag.strand.fasta" && -e "transfrag.noStrand.fasta" && ( !defined $output_alignment_GFF3 || -e $output_alignment_GFF3 ) ) {
+    print STDERR "Skip step 1 for file 01.transfrag2Seq.ok exists.\n";
+}
+else {
+    my $genome = &read_fasta($input_genome);
+
+    # 输出 alignment.gff3 文件
+    if ( defined $output_alignment_GFF3 ) {
+        open my $aln, ">", $output_alignment_GFF3 or die "Can not create file $output_alignment_GFF3, $!";
+        foreach my $transcriptID ( @transcript_ID ) {
+            # 分析每个 transcript 的exon信息
+            my @exon = &sort_intervals(keys %{$transcript_exon{$transcriptID}});
+            @exon = reverse @exon if $sort4{$transcriptID} eq "-";
+            my $map_start = 1;
+            foreach my $ex ( @exon ) {
+                my ($es, $ee) = split /\t/, $ex;
+                my $map_end = $ee - $es + $map_start;
+                print $aln "$sort1{$transcriptID}\t$source{$transcriptID}\tcDNA_match\t$es\t$ee\t$score{$transcriptID}\t$sort4{$transcriptID}\t.\tID=$transcriptID;Target=$transcriptID $map_start $map_end +\n";
+                $map_start = $map_end + 1;
+            }
+            print $aln "\n";
+        }
+        close $aln;
+        print STDERR "By adding the --output_alignment_GFF3 option, the program output the cDNA alignment results ($output_alignment_GFF3) in an irregular GFF3 file.\n";
+    }
+
+    # 输出 transfrag.strand.fasta 和 transfrag.noStrand.fasta 文件
+    open my $out1, ">", "transfrag.strand.fasta" or die "Can not create file $tmp_dir/transfrag.strand.fasta, $!";
+    open my $out2, ">", "transfrag.noStrand.fasta" or die "Can not create file $tmp_dir/transfrag.noStrand.fasta, $!";
+    my ($n_strand, $n_nostrand, $n_skipped) = (0, 0, 0);
+    foreach my $transcriptID ( @transcript_ID ) {
+        my @exon = &sort_intervals(keys %{$transcript_exon{$transcriptID}});
+        my $transcript_seq = &get_spliced_seq($genome, $sort1{$transcriptID}, \@exon);
+        unless ( defined $transcript_seq ) {
+            $n_skipped ++;
+            warn "Warning: transcript $transcriptID was skipped: its chromosome ($sort1{$transcriptID}) is absent from the genome, or an exon exceeds the chromosome length.\n" if $n_skipped <= 20;
+            next;
+        }
+        if ( $sort4{$transcriptID} eq "-" ) {
+            $transcript_seq = &revcom($transcript_seq);
+        }
+        if ( $sort4{$transcriptID} eq "." ) {
+            print $out2 ">$transcriptID\n$transcript_seq\n";
+            $n_nostrand ++;
+        }
+        else {
+            print $out1 ">$transcriptID\n$transcript_seq\n";
+            $n_strand ++;
+        }
+    }
+    close $out1; close $out2;
+    print STDERR "We created the transcript sequences: $n_strand with a known strand (transfrag.strand.fasta), $n_nostrand with an unknown strand (transfrag.noStrand.fasta), $n_skipped skipped.\n";
+
+    open my $ok, ">", "01.transfrag2Seq.ok" or die $!; close $ok;
+}
+
+
+# 2. 调用TransDecoder或TIdeS对transcripts序列进行ORF分析，并将ORF结果读入内存（%cds）。
+# 无论使用哪种ORF预测软件，ORF在输入转录本序列上的坐标信息都先保存为临时文件夹中的中间标准GFF3文件：transfrag.$ORF_predictor.gff3
+#   （即 transfrag.TransDecoder.gff3 或 transfrag.TIdeS.gff3），然后统一从该文件读入 %cds。
+# %cds 的结构：第一个键是转录本ID，第二个键是 "ORF起点\tORF终点\tORF所在链"，坐标均为转录本序列上的坐标（以转录本序列最左端为1号位点，起点<=终点）。
+print STDERR "\n2. Use $ORF_predictor to analyze the ORFs in the transcript sequence.\n";
+# transfrag.strand.fasta / transfrag.noStrand.fasta 有可能其中一个为空文件，避免对空文件调用ORF预测软件。
+my $run_strand_fasta = ( -s "transfrag.strand.fasta" ) ? 1 : 0;
+my $run_noStrand_fasta = ( -s "transfrag.noStrand.fasta" ) ? 1 : 0;
+die "Error: both transfrag.strand.fasta and transfrag.noStrand.fasta are empty, please check whether the input transfrag.gff3 file ($input_GFF3) matches the genome file.\n" unless ( $run_strand_fasta || $run_noStrand_fasta );
+
+# 中间GFF3文件（位于临时文件夹中），存放ORF在输入转录本序列上的坐标信息。
+my $orf_gff3 = "$tmp_dir/transfrag.$ORF_predictor.gff3";
+
+my %cds;
+@cmdString = ();
+if ( $ORF_predictor eq "TransDecoder" ) {
+    my $td = &shq("$software_dir/TransDecoder-v5.5.0");
+    if ( $run_strand_fasta ) {
+        push @cmdString, "$td/TransDecoder.LongOrfs -m $min_protein_length -t transfrag.strand.fasta -S > /dev/null 2>&1";
+        push @cmdString, "$td/TransDecoder.Predict -t transfrag.strand.fasta > /dev/null 2>&1";
+    }
+    if ( $run_noStrand_fasta ) {
+        push @cmdString, "$td/TransDecoder.LongOrfs -m $min_protein_length -t transfrag.noStrand.fasta > /dev/null 2>&1";
+        if ( $run_strand_fasta ) {
+            push @cmdString, "$td/TransDecoder.Predict -t transfrag.noStrand.fasta --train transfrag.strand.fasta.transdecoder_dir/longest_orfs.cds.top_500_longest > /dev/null 2>&1";
+        }
+        else {
+            push @cmdString, "$td/TransDecoder.Predict -t transfrag.noStrand.fasta > /dev/null 2>&1";
+        }
+    }
+
+    # 根据实际运行了哪些TransDecoder分析，合并/复制得到最终的 transfrag.TransDecoder.gff3 文件。
+    if ( $run_strand_fasta && $run_noStrand_fasta ) {
+        push @cmdString, "cat transfrag.strand.fasta.transdecoder.gff3 transfrag.noStrand.fasta.transdecoder.gff3 > transfrag.TransDecoder.gff3";
+    }
+    elsif ( $run_strand_fasta ) {
+        push @cmdString, "cp transfrag.strand.fasta.transdecoder.gff3 transfrag.TransDecoder.gff3";
+    }
+    else {
+        push @cmdString, "cp transfrag.noStrand.fasta.transdecoder.gff3 transfrag.TransDecoder.gff3";
+    }
+
+    &execute_cmds(@cmdString, "$tmp_dir/02.$ORF_predictor.ok");
+
+    # 读取TransDecoder输出的（以转录本为坐标系的）GFF3文件中的CDS信息。
+    &read_orf_gff3($orf_gff3, \%cds);
+}
+elsif ( $ORF_predictor eq "TIdeS" ) {
+    my $extra_options = $TIdeS_extra_options ? " $TIdeS_extra_options" : "";
+    my $q_bin = &shq($TIdeS_bin);
+    my $q_db = &shq($TIdeS_protein_database);
+    my $model = "for_model_TIdeS/for_model.TIdeS.pkl";
+    if ( $run_strand_fasta ) {
+        # transfrag.strand.fasta 中的序列已经按照转录本的正义链方向排列，因此只需要在正链上搜索ORF。
+        # 第一轮单独训练模型（使用 --TIdeS_identity_for_training_model 作为 --id 参数，默认97）
+        push @cmdString, "$q_bin --fin transfrag.strand.fasta --id $TIdeS_identity_for_training_model --taxon for_model --db $q_db$min_orf_option$partial_option --threads $tides_threads --gencode $TIdeS_genetic_code --strand plus$extra_options > for_model_TIdeS.log 2>&1";
+        # 模型训练完成后，对全部序列进行正式的ORF分析，此时 --id 固定为 $tides_formal_identity（100）
+        push @cmdString, "$q_bin --id $tides_formal_identity --fin transfrag.strand.fasta --taxon transfrag_strand --db $q_db$min_orf_option$partial_option --model $model --threads $tides_threads --gencode $TIdeS_genetic_code --strand plus$extra_options > transfrag_strand_TIdeS.log 2>&1";
+    }
+    if ( $run_noStrand_fasta ) {
+        # transfrag.noStrand.fasta 中的是链向未知的转录本序列，两条链都需要搜索。
+        # 只有运行了strand分析（即存在训练好的模型文件）时，才添加 --model 参数。
+        # 注意：这里不使用 --clean，因为本程序需要读取 Filter_Steps/Clustering 下的聚类结果文件。
+        my $model_option = $run_strand_fasta ? " --model $model" : "";
+        push @cmdString, "$q_bin --id $tides_formal_identity --fin transfrag.noStrand.fasta --taxon transfrag_noStrand --db $q_db$min_orf_option$model_option$partial_option --threads $tides_threads --gencode $TIdeS_genetic_code --strand both$extra_options > transfrag_noStrand_TIdeS.log 2>&1";
+    }
+
+    &execute_cmds(@cmdString, "$tmp_dir/02.$ORF_predictor.ok");
+
+    # TIdeS的结果是ORF核酸序列的FASTA文件，序列ID已被完全修改。
+    # 这里只解析ORF头部的坐标信息，并借助 Filter_Steps/Clustering 下的聚类序列文件，
+    # 在输入的转录本序列中找到与之完全一致的全部序列，先把CDS坐标存入 %cds。
+    if ( $run_strand_fasta ) {
+        # strand.fasta中的序列已经按转录本正义链排列，TIdeS只搜索了正链，因此不允许反向互补匹配。
+        &load_one_TIdeS_result("transfrag_strand", "transfrag.strand.fasta", 0, \%cds);
+    }
+    if ( $run_noStrand_fasta ) {
+        # noStrand.fasta中的ORF可能在两条链上，且CD-HIT聚类时可能把互为反向互补的序列聚为一类，因此允许反向互补匹配。
+        &load_one_TIdeS_result("transfrag_noStrand", "transfrag.noStrand.fasta", 1, \%cds);
+    }
+
+    # 读取输入转录本序列的长度，用于在中间GFF3中输出gene/mRNA/exon的范围以及UTR区间。
+    my %transcript_seq_length;
+    foreach my $fasta ( "transfrag.strand.fasta", "transfrag.noStrand.fasta" ) {
+        next unless -s $fasta;
+        my $tmp_seq = &read_fasta($fasta);
+        foreach my $tid ( keys %{$tmp_seq} ) {
+            $transcript_seq_length{$tid} = length $tmp_seq->{$tid};
+        }
+    }
+
+    # 将ORF在输入转录本序列上的坐标输出为标准GFF3格式的中间文件 transfrag.TIdeS.gff3（放置于临时文件夹中），
+    # 然后清空 %cds 并从该GFF3文件重新读入，使TIdeS与TransDecoder的处理方式保持一致。
+    &write_orf_gff3($orf_gff3, \%cds, $ORF_predictor, \%transcript_seq_length);
+    print STDERR "The ORF coordinates on the input transcript sequences were saved in the intermediate GFF3 file: $orf_gff3\n";
+    %cds = ();
+    &read_orf_gff3($orf_gff3, \%cds);
+}
+
+# 统计ORF总数，用于生成等宽的基因编号。
+my $cds_total_number = 0;
+foreach my $tid ( keys %cds ) {
+    $cds_total_number += scalar( keys %{$cds{$tid}} );
+}
+die "Error: no ORF was found by $ORF_predictor, please check the input files and the log files in $tmp_dir.\n" unless $cds_total_number;
+print STDERR "$cds_total_number ORF(s) on " . scalar(keys %cds) . " transcript(s) were loaded from the $ORF_predictor results ($orf_gff3).\n";
+
+
+# 3. 将转录本序列上ORF结果转化为基因组上的基因预测结果。
+print STDERR "\n3. Turn the ORF results from transcript sequences into gene predictions on the genome.\n";
+my $genome = &read_fasta($input_genome);
+
+# 转录本长度：由其全部外显子的长度累加得到（与转录本序列长度一致），对TransDecoder和TIdeS均适用。
+my %transcript_length;
+foreach my $tid ( keys %transcript_exon ) {
+    my $length = 0;
+    foreach my $exon_key ( keys %{$transcript_exon{$tid}} ) {
+        my ($es, $ee) = split /\t/, $exon_key;
+        $length += $ee - $es + 1;
+    }
+    $transcript_length{$tid} = $length;
+}
+
+print "##gff-version 3\n";
+my $gene_number = 0;
+foreach my $transcript_id ( @transcript_ID ) {
+    # 获取每个转录本在基因组上的exon信息，在转录本序列上的CDS信息。
+    # 按从小到大排序后，不管转录本在那条链上，统统按从左往右方向进行分析。即以转录本比对到基因组最左端位点为1号位点。
+    next unless exists $cds{$transcript_id};
+    my @cds = &sort_intervals(keys %{$cds{$transcript_id}});
+    my $align_strand = $sort4{$transcript_id};
+    my $tlen = $transcript_length{$transcript_id};
+
+    # 已知链向（+或-）的转录本，其转录本序列已经按转录本方向排列（负义链转录本已反向互补），
+    # 因此只有位于转录本序列正链上的ORF才是有效的；仅对链向未知（.）的转录本才接受反向链上的ORF。
+    if ( $align_strand ne "." ) {
+        @cds = grep { (split /\t/, $_)[2] eq "+" } @cds;
+    }
+    # 丢弃坐标不合法（超出转录本长度）的ORF
+    my $n_before = @cds;
+    @cds = grep { my ($cs, $ce) = split /\t/, $_; $cs >= 1 && $ce <= $tlen && $cs <= $ce } @cds;
+    warn "Warning: $transcript_id: " . ($n_before - @cds) . " ORF(s) with coordinates outside the transcript length ($tlen bp) were discarded.\n" if $n_before != @cds;
+    next unless @cds;
+    my @exon = &sort_intervals(keys %{$transcript_exon{$transcript_id}});
+
+    # 若转录本位于负义链上，则将其CDS坐标进行反向，以转录本比对到基因组上的最小坐标为1。示例如下：
+    # 基因组序列  ====================================================
+    # 转录本序列         <=========-------=========         转录本长度 600 bp
+    # CDS信息                  ++++-------+++++++++         转录本上找到一个CDS，其坐标为 1-400
+    #                                                       以转录本最左端为1号位点，需要将CDS的坐标更正为201-600
+    # 对于noStrand转录本序列，使用Transdecoder/TIdeS预测ORF时未对序列进行反向互补。即使在负义链上预测到了CDS，其对应的坐标也是以最左端为1号位点，不需要进行更正。
+    if ( $align_strand eq "-" ) {
+        my @cds_new;
+        foreach my $c ( @cds ) {
+            my ($cs, $ce, $cstrand) = split /\t/, $c;
+            my $start_new = $tlen - $ce + 1;
+            my $end_new = $tlen - $cs + 1;
+            push @cds_new, "$start_new\t$end_new\t$cstrand";
+        }
+        @cds = &sort_intervals(@cds_new);
+    }
+
+    # 得到拼接后的转录本序列（按基因组从左到右方向，未反向互补），其坐标系与上面的CDS坐标一致，用于判断基因模型的完整性。
+    my $spliced_seq = &get_spliced_seq($genome, $sort1{$transcript_id}, \@exon);
+    unless ( defined $spliced_seq && length($spliced_seq) == $tlen ) {
+        warn "Warning: transcript $transcript_id was skipped: its sequence can not be extracted from the genome.\n";
+        next;
+    }
+
+    # 对转录本序列上的每个ORF预测结果的CDS进行分析，得到其在基因组序列上的CDS和exon信息。
+    # %exon_info，该双重哈希的第一个键是：转录本序列上的CDS区间，第二个键：在基因组序列上的exon区间。
+    # %cds_info，该双重哈希的第一个键是：转录本序列上的CDS区间，第二个键：在基因组序列上的CDS区间。
+    my (%exon_info, %cds_info);
+    my $num = 0;
+    foreach my $cds (@cds) {
+        $num ++;
+        # 当前CDS的基因模型和下一个CDS的基因模型可能在UTR区重叠，需要准确分析其在基因组上的exon区间。
+        # 若一个transcript序列中有多个ORF结果，则给出多个基因模型，且相邻基因模型之间共用exon，即在UTR区是有重叠的。如下图所示：
+        # 基因组序列    ==========================================================================================
+        # 转录本序列          ===========----==========---==========---===========----======---============>
+        # 基因模型1           ======+++++----++++++++++---++=======>
+        # 基因模型2                                       =======+++---+++++++====----=====>
+        # 基因模型3                                                                   ======--- ==+++++++==>
+        my %exon_info_out = &get_cross_utr_exon($cds, $cds[$num], \@exon);
+        foreach my $cdscds (keys %exon_info_out) {
+            foreach my $ex (keys %{$exon_info_out{$cdscds}}) {
+                $exon_info{$cdscds}{$ex} = 1;
+            }
+        }
+        my ($start, $end) = split /\t/, $cds;
+        # 得到基因模型在基因组上的CDS区间
+        foreach my $ci ( &get_cds($start, $end, \@exon) ) {
+            $cds_info{$cds}{$ci} = 1;
+        }
+    }
+
+    # 上一个步骤分析完毕后，得到了基因模型的CDS和exon，其数量一致。而转录本可能存在多个exon都属于UTR情况，要给基因模型的首尾增加属于UTR的exon信息。
+    my $cds_first = $cds[0];
+    my ($first_start, undef) = split /\t/, $cds_first;
+    my $total_length = 0;
+    foreach my $ex ( @exon ) {
+        my ($es, $ee) = split /\t/, $ex;
+        $total_length += $ee - $es + 1;
+        $exon_info{$cds_first}{$ex} = 1 if $total_length <= $first_start;
+    }
+    my $cds_last = $cds[-1];
+    my (undef, $last_end) = split /\t/, $cds_last;
+    $total_length = 0;
+    foreach my $ex ( @exon ) {
+        my ($es, $ee) = split /\t/, $ex;
+        $total_length += $ee - $es + 1;
+        $exon_info{$cds_last}{$ex} = 1 if $total_length >= $last_end;
+    }
+
+    # 对一个转录本序列上的ORFs进行分析，并输出结果。
+    my $cds_number = 0;
+    my $cds_num = @cds;
+    foreach my $cds (@cds) {
+        $cds_number ++;
+        my @exon_info = &sort_intervals(keys %{$exon_info{$cds}});
+        my @cds_info = &sort_intervals(keys %{$cds_info{$cds}});
+
+        # 分析基因模型在正义或负义链上。
+        my ($orf_start, $orf_end, $orf_strand) = split /\t/, $cds;
+        my $strand_type = ( $align_strand eq '.' ) ? $orf_strand : $align_strand;
+
+        # 分析基因模型的完整性：在拼接后的转录本序列上截取整条CDS，检查起始/终止密码子（可正确处理密码子被内含子隔开的情况）。
+        my $integrity_type = &get_integrity($spliced_seq, $orf_start, $orf_end, $strand_type);
+        $n_integrity_total ++;
+        # 使用TIdeS且没有添加--partial时，TIdeS只报告完整ORF，因此直接标注为complete，并统计与序列判断结果不一致的数量。
+        if ( $force_complete ) {
+            if ( $integrity_type ne "complete" ) {
+                $n_integrity_override ++;
+                print STDERR "Note: $transcript_id ORF $orf_start-$orf_end($strand_type) was reported as complete by TIdeS (no --partial), but its start/stop codon check gave $integrity_type; it is labeled complete.\n" if $n_integrity_override <= 20;
+            }
+            $integrity_type = "complete";
+        }
+
+        # 分析CDS占转录本的比例
+        my $CDS_percentage = sprintf("%.2f%%", ($orf_end - $orf_start + 1) / $tlen * 100);
+
+        # 分析基因模型的全部外显子边界，从而得到基因的起始和结束位点
+        my @exon_boundary;
+        foreach my $ex ( @exon_info ) {
+            push @exon_boundary, split /\t/, $ex;
+        }
+        @exon_boundary = sort { $a <=> $b } @exon_boundary;
+        $gene_number ++;
+        my $gene_id = $gene_prefix . '0' x ((length $cds_total_number) - (length $gene_number)) . $gene_number;
+        my $form = "one_transcript_get_${cds_num}_gene_model";
+
+        # 输出GFF3中gene/mRNA信息。第二列使用 --source 参数设置的字符串（默认为"."）。
+        my $gene_attr = "ID=$gene_id;Form=${form}_num${cds_number}_$CDS_percentage;Integrity=$integrity_type";
+        $gene_attr .= ";$attribute{$transcript_id}" if ( defined $attribute{$transcript_id} && $attribute{$transcript_id} ne "" );
+        print "$sort1{$transcript_id}\t$gff_source\tgene\t$exon_boundary[0]\t$exon_boundary[-1]\t.\t$strand_type\t.\t$gene_attr\n";
+        print "$sort1{$transcript_id}\t$gff_source\tmRNA\t$exon_boundary[0]\t$exon_boundary[-1]\t.\t$strand_type\t.\tID=$gene_id.t01;Parent=$gene_id\n";
+
+        # 准备GFF3中exon信息：每个元素为 [起点, 特征顺序(exon=0,CDS=1), 输出行]
+        my @feature;
+        my $exon_num = 0;
+        @exon_info = reverse @exon_info if $strand_type eq "-";
+        foreach my $ex ( @exon_info ) {
+            $exon_num ++;
+            my ($es, undef) = split /\t/, $ex;
+            push @feature, [ $es, 0, "$sort1{$transcript_id}\t$gff_source\texon\t$ex\t.\t$strand_type\t.\tID=$gene_id.t01.exon$exon_num;Parent=$gene_id.t01\n" ];
+        }
+
+        # 准备GFF3中CDS信息
+        my $cds_seg_num = 0;
+        @cds_info = reverse @cds_info if $strand_type eq "-";
+        my $frame = 0;
+        my $cds_bp_length = 0;
+        foreach my $ci ( @cds_info ) {
+            $cds_seg_num ++;
+            my ($cs, $ce) = split /\t/, $ci;
+            push @feature, [ $cs, 1, "$sort1{$transcript_id}\t$gff_source\tCDS\t$ci\t.\t$strand_type\t$frame\tID=$gene_id.t01.CDS$cds_seg_num;Parent=$gene_id.t01\n" ];
+            $cds_bp_length += $ce - $cs + 1;
+            $frame = $cds_bp_length % 3;
+            $frame = 3 - $frame if $frame != 0;
+        }
+        warn "Warning: $transcript_id: the cds length of $gene_id is not a multiple of 3!\n" if ( $frame != 0 && $integrity_type eq "complete" );
+
+        # 输出GFF3的exon和CDS信息。
+        my @out = ( $strand_type eq "-" )
+            ? sort { $b->[0] <=> $a->[0] or $a->[1] <=> $b->[1] } @feature
+            : sort { $a->[0] <=> $b->[0] or $a->[1] <=> $b->[1] } @feature;
+        print $_->[2] foreach @out;
+        print "\n";
+    }
+}
+print STDERR "Integrity: $n_integrity_total gene model(s) were analyzed" . ( $force_complete ? "; TIdeS was run without --partial, so all are labeled complete ($n_integrity_override of them did not pass the start/stop codon check on the genome sequence)" : "" ) . ".\n";
+
+# 4. 处理临时文件夹：默认删除整个 --tmp_dir 文件夹；添加 --keep_tmp_files 参数则保留全部临时数据。
+# 只有程序前面所有步骤都成功完成后才会执行到这里；若程序中途出错或被中断，临时文件夹不会被删除，以便断点续跑。
+close STDOUT or die "Error: failed to write the GFF3 result to the standard output, $!";
+chdir $original_dir;   # 先离开临时文件夹，再进行删除
+if ( $keep_tmp_files ) {
+    print STDERR "\nThe --keep_tmp_files option was set, so the temporary folder and all intermediate files in it were kept: $tmp_dir\n";
+}
+else {
+    print STDERR "\nRemoving the temporary folder: $tmp_dir (add --keep_tmp_files to keep it)\n";
+    my $remove_error;
+    remove_tree($tmp_dir, { error => \$remove_error });
+    if ( $remove_error && @$remove_error ) {
+        foreach my $diag ( @$remove_error ) {
+            my ($file, $message) = %$diag;
+            warn "Warning: failed to remove " . ( $file eq '' ? "(general error)" : $file ) . ": $message\n";
+        }
+    }
+    elsif ( -e $tmp_dir ) {
+        warn "Warning: the temporary folder $tmp_dir still exists after removal.\n";
+    }
+    else {
+        print STDERR "The temporary folder was removed.\n";
+    }
+}
+
+print STDERR "============================================\n";
+print STDERR "$programe_name complete successfully! " . "(" . (localtime) . ")" . "\n\n";
+print STDERR "#################### $programe_name | End ####################\n";
+
+
+########################################################################
+#                                 子程序
+########################################################################
+
+# 对shell命令中的路径加单引号，避免路径中的空格等特殊字符导致命令出错。
+sub shq {
+    my ($s) = @_;
+    $s =~ s/'/'\\''/g;
+    return "'$s'";
+}
+
+# 将 "起点\t终点[\t...]" 形式的区间字符串按起点、终点从小到大数值排序。
+sub sort_intervals {
+    return map { $_->[0] }
+           sort { $a->[1] <=> $b->[1] or $a->[2] <=> $b->[2] or $a->[0] cmp $b->[0] }
+           map { my @f = split /\t/, $_; [ $_, $f[0], $f[1] ] } @_;
+}
+
+# 反向互补（支持IUPAC简并碱基）。
+sub revcom {
+    my $s = reverse $_[0];
+    $s =~ tr/ACGTUMRWSYKVHDBNacgtumrwsykvhdbn/TGCAAKYWSRMBDHVNtgcaakywsrmbdhvn/;
+    return $s;
+}
+
+# 将一个FASTA文件读取到哈希引用中（键为序列ID，即">"后第一个空白字符前的内容；值为大写序列）。
+sub read_fasta {
+    my ($file) = @_;
+    my (%seq, $id);
+    open my $in, "<", $file or die "Can not open file $file, $!";
+    while (<$in>) {
+        chomp;
+        s/\r$//;
+        if (m/^>(\S+)/) { $id = $1; $seq{$id} = "" unless exists $seq{$id}; }
+        elsif ( defined $id ) { s/\s+//g; $seq{$id} .= uc $_; }
+    }
+    close $in;
+    return \%seq;
+}
+
+# 按基因组从左到右的方向拼接外显子序列（不反向互补）。
+# 参数：基因组序列哈希引用、染色体名、排序后的外显子区间列表引用。若染色体不存在或外显子超出染色体长度，返回undef。
+sub get_spliced_seq {
+    my ($genome_ref, $chr, $exon_ref) = @_;
+    my $gseq = $genome_ref->{$chr};
+    return undef unless defined $gseq;
+    my $glen = length $gseq;
+    my $s = "";
+    foreach my $ex ( @{$exon_ref} ) {
+        my ($es, $ee) = split /\t/, $ex;
+        return undef if ( $es < 1 || $ee > $glen );
+        $s .= substr($gseq, $es - 1, $ee - $es + 1);
+    }
+    return $s;
+}
+
+# 读取输入的转录本GFF3文件。转录本行可以是mRNA或transcript，exon行通过Parent属性关联转录本（支持逗号分隔的多个Parent）。
+# 返回哈希引用，包含：exon（转录本=>{"起点\t终点"=>1}）、chr、strand、score、source、attr（继承自gene行的属性）、ids（按染色体、起点、终点排序的转录本ID列表）。
+sub read_transfrag_gff3 {
+    my ($file) = @_;
+    my (%exon, %chr, %start, %end, %strand, %score, %source, %gene_attr, %mrna_parent);
+    open my $in, "<", $file or die "Can not open file $file, $!";
+    while ( my $line = <$in> ) {
+        $line =~ s/[\r\n]+$//;
+        next if ( $line =~ m/^\s*$/ || $line =~ m/^#/ );
+        my @f = split /\t/, $line, 9;
+        next if @f < 9;
+        next unless ( $f[3] =~ m/^\d+$/ && $f[4] =~ m/^\d+$/ );
+        ($f[3], $f[4]) = ($f[4], $f[3]) if $f[3] > $f[4];
+
+        # 解析attribute列：取出ID，其余属性保留。
+        my (%kv, @rest, $id);
+        foreach my $pair ( grep { length } split /;/, $f[8] ) {
+            if ( $pair =~ m/^ID=(.*)$/ && !defined $id ) { $id = $1; next; }
+            push @rest, $pair;
+            $kv{$1} = $2 if $pair =~ m/^([^=]+)=(.*)$/;
+        }
+        my $type = $f[2];
+        if ( $type eq "gene" ) {
+            next unless defined $id;
+            # 去除可能已存在的Form/Integrity标签（例如输入是本程序的输出结果），避免重复。
+            $gene_attr{$id} = join(";", grep { !m/^(?:Form|Integrity)=/ } @rest);
+        }
+        elsif ( $type eq "mRNA" || $type eq "transcript" ) {
+            next unless defined $id;
+            $chr{$id} = $f[0];
+            $start{$id} = $f[3];
+            $end{$id} = $f[4];
+            $strand{$id} = ( $f[6] eq "+" || $f[6] eq "-" ) ? $f[6] : ".";
+            $score{$id} = $f[5];
+            $source{$id} = $f[1];
+            $mrna_parent{$id} = $kv{Parent} if defined $kv{Parent};
+        }
+        elsif ( $type eq "exon" ) {
+            next unless defined $kv{Parent};
+            $exon{$_}{"$f[3]\t$f[4]"} = 1 foreach split /,/, $kv{Parent};
+        }
+    }
+    close $in;
+
+    my %attr;
+    foreach my $id ( keys %chr ) {
+        my $p = $mrna_parent{$id};
+        $attr{$id} = ( defined $p && defined $gene_attr{$p} ) ? $gene_attr{$p} : "";
+    }
+    my $n_orphan = grep { !defined $chr{$_} } keys %exon;
+    warn "Warning: $n_orphan transcript ID(s) have exon lines but no mRNA/transcript line in $file; they are ignored.\n" if $n_orphan;
+
+    # 排序时最后按ID比较，保证输出顺序（以及基因编号）在多次运行之间完全一致。
+    my @ids = sort {
+        $chr{$a} cmp $chr{$b} or $start{$a} <=> $start{$b} or $end{$a} <=> $end{$b}
+        or $strand{$b} cmp $strand{$a} or $a cmp $b
+    } grep { defined $chr{$_} } keys %exon;
+    return { exon => \%exon, chr => \%chr, strand => \%strand, score => \%score, source => \%source, attr => \%attr, ids => \@ids };
+}
+
+# 判断路径 $path 是否等于目录 $dir 或位于其内部。
+sub is_inside {
+    my ($path, $dir) = @_;
+    return 0 unless ( defined $path && length $path && defined $dir && length $dir );
+    $dir =~ s/\/+$//;
+    return 1 if $path eq $dir;
+    return ( index($path, "$dir/") == 0 ) ? 1 : 0;
+}
+
+# 检查即将被删除的临时文件夹是否安全，不安全则在做任何工作之前直接报错退出。
+# 参数：临时文件夹绝对路径，程序启动时的工作目录，程序所在目录，需要保护的文件（输入/输出文件）列表的引用。
+sub check_tmp_dir_safety {
+    my ($dir, $cwd_dir, $program_dir, $files_ref) = @_;
+    my $hint = "Please use another --tmp_dir, or add --keep_tmp_files.\n";
+
+    die "Error: --tmp_dir can not be the root directory, because it is removed after the program finishes successfully. $hint" if $dir eq "/";
+
+    if ( defined $ENV{HOME} && length $ENV{HOME} ) {
+        my $home = abs_path($ENV{HOME});
+        die "Error: --tmp_dir ($dir) can not be the home directory, because it is removed after the program finishes successfully. $hint" if ( defined $home && $dir eq $home );
+    }
+
+    die "Error: the current working directory ($cwd_dir) is inside --tmp_dir ($dir), which is removed after the program finishes successfully. $hint" if &is_inside($cwd_dir, $dir);
+
+    die "Error: --tmp_dir ($dir) contains the program's own directory ($program_dir), and it is removed after the program finishes successfully. $hint" if &is_inside($program_dir, $dir);
+
+    foreach my $file ( @{$files_ref} ) {
+        next unless defined $file;
+        die "Error: the input/output file $file is inside --tmp_dir ($dir), which is removed after the program finishes successfully. $hint" if &is_inside($file, $dir);
+    }
+
+    # 已存在且非空的文件夹，如果里面没有本程序生成的标记文件，则很可能是用户的其它文件夹，拒绝使用。
+    if ( -d $dir ) {
+        opendir my $dh, $dir or die "Error: can not open --tmp_dir ($dir), $!";
+        my @entries = grep { $_ ne "." && $_ ne ".." } readdir $dh;
+        closedir $dh;
+        if ( @entries && !grep { m/^0[12]\..*\.ok$/ || m/^transfrag\.(?:strand|noStrand)\.fasta$/ } @entries ) {
+            die "Error: --tmp_dir ($dir) already exists, is not empty, and does not look like a temporary folder created by this program; it would be removed after the program finishes successfully. $hint";
+        }
+    }
+    return 1;
+}
+
+sub execute_cmds {
+    my $ok_file = pop @_;
+
+    if ( -e $ok_file ) {
+        foreach ( @_ ) {
+            print STDERR "CMD(Skipped): $_\n";
+        }
+    }
+    else {
+        foreach my $cmd ( @_ ) {
+            print STDERR (localtime) . ": CMD: $cmd\n";
+            system($cmd) == 0 or die "failed to execute: $cmd\n";
+        }
+        open my $ok, ">", $ok_file or die $!; close $ok;
+    }
+
+    return 1;
+}
+
+# 参数：转录本上的CDS区间（"起点\t终点[\t链]"）、下一个CDS区间（可为undef）、排序后的外显子区间列表引用。
+# 返回：哈希，第一个键是转录本上的CDS区间，第二个键是该基因模型包含的外显子（基因组坐标）。
+# 基因模型包含：覆盖本ORF的全部外显子；以及本ORF与下一个ORF之间的全部外显子（相邻基因模型共用）。
+sub get_cross_utr_exon {
+    my ($cds1, $cds2, $exon_ref) = @_;
+    my @exon = @{$exon_ref};
+    my (@cum, $t);
+    $t = 0;
+    foreach my $ex ( @exon ) {
+        my ($es, $ee) = split /\t/, $ex;
+        $t += $ee - $es + 1;
+        push @cum, $t;
+    }
+    my %out;
+    my ($a1, $b1) = (split /\t/, $cds1)[0, 1];
+    my ($i1a, $i1b) = ( &locate_exon_index($a1, \@cum), &locate_exon_index($b1, \@cum) );
+    $out{$cds1}{$exon[$_]} = 1 foreach ( $i1a .. $i1b );
+
+    if ( defined $cds2 && length $cds2 ) {
+        my ($a2, $b2) = (split /\t/, $cds2)[0, 1];
+        my ($i2a, $i2b) = ( &locate_exon_index($a2, \@cum), &locate_exon_index($b2, \@cum) );
+        $out{$cds2}{$exon[$_]} = 1 foreach ( $i2a .. $i2b );
+        # 两个ORF之间的外显子由两个基因模型共用
+        foreach my $i ( $i1b + 1 .. $i2a - 1 ) {
+            $out{$cds1}{$exon[$i]} = 1;
+            $out{$cds2}{$exon[$i]} = 1;
+        }
+    }
+    return %out;
+}
+
+# 返回转录本上第 $pos 个碱基（1-based）所在外显子的下标；@$cum 为各外显子的累计长度。
+sub locate_exon_index {
+    my ($pos, $cum) = @_;
+    for my $i ( 0 .. $#{$cum} ) {
+        return $i if $cum->[$i] >= $pos;
+    }
+    return $#{$cum};
+}
+
+# 判断基因模型的完整性。
+# 参数：拼接后的转录本序列（按基因组从左到右方向，未反向互补）、ORF起点、ORF终点（均为该序列上的1-based坐标，起点<=终点）、ORF所在链（+或-）。
+# 在拼接后的转录本序列上截取整条CDS（负链则反向互补），再检查其首、末密码子，因此不受内含子影响。
+# 若CDS末尾不是终止密码子，但紧邻CDS之后的下一个密码子是终止密码子（即ORF坐标不含终止密码子），也认为3'端完整。
+sub get_integrity {
+    my ($spliced, $orf_start, $orf_end, $strand) = @_;
+    my $total = length $spliced;
+    return "internal" if ( $orf_start < 1 || $orf_end > $total || $orf_end < $orf_start );
+
+    my $cds_seq = substr($spliced, $orf_start - 1, $orf_end - $orf_start + 1);
+    my $next_codon = "";   # 紧邻CDS 3'端之后的下一个密码子（按转录方向）
+    if ( $strand eq '-' ) {
+        $cds_seq = &revcom($cds_seq);
+        # 负链：转录方向的下游位于左侧（坐标较小的一侧）
+        if ( $orf_start - 1 >= 3 ) {
+            $next_codon = &revcom( substr($spliced, $orf_start - 4, 3) );
+        }
+    }
+    else {
+        if ( $orf_end + 3 <= $total ) {
+            $next_codon = substr($spliced, $orf_end, 3);
+        }
+    }
+    return "internal" if length($cds_seq) < 3;
+
+    my $start_codon = uc substr($cds_seq, 0, 3);
+    my $end_codon   = uc substr($cds_seq, -3);
+    $next_codon = uc $next_codon;
+
+    my $start_complete = $is_start_codon{$start_codon} ? 1 : 0;
+    my $end_complete = $is_stop_codon{$end_codon} ? 1 : 0;
+    $end_complete = 1 if ( !$end_complete && length($next_codon) == 3 && $is_stop_codon{$next_codon} );
+
+    if ($start_complete) {
+        return $end_complete ? "complete" : "3prime_partial";
+    }
+    else {
+        return $end_complete ? "5prime_partial" : "internal";
+    }
+}
+
+# 将转录本上的CDS区间转换为基因组上的CDS区间（可能被内含子分成多段）。
+# 参数：CDS起点、终点（转录本上的1-based坐标，从左到右）、排序后的外显子区间列表引用。
+sub get_cds {
+    my ($start, $end, $exon_ref) = @_;
+    my @out;
+    my $total_length = 0;
+    my ($start_ok, $end_ok) = (0, 0);
+    foreach my $ex ( @{$exon_ref} ) {
+        my ($es, $ee) = split /\t/, $ex;
+        $total_length += $ee - $es + 1;
+        my $seg_start = $es;
+        if ( !$start_ok && $total_length >= $start ) {
+            $seg_start = $ee - ($total_length - $start);
+            $start_ok = 1;
+        }
+        if ( $start_ok && !$end_ok ) {
+            if ( $total_length >= $end ) {
+                push @out, "$seg_start\t" . ($ee - ($total_length - $end));
+                $end_ok = 1;
+            }
+            else {
+                push @out, "$seg_start\t$ee";
+            }
+        }
+    }
+    return @out;
+}
+
+
+# ===================== 以下为ORF预测结果读入内存/输出中间GFF3文件的子程序 =====================
+
+# 读取中间GFF3文件（TransDecoder或TIdeS，格式一致：以转录本为坐标系的标准GFF3），将其中的CDS信息存入 %cds（通过引用传入）。
+# 键结构：$cds_ref->{转录本ID}{"起点\t终点\t链"} = 1
+sub read_orf_gff3 {
+    my ($file, $cds_ref) = @_;
+    open my $in, "<", $file or die "Error: Can not open file $file, $!";
+    while (<$in>) {
+        next if m/^#/;
+        chomp;
+        my @f = split /\t/;
+        next unless ( @f >= 7 && $f[2] eq "CDS" );
+        ($f[3], $f[4]) = ($f[4], $f[3]) if $f[3] > $f[4];
+        $cds_ref->{$f[0]}{"$f[3]\t$f[4]\t$f[6]"} = 1;
+    }
+    close $in;
+}
+
+# 将 %cds 中的ORF坐标（转录本序列上的坐标）输出为标准GFF3格式的中间文件 transfrag.$ORF_predictor.gff3。
+# 以输入转录本序列为坐标系（第1列为输入转录本ID），每个ORF输出一个完整的基因模型：
+#   gene / mRNA / exon（均覆盖整条转录本，1..转录本长度）/ five_prime_UTR / three_prime_UTR（有UTR时才输出）/ CDS
+# 其格式与TransDecoder输出的以转录本为坐标系的GFF3文件一致，可被 read_orf_gff3 直接读取。
+# 参数：输出文件名，%cds的引用，来源名称（第2列），转录本长度哈希的引用（键为转录本ID）。
+# 注意：该中间文件只是临时文件，其第2列固定为ORF预测软件名称，不受 --source 参数影响。
+sub write_orf_gff3 {
+    my ($file, $cds_ref, $src, $len_ref) = @_;
+    open my $out, ">", $file or die "Error: Can not create file $file, $!";
+    print $out "##gff-version 3\n\n";
+    foreach my $tid ( sort keys %{$cds_ref} ) {
+        my $orf_num = 0;
+        foreach my $key ( &sort_intervals(keys %{$cds_ref->{$tid}}) ) {
+            my ($start, $end, $strand) = split /\t/, $key;
+            $orf_num ++;
+
+            # 转录本长度；若缺失（理论上不会发生），则退而使用ORF终点，保证坐标合法。
+            my $len = $len_ref->{$tid} || $end;
+            $len = $end if $len < $end;
+
+            my $mrna_id = "$tid.p$orf_num";
+            my $gene_id = "GENE.$mrna_id";
+
+            print $out "$tid\t$src\tgene\t1\t$len\t.\t$strand\t.\tID=$gene_id;Name=ORF_$mrna_id\n";
+            print $out "$tid\t$src\tmRNA\t1\t$len\t.\t$strand\t.\tID=$mrna_id;Parent=$gene_id;Name=ORF_$mrna_id\n";
+            print $out "$tid\t$src\texon\t1\t$len\t.\t$strand\t.\tID=$mrna_id.exon1;Parent=$mrna_id\n";
+
+            # UTR：左侧UTR（1..start-1）和右侧UTR（end+1..len）。
+            # 正链时左侧为5'UTR、右侧为3'UTR；负链时相反。
+            my ($left_type, $right_type) = ( $strand eq "-" ) ? ("three_prime_UTR", "five_prime_UTR") : ("five_prime_UTR", "three_prime_UTR");
+            if ( $start > 1 ) {
+                my $utr_end = $start - 1;
+                print $out "$tid\t$src\t$left_type\t1\t$utr_end\t.\t$strand\t.\tID=$mrna_id.utr" . ( $strand eq "-" ? "3" : "5" ) . "p1;Parent=$mrna_id\n";
+            }
+            print $out "$tid\t$src\tCDS\t$start\t$end\t.\t$strand\t0\tID=cds.$mrna_id;Parent=$mrna_id\n";
+            if ( $end < $len ) {
+                my $utr_start = $end + 1;
+                print $out "$tid\t$src\t$right_type\t$utr_start\t$len\t.\t$strand\t.\tID=$mrna_id.utr" . ( $strand eq "-" ? "5" : "3" ) . "p1;Parent=$mrna_id\n";
+            }
+            print $out "\n";
+        }
+    }
+    close $out;
+}
+
+# 找到TIdeS聚类（去冗余）后的序列文件：
+#   <taxon>_TIdeS/Filter_Steps/Clustering/<taxon>.<最小长度>bp.<相似度>pid.Cluster.fas
+# 文件名中的最小长度对应TIdeS的最小序列长度参数，相似度固定为正式分析步骤使用的 --id 100。若精确文件名不存在，则用通配符查找。
+sub find_cluster_file {
+    my ($taxon, $min_length, $identity) = @_;
+    my $dir = "${taxon}_TIdeS/Filter_Steps/Clustering";
+    my $expected = "$dir/$taxon.${min_length}bp.${identity}pid.Cluster.fas";
+    return $expected if -e $expected;
+
+    my @found = sort glob("$dir/$taxon.*bp.${identity}pid.Cluster.fas");
+    @found = sort glob("$dir/$taxon.*bp.*pid.Cluster.fas") unless @found;
+    die "Error: can not find the TIdeS cluster file $expected (nor any file like $dir/$taxon.*bp.*pid.Cluster.fas). The program needs it to link TIdeS ORFs back to the input transcripts. Please check TIdeS log files in $tmp_dir, and make sure --TIdeS_min_length matches the value used by TIdeS.\n" unless @found;
+    warn "Warning: expected cluster file $expected was not found, use $found[0] instead" . (@found > 1 ? " (multiple candidates: " . join(", ", @found) . ")" : "") . ".\n";
+    return $found[0];
+}
+
+# 读取一个TIdeS结果，并把ORF在输入转录本上的坐标存入 %cds。
+# 处理流程（只依赖ORF头部坐标和转录本序列内容，不通过ORF(CDS)序列去查找）：
+#   (a) 解析ORF序列头部末尾的 "TIdeS转录本ID:起点-终点(链)"，得到ORF在TIdeS转录本序列上的坐标；
+#   (b) 从聚类文件（Cluster.fas）中取出该TIdeS转录本的碱基序列；
+#   (c) 在输入转录本FASTA（transfrag.strand.fasta 或 transfrag.noStrand.fasta）中，查找与该序列完全一致的全部转录本，
+#       它们的ORF结果一致，全部记录；若找不到，则在标准错误输出警告；
+#       若允许反向互补（noStrand），则与该序列互为反向互补的转录本也会记录，坐标和链相应翻转。
+# 参数：taxon（TIdeS的--taxon参数，也是输出文件夹前缀），输入转录本FASTA文件，是否允许反向互补匹配（1/0），%cds的引用。
+sub load_one_TIdeS_result {
+    my ($taxon, $input_fasta, $allow_reverse, $cds_ref) = @_;
+    my $orf_file = "${taxon}_TIdeS/$taxon.TIdeS.fasta";
+    unless (-e $orf_file) {
+        warn "Warning: expected TIdeS output file $orf_file was not found, skipped. This may happen if the installed TIdeS version names its output files differently, or if TIdeS did not find any ORF; please check.\n";
+        return;
+    }
+    my $cluster_file = &find_cluster_file($taxon, $TIdeS_min_length, $tides_formal_identity);
+    print STDERR "$taxon: use cluster file $cluster_file\n";
+
+    # 读取输入转录本序列，按序列内容建立索引：序列 => [转录本ID...]
+    my $parent_seq = &read_fasta($input_fasta);
+    my %seq2ids;
+    foreach my $tid ( sort keys %{$parent_seq} ) {
+        push @{$seq2ids{$parent_seq->{$tid}}}, $tid;
+    }
+
+    # 读取聚类后的TIdeS转录本序列（键为TIdeS转录本ID）。同时保存去掉"xxx|"前缀的别名，以防ORF头部与聚类文件中的ID写法稍有不同。
+    my $raw_cluster = &read_fasta($cluster_file);
+    my %cluster_seq;
+    foreach my $id ( keys %{$raw_cluster} ) {
+        $cluster_seq{$id} = $raw_cluster->{$id};
+        (my $short = $id) =~ s/^[^|]*\|//;
+        $cluster_seq{$short} = $raw_cluster->{$id} unless exists $cluster_seq{$short};
+    }
+
+    # 只读取TIdeS ORF文件的头部行（含坐标信息），不需要ORF核酸序列。
+    my @orf_head;
+    open my $in, "<", $orf_file or die "Can not open file $orf_file, $!";
+    while (<$in>) {
+        chomp;
+        s/\r$//;
+        push @orf_head, $_ if m/^>/;
+    }
+    close $in;
+
+    my ($n_orf, $n_bad_header, $n_no_cluster, $n_bad_coord, $n_no_match, $n_assignment) = (scalar(@orf_head), 0, 0, 0, 0, 0);
+    foreach my $head ( @orf_head ) {
+        (my $orf_name = $head) =~ s/^>(\S+).*$/$1/;
+
+        # (a) 解析头部末尾的 "TIdeS转录本ID:起点-终点(链)"
+        my ($tides_id, $start, $end, $strand);
+        if ( $head =~ m/(\S+):(\d+)-(\d+)\(([+-])\)\s*$/ ) {
+            ($tides_id, $start, $end, $strand) = ($1, $2, $3, $4);
+            ($start, $end) = ($end, $start) if $start > $end;   # 保证起点<=终点
+        }
+        else {
+            $n_bad_header ++;
+            warn "Warning: can not parse the coordinates from the header of TIdeS ORF $orf_name, skipped: $head\n";
+            next;
+        }
+
+        # (b) 聚类文件中该TIdeS转录本的序列
+        my $t = $cluster_seq{$tides_id};
+        unless ( defined $t ) {
+            $n_no_cluster ++;
+            warn "Warning: transcript $tides_id (of ORF $orf_name) was not found in $cluster_file, skipped.\n";
+            next;
+        }
+        my $len = length($t);
+        if ( $start < 1 || $end > $len ) {
+            $n_bad_coord ++;
+            warn "Warning: the coordinates $start-$end of TIdeS ORF $orf_name exceed the length ($len bp) of transcript $tides_id in $cluster_file, skipped.\n";
+            next;
+        }
+
+        # (c) 在输入转录本序列中查找与聚类序列完全一致的全部序列。
+        my $matched = 0;
+        foreach my $tid ( @{$seq2ids{$t} || []} ) {
+            $cds_ref->{$tid}{"$start\t$end\t$strand"} = 1;
+            $n_assignment ++;
+            $matched = 1;
+        }
+        # 允许反向互补（noStrand）：与聚类序列互为反向互补的转录本，坐标和链翻转。
+        if ( $allow_reverse ) {
+            my $rc = &revcom($t);
+            if ( $rc ne $t && $seq2ids{$rc} ) {
+                my ($new_start, $new_end) = ( $len - $end + 1, $len - $start + 1 );
+                my $new_strand = ( $strand eq "+" ) ? "-" : "+";
+                foreach my $tid ( @{$seq2ids{$rc}} ) {
+                    $cds_ref->{$tid}{"$new_start\t$new_end\t$new_strand"} = 1;
+                    $n_assignment ++;
+                    $matched = 1;
+                }
+            }
+        }
+        unless ( $matched ) {
+            $n_no_match ++;
+            warn "Warning: the sequence of $tides_id (ORF $orf_name) is not identical" . ($allow_reverse ? " (nor reverse-complementary)" : "") . " to any sequence in $input_fasta, skipped.\n";
+        }
+    }
+    print STDERR "$orf_file: $n_orf ORFs in total; $n_assignment ORF-transcript assignments were made; skipped: $n_bad_header with unparsable header, $n_no_cluster without cluster sequence, $n_bad_coord with out-of-range coordinates, $n_no_match without identical input transcript.\n";
+}
+
+
+########################################################################
+#                      English usage (at the end of the program)
+########################################################################
+sub get_usage_english {
+my $usage = <<USAGE;
+Usage:
+    $0 [options] genome.fasta transfrag.gff3 > ORF.gff3
+
+    This program uses TransDecoder or TIdeS to analyze the ORFs in the input transcript sequences, obtains the structural annotation of the protein-coding transcripts on the genome, and outputs the result in standard GFF3 format.
+
+    Here's how it works:
+    (1) The transcript sequences are extracted from the input GFF3 file and split into two files according to the strand information of each transcript:
+        transfrag.strand.fasta   : transcripts with a known strand (+ or - in column 7 of the GFF3). Minus-strand transcripts are reverse-complemented, so all sequences are oriented in the transcript direction and only the forward strand needs to be searched for ORFs.
+        transfrag.noStrand.fasta : transcripts with an unknown strand (. in column 7; e.g. single-exon transcripts assembled from non-strand-specific sequencing data). Their sequences are in the genome forward direction and both strands are searched for ORFs.
+        If the GFF3 file comes from strand-specific sequencing data (all strands known), the latter file is empty.
+    (2) TransDecoder or TIdeS (chosen with --ORF_predictor) is used to analyze the ORFs in the transcript sequences. Whichever software is used, the ORF coordinates on the input transcript sequences are saved as an intermediate standard GFF3 file in the temporary folder (transfrag.TransDecoder.gff3 or transfrag.TIdeS.gff3; transcript sequences are the coordinate system, with gene/mRNA/exon/UTR/CDS features), and step 3 reads the ORF coordinates from this file.
+    (3) The ORF results on the transcript sequences are converted into gene predictions on the genome and output directly as a standard GFF3 file.
+    (4) After the program finishes successfully, the whole temporary folder given by --tmp_dir (including every intermediate file in it) is removed by default to save disk space; if --keep_tmp_files is given, the temporary folder and all temporary data in it are kept. If the program fails or is interrupted, the temporary folder is NOT removed, so that the run can be resumed by rerunning with the same --tmp_dir.
+
+    Usage instructions:
+    (1) The input GFF3 file may contain alternatively spliced transcripts; all transcript sequences are extracted for ORF analysis. Each predicted ORF is assigned a gene number, so some of the genes obtained may be redundant and could be removed later using the GFF3_filling_gene_models or GFF3Clear command. Transcript lines in the input GFF3 can be of type mRNA or transcript; exon lines are linked to transcripts through the Parent attribute (several comma-separated Parents are supported).
+    (2) When using TransDecoder for ORF prediction (--ORF_predictor TransDecoder), the TransDecoder-v5.5.0 folder must exist in the parent directory of the directory holding this program. It is a modified TransDecoder in which the --train option was added to the TransDecoder.Predict command. Note that this program does not work with the original TransDecoder. The value of --min_protein_length is passed to the -m option of the TransDecoder.LongOrfs command.
+    (3) When using TIdeS for ORF prediction (--ORF_predictor TIdeS, the default), TIdeS (and its dependencies, such as DIAMOND and CD-HIT) must be installed beforehand, with the "tides" command available in your PATH (or specified via --TIdeS_bin), and a reference protein database must be provided with --TIdeS_protein_database. The value of --min_protein_length multiplied by 3 is passed to the --min-orf option of the tides command (in both the model-training step and the formal ORF analysis step). By default the --partial option is NOT passed to the tides command, so TIdeS only reports complete ORFs (with both start and stop codons) and Integrity is labeled complete for all gene models in the output GFF3; add --TIdeS_partial to also predict 5'/3' partial ORFs (in that case Integrity is judged from the start/stop codons on the genome sequence). TIdeS filters (and clusters) the input sequences by length, rRNA and similarity and completely renames them, and its results are ORF nucleotide FASTA files (transfrag_strand_TIdeS/transfrag_strand.TIdeS.fasta and transfrag_noStrand_TIdeS/transfrag_noStrand.TIdeS.fasta) rather than GFF3 files. This program first trains a model separately; once the model is trained, all sequences are analyzed for ORFs in the formal analysis step, in which --id is fixed to 100. This program works as follows:
+        a. It parses the trailing "TIdeS_transcript_ID:start-end(strand)" in each ORF header (e.g. ">transfrag_strand|Transcript_1_Len_484.pORF1 orf_type:complete orf_length:303 transfrag_strand|Transcript_1_Len_484:38-340(+)") to get the ORF coordinates on the TIdeS transcript;
+        b. It reads the nucleotide sequence of that TIdeS transcript from transfrag_strand_TIdeS/Filter_Steps/Clustering/transfrag_strand.300bp.100pid.Cluster.fas (or transfrag_noStrand_TIdeS/Filter_Steps/Clustering/transfrag_noStrand.300bp.100pid.Cluster.fas for noStrand; 300 in the file name is the TIdeS minimum length, see --TIdeS_min_length, and 100 is the --id value fixed in the formal analysis step);
+        c. It looks for all transcripts in the input transfrag.strand.fasta (or transfrag.noStrand.fasta) whose sequences are exactly identical to that sequence. These transcripts share the same ORF result and all of them get the same CDS coordinates (for noStrand, transcripts that are the reverse complement of that sequence are also recognized, with coordinates and strand flipped accordingly). If no identical transcript sequence is found, a warning is written to the standard error.
+        d. It writes the resulting ORF coordinates on the input transcript sequences into the intermediate file transfrag.TIdeS.gff3 in the temporary folder (standard GFF3 format with the transcript sequences as the coordinate system and gene/mRNA/exon/UTR/CDS features, consistent with the TransDecoder intermediate GFF3 file), and then reads the ORF coordinates back from this file.
+    Sequence names are never used to link results, and the ORF (CDS) sequences are not used to locate ORFs; only the header coordinates and the transcript sequence content are used. Transcripts filtered out by TIdeS (or removed during clustering) will have no ORF results.
+    (4) The last column (attributes) of the gene feature lines in the output GFF3 contains some extra information: the Form tag shows the number of ORFs predicted on the transcript sequence and the percentage of the transcript covered by the CDS of the current gene model; the Integrity tag indicates the integrity of the gene model. Integrity is judged as follows: the whole CDS is extracted from the spliced transcript sequence (so start/stop codons split by an intron are handled correctly), and its first codon must be a start codon (ATG; with a non-standard genetic code, the other start codons allowed by that code are also accepted) and its last codon a stop codon (if the CDS does not end with a stop codon but the codon immediately following it is a stop codon, i.e. the ORF coordinates exclude the stop codon, the 3' end is also regarded as complete). The stop codons are determined by --TIdeS_genetic_code (the standard TAA/TAG/TGA are used with TransDecoder). When TIdeS is used without --TIdeS_partial, TIdeS only reports complete ORFs, so Integrity is directly labeled complete (the number of models that disagree with the sequence-based check is reported on the standard error).
+    (5) If a transcript sequence has multiple ORFs, multiple gene models are given, and adjacent gene models share exons, i.e. they overlap in the UTR region, as shown below:
+    genome sequence    ==========================================================================================
+    transcript               ===========----==========---==========---===========----======---============>
+    gene model 1             ======+++++----++++++++++---++=======>
+    gene model 2                                         =======+++---+++++++====----=====>
+    gene model 3                                                                     ======--- ==+++++++==>
+    (6) For transcripts with a known strand (+ or - in the GFF3), the transcript sequence is already oriented in the transcript direction, so only ORFs on the forward strand of the transcript sequence are kept; ORFs on the reverse strand are accepted only for transcripts of unknown strand (.).
+    (7) Because the whole --tmp_dir folder is deleted by default after a successful run, do not point --tmp_dir to a folder holding other important files. To prevent accidental deletion, the program exits with an error before doing any work if the folder is the root or home directory, if the current working directory is inside it, if it contains any input file (genome.fasta, transfrag.gff3, --output_alignment_GFF3, --TIdeS_protein_database) or this program's own directory, or if it already exists, is not empty and does not look like a temporary folder created by this program (in these cases use another --tmp_dir, or add --keep_tmp_files).
+    (8) Lower-case (soft-masked) bases in the genome sequence are converted to upper case, so they do not affect the extraction of transcript sequences or the start/stop codon check. Transcripts whose chromosome is absent from the genome, or whose exon coordinates exceed the chromosome length, are skipped with a warning on the standard error.
+
+Parameters:
+[OUTPUT]
+    --tmp_dir <string>    default: tmp_\$date\$pid (i.e. "tmp_" followed by the date-time and the process ID)
+    Path of the temporary folder. After a successful run the whole folder (with all intermediate files in it) is deleted by default; add --keep_tmp_files to keep it. Rerunning with an existing temporary folder skips the finished steps (resuming); after changing any input file or parameter, please use a new --tmp_dir, or manually delete the corresponding .ok files.
+
+    --keep_tmp_files    default: None
+    If set, the temporary folder given by --tmp_dir and all temporary data in it are kept after the program finishes successfully (including the transcript FASTA files, the TransDecoder/TIdeS results and logs, the intermediate GFF3 files, the step .ok marker files, etc.) and nothing is deleted; if not set, the whole --tmp_dir folder is deleted after a successful run.
+
+    --output_alignment_GFF3 <string>    default: None
+    Output file name for the transcript sequence alignment result, written in a non-standard GFF3 format (cDNA_match features recording the genomic position of every exon of each transcript and its Target interval on the transcript sequence).
+
+    --gene_prefix <string>    default: transfrag
+    Set the prefix for gene names in the output GFF3 file.
+
+    --source <string>    default: .
+    Set the string written in the second column (source) of the output GFF3 file. It is used in all feature lines (gene, mRNA, exon and CDS). The default is "." (source not specified). The string can not contain tab or newline characters, and containing whitespace is not recommended.
+
+[ORF PREDICTOR]
+    --ORF_predictor <string>    default: TIdeS
+    Set the software used for ORF prediction, either TransDecoder or TIdeS (case-insensitive).
+
+    --min_protein_length <int>    default: 100
+    Set the minimum protein length (in amino acids) for identifying ORFs. With TransDecoder, this value is passed to the -m option of the TransDecoder.LongOrfs command; with TIdeS, this value multiplied by 3 (i.e. the minimum ORF length in nucleotides) is passed to the --min-orf option of the tides command. Please do not pass --min-orf again through --TIdeS_extra_options.
+
+    --TIdeS_bin <string>    default: tides.py
+    Set the path or name of the TIdeS executable (the "tides" command). By default it is assumed to already be in your PATH. Only used when --ORF_predictor is TIdeS.
+
+    --TIdeS_protein_database <string>    default: None
+    Set the reference protein database (FASTA or DIAMOND format) required by TIdeS for ORF prediction. This parameter is required when --ORF_predictor is set to TIdeS.
+
+    --TIdeS_genetic_code <string>    default: 1
+    Set the genetic code table (matching the NCBI translation table numbering) used by TIdeS for ORF calling and translation; it is also used to determine the start and stop codons when judging gene model integrity. Only used when --ORF_predictor is TIdeS.
+
+    --TIdeS_partial    default: None
+    If set, the --partial option is passed to the tides command, i.e. 5'/3' partial ORFs are also predicted. By default it is not passed, so TIdeS only reports complete ORFs and Integrity in the output GFF3 is complete for all gene models. Only used when --ORF_predictor is TIdeS.
+
+    --TIdeS_identity_for_training_model <int>    default: 97
+    The value passed to the --id option of the tides command in the first model-training step (--taxon for_model), in percent (sequence clustering identity). The model is trained separately; once it is trained, the formal ORF analysis of all sequences always uses --id 100 in the tides command, so there is no separate parameter for the --id of the formal analysis step (the 100pid in the cluster file name also corresponds to this fixed value). Please do not pass --id again through --TIdeS_extra_options. Only used when --ORF_predictor is TIdeS.
+
+    --TIdeS_min_length <int>    default: 300
+    The minimum sequence length used by TIdeS when filtering sequences. It is only used to build the cluster file name (*.300bp.*.Cluster.fas) and is NOT passed to the tides command; make sure it matches the value actually used by TIdeS (TIdeS default is 300; if you changed the minimum length through --TIdeS_extra_options, change this parameter accordingly). If the exact file name is not found, the program falls back to a wildcard search. Only used when --ORF_predictor is TIdeS.
+
+    --TIdeS_extra_options <string>    default: None
+    Set any additional command line options to pass through to the tides command, appended verbatim to the end of the tides command line. Only used when --ORF_predictor is TIdeS.
+
+[PERFORMANCE]
+    --cpu <int>    default: 1
+    Set the number of threads available for TIdeS. Only used when --ORF_predictor is TIdeS. Note that the --threads value passed to the tides command is at most 24 (values greater than 32 easily cause TIdeS to fail), so only 24 threads are used even if --cpu is larger than 24.
+
+[HELP]
+    --help    default: None
+    display this help (English) and exit.
+
+    --chinese_help    default: None
+    使用该参数后，程序给出中文用法并退出。
+
+USAGE
+
+return $usage;
+}

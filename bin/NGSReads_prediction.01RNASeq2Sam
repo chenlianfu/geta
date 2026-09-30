@@ -1,0 +1,1288 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+use Getopt::Long qw/GetOptions/;
+use Cwd qw/abs_path getcwd/;
+use File::Basename qw/dirname basename/;
+use File::Path qw/make_path remove_tree/;
+use POSIX qw/strftime/;
+
+my $command_line = "$0 " . join(" ", @ARGV);
+my $prog_name    = basename($0);
+my $bin_path     = dirname(abs_path($0));
+my $software_dir = $bin_path; $software_dir =~ s/\/bin$//;
+
+# 后台构建索引相关的全局状态：
+#   $main_pid   : 主进程的pid（用于在子进程中避免误执行END块中的清理逻辑）
+#   $index_pid  : 后台构建索引的子进程pid
+#   $index_done : 已经等待并确认索引构建成功后置1
+#   %bg_status  : run_command_pool中wait()到的、不属于该进程池的子进程（即索引构建进程）的退出状态
+my $main_pid = $$;
+my ($index_pid, $index_done);
+my %bg_status;
+
+# Trimmomatic的ILLUMINACLIP参数字符串（含前导空格；不去除接头时为空字符串），在check_dependencies中确定。
+my $illumina_clip = "";
+
+# 收到Ctrl-C或TERM信号时正常退出，以便END块能够清理后台的索引构建进程组
+$SIG{INT} = $SIG{TERM} = sub { exit 130; };
+
+# 若主程序异常退出（die、被中断等），终止仍在后台运行的索引构建进程组（含其下的hisat2-build/STAR），避免残留进程。
+END {
+    if ( defined $index_pid && !$index_done && $$ == $main_pid && defined $? && $? != 0 ) {
+        kill 'TERM', -$index_pid;
+    }
+}
+
+# 各软件参数的内置默认值（可通过对应的命令行参数整体替换）。
+my $DEFAULT_TRIMMOMATIC_ADAPTER = 'TruSeq3-PE-2.fa:2:30:10';
+my $DEFAULT_TRIMMOMATIC_OPTS    = 'LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:50 TOPHRED33';
+my $DEFAULT_HISAT2_OPTS         = '--min-intronlen 20 --max-intronlen 200000 --dta --score-min L,0.0,-0.4 -k 1';
+my $DEFAULT_STAR_OPTS           = '--alignIntronMax 200000 --alignMatesGapMax 200000 --outFilterType BySJout --outFilterMultimapNmax 20 --alignSJoverhangMin 8 --alignSJDBoverhangMin 1 --outFilterMismatchNmax 999 --outFilterMismatchNoverReadLmax 0.04';
+
+# 中文用法说明放在这里；英文用法说明（默认显示的用法说明）放在本程序文件的最尾部（__DATA__ 之后）。
+my $usage_cn = <<'USAGE';
+用法:
+    __PROG__ --genome genome_seq.fasta --out out.sorted.{bam,sam} [选项]
+
+    本程序是 NGSReads_prediction 流程的第一部分（数据质控 + 比对 + 排序）：利用RNA-Seq原始测序数据（FASTQ格式的双末端/单端数据，或已比对好的SAM/BAM文件，三者可单独或混合输入），对--genome参数指定的参考基因组进行比对，最终将所有来源的比对结果合并、按基因组坐标排序，按--output_type参数指定的格式（bam或sam，默认bam）写入--out参数指定的文件，供下游的转录本组装/基因预测程序（如Sam2Transfrag）使用。
+
+    程序运行流程：
+      0. 若输入了--pe1/--pe2或--se的FASTQ数据（即需要比对），程序一开始就在后台启动--aligner指定的比对软件（HISAT2或STAR）的基因组索引构建，并与下面第1步的质控、第2步中的数据切分同时并行进行（建索引耗时较长，且其中很长一段时间是单线程运行的，因此提前并行可以节约总运行时间）。建索引使用的线程数及质控使用的线程数都不因此减少，故此阶段程序实际占用的总线程数会暂时超过--cpu；比对开始之前，程序会等待索引构建完成。若仅输入了--sam数据，则不需要建索引。
+      1. 若输入了--pe1/--pe2或--se的FASTQ数据，调用Trimmomatic软件进行质量控制，得到质控后数据（Clean data，支持多组数据，支持.gz压缩文件；超过--pe_used_pair_num/--se_used_read_num限定的数据量时，各组数据按比例从头部截取）。质控命令的并行化由本程序内置的多进程worker池直接调度完成。
+      2. 对质控后数据，先按--chunk_num参数将其（双末端、单端分别独立处理）按read数尽量均匀地切分为多份（若某类型数据的实际read总数少于--chunk_num，则按实际read数切分，不会产生空文件），再在第0步的索引构建完成后，调用--aligner指定的比对软件（HISAT2或STAR）同时并行比对每一份数据到参考基因组上，每份数据对应的比对命令所使用的线程数约为--cpu除以--chunk_num（向下取整，不足1时按1计算）；其中HISAT2支持在同一条命令中混合双末端和单端输入，故同一分片序号的双末端、单端质控后数据会合并进同一条HISAT2命令，而STAR不支持在同一次运行中混合两种数据类型，程序会复用同一份索引，对双末端、单端分片分别独立并行比对。若设置了--alignment_stats，则在全部分片比对完成后，程序会将各分片的比对统计信息（HISAT2的比对总结日志，或STAR的Log.final.out）汇总为一份整体的比对统计结果并输出到该文件。
+      3. 将比对结果（若存在多个分片，会先并行地分别调用samtools sort排序，各条排序命令实际可用的CPU线程数在受--cpu及可用内存限制的排序总线程预算内、按并行任务数平均分配）和--sam参数直接输入的SAM/BAM文件（可以有多个，同样会与比对分片一起并行排序）一起，逐个排序为BAM后，直接调用samtools merge按--output_type参数指定的格式（bam或sam，默认bam）合并输出到--out参数指定的文件（不会在临时目录中额外保留一份整合后的BAM文件，以节省磁盘空间；若输出格式为bam，也不会为该文件另外创建.bai索引文件）。
+      4. 程序成功结束后，默认直接删除--tmp_dir指定的整个临时文件夹（包括其中所有中间文件）以节省磁盘空间；若添加--keep_tmp_files参数，则保留该临时文件夹及其中所有中间文件。程序运行失败或被中断时，不会删除临时文件夹，以便断点续跑（此时后台正在构建的索引会被终止，尚未构建完成的索引在续跑时会重新构建）。
+
+    断点续跑（--tmp_dir）说明：程序为质控、数据切分、建索引、比对、排序合并这几个主要阶段分别设置了完成标记文件（*.ok），使用相同的--tmp_dir重新运行时，已经完成的阶段会被跳过。该功能用于程序中途失败或被中断之后的续跑：程序成功结束后临时文件夹默认已被整个删除（除非添加了--keep_tmp_files），此时再次运行将从头开始。注意：本程序未像homolog_prediction主程序那样记录每个阶段输入内容的指纹，所以修改任何参数或输入文件后，请手动删除相应及后续阶段的.ok标记文件（或直接使用一个新的--tmp_dir），否则修改可能不会生效。
+
+参数:
+[输入参数]
+    --genome <string>    默认值：无（必需）
+    输入参考基因组序列的FASTA格式文件路径，用于建立比对索引及后续的比对。
+
+    --pe1 <string> --pe2 <string>    默认值：无
+    输入二代双末端测序的两个FASTQ格式文件。参数支持输入多对数据文件，使用逗号对不同文库的FASTQ文件路径进行分隔即可（--pe1和--pe2中的文件按顺序一一对应）。参数也支持输入.gz格式的压缩文件。
+
+    --se <string>    默认值：无
+    输入二代单端测序的FASTQ格式文件。参数支持输入多个数据文件，使用逗号分隔。参数也支持输入.gz格式的压缩文件。
+
+    --sam <string>    默认值：无
+    输入已经比对好的二代测序SAM或BAM格式数据文件。参数支持输入多个数据文件，使用逗号分隔。这些文件会在排序阶段和比对结果合并到一起。--pe1/--pe2、--se和--sam这三类输入可以全部或部分同时使用。
+
+    --aligner <hisat2|star>    默认值：star
+    设置用于比对的软件，可选hisat2或star（大小写不限，程序会自动转换为小写后再判断）。
+
+    --strand_specific    默认值：无
+    添加该参数后，认为所有输入的二代数据是链特异性测序数据。对HISAT2比对，添加该参数会使用--rna-strandness RF参数，此时所有reads的比对结果都会被赋予表示其所在链的XS标签；但STAR软件并不能很好地支持链特异性比对——无论是否添加--strand_specific，STAR比对命令实际使用的参数完全一致，均会统一添加--outSAMstrandField intronMotif参数，该参数只是对比对结果中跨内含子（即存在剪接）的reads额外添加表示其所在链的XS标签，并不能像HISAT2添加--rna-strandness RF后那样，使所有reads的比对结果都带上XS标签。无论是否添加本参数，本程序自身的比对、排序、合并流程都不受影响，也不会改变任何read的比对位置——该参数只影响是否为比对结果赋予XS链标签，因此不添加该参数并不妨碍下游程序（如后续的链特异性转录本组装/定量分析）自行根据实际的建库策略对比对结果做链特异性方向的判断与处理。
+
+[软件参数]
+    以下参数用于设置本程序所调用的Trimmomatic、HISAT2和STAR软件的详细参数。凡是设置了"默认值"的参数，一旦在命令行中指定，就会整体替换（而不是追加到）该默认值，因此请在指定时写出完整的参数内容。含有空格或以"-"开头的参数值，请使用引号括起来，例如：--hisat2_opts="--dta -k 5"。
+    本程序自身会自动设置的参数请不要重复指定：HISAT2的-x、-p、-1、-2、-U、-S、--rna-strandness（--strand_specific），STAR的--genomeDir、--readFilesIn、--runThreadN、--outSAMtype、--outFileNamePrefix、--outSAMstrandField，hisat2-build的-p，STAR建索引的--runMode、--genomeDir、--genomeFastaFiles、--runThreadN、--outFileNamePrefix，以及Trimmomatic的PE/SE模式、输入输出文件和-threads。
+
+    --trimmomatic_adapter <string>    默认值：TruSeq3-PE-2.fa:2:30:10
+    设置Trimmomatic的ILLUMINACLIP步骤的参数，格式为"接头文件:seedMismatches:palindromeClipThreshold:simpleClipThreshold"。接头文件若不含"/"，则在Trimmomatic的adapters目录（$software_dir/Trimmomatic-0.38/adapters）中查找；若含"/"，则视为该文件的路径。若设置为空字符串（--trimmomatic_adapter ""），则不进行接头去除（不添加ILLUMINACLIP步骤）。
+
+    --trimmomatic_opts <string>    默认值：LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:50 TOPHRED33
+    设置Trimmomatic在ILLUMINACLIP之后的其它质控步骤及参数（按顺序执行），例如"LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:36 TOPHRED33"。
+
+    --hisat2_index_opts <string>    默认值：无
+    传递给hisat2-build（建HISAT2索引）的附加参数，例如"--large-index"。仅在--aligner为hisat2时有效。
+
+    --hisat2_opts <string>    默认值：--min-intronlen 20 --max-intronlen 200000 --dta --score-min L,0.0,-0.4 -k 1
+    传递给hisat2（比对）的参数。仅在--aligner为hisat2时有效。
+
+    --star_index_opts <string>    默认值：无
+    传递给STAR --runMode genomeGenerate（建STAR索引）的附加参数，例如"--genomeSAindexNbases 12"。若其中已指定--genomeSAindexNbases、--genomeChrBinNbits或--limitGenomeGenerateRAM，则程序不再自动计算并添加相应的同名参数。仅在--aligner为star时有效。
+
+    --star_opts <string>    默认值：--alignIntronMax 200000 --alignMatesGapMax 200000 --outFilterType BySJout --outFilterMultimapNmax 20 --alignSJoverhangMin 8 --alignSJDBoverhangMin 1 --outFilterMismatchNmax 999 --outFilterMismatchNoverReadLmax 0.04
+    传递给STAR（比对）的参数。仅在--aligner为star时有效。
+
+[输出参数]
+    --tmp_dir <string>    默认值：tmp_$date$pid
+    程序运行时临时文件夹名称。指定已有的临时文件夹重新运行时，已完成的阶段（见上文"断点续跑"说明）会被跳过。注意：若没有添加--keep_tmp_files参数，程序成功结束后会把该文件夹连同其中所有内容整个删除，因此请指定一个专用于本程序的临时文件夹，不要指定包含其它重要文件的文件夹。为避免误删，若该文件夹是根目录或家目录、当前工作目录位于该文件夹之内、或者该文件夹包含了输入文件（--genome/--pe1/--pe2/--se/--sam）、输出文件（--out/--alignment_stats）或本程序所在目录，程序会在运行前直接报错退出（此时可改用其它--tmp_dir，或添加--keep_tmp_files）。
+
+    --keep_tmp_files    默认值：无
+    添加该参数后，程序成功结束后保留--tmp_dir指定的临时文件夹及其中所有中间文件（包括质控后数据、切分后的数据分片、比对软件生成的中间SAM/BAM文件、各输入文件排序后的中间BAM文件、各阶段的日志和完成标记文件等），便于排查问题或断点续跑。若不添加该参数，程序成功结束后会直接删除--tmp_dir指定的整个临时文件夹。
+
+    --keep_intermediate_sam    默认值：无
+    （已弃用，仅为兼容旧的调用脚本而保留）等同于--keep_tmp_files。
+
+    --out <string>    默认值：无（必需）
+    设置最终比对结果的输出文件路径。本程序不再向标准输出写入任何比对结果，排序、合并后的最终结果会按--output_type参数指定的格式直接写入该文件；若该文件所在的目录不存在，程序会自动创建该目录，无需用户手动预先建好，以免程序因目录不存在而运行失败。该文件不能位于--tmp_dir之内（除非添加--keep_tmp_files）。
+
+    --output_type <bam|sam>    默认值：bam
+    设置--out输出文件的格式，可选bam或sam（大小写不限）。排序、合并阶段会调用samtools merge直接按此格式生成最终结果文件，不会在临时目录中额外保留一份整合后的BAM文件（以节省磁盘空间）；若输出格式为bam，也不会为该文件另外创建.bai索引文件。
+
+    --alignment_stats <string>    默认值：无
+    若设置该参数，则程序在完成所有分片比对后，将各分片的比对统计信息（HISAT2的比对总结日志，或STAR的Log.final.out统计文件）汇总为一份整体的比对统计结果，并保存到该参数指定的文件路径（各计数类指标为跨分片直接求和，比例类指标基于求和后的计数重新计算，STAR中无法由计数重新计算的速率/长度类指标按各分片的read数加权平均给出）；该参数仅在实际执行了比对（即存在--pe1/--pe2或--se输入）时生效，若只提供了--sam输入而未执行比对，设置该参数会导致程序报错退出。该文件不能位于--tmp_dir之内（除非添加--keep_tmp_files）。
+
+[阈值参数]
+    --pe_used_pair_num <int>    默认值：100000000
+    设置程序利用的最大双末端测序read对数量。当输入的数据较多时，最多使用此数量的read对；若输入了多组数据，则从每组前面取相同比例的数据量。程序默认最大使用100M的read对（按PE150bp测序，约30 Gb数据）。
+
+    --se_used_read_num <int>    默认值：100000000
+    设置程序利用的最大单端测序read数量，规则同上（按SE150bp测序，约15 Gb数据）。
+
+[性能参数]
+    --cpu <int>    默认值：8
+    设置程序使用的CPU线程数，用于Trimmomatic质控（多进程并行调度）、比对软件（HISAT2/STAR）建索引、各分片的比对及排序、以及samtools merge。Trimmomatic质控阶段会根据--cpu和可用内存自动计算同时运行的Trimmomatic进程数（每个进程占用16个线程），由本程序内置的fork/worker进程池直接调度执行，不再依赖外部的ParaFly程序。注意：建索引在程序开始时就与质控、数据切分同时并行运行，两者各自使用的线程数都不减少（建索引最多使用--cpu个线程，且最多80个），因此该阶段程序实际占用的总线程数会暂时超过--cpu；由于建索引的大部分时间是单线程运行的，这样安排可以节约总运行时间。
+
+    --chunk_num <int>    默认值：10
+    设置将质控后数据切分成的份数，用于对Step 2比对阶段进行并行化加速。质控完成后，双末端和/或单端质控后数据会分别按read数尽量均匀地切分为最多--chunk_num份（某类型数据的实际read总数少于--chunk_num时按实际read数切分），随后对这些分片同时并行调用--aligner指定的比对软件进行比对：HISAT2支持在一条命令中混合双末端和单端数据，故同一分片序号对应一条HISAT2命令；STAR不支持混合两种数据类型，故双末端、单端分片分别独立并行比对。每条比对命令实际使用的线程数为--cpu除以--chunk_num后向下取整（不足1时按1计算）。比对完成后，Step 3排序阶段对这些分片比对结果（以及--sam直接输入的文件）调用samtools sort的命令同样会并行执行，各条排序命令实际可用的线程数在受限于--cpu及可用内存总量的排序总线程预算内、按同时运行的排序任务数平均分配。
+
+[帮助参数]
+    --help    默认值：无
+    显示英文帮助信息并退出。不带任何参数运行本程序时，默认也显示英文帮助信息。
+
+    --chinese_help    默认值：无
+    显示中文帮助信息并退出。
+
+    依赖：终端中需要能直接运行 samtools 命令；若输入了--pe1/--pe2或--se的FASTQ数据，还需要能直接运行 java 命令，以及--aligner指定的比对软件（hisat2和hisat2-build，或STAR），以及 $software_dir/Trimmomatic-0.38/trimmomatic-0.38.jar 及其adapters子目录存在。
+
+USAGE
+
+# 英文用法说明位于本程序文件的最尾部（__DATA__ 段），运行时在此读取。
+my $usage_en = do { local $/; <DATA> };
+$usage_cn =~ s/__PROG__/$prog_name/g;
+$usage_en =~ s/__PROG__/$prog_name/g;
+$usage_cn =~ s/\$software_dir/$software_dir/g;
+$usage_en =~ s/\$software_dir/$software_dir/g;
+
+# 不带任何参数运行时，默认输出英文用法说明
+if (@ARGV == 0) { print STDERR $usage_en; exit 1; }
+
+########################################################################
+# 1. 解析并检查参数
+########################################################################
+my %o;
+GetOptions(\%o,
+    'genome=s',
+    'pe1=s', 'pe2=s', 'se=s', 'sam=s',
+    'aligner=s', 'strand_specific',
+    'trimmomatic_adapter=s', 'trimmomatic_opts=s',
+    'hisat2_index_opts=s', 'hisat2_opts=s',
+    'star_index_opts=s', 'star_opts=s',
+    'tmp_dir=s', 'out=s', 'output_type=s', 'alignment_stats=s',
+    'keep_tmp_files|keep_intermediate_sam',    # --keep_intermediate_sam 为已弃用的旧名称，等同于--keep_tmp_files
+    'pe_used_pair_num=i', 'se_used_read_num=i',
+    'cpu=i', 'chunk_num=i',
+    'help|h', 'chinese_help',
+) or do { print STDERR "\nRun '$prog_name --help' for usage.\n"; exit 1; };
+
+if ($o{chinese_help}) { print $usage_cn; exit 0; }
+if ($o{help})         { print $usage_en; exit 0; }
+
+$o{aligner}           //= 'star';
+$o{aligner}           = lc($o{aligner});
+$o{pe_used_pair_num}  //= 100000000;
+$o{se_used_read_num}  //= 100000000;
+$o{cpu}               //= 8;
+$o{chunk_num}         //= 10;
+$o{output_type}       //= 'bam';
+$o{output_type}       = lc($o{output_type});
+die "Error: --cpu must be >= 1.\n" if $o{cpu} < 1;
+die "Error: --chunk_num must be >= 1.\n" if $o{chunk_num} < 1;
+die "Error: --aligner must be either 'hisat2' or 'star' (case-insensitive).\n" unless $o{aligner} eq 'hisat2' || $o{aligner} eq 'star';
+die "Error: --output_type must be either 'bam' or 'sam' (case-insensitive).\n" unless $o{output_type} eq 'bam' || $o{output_type} eq 'sam';
+
+# 各软件的参数：未在命令行指定时使用内置默认值；指定后整体替换默认值。
+my $trimmomatic_adapter = defined $o{trimmomatic_adapter} ? $o{trimmomatic_adapter} : $DEFAULT_TRIMMOMATIC_ADAPTER;
+my $trimmomatic_opts    = defined $o{trimmomatic_opts}    ? $o{trimmomatic_opts}    : $DEFAULT_TRIMMOMATIC_OPTS;
+my $hisat2_index_opts   = defined $o{hisat2_index_opts}   ? $o{hisat2_index_opts}   : '';
+my $hisat2_opts         = defined $o{hisat2_opts}         ? $o{hisat2_opts}         : $DEFAULT_HISAT2_OPTS;
+my $star_index_opts     = defined $o{star_index_opts}     ? $o{star_index_opts}     : '';
+my $star_opts           = defined $o{star_opts}           ? $o{star_opts}           : $DEFAULT_STAR_OPTS;
+s/^\s+|\s+$//g foreach ( $trimmomatic_adapter, $trimmomatic_opts, $hisat2_index_opts, $hisat2_opts, $star_index_opts, $star_opts );
+
+# 给出了当前未选用的比对软件的参数时，仅提示警告。
+if ( $o{aligner} eq 'hisat2' && ( defined $o{star_opts} || defined $o{star_index_opts} ) ) {
+    print STDERR "Warning: --star_opts/--star_index_opts are ignored because --aligner is hisat2.\n";
+}
+if ( $o{aligner} eq 'star' && ( defined $o{hisat2_opts} || defined $o{hisat2_index_opts} ) ) {
+    print STDERR "Warning: --hisat2_opts/--hisat2_index_opts are ignored because --aligner is star.\n";
+}
+
+die "Error: --pe1/--pe2, --se or --sam should provide at least one kind of input data.\n"
+    unless ( ($o{pe1} && $o{pe2}) || $o{se} || $o{sam} );
+
+die "Error: --alignment_stats requires --pe1/--pe2 or --se input, since it summarizes alignment statistics and no alignment is performed with --sam input alone.\n"
+    if defined $o{alignment_stats} && !( ($o{pe1} && $o{pe2}) || $o{se} );
+
+die "Error: --genome is required, please specify the reference genome fasta file.\n" unless defined $o{genome};
+die "Error: unrecognized extra command line argument(s): @ARGV\n" if @ARGV;
+my $input_genome = abs_path($o{genome});
+die "Error: genome file $o{genome} does not exist or is empty.\n" unless defined $input_genome && -e $input_genome && -s $input_genome;
+
+die "Error: --out is required, please specify the path of the output alignment file.\n" unless defined $o{out};
+{
+    # --out指定的文件所在目录若不存在，先自动创建该目录，以免程序因目录不存在而运行失败；
+    # 目录部分需要先创建好之后才能用abs_path正确解析为绝对路径（abs_path要求路径中除最后一级文件名外的部分必须已经存在）。
+    my $out_dir_raw = dirname($o{out});
+    my $out_base    = basename($o{out});
+    make_path($out_dir_raw) unless -d $out_dir_raw;
+    die "Error: can not create the directory of --out: $out_dir_raw\n" unless -d $out_dir_raw;
+    my $out_dir_abs = abs_path($out_dir_raw);
+    die "Error: --out resolves to an invalid path, please check its parent directory.\n" unless defined $out_dir_abs;
+    $o{out} = "$out_dir_abs/$out_base";
+}
+my $out_dir = dirname($o{out});
+
+$o{alignment_stats} = abs_path($o{alignment_stats}) if defined $o{alignment_stats};
+if ( defined $o{alignment_stats} ) {
+    my $d = dirname($o{alignment_stats});
+    die "Error: the directory of --alignment_stats does not exist: $d\n" unless -d $d;
+}
+
+my $cpu_per_chunk = int( $o{cpu} / $o{chunk_num} );
+$cpu_per_chunk = 1 if $cpu_per_chunk < 1;
+
+my $date = strftime("%Y%m%d%H%M%S", localtime);
+my $tmp_dir_given  = defined $o{tmp_dir} ? 1 : 0;
+my $tmp_dir_target = $tmp_dir_given ? $o{tmp_dir} : "tmp_$date$$";
+my $tmp_dir_existed = -d $tmp_dir_target ? 1 : 0;
+make_path($tmp_dir_target) unless $tmp_dir_existed;
+my $tmp_dir = abs_path($tmp_dir_target);
+die "Error: can not create the temporary directory $tmp_dir_target.\n" unless defined $tmp_dir && -d $tmp_dir;
+
+########################################################################
+# 2. 解析多组PE/SE/SAM输入
+########################################################################
+my (@pe_pairs, @se_files, @input_sam_files);
+if ( $o{pe1} && $o{pe2} ) {
+    my @pe1 = split /,/, $o{pe1};
+    my @pe2 = split /,/, $o{pe2};
+    die "Error: the number of files in --pe1 (" . scalar(@pe1) . ") and --pe2 (" . scalar(@pe2) . ") must be equal.\n"
+        unless @pe1 == @pe2;
+    for my $i ( 0 .. $#pe1 ) {
+        my ($f1, $f2) = (abs_path($pe1[$i]), abs_path($pe2[$i]));
+        die "Error: file $pe1[$i] does not exist or is empty.\n" unless defined $f1 && -e $f1 && -s $f1;
+        die "Error: file $pe2[$i] does not exist or is empty.\n" unless defined $f2 && -e $f2 && -s $f2;
+        push @pe_pairs, [$f1, $f2];
+    }
+}
+elsif ( $o{pe1} xor $o{pe2} ) {
+    die "Error: --pe1 and --pe2 must be set together.\n";
+}
+if ( $o{se} ) {
+    foreach ( split /,/, $o{se} ) {
+        my $f = abs_path($_);
+        die "Error: file $_ does not exist or is empty.\n" unless defined $f && -e $f && -s $f;
+        push @se_files, $f;
+    }
+}
+if ( $o{sam} ) {
+    foreach ( split /,/, $o{sam} ) {
+        my $f = abs_path($_);
+        die "Error: file $_ does not exist or is empty.\n" unless defined $f && -e $f && -s $f;
+        die "Error: --sam input $_ should be a .sam, .bam or .cram file.\n" unless $f =~ /\.(sam|bam|cram)$/i;
+        push @input_sam_files, $f;
+    }
+}
+my $need_alignment = ( @pe_pairs || @se_files ) ? 1 : 0;
+
+########################################################################
+# 2b. 临时文件夹安全检查：未指定--keep_tmp_files时，程序成功结束后会整个删除--tmp_dir，
+#     故在运行前确认该文件夹不会误删输入/输出文件、程序目录、当前工作目录等重要内容。
+########################################################################
+unless ( $o{keep_tmp_files} ) {
+    my @conflicts;
+    my $cwd_now = getcwd();
+    push @conflicts, "it is the root directory" if $tmp_dir eq '/';
+    if ( defined $ENV{HOME} && $ENV{HOME} ne '' ) {
+        my $home = abs_path($ENV{HOME});
+        push @conflicts, "it is your home directory" if defined $home && $home eq $tmp_dir;
+    }
+    push @conflicts, "the current working directory ($cwd_now) is the temporary directory itself or is inside it" if &path_in_dir($cwd_now, $tmp_dir);
+    push @conflicts, "it contains the program directory ($bin_path)" if &path_in_dir($bin_path, $tmp_dir);
+    push @conflicts, "it contains the genome file ($input_genome)" if &path_in_dir($input_genome, $tmp_dir);
+    push @conflicts, "it contains the output file --out ($o{out})" if &path_in_dir($o{out}, $tmp_dir);
+    push @conflicts, "it contains the file --alignment_stats ($o{alignment_stats})" if defined $o{alignment_stats} && &path_in_dir($o{alignment_stats}, $tmp_dir);
+    foreach my $pair (@pe_pairs) {
+        foreach my $f (@$pair) { push @conflicts, "it contains the input file $f" if &path_in_dir($f, $tmp_dir); }
+    }
+    foreach my $f (@se_files, @input_sam_files) {
+        push @conflicts, "it contains the input file $f" if &path_in_dir($f, $tmp_dir);
+    }
+    if (@conflicts) {
+        rmdir $tmp_dir unless $tmp_dir_existed;    # 仅删除本次刚创建的空文件夹，rmdir不会删除非空文件夹
+        die "Error: the temporary directory $tmp_dir would be removed entirely after the run (no --keep_tmp_files given), but this is unsafe because:\n  - "
+            . join("\n  - ", @conflicts)
+            . "\nPlease use a dedicated --tmp_dir, or add --keep_tmp_files to keep the temporary directory.\n";
+    }
+}
+
+########################################################################
+# 3. 检查依赖的命令是否可以直接执行（同时确定Trimmomatic的ILLUMINACLIP参数）
+########################################################################
+&check_dependencies();
+
+my $pwd = getcwd();
+print STDERR "\n#################### $prog_name | Start ####################\n";
+print STDERR "PWD: $pwd\n" . localtime() . ": CMD: $command_line\n";
+print STDERR "Temporary directory: $tmp_dir" . ($tmp_dir_given ? " (existing records found, finished stages will be skipped)" : "") . "\n";
+if ( $o{keep_tmp_files} ) {
+    print STDERR "The temporary directory and all intermediate files will be kept (--keep_tmp_files).\n";
+}
+else {
+    print STDERR "The whole temporary directory will be removed after the program finishes successfully (add --keep_tmp_files to keep it).\n";
+}
+print STDERR "To resume after an interruption, run the same command with: --tmp_dir $tmp_dir\n" unless $tmp_dir_given;
+if ( $need_alignment ) {
+    print STDERR "Trimmomatic ILLUMINACLIP:" . ( $illumina_clip ne '' ? $illumina_clip : " (disabled)" ) . "\n";
+    print STDERR "Trimmomatic options: $trimmomatic_opts\n";
+    if ( $o{aligner} eq 'hisat2' ) {
+        print STDERR "HISAT2 index options: " . ( $hisat2_index_opts ne '' ? $hisat2_index_opts : "(none)" ) . "\n";
+        print STDERR "HISAT2 options: $hisat2_opts\n";
+    }
+    else {
+        print STDERR "STAR index options: " . ( $star_index_opts ne '' ? $star_index_opts : "(none)" ) . "\n";
+        print STDERR "STAR options: $star_opts\n";
+    }
+}
+print STDERR "============================================\n";
+
+my $MemAvailable = &get_MemAvailable();
+
+########################################################################
+# 4. Step 0: 一开始就在后台启动比对软件的基因组索引构建（耗时较长，且大部分时间是单线程运行）。
+#     它与下面的Step 1（Trimmomatic质控）和Step 2a（数据切分）同时并行进行；
+#     建索引与质控使用的线程数均不减少。到Step 2b真正开始比对之前，再等待索引构建完成。
+#     若已有02.align.ok标记（比对已完成，续跑时会跳过比对），则不需要索引，不再启动。
+########################################################################
+my $align_dir = "$tmp_dir/b.align";
+if ( $need_alignment ) {
+    make_path($align_dir) unless -d $align_dir;
+    if ( !-e "$tmp_dir/02.align.ok" ) {
+        print STDERR "\nStep 0. Building the " . uc($o{aligner}) . " genome index in the background, in parallel with the following steps (" . localtime() . ")\n";
+        $index_pid = &start_index_build($align_dir);
+    }
+}
+
+########################################################################
+# 5. Step 1: Trimmomatic质控（仅在有--pe1/--pe2或--se输入时进行）
+########################################################################
+my ($final_pe1, $final_pe2, $final_se);
+if ( $need_alignment ) {
+    print STDERR "\nStep 1. Quality control of RNA-Seq reads by Trimmomatic software (" . localtime() . ")\n";
+    my $trim_dir = "$tmp_dir/a.trimmomatic";
+    make_path($trim_dir) unless -d $trim_dir;
+
+    if ( -e "$tmp_dir/01.trimmomatic.ok" ) {
+        print STDERR "Step 1: already finished, skipped.\n";
+    }
+    else {
+        my $worker_num = &calc_worker_num($MemAvailable, $o{cpu}, 16000000);
+
+        if ( @pe_pairs ) {
+            my $lib_num = @pe_pairs;
+            my $number = 0;
+            my @prefix;
+            my @cmds;
+            foreach my $pair (@pe_pairs) {
+                $number ++;
+                my $code = ("0" x (length($lib_num) - length($number))) . $number;
+                push @prefix, "reads$code";
+                push @cmds, "java -jar $software_dir/Trimmomatic-0.38/trimmomatic-0.38.jar PE -threads 16 $pair->[0] $pair->[1] $trim_dir/reads$code.1.fastq $trim_dir/reads$code.1.unpaired.fastq $trim_dir/reads$code.2.fastq $trim_dir/reads$code.2.unpaired.fastq$illumina_clip $trimmomatic_opts &> $trim_dir/reads$code.trimmomatic.log";
+            }
+            open my $cmdfh, ">", "$trim_dir/command.trimmomatic_pe.list" or die "Can not create file $trim_dir/command.trimmomatic_pe.list, $!\n";
+            print $cmdfh "$_\n" foreach @cmds;
+            close $cmdfh;
+            &run_trimmomatic_batch(\@cmds, $worker_num, "PE");
+
+            my ($total_pair_num, %lib_pair_num) = (0);
+            foreach my $prefix (@prefix) {
+                open my $lh, "<", "$trim_dir/$prefix.trimmomatic.log" or die "Error: Can not open file $trim_dir/$prefix.trimmomatic.log, $!\n";
+                while (<$lh>) { if ( m/Surviving:\s*(\d+)/ ) { $lib_pair_num{$prefix} = $1; $total_pair_num += $1; } }
+                close $lh;
+            }
+            die "Error: no surviving read pair was detected after Trimmomatic PE quality control, please check the logs in $trim_dir.\n" unless $total_pair_num > 0;
+
+            open my $o1, ">", "$trim_dir/PE_reads.1.fastq" or die "Error: Can not create file $trim_dir/PE_reads.1.fastq, $!\n";
+            open my $o2, ">", "$trim_dir/PE_reads.2.fastq" or die "Error: Can not create file $trim_dir/PE_reads.2.fastq, $!\n";
+            foreach my $prefix (@prefix) {
+                my $max_line_num = int( $o{pe_used_pair_num} / $total_pair_num * ($lib_pair_num{$prefix} || 0) ) * 4;
+                &copy_up_to_lines("$trim_dir/$prefix.1.fastq", $o1, $max_line_num);
+                &copy_up_to_lines("$trim_dir/$prefix.2.fastq", $o2, $max_line_num);
+            }
+            close $o1; close $o2;
+            $final_pe1 = "$trim_dir/PE_reads.1.fastq";
+            $final_pe2 = "$trim_dir/PE_reads.2.fastq";
+        }
+
+        if ( @se_files ) {
+            my $lib_num = @se_files;
+            my $number = 0;
+            my @prefix;
+            my @cmds;
+            foreach my $file (@se_files) {
+                $number ++;
+                my $code = ("0" x (length($lib_num) - length($number))) . $number;
+                push @prefix, "reads_se$code";
+                push @cmds, "java -jar $software_dir/Trimmomatic-0.38/trimmomatic-0.38.jar SE -threads 16 $file $trim_dir/reads_se$code.fastq$illumina_clip $trimmomatic_opts &> $trim_dir/reads_se$code.trimmomatic.log";
+            }
+            open my $cmdfh, ">", "$trim_dir/command.trimmomatic_se.list" or die "Can not create file $trim_dir/command.trimmomatic_se.list, $!\n";
+            print $cmdfh "$_\n" foreach @cmds;
+            close $cmdfh;
+            &run_trimmomatic_batch(\@cmds, $worker_num, "SE");
+
+            my ($total_read_num, %lib_read_num) = (0);
+            foreach my $prefix (@prefix) {
+                open my $lh, "<", "$trim_dir/$prefix.trimmomatic.log" or die "Error: Can not open file $trim_dir/$prefix.trimmomatic.log, $!\n";
+                while (<$lh>) { if ( m/Surviving:\s*(\d+)/ ) { $lib_read_num{$prefix} = $1; $total_read_num += $1; } }
+                close $lh;
+            }
+            die "Error: no surviving read was detected after Trimmomatic SE quality control, please check the logs in $trim_dir.\n" unless $total_read_num > 0;
+
+            open my $out, ">", "$trim_dir/SE_reads.fastq" or die "Error: Can not create file $trim_dir/SE_reads.fastq, $!\n";
+            foreach my $prefix (@prefix) {
+                my $max_line_num = int( $o{se_used_read_num} / $total_read_num * ($lib_read_num{$prefix} || 0) ) * 4;
+                &copy_up_to_lines("$trim_dir/$prefix.fastq", $out, $max_line_num);
+            }
+            close $out;
+            $final_se = "$trim_dir/SE_reads.fastq";
+        }
+
+        open my $okfh, ">", "$tmp_dir/01.trimmomatic.ok" or die $!; close $okfh;
+    }
+    # 断点续跑时，即使跳过了本阶段的计算，也要重新指向已经存在的输出文件路径
+    $final_pe1 = "$trim_dir/PE_reads.1.fastq" if @pe_pairs && -e "$trim_dir/PE_reads.1.fastq";
+    $final_pe2 = "$trim_dir/PE_reads.2.fastq" if @pe_pairs && -e "$trim_dir/PE_reads.2.fastq";
+    $final_se  = "$trim_dir/SE_reads.fastq"   if @se_files  && -e "$trim_dir/SE_reads.fastq";
+}
+
+########################################################################
+# 6. Step 2: 切分Clean data + 并行比对（仅在有质控后数据时进行），支持HISAT2或STAR
+#    （基因组索引已在Step 0中于后台构建，比对开始前等待其完成）
+########################################################################
+my @aligner_outputs;
+if ( $need_alignment ) {
+    print STDERR "\nStep 2. Aligning NGS reads to genome by " . uc($o{aligner}) . " in up to $o{chunk_num} parallel chunk(s) (" . localtime() . ")\n";
+    my $split_dir = "$align_dir/split_chunks";
+    make_path($split_dir) unless -d $split_dir;
+
+    ####################################################################
+    # 6a. 将质控后数据（双末端、单端分别独立处理）切分为--chunk_num等份
+    #     （此时后台的索引构建仍在继续运行）
+    ####################################################################
+    if ( -e "$tmp_dir/02a.split.ok" ) {
+        print STDERR "Step 2 (split clean data): already finished, skipped.\n";
+    }
+    else {
+        &split_fastq_pe($final_pe1, $final_pe2, $o{chunk_num}, $split_dir) if defined $final_pe1 && defined $final_pe2;
+        &split_fastq_se($final_se, $o{chunk_num}, $split_dir) if defined $final_se;
+        open my $ok, ">", "$tmp_dir/02a.split.ok" or die $!; close $ok;
+    }
+    my @pe1_chunks = defined $final_pe1 && defined $final_pe2 ? &glob_sorted($split_dir, qr/^pe_chunk\d+\.1\.fastq$/) : ();
+    my @pe2_chunks = defined $final_pe1 && defined $final_pe2 ? &glob_sorted($split_dir, qr/^pe_chunk\d+\.2\.fastq$/) : ();
+    my @se_chunks  = defined $final_se                        ? &glob_sorted($split_dir, qr/^se_chunk\d+\.fastq$/)   : ();
+    die "Error: the number of split PE chunk files does not match (" . scalar(@pe1_chunks) . " vs " . scalar(@pe2_chunks) . ").\n" if @pe1_chunks != @pe2_chunks;
+    my $chunk_total = @pe1_chunks > @se_chunks ? scalar(@pe1_chunks) : scalar(@se_chunks);
+    print STDERR "Clean data was split into " . scalar(@pe1_chunks) . " PE chunk(s) and " . scalar(@se_chunks) . " SE chunk(s); each alignment command will use $cpu_per_chunk thread(s).\n";
+
+    ####################################################################
+    # 6b. 等待索引构建完成后，并行比对每一份数据
+    ####################################################################
+    if ( -e "$tmp_dir/02.align.ok" ) {
+        print STDERR "Step 2 (align): already finished, skipped.\n";
+        @aligner_outputs = $o{aligner} eq 'hisat2'
+            ? &glob_sorted($align_dir, qr/^alignment\.chunk\d+\.sam$/)
+            : ( &glob_sorted($align_dir, qr/^pe_chunk\d+_Aligned\.out\.bam$/), &glob_sorted($align_dir, qr/^se_chunk\d+_Aligned\.out\.bam$/) );
+    }
+    else {
+        # 等待Step 0中后台启动的索引构建完成（若质控、切分耗时比建索引长，则此处基本无需等待）
+        &wait_index_build($index_pid) if defined $index_pid;
+
+        if ( $o{aligner} eq 'hisat2' ) {
+            my @cmds;
+            for my $i ( 1 .. $chunk_total ) {
+                my $input = "";
+                $input .= " -1 $pe1_chunks[$i-1] -2 $pe2_chunks[$i-1]" if $i <= @pe1_chunks;
+                $input .= " -U $se_chunks[$i-1]" if $i <= @se_chunks;
+                $input .= " --rna-strandness RF" if $o{strand_specific};
+                die "Error: no clean read is available for HISAT2 alignment in chunk $i.\n" if $input eq "";
+                my $code = ("0" x (length($o{chunk_num}) - length($i))) . $i;
+                my $chunk_sam = "$align_dir/alignment.chunk$code.sam";
+                my $chunk_log = "$align_dir/hisat2.chunk$code.log";
+                push @cmds, "hisat2 -x $align_dir/genome -p $cpu_per_chunk$input -S $chunk_sam $hisat2_opts 2> $chunk_log";
+                push @aligner_outputs, $chunk_sam;
+            }
+            open my $cmdfh, ">", "$align_dir/command.hisat2.list" or die "Can not create file $align_dir/command.hisat2.list, $!\n";
+            print $cmdfh "$_\n" foreach @cmds;
+            close $cmdfh;
+            print STDERR localtime() . ": running " . scalar(@cmds) . " HISAT2 command(s) in parallel (up to " . scalar(@cmds) . " at a time, $cpu_per_chunk thread(s) each)\n";
+            my @failed = &run_command_pool(\@cmds, scalar(@cmds));
+            die "Error: the following HISAT2 command(s) failed:\n" . join("\n", @failed) . "\n" if @failed;
+        }
+        else {
+            # STAR并不能像HISAT2那样通过参数真正区分链特异性/非链特异性比对：无论是否设置了--strand_specific，
+            # STAR比对命令实际使用的参数都完全一致，统一添加--outSAMstrandField intronMotif，该参数仅对
+            # 跨内含子（存在剪接）的比对结果额外添加表示所在链的XS标签，其余reads的比对结果不受影响。
+            my $extra_star_opt = " --outSAMstrandField intronMotif";
+            my @cmds;
+            for my $i ( 1 .. scalar(@pe1_chunks) ) {
+                my $code = ("0" x (length($o{chunk_num}) - length($i))) . $i;
+                push @cmds, "STAR --genomeDir $align_dir --readFilesIn $pe1_chunks[$i-1] $pe2_chunks[$i-1] --runThreadN $cpu_per_chunk --outSAMtype BAM Unsorted --outFileNamePrefix $align_dir/pe_chunk${code}_ $star_opts$extra_star_opt &> $align_dir/star_pe.chunk$code.log";
+                push @aligner_outputs, "$align_dir/pe_chunk${code}_Aligned.out.bam";
+            }
+            for my $i ( 1 .. scalar(@se_chunks) ) {
+                my $code = ("0" x (length($o{chunk_num}) - length($i))) . $i;
+                push @cmds, "STAR --genomeDir $align_dir --readFilesIn $se_chunks[$i-1] --runThreadN $cpu_per_chunk --outSAMtype BAM Unsorted --outFileNamePrefix $align_dir/se_chunk${code}_ $star_opts$extra_star_opt &> $align_dir/star_se.chunk$code.log";
+                push @aligner_outputs, "$align_dir/se_chunk${code}_Aligned.out.bam";
+            }
+            die "Error: no clean read is available for STAR alignment.\n" unless @cmds;
+            open my $cmdfh, ">", "$align_dir/command.star.list" or die "Can not create file $align_dir/command.star.list, $!\n";
+            print $cmdfh "$_\n" foreach @cmds;
+            close $cmdfh;
+            print STDERR localtime() . ": running " . scalar(@cmds) . " STAR command(s) in parallel (up to " . scalar(@cmds) . " at a time, $cpu_per_chunk thread(s) each)\n";
+            my @failed = &run_command_pool(\@cmds, scalar(@cmds));
+            die "Error: the following STAR command(s) failed:\n" . join("\n", @failed) . "\n" if @failed;
+        }
+        open my $ok, ">", "$tmp_dir/02.align.ok" or die $!; close $ok;
+    }
+
+    ####################################################################
+    # 6c. 汇总各分片的比对统计信息，输出到--alignment_stats
+    ####################################################################
+    if ( defined $o{alignment_stats} ) {
+        my @log_files = $o{aligner} eq 'hisat2'
+            ? &glob_sorted($align_dir, qr/^hisat2\.chunk\d+\.log$/)
+            : ( &glob_sorted($align_dir, qr/^pe_chunk\d+_Log\.final\.out$/), &glob_sorted($align_dir, qr/^se_chunk\d+_Log\.final\.out$/) );
+        if ( @log_files ) {
+            $o{aligner} eq 'hisat2'
+                ? &aggregate_hisat2_logs(\@log_files, $o{alignment_stats})
+                : &aggregate_star_logs(\@log_files, $o{alignment_stats});
+            print STDERR "Aggregated alignment statistics across " . scalar(@log_files) . " chunk(s) were saved to $o{alignment_stats} .\n";
+        }
+        else {
+            print STDERR "Warning: no per-chunk alignment log was found, --alignment_stats was not written.\n";
+        }
+    }
+}
+
+########################################################################
+# 7. Step 3: 并行排序所有来源的SAM/BAM，再直接合并输出为--out指定的最终结果文件
+########################################################################
+print STDERR "\nStep 3. Sorting and merging all alignments by genome coordinate, writing directly to $o{out} (" . localtime() . ")\n";
+my $merge_dir = "$tmp_dir/c.sort_merge";
+make_path($merge_dir) unless -d $merge_dir;
+
+my @all_inputs = @input_sam_files;
+push @all_inputs, @aligner_outputs;
+die "Error: no alignment (from the aligner or --sam) is available to sort and merge.\n" unless @all_inputs;
+
+if ( -e "$tmp_dir/03.sort_merge.ok" && -e $o{out} ) {
+    print STDERR "Step 3: already finished, skipped.\n";
+}
+else {
+    my $sort_cpu_total = $o{cpu};
+    $sort_cpu_total = int($MemAvailable * 0.8 / 768 / 1024) if $sort_cpu_total > int($MemAvailable * 0.8 / 768 / 1024);
+    $sort_cpu_total = 1 if $sort_cpu_total < 1;
+
+    my $sort_worker_num = @all_inputs < $sort_cpu_total ? scalar(@all_inputs) : $sort_cpu_total;
+    $sort_worker_num = 1 if $sort_worker_num < 1;
+    my $sort_cpu_per_job = int( $sort_cpu_total / $sort_worker_num );
+    $sort_cpu_per_job = 1 if $sort_cpu_per_job < 1;
+
+    my (@sorted_bams, @sort_cmds);
+    my $n = 0;
+    foreach my $f (@all_inputs) {
+        $n ++;
+        my $sorted = "$merge_dir/sorted_input$n.bam";
+        push @sorted_bams, $sorted;
+        push @sort_cmds, "samtools sort -\@ $sort_cpu_per_job -o $sorted -O BAM $f";
+    }
+    open my $cmdfh, ">", "$merge_dir/command.sort.list" or die "Can not create file $merge_dir/command.sort.list, $!\n";
+    print $cmdfh "$_\n" foreach @sort_cmds;
+    close $cmdfh;
+    print STDERR localtime() . ": running " . scalar(@sort_cmds) . " samtools sort command(s) with up to $sort_worker_num parallel worker(s), $sort_cpu_per_job thread(s) each\n";
+    my @failed = &run_command_pool(\@sort_cmds, $sort_worker_num);
+    die "Error: the following samtools sort command(s) failed:\n" . join("\n", @failed) . "\n" if @failed;
+
+    # 不再生成一份额外的整合后BAM文件保存于临时目录中：samtools merge直接按--output_type指定的格式
+    # （bam或sam）将各排序分片合并输出到--out指定的最终文件；若输出格式为bam，也不再调用samtools index建索引。
+    my $merge_format = uc( $o{output_type} );    # BAM or SAM
+    print STDERR localtime() . ": running samtools merge to write the final $merge_format result directly to $o{out}\n";
+    &run_cmd("samtools merge -f -\@ $sort_cpu_total -O $merge_format $o{out} " . join(" ", @sorted_bams));
+
+    # 中间文件（比对软件生成的SAM/BAM、各输入排序后的BAM等）不再在此处逐个删除：
+    # 程序成功结束后，要么整个删除临时文件夹（默认），要么整体保留（--keep_tmp_files）。
+    open my $ok, ">", "$tmp_dir/03.sort_merge.ok" or die $!; close $ok;
+}
+
+print STDERR "Final coordinate-sorted alignment (" . uc($o{output_type}) . " format) was saved to $o{out} .\n";
+
+########################################################################
+# 8. 收尾：默认直接删除整个--tmp_dir；指定--keep_tmp_files时保留所有中间文件
+########################################################################
+if ( $o{keep_tmp_files} ) {
+    print STDERR "Temporary directory $tmp_dir keeps all intermediate files (--keep_tmp_files); it can be reused with --tmp_dir to resume an interrupted run.\n";
+}
+else {
+    print STDERR "Removing the whole temporary directory $tmp_dir (add --keep_tmp_files to keep it next time) ...\n";
+    chdir $pwd;
+    my $rm_err;
+    remove_tree($tmp_dir, { error => \$rm_err });
+    if ( $rm_err && @$rm_err ) {
+        print STDERR "Warning: some files or directories in $tmp_dir could not be removed:\n";
+        foreach my $diag (@$rm_err) {
+            my ($file, $message) = %$diag;
+            print STDERR "  " . ( $file eq '' ? '' : "$file: " ) . "$message\n";
+        }
+    }
+    else {
+        print STDERR "Temporary directory $tmp_dir was removed.\n";
+    }
+}
+print STDERR "\n#################### $prog_name | Done ####################\n";
+exit 0;
+
+
+########################################################################
+# 子程序
+########################################################################
+
+# 判断路径$path是否就是目录$dir本身，或位于$dir之内（均为绝对路径）。
+sub path_in_dir {
+    my ($path, $dir) = @_;
+    return 0 unless defined $path && defined $dir;
+    $dir =~ s{/+$}{};
+    return 1 if $dir eq '';    # $dir为根目录，包含一切路径
+    return ( $path eq $dir || index($path, "$dir/") == 0 ) ? 1 : 0;
+}
+
+sub check_dependencies {
+    my @missing;
+    push @missing, "  - the samtools command can not be run directly, please make sure it is installed and added to PATH." unless &find_in_path("samtools");
+    if ( $need_alignment ) {
+        push @missing, "  - the java command can not be run directly (required by Trimmomatic), please make sure it is installed and added to PATH." unless &find_in_path("java");
+        if ( $o{aligner} eq 'hisat2' ) {
+            push @missing, "  - the hisat2 command can not be run directly." unless &find_in_path("hisat2");
+            push @missing, "  - the hisat2-build command can not be run directly." unless &find_in_path("hisat2-build");
+        }
+        else {
+            push @missing, "  - the STAR command can not be run directly." unless &find_in_path("STAR");
+        }
+        my $jar = "$software_dir/Trimmomatic-0.38/trimmomatic-0.38.jar";
+        push @missing, "  - Trimmomatic was not found: $jar ." unless -e $jar;
+        my $adapters = "$software_dir/Trimmomatic-0.38/adapters";
+        push @missing, "  - the Trimmomatic adapters directory was not found: $adapters ." unless -d $adapters;
+
+        # 根据--trimmomatic_adapter确定ILLUMINACLIP参数（空字符串表示不去除接头）
+        if ( $trimmomatic_adapter ne '' ) {
+            my ($afile, $arest) = split /:/, $trimmomatic_adapter, 2;
+            my $apath;
+            if ( $afile =~ m{/} ) {
+                $apath = abs_path($afile);
+                push @missing, "  - the adapter file given by --trimmomatic_adapter was not found: $afile ." unless defined $apath && -f $apath;
+            }
+            else {
+                $apath = "$adapters/$afile";
+                push @missing, "  - the adapter file given by --trimmomatic_adapter was not found: $apath ." unless -f $apath;
+            }
+            $illumina_clip = " ILLUMINACLIP:$apath" . ( defined $arest ? ":$arest" : "" ) if defined $apath;
+        }
+    }
+    if (@missing) {
+        rmdir $tmp_dir unless $tmp_dir_existed;    # 仅删除本次刚创建的空文件夹
+        die "Error: missing commands or files required by this program:\n" . join("\n", @missing) . "\n";
+    }
+    print STDERR "Dependency check passed.\n";
+}
+
+sub find_in_path {
+    my ($cmd) = @_;
+    foreach my $d (split /:/, ($ENV{PATH} // "")) {
+        next if $d eq "";
+        my $p = "$d/$cmd";
+        return $p if -f $p && -x _;
+    }
+    return;
+}
+
+# 运行一条命令；若命令失败，打印命令后报错退出。
+sub run_cmd {
+    my ($cmd) = @_;
+    print STDERR localtime() . ": CMD: $cmd\n";
+    system($cmd) == 0 or die "Error: failed to execute: $cmd\n";
+}
+
+# 返回索引构建完成标记文件的路径（按当前使用的比对软件区分）。
+sub index_ok_file {
+    my ($dir) = @_;
+    return $o{aligner} eq 'hisat2' ? "$dir/hisat2-build.ok" : "$dir/star-build.ok";
+}
+
+# 在当前进程中（同步）构建比对软件的基因组索引：HISAT2使用hisat2-build，STAR使用genomeGenerate
+# （根据基因组长度及序列数自动计算genomeSAindexNbases和genomeChrBinNbits，用户在--star_index_opts中已指定的除外）。
+# 已存在完成标记文件（*-build.ok）时跳过。建索引使用的线程数为--cpu（最多80），不因并行化而减少。
+sub build_index {
+    my ($dir) = @_;
+    my $ok_file = &index_ok_file($dir);
+    if ( -e $ok_file ) {
+        print STDERR "CMD(Skipped): genome index already built in $dir\n";
+        return;
+    }
+    my $build_cpu = $o{cpu} > 80 ? 80 : $o{cpu};
+    if ( $o{aligner} eq 'hisat2' ) {
+        &run_cmd("hisat2-build -p $build_cpu $hisat2_index_opts $input_genome $dir/genome &> $dir/hisat2-build.log");
+    }
+    else {
+        my ($genome_len, $seq_num) = &get_genome_length_and_seq_num($input_genome);
+        my $auto_opts = "";
+        unless ( $star_index_opts =~ /--genomeSAindexNbases\b/ ) {
+            my $sa_index_nbases = int( log($genome_len) / log(2) / 2 - 1 );
+            $sa_index_nbases = 14 if $sa_index_nbases > 14;
+            $sa_index_nbases = 2  if $sa_index_nbases < 2;
+            $auto_opts .= " --genomeSAindexNbases $sa_index_nbases";
+        }
+        unless ( $star_index_opts =~ /--genomeChrBinNbits\b/ ) {
+            my $chr_bin_nbits = int( log($genome_len / ($seq_num || 1)) / log(2) );
+            $chr_bin_nbits = 18 if $chr_bin_nbits > 18;
+            $chr_bin_nbits = 8  if $chr_bin_nbits < 8;
+            $auto_opts .= " --genomeChrBinNbits $chr_bin_nbits";
+        }
+        unless ( $star_index_opts =~ /--limitGenomeGenerateRAM\b/ ) {
+            my $star_ram = int($MemAvailable * 0.8 * 1024);
+            $star_ram = 4000000000 if $star_ram < 4000000000;
+            $auto_opts .= " --limitGenomeGenerateRAM $star_ram";
+        }
+        &run_cmd("STAR --runMode genomeGenerate --genomeDir $dir --genomeFastaFiles $input_genome --runThreadN $build_cpu$auto_opts $star_index_opts --outFileNamePrefix $dir/star-build_ &> $dir/star-build.log");
+    }
+    open my $ok, ">", $ok_file or die "Error: can not create file $ok_file, $!\n";
+    close $ok;
+}
+
+# 在后台（fork出的子进程中）启动基因组索引构建，立即返回子进程pid，主进程可继续做质控、切分等其它步骤。
+# 子进程被放入独立的进程组，这样主程序异常退出时可以一并终止其下的hisat2-build/STAR进程（见END块）。
+sub start_index_build {
+    my ($dir) = @_;
+    my $pid = fork();
+    die "Error: fork() failed when starting the index building process, $!\n" unless defined $pid;
+    if ( $pid == 0 ) {
+        # 子进程
+        $SIG{INT} = $SIG{TERM} = 'DEFAULT';
+        setpgrp(0, 0);
+        my $ok = eval { &build_index($dir); 1 };
+        unless ($ok) {
+            my $err = $@ || "unknown error\n";
+            print STDERR "Error (background genome index building): $err";
+            POSIX::_exit(1);
+        }
+        POSIX::_exit(0);
+    }
+    # 父进程：同样设置子进程的进程组，避免子进程尚未来得及设置时出现竞争
+    setpgrp($pid, $pid);
+    print STDERR localtime() . ": genome index building started in the background (pid $pid)\n";
+    return $pid;
+}
+
+# 等待后台的索引构建进程结束，并检查其退出状态及完成标记文件；失败则报错退出。
+sub wait_index_build {
+    my ($pid) = @_;
+    my $ok_file = &index_ok_file($align_dir);
+    if ( !exists $bg_status{$pid} && !-e $ok_file ) {
+        print STDERR localtime() . ": waiting for the genome index building to finish ...\n";
+    }
+    my $status;
+    if ( exists $bg_status{$pid} ) {
+        # 该子进程已被run_command_pool中的wait()回收，其退出状态保存在%bg_status中
+        $status = delete $bg_status{$pid};
+    }
+    else {
+        my $r = waitpid($pid, 0);
+        $status = $r == -1 ? -1 : $?;
+    }
+    if ( $status != 0 || !-e $ok_file ) {
+        $index_done = 1;    # 索引进程已结束，END块中无需再终止它
+        die "Error: the background genome index building failed (exit status $status), please check the logs in $align_dir (hisat2-build.log or star-build.log) and the messages above.\n";
+    }
+    $index_done = 1;
+    print STDERR localtime() . ": genome index is ready.\n";
+}
+
+# 使用Perl原生fork实现的worker进程池并行执行一批shell命令，最多同时运行$cpu个子进程。
+# 返回执行失败（退出码非0）的命令列表；不会因为个别命令失败而中断其它命令的执行。
+# 注意：wait()会回收任意子进程，若回收到的不是本进程池启动的子进程（即后台的索引构建进程），
+# 则把它的退出状态记录到%bg_status中，供wait_index_build读取，避免状态丢失。
+sub run_command_pool {
+    my ($cmds_ref, $cpu) = @_;
+    $cpu = 1 if $cpu < 1;
+    my @queue = @$cmds_ref;
+    my %running;    # pid => cmd
+    my @failed;
+
+    while ( @queue || %running ) {
+        while ( @queue && scalar(keys %running) < $cpu ) {
+            my $cmd = shift @queue;
+            my $pid = fork();
+            die "Error: fork() failed, $!\n" unless defined $pid;
+            if ( $pid == 0 ) {
+                # 子进程：通过shell执行命令（命令本身可能包含重定向、管道等），执行完毕后立即退出
+                exec('/bin/sh', '-c', $cmd);
+                # exec失败时才会执行到这里
+                warn "Error: exec failed for command: $cmd, $!\n";
+                POSIX::_exit(127);
+            }
+            $running{$pid} = $cmd;
+        }
+        my $pid    = wait();
+        my $status = $?;
+        last if $pid == -1;
+        if ( exists $running{$pid} ) {
+            push @failed, $running{$pid} if $status != 0;
+            delete $running{$pid};
+        }
+        else {
+            # 不属于本进程池的子进程（后台索引构建进程）：保存其退出状态
+            $bg_status{$pid} = $status;
+        }
+    }
+    return @failed;
+}
+
+# 并行运行一批Trimmomatic命令；若因个别reads质量全为固定值导致Trimmomatic无法自动探测phred格式
+# 而运行失败，则对失败的命令强制指定-phred33后重跑一次（与原NGSReads_prediction脚本行为一致）。
+# 并行调度完全由本程序内置的fork/worker进程池（&run_command_pool）实现，不再依赖外部的ParaFly程序。
+sub run_trimmomatic_batch {
+    my ($cmds_ref, $cpu, $mode) = @_;
+    print STDERR localtime() . ": running " . scalar(@$cmds_ref) . " Trimmomatic $mode command(s) with up to $cpu parallel worker(s)\n";
+    my @failed = &run_command_pool($cmds_ref, $cpu);
+    if ( @failed ) {
+        print STDERR "Warning: some Trimmomatic $mode commands failed (often caused by reads whose base qualities are all a fixed value, preventing phred format auto-detection); retrying the failed commands with -phred33 explicitly specified.\n";
+        my @retry_cmds = map { my $c = $_; $c =~ s/ (PE|SE) / $1 -phred33 /; $c } @failed;
+        my @failed2 = &run_command_pool(\@retry_cmds, $cpu);
+        if ( @failed2 ) {
+            die "Error: the following Trimmomatic $mode command(s) still failed after retrying with -phred33:\n" . join("\n", @failed2) . "\n";
+        }
+    }
+}
+
+# 将文件中不超过$max_line_num行的内容追加写入到已打开的文件句柄；$max_line_num <= 0 时不输出任何内容。
+sub copy_up_to_lines {
+    my ($file, $out_fh, $max_line_num) = @_;
+    return if $max_line_num <= 0;
+    open my $in, "<", $file or die "Error: Can not open file $file, $!\n";
+    my $n = 0;
+    while (<$in>) {
+        $n ++;
+        last if $n > $max_line_num;
+        print $out_fh $_;
+    }
+    close $in;
+}
+
+# 计算Trimmomatic并行化数：既不超过 cpu/8（每个Trimmomatic命令使用16线程），也不超过可用内存
+# 允许同时运行的进程数（每个进程按$mem_per_job_kb估算内存消耗，单位kB）。
+sub calc_worker_num {
+    my ($mem_available_kb, $cpu, $mem_per_job_kb) = @_;
+    my $by_cpu = $cpu / 8;
+    my $by_mem = $mem_available_kb / $mem_per_job_kb;
+    my $n = $by_cpu < $by_mem ? $by_cpu : $by_mem;
+    $n = 1 if $n < 1;
+    return int($n);
+}
+
+# 检测服务器剩余可用内存容量，结果单位是 kB。
+sub get_MemAvailable {
+    open my $fh, "<", "/proc/meminfo" or die "Error: Can not open file /proc/meminfo, $!\n";
+    my $mem;
+    while (<$fh>) {
+        if ( m/MemAvailable:\s*(\d+)\s*kB/ ) { $mem = $1; last; }
+    }
+    close $fh;
+    return $mem // 8000000;    # 若探测失败（例如非Linux系统），退化为一个保守的默认值
+}
+
+# 通过samtools faidx获取基因组总长度和序列条数，用于STAR建索引参数的自动计算。
+sub get_genome_length_and_seq_num {
+    my ($genome) = @_;
+    unless ( -e "$genome.fai" ) {
+        &run_cmd("samtools faidx $genome");
+    }
+    open my $fh, "<", "$genome.fai" or die "Error: Can not open file $genome.fai, $!\n";
+    my ($total_len, $seq_num) = (0, 0);
+    while (<$fh>) {
+        my @f = split /\t/;
+        $total_len += $f[1];
+        $seq_num ++;
+    }
+    close $fh;
+    return ($total_len, $seq_num);
+}
+
+# 统计一个FASTQ文件的read数量（行数须能被4整除）。
+sub count_fastq_reads {
+    my ($file) = @_;
+    open my $fh, "<", $file or die "Error: Can not open file $file, $!\n";
+    my $n = 0;
+    $n ++ while <$fh>;
+    close $fh;
+    die "Error: file $file does not contain a number of lines divisible by 4, is it a valid FASTQ file?\n" if $n % 4 != 0;
+    return $n / 4;
+}
+
+# 将$total个read尽量均匀地分配到$n份中，前面的份数可能比后面多分配1个read（余数分配）。
+# 返回一个长度为$n的数组，每个元素是该份分配到的read数。
+sub distribute_count {
+    my ($total, $n) = @_;
+    my $base = int($total / $n);
+    my $rem  = $total % $n;
+    my @counts;
+    for my $i ( 1 .. $n ) {
+        push @counts, $base + ( $i <= $rem ? 1 : 0 );
+    }
+    return @counts;
+}
+
+# 按照$counts_ref（各份的read数）依次从$file中读取内容，顺序写入$outfiles_ref指定的各个文件。
+sub write_fastq_chunks {
+    my ($file, $counts_ref, $outfiles_ref) = @_;
+    open my $in, "<", $file or die "Error: Can not open file $file, $!\n";
+    for my $i ( 0 .. $#$outfiles_ref ) {
+        open my $out, ">", $outfiles_ref->[$i] or die "Error: Can not create file $outfiles_ref->[$i], $!\n";
+        my $lines = $counts_ref->[$i] * 4;
+        for ( 1 .. $lines ) {
+            my $line = <$in>;
+            last unless defined $line;
+            print $out $line;
+        }
+        close $out;
+    }
+    close $in;
+}
+
+# 将一对双末端FASTQ文件（read数须一致）按相同的分割点同时切分为最多$chunk_num份（read数不足$chunk_num时按实际read数切分），
+# 输出文件命名为 pe_chunkNN.1.fastq / pe_chunkNN.2.fastq，NN的位宽固定为length($chunk_num)。
+sub split_fastq_pe {
+    my ($file1, $file2, $chunk_num, $out_dir) = @_;
+    my $total1 = &count_fastq_reads($file1);
+    my $total2 = &count_fastq_reads($file2);
+    die "Error: paired FASTQ files $file1 ($total1 reads) and $file2 ($total2 reads) have different read numbers, can not be split into chunks.\n" unless $total1 == $total2;
+    my $n = $chunk_num;
+    $n = $total1 if $total1 < $n;
+    $n = 1 if $n < 1;
+    my @counts = &distribute_count($total1, $n);
+    my $pad = length($chunk_num);
+    my (@out1, @out2);
+    for my $i ( 1 .. $n ) {
+        my $code = ("0" x ($pad - length($i))) . $i;
+        push @out1, "$out_dir/pe_chunk$code.1.fastq";
+        push @out2, "$out_dir/pe_chunk$code.2.fastq";
+    }
+    &write_fastq_chunks($file1, \@counts, \@out1);
+    &write_fastq_chunks($file2, \@counts, \@out2);
+    return (\@out1, \@out2);
+}
+
+# 将一个单端FASTQ文件按read数切分为最多$chunk_num份，输出文件命名为 se_chunkNN.fastq。
+sub split_fastq_se {
+    my ($file, $chunk_num, $out_dir) = @_;
+    my $total = &count_fastq_reads($file);
+    my $n = $chunk_num;
+    $n = $total if $total < $n;
+    $n = 1 if $n < 1;
+    my @counts = &distribute_count($total, $n);
+    my $pad = length($chunk_num);
+    my @out;
+    for my $i ( 1 .. $n ) {
+        my $code = ("0" x ($pad - length($i))) . $i;
+        push @out, "$out_dir/se_chunk$code.fastq";
+    }
+    &write_fastq_chunks($file, \@counts, \@out);
+    return \@out;
+}
+
+# 列出$dir目录下所有文件名匹配$pattern（正则）的文件，按文件名排序后返回其完整路径列表。
+sub glob_sorted {
+    my ($dir, $pattern) = @_;
+    opendir my $dh, $dir or die "Error: Can not open directory $dir, $!\n";
+    my @files = sort grep { /$pattern/ } readdir($dh);
+    closedir $dh;
+    return map { "$dir/$_" } @files;
+}
+
+# 将多个分片的HISAT2比对总结日志汇总为一份整体统计结果，写入$out_file。
+# 通过跟踪每个日志内部的缩进层级，重建各条"N (P%) 描述"统计行的父子关系（分片间以完整层级路径作为key），
+# 各分片的计数按相同key直接求和，比例则用求和后的分子除以求和后的分母（父级计数之和）重新计算，
+# 因此对PE/SE混合、只PE或只SE等各种hisat2输出结构均可正确聚合而不会互相混淆。
+# 总体比对率（overall alignment rate）按各分片reads总数加权平均计算（等价于总比对上的reads数除以总reads数）。
+sub aggregate_hisat2_logs {
+    my ($log_files_ref, $out_file) = @_;
+    my (%sum_num, %sum_denom, %has_pct, %order);
+    my $order_idx = 0;
+    my ($total_reads_sum, $weighted_rate_sum, $file_count) = (0, 0, 0);
+
+    foreach my $log (@$log_files_ref) {
+        open my $fh, "<", $log or die "Error: Can not open file $log, $!\n";
+        my @stack;    # 每个元素: { depth=>.., count=>.., label=>.. }
+        my ($this_total, $this_rate);
+        while ( my $line = <$fh> ) {
+            chomp $line;
+            next if $line =~ /^\s*-+\s*$/;
+            next if $line =~ /^\s*$/;
+            my ($leading) = $line =~ /^(\s*)/;
+            my $depth = length($leading);
+
+            if ( $line =~ /^\s*(\d+)\s+reads;\s*of these:\s*$/ ) {
+                $this_total = $1;
+                @stack = ( { depth => $depth, count => $1, label => 'reads' } );
+                $sum_num{'reads'} += $1;
+                $order{'reads'} = $order_idx ++ unless exists $order{'reads'};
+            }
+            elsif ( $line =~ /^\s*([\d.]+)%\s+overall alignment rate\.?\s*$/ ) {
+                $this_rate = $1;
+            }
+            elsif ( $line =~ /^\s*(\d+)\s+\(([\d.]+)%\)\s+(.*?)\s*$/ ) {
+                my ( $count, $pct, $label ) = ( $1, $2, $3 );
+                my $has_children = ( $label =~ s/;\s*of these\s*$//i ) ? 1 : 0;
+                while ( @stack && $stack[-1]{depth} >= $depth ) { pop @stack; }
+                my $parent_count = @stack ? $stack[-1]{count} : ( $this_total // $count );
+                my $key = join( ' > ', ( map { $_->{label} } @stack ), $label );
+                $sum_num{$key}   += $count;
+                $sum_denom{$key} += $parent_count;
+                $has_pct{$key}    = 1;
+                $order{$key}      = $order_idx ++ unless exists $order{$key};
+                push @stack, { depth => $depth, count => $count, label => $label } if $has_children;
+            }
+            elsif ( $line =~ /^\s*(\d+)\s+((?:pairs|mates)\b.*?)\s*$/ ) {
+                my ( $count, $label ) = ( $1, $2 );
+                my $has_children = ( $label =~ s/;\s*of these\s*$//i ) ? 1 : 0;
+                while ( @stack && $stack[-1]{depth} >= $depth ) { pop @stack; }
+                my $key = join( ' > ', ( map { $_->{label} } @stack ), $label );
+                $sum_num{$key} += $count;
+                $order{$key}    = $order_idx ++ unless exists $order{$key};
+                push @stack, { depth => $depth, count => $count, label => $label } if $has_children;
+            }
+        }
+        close $fh;
+        if ( defined $this_total && defined $this_rate ) {
+            $total_reads_sum   += $this_total;
+            $weighted_rate_sum += $this_total * $this_rate;
+            $file_count ++;
+        }
+    }
+
+    open my $out, ">", $out_file or die "Error: Can not create file $out_file, $!\n";
+    print $out "#### Aggregated HISAT2 alignment statistics across $file_count chunk(s) ####\n\n";
+    foreach my $key ( sort { $order{$a} <=> $order{$b} } keys %sum_num ) {
+        if ( $key eq 'reads' ) {
+            print $out "$sum_num{$key} reads (aggregated); of these:\n";
+            next;
+        }
+        ( my $print_key = $key ) =~ s/^reads > //;
+        if ( $has_pct{$key} && $sum_denom{$key} > 0 ) {
+            my $pct = sprintf( "%.2f", $sum_num{$key} / $sum_denom{$key} * 100 );
+            print $out "  $sum_num{$key} ($pct%) $print_key\n";
+        }
+        else {
+            print $out "  $sum_num{$key} $print_key\n";
+        }
+    }
+    if ( $total_reads_sum > 0 ) {
+        my $overall = sprintf( "%.2f", $weighted_rate_sum / $total_reads_sum );
+        print $out "$overall% overall alignment rate\n";
+    }
+    close $out;
+}
+
+# 将多个分片的STAR Log.final.out统计文件汇总为一份整体统计结果，写入$out_file。
+# 计数类字段（read数、拼接数等）跨分片直接求和；比例类字段（如Uniquely mapped %）由对应计数字段求和后
+# 除以总输入read数重新计算；其余无法由计数精确重算的速率/长度类字段（如平均read长度、错配率）
+# 按各分片的输入read数加权平均给出（数学上等价于总量除以总read数）。
+sub aggregate_star_logs {
+    my ($log_files_ref, $out_file) = @_;
+
+    my %count_fields = map { $_ => 1 } (
+        'Number of input reads',
+        'Uniquely mapped reads number',
+        'Number of splices: Total',
+        'Number of splices: Annotated (sjdb)',
+        'Number of splices: GT/AG',
+        'Number of splices: GC/AG',
+        'Number of splices: AT/AC',
+        'Number of splices: Non-canonical',
+        'Number of reads mapped to multiple loci',
+        'Number of reads mapped to too many loci',
+        'Number of reads unmapped: too many mismatches',
+        'Number of reads unmapped: too short',
+        'Number of reads unmapped: other',
+        'Number of chimeric reads',
+    );
+    my %pct_of_input = (
+        'Uniquely mapped %'                        => 'Uniquely mapped reads number',
+        '% of reads mapped to multiple loci'        => 'Number of reads mapped to multiple loci',
+        '% of reads mapped to too many loci'        => 'Number of reads mapped to too many loci',
+        '% of reads unmapped: too many mismatches'  => 'Number of reads unmapped: too many mismatches',
+        '% of reads unmapped: too short'            => 'Number of reads unmapped: too short',
+        '% of reads unmapped: other'                => 'Number of reads unmapped: other',
+        '% of chimeric reads'                       => 'Number of chimeric reads',
+    );
+
+    my (%sum_count, %order, %weighted_sum, %weighted_flag_pct);
+    my $order_idx = 0;
+    my $total_input_reads = 0;
+    my $file_count = 0;
+
+    foreach my $log (@$log_files_ref) {
+        open my $fh, "<", $log or die "Error: Can not open file $log, $!\n";
+        my %vals;
+        while ( my $line = <$fh> ) {
+            chomp $line;
+            next unless $line =~ /\|/;
+            my ( $label, $value ) = split /\|/, $line, 2;
+            $label =~ s/^\s+|\s+$//g;
+            $value =~ s/^\s+|\s+$//g;
+            next if $label eq '' || $value eq '';
+            $vals{$label} = $value;
+        }
+        close $fh;
+        next unless exists $vals{'Number of input reads'};
+        my $input_reads = $vals{'Number of input reads'};
+        $total_input_reads += $input_reads;
+        $file_count ++;
+
+        foreach my $label ( keys %vals ) {
+            next if exists $pct_of_input{$label};    # 由对应计数字段重新计算，跳过原始百分比值
+            $order{$label} = $order_idx ++ unless exists $order{$label};
+            if ( exists $count_fields{$label} ) {
+                $sum_count{$label} += $vals{$label};
+            }
+            elsif ( $label =~ /^(Started|Finished)/ ) {
+                # 时间戳字段不做汇总，仅保留最后一个读到的值
+                $sum_count{$label} = $vals{$label};
+            }
+            else {
+                my $v = $vals{$label};
+                my $is_pct = ( $v =~ s/%\s*$// ) ? 1 : 0;
+                $weighted_sum{$label}     += $v * $input_reads;
+                $weighted_flag_pct{$label} = $is_pct;
+            }
+        }
+    }
+
+    open my $out, ">", $out_file or die "Error: Can not create file $out_file, $!\n";
+    print $out "#### Aggregated STAR alignment statistics across $file_count chunk(s) ####\n\n";
+    foreach my $label ( sort { $order{$a} <=> $order{$b} } keys %order ) {
+        if ( exists $count_fields{$label} ) {
+            print $out "$label |\t$sum_count{$label}\n";
+        }
+        elsif ( $label =~ /^(Started|Finished)/ ) {
+            print $out "$label |\t$sum_count{$label} (last chunk)\n";
+        }
+        else {
+            my $avg = $total_input_reads > 0 ? $weighted_sum{$label} / $total_input_reads : 0;
+            printf $out "%s |\t%.2f%s\n", $label, $avg, ( $weighted_flag_pct{$label} ? '%' : '' );
+        }
+    }
+    foreach my $pct_label ( sort keys %pct_of_input ) {
+        my $count_label = $pct_of_input{$pct_label};
+        my $pct = $total_input_reads > 0 ? sprintf( "%.2f", ( $sum_count{$count_label} // 0 ) / $total_input_reads * 100 ) : '0.00';
+        print $out "$pct_label |\t$pct%\n";
+    }
+    close $out;
+}
+
+########################################################################
+# 英文用法说明（默认显示的用法说明）：位于程序文件最尾部，由上方通过 <DATA> 读取。
+# 注意：__DATA__ 之后的内容全部是英文用法说明的原始文本，不是Perl代码，请勿在其后添加代码。
+########################################################################
+__DATA__
+Usage:
+    __PROG__ --genome genome_seq.fasta --out out.sorted.{bam,sam} [options]
+
+    This program is the first part (quality control + alignment + sorting) of the NGSReads_prediction pipeline: it uses raw RNA-Seq data (paired-end/single-end FASTQ files, or already-aligned SAM/BAM files, any combination of which may be used together) to align reads to the reference genome given by --genome, merges every source of alignments, sorts the result by genome coordinate, and writes it, in the format selected by --output_type (bam or sam, default bam), to the file given by --out, for downstream transcript assembly / gene prediction programs (e.g. Sam2Transfrag).
+
+    Workflow:
+      0. If --pe1/--pe2 or --se FASTQ data are given (i.e. alignment is needed), the program immediately starts building the genome index of the aligner selected by --aligner (HISAT2 or STAR) in the background, in parallel with the quality control of step 1 and the data splitting of step 2 below (index building is time-consuming and stays single-threaded for a long part of its run, so starting it early and in parallel saves overall run time). The number of threads used for index building and for quality control is not reduced, so during this phase the program may temporarily use more threads in total than --cpu; before alignment starts, the program waits for the index building to finish. If only --sam input is given, no index is needed.
+      1. If --pe1/--pe2 or --se FASTQ data are given, the Trimmomatic software is called to obtain clean data (multiple libraries and .gz compressed files are supported; when the data exceeds --pe_used_pair_num / --se_used_read_num, each library is truncated proportionally from the start). The Trimmomatic commands are parallelized by this program's own built-in multi-process worker pool.
+      2. The clean data is first split, independently for paired-end and single-end reads, into up to --chunk_num roughly equal chunks by read count (fewer chunks are produced if the actual number of reads of a given type is smaller than --chunk_num, so no empty chunk file is created); then, once the index building of step 0 has finished, the aligner selected by --aligner (HISAT2 or STAR) is run on every chunk in parallel, each alignment command using roughly --cpu / --chunk_num threads (floored, at least 1). HISAT2 supports mixing paired-end and single-end input in one run, so the paired-end and single-end chunks sharing the same chunk index are aligned together with a single HISAT2 command; STAR does not support mixing the two data types in one run, so paired-end and single-end chunks are split and aligned in parallel independently (reusing the same index). If --alignment_stats is set, once every chunk has finished aligning the per-chunk alignment statistics (HISAT2's summary log, or STAR's Log.final.out) are merged into one overall report and written to that file.
+      3. The alignment chunks (sorted in parallel with samtools sort first, when there is more than one; the CPU threads actually usable by each sort command are divided evenly among the concurrently running sort jobs within a total sort thread budget bounded by --cpu and available memory) and any SAM/BAM files given directly via --sam (there can be several, and they are sorted in the same parallel batch) are each sorted with samtools sort, then samtools merge is called directly on the sorted files to write the final merged result, in the format selected by --output_type (bam or sam, default bam), straight to the file given by --out (no extra merged BAM file is kept in the temporary directory, to save disk space; when the output format is bam, no .bai index file is created for it either).
+      4. After the program finishes successfully, the whole temporary directory given by --tmp_dir (including every intermediate file in it) is removed by default to save disk space; if --keep_tmp_files is given, the temporary directory and all intermediate files in it are kept. If the program fails or is interrupted, the temporary directory is NOT removed, so that the run can be resumed (an index that is still being built in the background at that moment is terminated, and an unfinished index will be rebuilt on resume).
+
+    Resuming an interrupted run (--tmp_dir): the program marks each main stage (quality control, data splitting, index building, alignment, sort/merge) with a completion file (*.ok); re-running with the same --tmp_dir skips finished stages. This is meant for resuming after a failure or an interruption: after a successful run the temporary directory has already been removed entirely (unless --keep_tmp_files was given), so running again starts from scratch. Note: unlike the main homolog_prediction program, this script does not fingerprint each stage's input, so after changing any parameter or input file, manually delete the corresponding and downstream .ok files (or use a new --tmp_dir), otherwise the change may not take effect.
+
+Parameters:
+[INPUT]
+    --genome <string>    default: None (required)
+    Path to the reference genome sequence in FASTA format, used for building the alignment index and for alignment.
+
+    --pe1 <string> --pe2 <string>    default: None
+    Paired-end FASTQ files. Multiple library pairs are supported, comma-separated (files in --pe1 and --pe2 correspond to each other in order). .gz compressed files are supported.
+
+    --se <string>    default: None
+    Single-end FASTQ files. Multiple files are supported, comma-separated. .gz compressed files are supported.
+
+    --sam <string>    default: None
+    Already-aligned SAM or BAM files. Multiple files are supported, comma-separated. These are merged with the aligner output during the sorting stage. --pe1/--pe2, --se and --sam may be used together, fully or partially.
+
+    --aligner <hisat2|star>    default: star
+    The aligner to use, either hisat2 or star (case-insensitive; the value is automatically lower-cased before being checked).
+
+    --strand_specific    default: None
+    Treat all input data as strand-specific. For HISAT2 alignment, this adds --rna-strandness RF, after which every read's alignment is given an XS tag indicating the strand it came from. STAR, however, does not properly support strand-specific alignment the same way: the STAR command uses exactly the same parameters whether or not --strand_specific is set, and always adds --outSAMstrandField intronMotif; this option only adds an XS tag to alignments that span an intron (i.e. spliced reads), not to every read's alignment the way HISAT2 does once --rna-strandness is set. Whether or not this option is set, it does not affect this program's own alignment, sorting or merging workflow, and it never changes where any read is aligned to — it only controls whether an XS strand tag is added to the alignment records, so leaving it unset does not prevent downstream programs (e.g. subsequent strand-specific transcript assembly/quantification) from independently handling strand orientation based on the actual library preparation strategy.
+
+[SOFTWARE PARAMETERS]
+    The following options set the detailed parameters of the Trimmomatic, HISAT2 and STAR commands called by this program. For every option that has a default value, specifying it on the command line replaces that default entirely (it is not appended to it), so please write out the complete parameter string. Values that contain spaces or start with "-" must be quoted, e.g. --hisat2_opts="--dta -k 5".
+    Please do not repeat the parameters that this program sets automatically: -x, -p, -1, -2, -U, -S and --rna-strandness (--strand_specific) of HISAT2; --genomeDir, --readFilesIn, --runThreadN, --outSAMtype, --outFileNamePrefix and --outSAMstrandField of STAR; -p of hisat2-build; --runMode, --genomeDir, --genomeFastaFiles, --runThreadN and --outFileNamePrefix of STAR index building; and the PE/SE mode, the input/output files and -threads of Trimmomatic.
+
+    --trimmomatic_adapter <string>    default: TruSeq3-PE-2.fa:2:30:10
+    Parameters of the Trimmomatic ILLUMINACLIP step, in the format "adapter_file:seedMismatches:palindromeClipThreshold:simpleClipThreshold". If the adapter file name contains no "/", it is looked up in the adapters directory of Trimmomatic ($software_dir/Trimmomatic-0.38/adapters); if it contains "/", it is treated as the path of that file. If set to an empty string (--trimmomatic_adapter ""), no adapter removal is performed (the ILLUMINACLIP step is not added).
+
+    --trimmomatic_opts <string>    default: LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:50 TOPHRED33
+    The other Trimmomatic quality-control steps and their parameters that follow ILLUMINACLIP (executed in the given order), e.g. "LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:36 TOPHRED33".
+
+    --hisat2_index_opts <string>    default: None
+    Additional parameters passed to hisat2-build (HISAT2 index building), e.g. "--large-index". Only effective when --aligner is hisat2.
+
+    --hisat2_opts <string>    default: --min-intronlen 20 --max-intronlen 200000 --dta --score-min L,0.0,-0.4 -k 1
+    Parameters passed to hisat2 (alignment). Only effective when --aligner is hisat2.
+
+    --star_index_opts <string>    default: None
+    Additional parameters passed to STAR --runMode genomeGenerate (STAR index building), e.g. "--genomeSAindexNbases 12". If --genomeSAindexNbases, --genomeChrBinNbits or --limitGenomeGenerateRAM is already specified here, the program no longer computes and adds the corresponding parameter automatically. Only effective when --aligner is star.
+
+    --star_opts <string>    default: --alignIntronMax 200000 --alignMatesGapMax 200000 --outFilterType BySJout --outFilterMultimapNmax 20 --alignSJoverhangMin 8 --alignSJDBoverhangMin 1 --outFilterMismatchNmax 999 --outFilterMismatchNoverReadLmax 0.04
+    Parameters passed to STAR (alignment). Only effective when --aligner is star.
+
+[OUTPUT]
+    --tmp_dir <string>    default: tmp_$date$pid
+    Temporary directory. Re-running with an existing directory skips finished stages (see "Resuming" above). Note: unless --keep_tmp_files is given, this directory is removed entirely, together with everything in it, after the program finishes successfully, so please use a directory dedicated to this program and never one that holds other important files. To prevent accidental deletion, the program exits with an error before doing any work if the directory is the root or home directory, if the current working directory is inside it, or if it contains any input file (--genome/--pe1/--pe2/--se/--sam), any output file (--out/--alignment_stats), or this program's own directory (in that case use another --tmp_dir, or add --keep_tmp_files).
+
+    --keep_tmp_files    default: None
+    If set, the temporary directory given by --tmp_dir and all intermediate files in it are kept after the program finishes successfully (including the quality-controlled clean data, the split data chunks, the intermediate SAM/BAM files produced by the aligner, the per-input sorted BAM files, and the logs and completion marker files of every stage), which is convenient for troubleshooting or for resuming. If not set, the whole temporary directory given by --tmp_dir is removed directly after a successful run.
+
+    --keep_intermediate_sam    default: None
+    (Deprecated; kept only for compatibility with old calling scripts.) Equivalent to --keep_tmp_files.
+
+    --out <string>    default: None (required)
+    Path of the final output alignment file. This program no longer writes any alignment result to STDOUT; the sorted and merged final result is written directly to this file in the format selected by --output_type; if the directory containing this file does not exist, the program will create it automatically, so there is no need to create it beforehand, and the program will not fail because of a missing directory. This file must not be located inside --tmp_dir (unless --keep_tmp_files is given).
+
+    --output_type <bam|sam>    default: bam
+    The format of the --out output file, either bam or sam (case-insensitive). During the sort/merge stage, samtools merge writes the final result directly in this format; no extra merged BAM file is kept in the temporary directory (to save disk space), and when the output format is bam, no .bai index file is created for it either.
+
+    --alignment_stats <string>    default: None
+    If set, after all chunks have finished aligning the program merges the per-chunk alignment statistics (HISAT2's summary log, or STAR's Log.final.out) into one overall report saved to this path (count-type metrics are summed directly across chunks; ratio-type metrics are recomputed from the summed counts; for STAR, rate/length-type metrics that cannot be recomputed from counts are reported as a weighted average over chunks, weighted by each chunk's read count). This option only takes effect when alignment is actually performed (--pe1/--pe2 or --se was given); setting it while only --sam input is provided (no alignment step) makes the program exit with an error. This file must not be located inside --tmp_dir (unless --keep_tmp_files is given).
+
+[THRESHOLDS]
+    --pe_used_pair_num <int>    default: 100000000
+    Maximum number of paired-end read pairs used by the program. When more data is provided, at most this number of pairs is used; with multiple libraries, the same proportion of data is taken from the beginning of each library. By default up to 100M read pairs are used (about 30 Gb of data for PE150bp sequencing).
+
+    --se_used_read_num <int>    default: 100000000
+    Maximum number of single-end reads used by the program, with the same rule as above (about 15 Gb of data for SE150bp sequencing).
+
+[PERFORMANCE]
+    --cpu <int>    default: 8
+    Number of CPU threads used for Trimmomatic quality control (multi-process worker pool), aligner (HISAT2/STAR) index building, each chunk's alignment and sorting, and samtools merge. During Trimmomatic quality control, the number of concurrent Trimmomatic processes (each using 16 threads) is calculated automatically from --cpu and the available memory, and is dispatched directly by this program's own built-in fork/worker process pool; the external ParaFly program is no longer required. Note: index building runs in the background from the very start of the program, in parallel with quality control and data splitting, and neither of them has its thread count reduced (index building uses up to --cpu threads, at most 80), so during this phase the program may temporarily use more threads in total than --cpu; since index building is single-threaded for most of its run, this arrangement saves overall run time.
+
+    --chunk_num <int>    default: 10
+    The number of chunks the quality-controlled clean data is split into, to parallelize the Step 2 alignment stage. After quality control, paired-end and/or single-end clean data are each independently split into up to --chunk_num roughly equal chunks by read count (fewer chunks are produced when the actual read count of a given type is smaller than --chunk_num). The aligner selected by --aligner is then run on all chunks in parallel: HISAT2 supports mixing paired-end and single-end data in one command, so the chunks sharing the same chunk index are combined into a single HISAT2 command; STAR does not support mixing the two data types, so paired-end and single-end chunks are aligned independently in parallel. Each alignment command uses --cpu / --chunk_num threads, floored, at least 1. Afterwards, in the Step 3 sorting stage, the samtools sort commands for these alignment chunks (and any --sam input files) are likewise run in parallel, with the CPU threads actually usable by each sort command divided evenly among the concurrently running sort jobs, within a total sort thread budget bounded by --cpu and the available memory.
+
+[HELP]
+    --help    default: None
+    Display this help (English) and exit. This English help is also shown by default when the program is run without any argument.
+
+    --chinese_help    default: None
+    Display the Chinese help and exit.
+
+    Dependencies: samtools must be directly runnable in the terminal; if --pe1/--pe2 or --se FASTQ data are given, java must also be directly runnable, together with the aligner selected by --aligner (hisat2 and hisat2-build, or STAR), and $software_dir/Trimmomatic-0.38/trimmomatic-0.38.jar with its adapters subdirectory must exist.
