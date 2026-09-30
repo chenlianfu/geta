@@ -56,6 +56,7 @@ Usage:
       2.5 只要存在两个及以上来源，程序就会在整合之前，对每两个来源两两调用GFF3_merging_and_removing_redundancy命令的--compare_2gff3_stats功能，比较每两个来源基因模型的CDS重叠冲突情况和得分高低；再汇总每个来源在所有两两比较中的胜出比例，得到mmseqs、miniprot、spaln这些来源的预测准确性排序，并按该顺序（准确性从高到低）排列输入给步骤2的GFF3_merging_and_removing_redundancy命令的GFF3文件顺序：由于该命令在多个基因模型得分打平时（--first_file_score 0.0下得分打平很常见）优先保留排在前面的输入文件，因此让预测更准确的来源排在前面，有助于在打分打平的情况下优先保留更可信的基因模型，得到更好的整合结果。这一步骤本身不改变各来源的基因模型内容，只影响它们在步骤2中的输入顺序。若设置了--method_comparison_stats参数，程序还会将两两比较的详细统计信息汇总输出到该参数指定的文件中，用于评估各方法的预测效果及彼此之间的一致性；不设置该参数时，两两比较仍会执行以确定准确性排序，只是不额外生成该汇总报告文件（每一对来源详细的逐基因冲突记录，以及排序时依据的胜出比例，仍会保留在--tmp_dir目录下的 compare.<来源1>_vs_<来源2>.stats.txt 文件中）。
       3. 用intron的Supported_times过滤C和D类基因模型：分别对每个来源的GFF3文件，根据其A和B类基因模型所有introns的Supported_times，按--threshod_ratio_of_intron_Supported_times指定的分位置计算出该来源的阈值threshold_value（默认0.5，即中位数）；然后对整合后的每个C或D类基因模型，依据其来源（GFF3第2列：gth/exonerate/genewise属于mmseqs来源，miniprot，spaln）选取对应阈值：若该基因模型所有introns的Supported_times都低于阈值，则过滤该基因模型；没有intron的（单外显子）C/D类基因模型不做过滤。A和B类基因模型不过滤。过滤后再次调用GFF3Clear重新编号，输出到标准输出。
       4. 若指定--output_raw_GFF3或--output_alignment_GFF3，则输出的是多个来源整合后的内容：raw GFF3调用GFF3_merging_and_removing_redundancy整合后再GFF3Clear（整合顺序同样使用步骤2.5得到的准确性排序）；比对GFF3为各来源比对结果去重后按基因组位置排序的合并。
+      5. 程序结束时在标准错误输出中给出最终基因模型的统计信息，包括四类基因模型的数量、各来源（预测方法）的基因模型数量，以及各预测方法在A、B、C、D四类基因模型中的数量矩阵。
 
     断点续跑（--tmp_dir）说明：
       程序在临时文件夹中为每个步骤记录"输入文件内容指纹 + 相关参数"（*.sig）和完成标记（*.ok）。程序被中断（Ctrl-C、kill、断电、命令报错）后，使用相同的 --tmp_dir 重新输入命令即可继续运行，已经完成的步骤会被跳过，未完成的步骤从其内部可续跑的位置继续。
@@ -181,6 +182,8 @@ Usage:
       4. If --output_raw_GFF3 or --output_alignment_GFF3 is specified, the output contains the merged content of all sources:
          the raw GFF3 is merged by GFF3_merging_and_removing_redundancy (using the same accuracy-based ordering from step 2.5) and then processed
          by GFF3Clear; the alignment GFF3 is the combination of the alignment results of all sources, de-duplicated and sorted by genome position.
+      5. At the end, the program prints the statistics of the final gene models to STDERR: the number of gene models in each of the four classes, the number of gene models of each source (prediction method),
+         and a matrix of the number of gene models of each method in each of the classes A, B, C and D.
 
     Resuming an interrupted run (--tmp_dir):
       For each step the program records in the temporary directory a signature (content fingerprints of the input files + the relevant parameters, *.sig) and a completion mark (*.ok).
@@ -714,14 +717,37 @@ if (defined $o{output_alignment_GFF3}) {
 ########################################################################
 my %num_class = (A => 0, B => 0, C => 0, D => 0);
 my %num_source;
+my %num_matrix;    # $num_matrix{来源(GFF3第2列)}{类别} = 基因模型数量
 my $total = 0;
 foreach my $g (&read_gff3_genes($final_gff3)) {
-    $num_class{$g->{class}} ++ if defined $g->{class};
+    if (defined $g->{class}) {
+        $num_class{$g->{class}} ++;
+        $num_matrix{$g->{source}}{$g->{class}} ++;
+    }
     $num_source{$g->{source}} ++;
     $total ++;
 }
 print STDERR "\nFinally, total $total gene models were divided into 4 classes : A, $num_class{A}; B, $num_class{B}; C, $num_class{C}; D, $num_class{D}.\n";
 print STDERR "Source of gene models: " . (join("; ", map { "$_, $num_source{$_}" } sort keys %num_source) || "none") . "\n";
+
+# 各预测方法（来源）在A、B、C、D四类基因模型中的数量矩阵
+if (%num_matrix) {
+    print STDERR "Number of gene models of each method in each class:\n";
+    printf STDERR "%-14s %10s %10s %10s %10s %10s\n", "Method", "A", "B", "C", "D", "Total";
+    my %col_total = (A => 0, B => 0, C => 0, D => 0);
+    my $grand_total = 0;
+    foreach my $src (sort keys %num_matrix) {
+        my @cnt = map { $num_matrix{$src}{$_} || 0 } qw/A B C D/;
+        my $row_total = 0;
+        $row_total += $_ foreach @cnt;
+        printf STDERR "%-14s %10d %10d %10d %10d %10d\n", $src, @cnt, $row_total;
+        my $k = 0;
+        foreach my $c (qw/A B C D/) { $col_total{$c} += $cnt[$k ++]; }
+        $grand_total += $row_total;
+    }
+    printf STDERR "%-14s %10d %10d %10d %10d %10d\n", "Total", (map { $col_total{$_} } qw/A B C D/), $grand_total;
+}
+
 print STDERR "All the gene models before intron filtering were kept in $res_dir/all.clear.gff3.\n";
 print STDERR "Temporary directory $tmp_dir keeps all intermediate results, it can be reused with --tmp_dir when changing --method or other parameters.\n";
 print STDERR "\n#################### $prog_name | Done ####################\n";
