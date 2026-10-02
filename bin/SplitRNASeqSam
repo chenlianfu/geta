@@ -1,167 +1,214 @@
 #!/usr/bin/perl
 use strict;
+use warnings;
 use Getopt::Long;
 use File::Basename;
-use Cwd qw/abs_path getcwd cwd/;
+use File::Path qw(make_path);
+use Cwd qw(abs_path getcwd cwd);
 
-my $usage = <<USAGE;
-Usage:
-    perl $0 [options] file.sam > output_SAM_file_paths.list
+use constant {
+    FLAG_UNMAPPED      => 0x4,
+    FLAG_SECONDARY     => 0x100,
+    FLAG_SUPPLEMENTARY => 0x800,
+};
 
-For example:
-    perl $0 --min_fragment_per_region 10 --output_directory out hisat2.sam > splited_sam_files.list
+# 英文说明文档实际存放在本文件末尾（__END__ 之后），运行时通过 DATA 句柄读入。
+my $usage = do { local $/; <DATA> };
+$usage =~ s/__PROG__/$0/g;
 
-    This program accepts SAM format data as input, derived from RNA-Seq alignment to the genome and subsequent sorting by coordinates to produce the SAM file, enabling segmentation of the data based on matching regions. It stores the segmented SAM files in a designated folder and provides the paths of all output files through standard output.
+my $usage_cn = <<"USAGE_CN";
+用法: perl $0 [参数] file.sam > output_SAM_file_paths.list
+
+示例: perl $0 --min_fragment_per_region 10 --output_directory out hisat2.sam > splited_sam_files.list
+
+    本程序读取按坐标排序的 RNA-Seq 比对 SAM 文件，根据比对区域将其切分为若干个子 SAM 文件：如果两个相邻比对区域之间存在完全没有 read 覆盖的空白区域，则在此处切开；如果前后两个比对区域是重叠的、或者恰好首尾相接（中间没有任何空白碱基），则会被合并为同一个区域，不会切开。切分后的 SAM 文件保存到指定文件夹中，所有输出文件的路径通过标准输出打印。
+
+    使用说明：
+    (1) 程序只在完全没有 read 比对的位置进行切割（恰好首尾相接、没有空白碱基的情况不会被切开）；
+    (2) 切分后每个 SAM 文件的路径信息会输出到标准输出；
+    (3) 每个区域最少需要包含的 fragment 数（按 QNAME 去重计数）默认是 10，可通过 --min_fragment_per_region 参数修改；
+    (4) 输出的 SAM 文件不包含 header 信息；
+    (5) 无法比对上的 read（CIGAR 为 '*' 或 FLAG 含 0x4 位）会被去除；
+    (6) 次优比对结果（FLAG 含 0x100 位，secondary alignment）以及默认情况下的嵌合/补充比对结果（FLAG 含 0x800 位，supplementary alignment）都会被去除；如果需要保留 supplementary 比对，请加上 --keep_supplementary 参数；
+    (7) 本程序不考虑比对方向（正负链）。
+
+    参数说明：
+    --min_fragment_per_region <整数>    默认值：10
+    切分后每个区域中最少需要包含的 fragment 数量（按 QNAME 去重计数）。
+
+    --output_directory <字符串>         默认值：out
+    输出文件夹路径，如果文件夹（含父级目录）不存在会自动创建。
+
+    --keep_supplementary                默认值: 无
+    保留 supplementary/嵌合比对结果（FLAG 0x800）。默认不加此参数会去除这些记录。
+
+    --help                              默认值: 无
+    显示英文说明文档并退出。
+
+    --chinese_help                      默认值: 无
+    显示本中文说明文档并退出。
+
+USAGE_CN
+
+# ---------------------------------------------------------------------------
+# 解析命令行参数
+# ---------------------------------------------------------------------------
+my ($min_fragment_per_region, $output_directory, $help, $chinese_help, $keep_supplementary);
+
+GetOptions(
+    "min_fragment_per_region=i" => \$min_fragment_per_region,
+    "output_directory=s"        => \$output_directory,
+    "keep_supplementary!"       => \$keep_supplementary,
+    "help!"                     => \$help,
+    "chinese_help!"             => \$chinese_help,
+) or die $usage;
+
+if ($chinese_help) { print $usage_cn; exit 0; }
+if ($help)         { print $usage;    exit 0; }
+die $usage unless @ARGV;
+
+$min_fragment_per_region = 10 unless defined $min_fragment_per_region;
+die "Error: --min_fragment_per_region must be a positive integer\n$usage"
+    unless $min_fragment_per_region =~ /^\d+$/ && $min_fragment_per_region >= 1;
+
+# ---------------------------------------------------------------------------
+# 准备输出文件夹
+# 注意：必须先创建目录，再解析绝对路径——abs_path() 要求路径已经存在，
+# 否则在不存在的路径上调用会返回 undef，导致后续操作出错（这是原脚本的一个 bug）。
+# ---------------------------------------------------------------------------
+$output_directory = "out" unless defined $output_directory;
+if (-e $output_directory && !-d $output_directory) {
+    die "Error: $output_directory exists and is not a directory\n";
+}
+unless (-d $output_directory) {
+    make_path($output_directory)
+        or die "Error: Can not create directory $output_directory, $!\n";
+}
+$output_directory = abs_path($output_directory);
+
+# ---------------------------------------------------------------------------
+# 准备读取输入的 SAM 文件
+# ---------------------------------------------------------------------------
+my $input_sam = $ARGV[0];
+die "Error: input SAM file $input_sam does not exist\n$usage" unless defined $input_sam && -e $input_sam;
+open my $IN, '<', $input_sam
+    or die "Error: Can not open file $input_sam, $!\n";
+$input_sam = abs_path($input_sam);
+
+my $cigar_op_re = qr/(\d+)([MIDNSHP=X])/;
+
+# 根据 CIGAR 计算该条比对记录在参考序列上占据的长度
+# （M / D / N / = / X 均会消耗参考序列，I / S / H / P 不会）
+sub cigar_ref_span {
+    my ($cigar) = @_;
+    my $span = 0;
+    while ($cigar =~ /$cigar_op_re/g) {
+        my ($len, $op) = ($1, $2);
+        $span += $len if $op =~ /^[MDN=X]$/;
+    }
+    return $span;
+}
+
+# 判断该条比对记录是否应该保留：
+# 已比对上、非 secondary，且（默认情况下）非 supplementary
+sub is_usable {
+    my ($fields, $keep_supp) = @_;
+    return 0 if $fields->[5] eq '*';        # 没有 CIGAR，说明未比对上
+    my $flag = $fields->[1] + 0;
+    return 0 if $flag & FLAG_UNMAPPED;
+    return 0 if $flag & FLAG_SECONDARY;
+    return 0 if !$keep_supp && ($flag & FLAG_SUPPLEMENTARY);
+    return 1;
+}
+
+# ---------------------------------------------------------------------------
+# 主循环：逐行读取 SAM 数据，按比对区域切分
+# ---------------------------------------------------------------------------
+my ($region_chrom, $region_start, $region_end, $sam_content);
+my %fragment_ids;
+my $region_open = 0;
+my $line_no = 0;
+
+sub flush_region {
+    return unless $region_open;
+    my $fragment_num = scalar keys %fragment_ids;
+    if ($fragment_num >= $min_fragment_per_region) {
+        my $end_inclusive = $region_end - 1;
+        my $out_file = "$output_directory/$region_chrom.$region_start-$end_inclusive.sam";
+        open my $OUT, '>', $out_file
+            or die "Error: Can not write $out_file, $!\n";
+        print {$OUT} $sam_content;
+        close $OUT;
+        print "$out_file\n";
+    }
+}
+
+while (my $line = <$IN>) {
+    $line_no++;
+    next if $line =~ /^\@/;      # 跳过 header 行
+    chomp $line;
+    next if $line eq '';
+    my @f = split /\t/, $line;
+    next if @f < 11;             # 行格式不完整（防御性处理），跳过
+    next unless is_usable(\@f, $keep_supplementary);
+
+    my $chrom = $f[2];
+    my $start = $f[3];
+    my $end   = $start + cigar_ref_span($f[5]);   # 半开区间的结束位点（不含）
+
+    if ($region_open && $chrom eq $region_chrom && $start <= $region_end) {
+        # 与当前区域重叠、或恰好首尾相接（无空白碱基）——合并进当前区域
+        if ($start < $region_start) {
+            warn "Warning: line $line_no ($chrom:$start) is out of coordinate order; "
+               . "please make sure the input SAM file is sorted by coordinate.\n";
+        }
+        $sam_content .= "$line\n";
+        $region_end = $end if $end > $region_end;
+        $fragment_ids{$f[0]} = 1;
+    }
+    else {
+        # 与上一区域之间存在空白（无 read 覆盖的区域），或是新染色体 / 第一条记录
+        flush_region();
+        $region_chrom = $chrom;
+        $region_start = $start;
+        $region_end   = $end;
+        $sam_content  = "$line\n";
+        %fragment_ids = ($f[0] => 1);
+        $region_open  = 1;
+    }
+}
+flush_region();
+close $IN;
+
+__END__
+Usage: perl __PROG__ [options] file.sam > output_SAM_file_paths.list
+
+Example: perl __PROG__ --min_fragment_per_region 10 --output_directory out hisat2.sam > splited_sam_files.list
+
+    This program accepts SAM format data as input, derived from RNA-Seq alignment to the genome and subsequent sorting by coordinates, enabling segmentation of the data based on matching regions. It stores the segmented SAM files in a designated folder and provides the paths of all output files through standard output.
 
     Instructions for Use:
-    (1) The program can split SAM file data in regions where no read alignments are present;
-    (2) The path information of the split SAM file is output to standard output;
-    (3) The minimum number of fragments per region after splitting the SAM file is 10 (set by the --min_fragment_per_region parameter);
-    (4) The output SAM file has no header information;
-    (5) The read information that could not be aligned is removed from the output SAM file;
-    (6) The suboptimal alignment results are removed from the output SAM file.
-    (7) This program does not consider the alignment direction;
+    (1) The program splits SAM file data at regions where no read alignments are present (positions that are merely adjacent/contiguous, with no gap at all, are NOT split);
+    (2) The path information of each split SAM file is written to standard output;
+    (3) The minimum number of fragments (read pairs, counted by unique QNAME) per region is 10 by default (set by --min_fragment_per_region);
+    (4) The output SAM files contain no header information;
+    (5) Reads that could not be aligned (CIGAR '*' or FLAG bit 0x4) are removed;
+    (6) Secondary alignments (FLAG bit 0x100) and, by default, supplementary/chimeric alignments (FLAG bit 0x800) are removed; use --keep_supplementary to keep the latter;
+    (7) This program does not consider alignment strand/direction;
 
+    Options:
     --min_fragment_per_region <int>    default: 10
-    This parameter specifies the minimum number of fragments required within each segment when dividing the SAM file, with each segment representing a distinct transcriptional region and resulting in a separate SAM file.
+    Minimum number of fragments (unique QNAMEs) required within a region for it to be written out.
 
-    --output_directory <string>    default: out
-    Set the path for the output folder.
+    --output_directory <string>        default: out
+    Output folder path (created automatically, including parent directories).
 
-USAGE
-if (@ARGV==0){die $usage}
+    --keep_supplementary               default: None
+    Keep supplementary/chimeric alignment records (FLAG 0x800). Off by default.
 
-my ( $min_fragment_per_region, $output_directory, $help );
-GetOptions(
-    "min_fragment_per_region:i" => \$min_fragment_per_region,
-    "output_directory:s" => \$output_directory,
-    "help!" => \$help,
-);
-if ( defined $help ) { die $usage }
+    --help                             default: None
+    Show this help message (English) and exit.
 
-$min_fragment_per_region ||= 10;
+    --chinese_help                     default: None
+    显示中文说明文档并退出 (show this help message in Chinese and exit).
 
-# 准备临时文件夹
-$output_directory ||= "out";
-$output_directory = abs_path($output_directory) if defined $output_directory;
-unless ( -e $output_directory ) {
-    mkdir $output_directory or die "Error: Can not create directory $output_directory, $!";
-}
-
-# 准备读取输入的SAM文件
-my $input_sam = $ARGV[0];
-$input_sam = abs_path($input_sam) if defined $input_sam;
-open IN, $input_sam or die "Error: Can not open file $input_sam, $!";
-# 略过SAM文件头部
-while ($_ = <IN>) {
-    @_ = split /\t/;
-    my $flag = sprintf("%b",$_[1])+0;
-
-    if (m/^\@/) { next; }
-    elsif ($_[5] eq '*') { next; }
-    # 略过次优的比对结果
-    elsif ($flag =~ m/(\d)\d\d\d\d\d\d\d\d$/ && $1 == 1) { next; }
-    else { last; }
-}
-
-# 读取SAM文件第一行有效数据
-my %fragment;
-@_ = split /\t/;
-# 得到read匹配基因组染色体ID和匹配起始
-my $last_chromosome_id = $_[2];
-my $last_alignment_start = $_[3];
-# 再根据CIGAR计算read匹配结束位点
-my $cigar = $_[5];
-my @cigar = $cigar =~ m/(\d+\w)/g;
-my $last_alignment_end = $last_alignment_start;
-foreach (@cigar) {
-    m/(\d+)(\w)/;
-    if ($2 eq "M") {
-        $last_alignment_end += $1;
-    }
-    elsif ($2 eq "D") {
-        $last_alignment_end += $1;
-    }
-    elsif ($2 eq "N") {
-        $last_alignment_end += $1;
-    }
-}
-# 收集当前一行数据
-my $sam_content = $_;
-$fragment{$_[0]} = 1;
-
-# 正式读取SAM文件主体内容
-while (<IN>) {
-    @_ = split /\t/;
-
-    # 略过不能比对上和次优匹配数据
-    my $flag = sprintf("%b",$_[1])+0;
-    next if $_[5] eq '*';
-    if ($flag =~ m/(\d)\d\d\d\d\d\d\d\d$/ && $1 == 1) { next; }
-
-    # 当前行与上一行匹配到相同染色体上，且和上一行匹配区域重叠，则收集当前一行数据
-    if ($_[2] eq $last_chromosome_id && $_[3] < $last_alignment_end) {
-        $sam_content .= $_;
-        # 根据CIGAR计算当前匹配区域结束位点
-        my $end = $_[3];
-        $cigar = $_[5];
-        @cigar = $cigar =~ m/(\d+\w)/g;
-        foreach (@cigar) {
-            m/(\d+)(\w)/;
-            if ($2 eq "M") {
-                $end += $1;
-            }
-            elsif ($2 eq "D") {
-                $end += $1;
-            }
-            elsif ($2 eq "N") {
-                $end += $1;
-            }
-        }
-        $last_alignment_end = $end if $end > $last_alignment_end;
-        $fragment{$_[0]} = 1;
-    }
-    # 当前行与上一行不重叠，则输出收集的数据，要求其数据行数不少于指定值（--min_fragment_per_region参数设定值）。
-    else {
-        my $fragment_num = keys %fragment;
-        if ($fragment_num >= $min_fragment_per_region) {
-            # read的100bp全部匹配上，其结束位点应该 = 匹配起始 + 100  - 1。所以此处要减去 1 。
-            $last_alignment_end --;
-            open OUT, '>', "$output_directory/$last_chromosome_id.$last_alignment_start-$last_alignment_end.sam" or die $!;
-            print OUT $sam_content;
-            close OUT;
-            print  "$output_directory/$last_chromosome_id.$last_alignment_start-$last_alignment_end.sam\n";
-        }
-        $sam_content = "";
-        %fragment = ();
-
-        $last_chromosome_id = $_[2];
-        $last_alignment_start = $_[3];
-        $cigar = $_[5];
-        @cigar = $cigar =~ m/(\d+\w)/g;
-        $last_alignment_end = $last_alignment_start;
-        foreach (@cigar) {
-            m/(\d+)(\w)/;
-            if ($2 eq "M") {
-                $last_alignment_end += $1;
-            }
-            elsif ($2 eq "D") {
-                $last_alignment_end += $1;
-            }
-            elsif ($2 eq "N") {
-                $last_alignment_end += $1;
-            }
-        }
-        $sam_content = $_;
-    }
-}
-# 当SAM文件读取完毕后，对最后一批数据进行分析和输出
-my $fragment_num = keys %fragment;
-if ($fragment_num >= $min_fragment_per_region) {
-    $last_alignment_end --;
-    open OUT, '>', "$output_directory/$last_chromosome_id.$last_alignment_start-$last_alignment_end.sam" or die $!;
-    print OUT $sam_content;
-    close OUT;
-    print  "$output_directory/$last_chromosome_id.$last_alignment_start-$last_alignment_end.sam\n";
-}
-close IN;

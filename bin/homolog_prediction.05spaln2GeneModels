@@ -9,7 +9,7 @@ use File::Spec;
 
 my $binPath = abs_path(dirname($0));
 
-my $usage = <<USAGE;
+my $usage_cn = <<USAGE;
 Usage:
     $0 [options] genome.fasta homolog.fasta > out.geneModels.gff3
 
@@ -25,8 +25,8 @@ Usage:
     (1) 在临时目录中建立参考基因组序列的软链接 genome.fa，调用 spaln 命令设置 -Wgenome -KP -t<int> -po 参数对基因组序列进行格式化（生成供蛋白质查询序列使用的 genome.bkp、genome.idx、genome.seq 等文件）；若设置了 --max_gene_size 参数，则将其参数值传递给 spaln 格式化时的 -XG 参数。运行完毕后生成 spaln_format.ok 标记文件。
     (2) 调用 spaln 命令设置 -Q7 -O0 -A<int> -t<int> -C<int> -pq -pF -dgenome 参数将同源蛋白比对到参考基因组上，得到GFF3格式结果文件 spaln.gff。其中 -Q7 表示基因组定位加启发式比对，-O0 表示输出Gff3 gene格式，-A 参数值来自本程序的 --dp_mode 参数，-t 参数值来自本程序的 --cpu 参数，-C 参数值来自本程序的 --genetic_code 参数，-pq 屏蔽警告信息，-pF 输出完整的蛋白序列名称；若设置了 --species 参数，则将其值传递给 -T 参数以使用物种特异的参数集；若 --max_loci 参数值大于1，则将其值传递给 -M 参数，使每个同源蛋白最多比对到多个基因座上；若设置了 --max_intron_size 参数，则将其值传递给 -yM 参数；--spaln_options 参数的值会原样追加到 spaln 命令中。spaln 默认在CDS中包含终止密码子。运行完毕后生成 spaln.ok 标记文件；若复用同一临时目录重新运行，检测到 spaln_format.ok 或 spaln.ok 后会跳过对应步骤。
     (3) 对 spaln.gff 文件的格式进行修改，得到标准的GFF3格式文件 spaln.gff3：每个比对结果生成 gene、mRNA、exon、CDS 和 intron 信息；根据CDS的Target信息得到同源蛋白匹配区间；根据基因组序列逐个CDS按其phase进行翻译，统计内部终止密码子数量，并根据相邻CDS的phase是否连续统计移码数量；因移码导致相互重叠或首尾相接的CDS片段被合并；在gene和mRNA的第9列记录同源蛋白名称、长度、匹配区间、覆盖度、移码数量、内部终止密码子数量和比对得分；intron的第9列记录所有比对结果中支持该intron的次数（Supported_times）。
-    (4) 调用GFF3_merging_and_removing_redundancy程序对 spaln.gff3 进行分析，去除冗余基因模型，得到 spaln_filtered.gff3 文件。
-    (5) 调用fillingEndsOfGeneModels命令对基因模型进行强制补齐，得到 spaln_filtered_filled.gff3 文件。
+    (4) 调用GFF3_merging_and_removing_redundancy程序（传递 --genetic_code、--overlap_coverage 和 --cpu 参数）对 spaln.gff3 进行分析，去除冗余基因模型，得到 spaln_filtered.gff3 文件。
+    (5) 调用fillingEndsOfGeneModels命令（传递 --genetic_code 和 --cpu 参数）对基因模型进行强制补齐，得到 spaln_filtered_filled.gff3 文件。
     (6) 将基因模型分成四类，并在GFF3文件gene和mRNA行第9列进行标注成四种类型：Type=excellent_gene_models_predicted_by_homolog、Type=good_gene_models_predicted_by_homolog、Type=fair_gene_models_predicted_by_homolog或Type=poor_gene_models_predicted_by_homolog。分类规则：先根据对同源蛋白的覆盖度进行初步分类；无需补齐即完整的基因模型保持初步分类；进行过补齐的基因模型，根据补齐后CDS长度 / (同源蛋白长度 * 3) 的比值降级为B、C或D类（A类和B类可降级为B、C或D类，C类可降级为D类）；不能补齐完整的基因模型归为D类。四类基因模型分别输出到临时目录的 A_out.gff3、B_out.gff3、C_out.gff3 和 D_out.gff3 文件中。
     (7) 调用GFF3Clear程序对格式进行修改，按A、B、C、D的顺序输入四类基因模型（类型更好的基因模型在CDS重叠冲突时优先保留），设置基因ID前缀为spaln，得到 final_all.gff3 文件，并将结果输出到标准输出。默认是输出所有四种类型的基因模型，若是添加--no_fair_gene_models或--no_poor_gene_models，则不输出第三类或第四类基因模型。
     (8) 若设置了 --output_raw_GFF3 参数，则将强制补齐前的去冗余基因模型输出到指定文件中，包含所有四种类型的基因模型，同时也在其GFF3文件第9列标注四种类型（与最终分类结果一致）。
@@ -36,7 +36,7 @@ Usage:
     设置对同源蛋白覆盖度阈值。若基因模型对同源蛋白的覆盖率不低于--threshold_homolog_coverage_good，则评估为good gene models；若基因模型对同源蛋白的覆盖率不低于--threshold_homolog_coverage_fair，则评估成fair gene models。
 
     --genetic_code <int>    default: 1
-    设置遗传密码。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。该参数值传递给spaln的-C参数，并用于统计内部终止密码子、设置对基因模型去冗余和强制补齐时的起始密码子和终止密码子。
+    设置遗传密码。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。该参数值传递给spaln的-C参数，同时也传递给GFF3_merging_and_removing_redundancy和fillingEndsOfGeneModels命令的--genetic_code参数（由这两个命令根据遗传密码自动确定起始密码子和终止密码子，用于基因模型去冗余和强制补齐），并用于本程序统计内部终止密码子。
 
     --species <string>    default: None
     设置spaln使用的物种特异参数集，传递给spaln的-T参数。其值为spaln安装目录下table文件夹中的子目录名，或table/gnm2tab文件中第1列或第3列的物种名（例如 arabidopsis_thaliana、zea_mays 等）。建议设置为与目标物种亲缘关系最近的物种；若不设置，spaln使用通用（generic）参数集。
@@ -84,16 +84,25 @@ Usage:
     设置CPU线程数。该参数值将传递给spaln、GFF3_merging_and_removing_redundancy、fillingEndsOfGeneModels和GFF3Clear命令。
 
     --help    default: None
-    display this help and exit.
+    Display this English usage and exit.
+
+    --chinese_help    default: None
+    显示中文用法说明并退出。
 
     本程序的运行需要调用终端中的spaln命令，以及其同目录下的GFF3_merging_and_removing_redundancy、fillingEndsOfGeneModels和GFF3Clear命令。若修改过spaln的table目录位置，请设置环境变量ALN_TAB。
 
 USAGE
-if (@ARGV==0){die $usage}
 
-my ($help_flag, $threshold_homolog_coverage_good, $threshold_homolog_coverage_fair, $genetic_code, $species, $dp_mode, $max_loci, $max_intron_size, $max_gene_size, $spaln_options, $overlap_coverage, $gene_prefix, $tmp_dir, $no_fair_gene_models, $no_poor_gene_models, $output_raw_GFF3, $output_alignment_GFF3, $max_alignment_num_for_each_gene_region, $cpu);
+# 英文用法说明放在本文件最尾部（__DATA__ 之后）
+my $usage_en = do { local $/; <DATA> };
+$usage_en =~ s/\$0/$0/g;
+
+if (@ARGV==0){die $usage_en}
+
+my ($help_flag, $chinese_help_flag, $threshold_homolog_coverage_good, $threshold_homolog_coverage_fair, $genetic_code, $species, $dp_mode, $max_loci, $max_intron_size, $max_gene_size, $spaln_options, $overlap_coverage, $gene_prefix, $tmp_dir, $no_fair_gene_models, $no_poor_gene_models, $output_raw_GFF3, $output_alignment_GFF3, $max_alignment_num_for_each_gene_region, $cpu);
 GetOptions(
     "help" => \$help_flag,
+    "chinese_help" => \$chinese_help_flag,
     "threshold_homolog_coverage_good:f" => \$threshold_homolog_coverage_good,
     "threshold_homolog_coverage_fair:f" => \$threshold_homolog_coverage_fair,
     "genetic_code:i" => \$genetic_code,
@@ -112,9 +121,10 @@ GetOptions(
     "output_alignment_GFF3:s" => \$output_alignment_GFF3,
     "max_alignment_num_for_each_gene_region:i" => \$max_alignment_num_for_each_gene_region,
     "cpu:i" => \$cpu,
-) or die $usage;
-if ( $help_flag ) { die $usage }
-die "Error: 需要且仅需要输入 genome.fasta 和 homolog.fasta 两个文件。\n\n$usage" unless @ARGV == 2;
+) or die $usage_en;
+if ( $help_flag ) { print STDERR $usage_en; exit 0; }
+if ( $chinese_help_flag ) { print STDERR $usage_cn; exit 0; }
+die "Error: 需要且仅需要输入 genome.fasta 和 homolog.fasta 两个文件。\n\n$usage_en" unless @ARGV == 2;
 
 ########## 设置参数默认值并检查参数 ##########
 $threshold_homolog_coverage_good = 0.8 unless defined $threshold_homolog_coverage_good;
@@ -166,7 +176,8 @@ foreach my $program ( qw/GFF3_merging_and_removing_redundancy fillingEndsOfGeneM
 print STDERR (localtime) . ": 依赖程序检测通过：spaln、$binPath/GFF3_merging_and_removing_redundancy、$binPath/fillingEndsOfGeneModels、$binPath/GFF3Clear 。\n";
 print STDERR "Warning: 未设置 --species 参数，spaln 将使用通用（generic）参数集；设置与目标物种亲缘关系最近的物种参数集可提高基因结构预测的准确性。\n" unless defined $species;
 
-# 根据遗传密码得到起始密码子和终止密码子
+# 根据遗传密码得到起始密码子和终止密码子（本程序仅用于统计内部终止密码子；
+# 去冗余和强制补齐时的起始、终止密码子由下游命令根据 --genetic_code 自行确定）
 my ($codon_ref, $start_codon_ref, $stop_codon_ref) = &codon_table();
 my $start_codon = join ",", sort keys %$start_codon_ref;
 my $stop_codon = join ",", sort keys %$stop_codon_ref;
@@ -256,14 +267,14 @@ if ( $output_alignment_GFF3 ) {
 }
 
 ########## (4) 去除冗余基因模型 ##########
-$cmdString = "$binPath/GFF3_merging_and_removing_redundancy --cpu $cpu --overlap_coverage $overlap_coverage --start_codon $start_codon --stop_codon $stop_codon --output_delete_info $tmp_dir/GFF3_merging_and_removing_redundancy.delete_info.txt $input_genome $tmp_dir/spaln.gff3 > $tmp_dir/spaln_filtered.gff3 2> $tmp_dir/GFF3_merging_and_removing_redundancy.log";
+$cmdString = "$binPath/GFF3_merging_and_removing_redundancy --cpu $cpu --overlap_coverage $overlap_coverage --genetic_code $genetic_code --output_delete_info $tmp_dir/GFF3_merging_and_removing_redundancy.delete_info.txt $input_genome $tmp_dir/spaln.gff3 > $tmp_dir/spaln_filtered.gff3 2> $tmp_dir/GFF3_merging_and_removing_redundancy.log";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 my $num_filtered = &count_gene_num("$tmp_dir/spaln_filtered.gff3");
 print STDERR "去冗余后剩余 $num_filtered 个基因模型。\n";
 
 ########## (5) 对基因模型进行强制补齐 ##########
-$cmdString = "$binPath/fillingEndsOfGeneModels --cpu $cpu --start_codon $start_codon --stop_codon $stop_codon $input_genome $tmp_dir/spaln_filtered.gff3 > $tmp_dir/spaln_filtered_filled.gff3 2> $tmp_dir/fillingEndsOfGeneModels.log";
+$cmdString = "$binPath/fillingEndsOfGeneModels --cpu $cpu --genetic_code $genetic_code $input_genome $tmp_dir/spaln_filtered.gff3 > $tmp_dir/spaln_filtered_filled.gff3 2> $tmp_dir/fillingEndsOfGeneModels.log";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
@@ -1035,3 +1046,85 @@ sub codon_table {
 
     return (\%code, \%start_codon, \%stop_codon);
 }
+
+__DATA__
+Usage:
+    $0 [options] genome.fasta homolog.fasta > out.geneModels.gff3
+
+    This program calls spaln (Spaln3, i.e. version 3.0 or above, is recommended) to align homologous proteins to the reference genome, removes redundancy, and finally classifies the gene models into four categories:
+    (A) The homologous protein is covered 100%, the alignment contains no frameshift and no internal stop codon, and the start codon and stop codon agree with the homologous protein (a complete gene model without any forced filling); excellent gene models
+    (B) The homologous protein coverage is not less than 80%, and the length of the complete gene model after forced filling is not less than 80% of the homologous protein length; good gene models
+    (C) The homologous protein coverage is not less than 40%, and the length of the complete gene model after forced filling is not less than 40% of the homologous protein length; fair gene models
+    (D) The homologous protein coverage is less than 40%, or the length of the gene model after forced filling is less than 40% of the homologous protein length, or the gene model cannot be filled to a complete one. poor gene models
+    The program generates the file final_all.gff3 in the temporary directory, which contains all gene models. The final result is written to the standard output, and the third and/or fourth category of gene models can optionally be left out.
+
+    Workflow of the program:
+    (0) Check that the spaln command which this program depends on can be run directly in the terminal, and that the dependent commands GFF3_merging_and_removing_redundancy, fillingEndsOfGeneModels and GFF3Clear exist and are executable in the same directory as this program.
+    (1) Create a symbolic link genome.fa of the reference genome in the temporary directory, and run spaln with the options -Wgenome -KP -t<int> -po to format the genome sequence (generating genome.bkp, genome.idx, genome.seq and other files used by protein query sequences); if --max_gene_size is set, its value is passed to the -XG option of the spaln formatting. A marker file spaln_format.ok is generated when finished.
+    (2) Run spaln with the options -Q7 -O0 -A<int> -t<int> -C<int> -pq -pF -dgenome to align the homologous proteins to the reference genome, obtaining the GFF3 format result file spaln.gff. Here -Q7 means genome localization plus heuristic alignment, -O0 means output in Gff3 gene format, the value of -A comes from the --dp_mode option of this program, the value of -t comes from the --cpu option, the value of -C comes from the --genetic_code option, -pq suppresses warning messages, and -pF outputs the full protein sequence names; if --species is set, its value is passed to -T to use a species-specific parameter set; if the value of --max_loci is greater than 1, it is passed to -M so that each homologous protein can be aligned to several loci at most; if --max_intron_size is set, its value is passed to -yM; the value of --spaln_options is appended to the spaln command as is. By default spaln includes the stop codon in the CDS. A marker file spaln.ok is generated when finished; when re-running with the same temporary directory, the corresponding step is skipped if spaln_format.ok or spaln.ok is detected.
+    (3) Convert spaln.gff into the standard GFF3 format file spaln.gff3: for each alignment, gene, mRNA, exon, CDS and intron features are generated; the matched interval on the homologous protein is obtained from the Target information of the CDS features; each CDS is translated according to its phase using the genome sequence to count the internal stop codons, and the number of frameshifts is counted according to whether the phases of adjacent CDS features are continuous; CDS fragments that overlap or are end-to-end adjacent because of frameshifts are merged; the homologous protein name, length, matched interval, coverage, number of frameshifts, number of internal stop codons and alignment score are recorded in column 9 of gene and mRNA; column 9 of intron records the number of times the intron is supported by all alignments (Supported_times).
+    (4) Run the GFF3_merging_and_removing_redundancy program (passing the --genetic_code, --overlap_coverage and --cpu options) on spaln.gff3 to remove redundant gene models, obtaining the file spaln_filtered.gff3.
+    (5) Run the fillingEndsOfGeneModels command (passing the --genetic_code and --cpu options) to force-fill the gene models, obtaining the file spaln_filtered_filled.gff3.
+    (6) Classify the gene models into four categories, and mark the type in column 9 of the gene and mRNA lines of the GFF3 file as Type=excellent_gene_models_predicted_by_homolog, Type=good_gene_models_predicted_by_homolog, Type=fair_gene_models_predicted_by_homolog or Type=poor_gene_models_predicted_by_homolog. Classification rules: first make a preliminary classification according to the coverage of the homologous protein; gene models that are complete without filling keep the preliminary class; for gene models that have been filled, the class is downgraded to B, C or D according to the ratio CDS length after filling / (homologous protein length * 3) (class A and B can be downgraded to B, C or D, class C can be downgraded to D); gene models that cannot be filled to complete ones are put into class D. The four classes of gene models are written to the files A_out.gff3, B_out.gff3, C_out.gff3 and D_out.gff3 in the temporary directory respectively.
+    (7) Run the GFF3Clear program to correct the format. The four classes of gene models are input in the order A, B, C, D (gene models of a better class are preferentially kept when their CDS overlap and conflict), and the gene ID prefix is set to spaln, obtaining the file final_all.gff3, whose content is written to the standard output. By default all four types of gene models are output; if --no_fair_gene_models or --no_poor_gene_models is added, the third or fourth class of gene models is not output.
+    (8) If --output_raw_GFF3 is set, the redundancy-removed gene models before forced filling, including all four types, are written to the specified file, and the four types are also marked in column 9 of its GFF3 file (consistent with the final classification result).
+
+    --threshold_homolog_coverage_good <float>    default: 0.8
+    --threshold_homolog_coverage_fair <float>    default: 0.4
+    Set the thresholds of the coverage of the homologous protein. If the coverage of a gene model on the homologous protein is not less than --threshold_homolog_coverage_good, it is evaluated as a good gene model; if the coverage is not less than --threshold_homolog_coverage_fair, it is evaluated as a fair gene model.
+
+    --genetic_code <int>    default: 1
+    Set the genetic code. For the corresponding values, please refer to NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi. The value is passed to the -C option of spaln, and also to the --genetic_code option of the GFF3_merging_and_removing_redundancy and fillingEndsOfGeneModels commands (these two commands determine the start codons and stop codons automatically from the genetic code, for redundancy removal and forced filling of gene models), and it is used by this program to count internal stop codons.
+
+    --species <string>    default: None
+    Set the species-specific parameter set used by spaln, passed to the -T option of spaln. The value is the name of a sub-directory in the table directory of the spaln installation, or a species name in column 1 or column 3 of the file table/gnm2tab (for example arabidopsis_thaliana, zea_mays, etc.). It is recommended to set it to the most closely related species of the target species; if not set, spaln uses the generic parameter set.
+
+    --dp_mode <int>    default: 1
+    Set the calculation mode of the dynamic programming of spaln, passed to the -A option of spaln, with a value of 0 to 7. 0: scalar calculation, the most accurate but the slowest; 1: SIMD vectorized calculation with the exact intron length distribution; 2: SIMD vectorized calculation with a coarse-grained intron length distribution; 3: SIMD vectorized calculation with a constant intron penalty, the fastest but the least accurate; 4 to 7 correspond to 0 to 3 respectively, but only use the one-way Hirschberg algorithm with a single mid-point.
+
+    --max_loci <int>    default: 4
+    Set the maximum number of loci output for each homologous protein. When the value is greater than 1, it is passed to the -M option of spaln; when the value is 1, the -M option is not added and only one locus is output for each homologous protein (note that -M1 of spaln means searching again the unaligned query regions, which is different from this).
+
+    --max_intron_size <int>    default: None
+    Set the maximum intron length, passed to the -yM option of spaln. If not set, spaln handles it automatically according to the intron length distribution.
+
+    --max_gene_size <int>    default: None
+    Set the length of the longest gene in the genome, passed to the -XG option of spaln when the genome is formatted. If not set, spaln infers it from the genome size.
+
+    --spaln_options <string>    default: None
+    Set additional options passed to the spaln alignment command. The value should be quoted, for example --spaln_options "-LS -yX2".
+
+    --overlap_coverage <float>    default: 0.30
+    Set the threshold of the CDS overlap coverage, passed to the --overlap_coverage option of the GFF3_merging_and_removing_redundancy command and the --coverage option of the GFF3Clear command, used to remove redundant gene models whose CDS regions overlap.
+
+    --gene_prefix <string>    default: spaln
+    Set the prefix of the gene IDs in the final output, passed to the --gene_prefix option of the GFF3Clear command.
+
+    --tmp_dir <string>    default: tmp_$date$pid
+    Set the name of the temporary directory used while the program runs.
+
+    --no_fair_gene_models    default: None
+    When this option is added, the program does not output the third class, fair gene models, to the standard output. The file final_all.gff3 in the temporary directory still keeps all four types of gene models.
+
+    --no_poor_gene_models    default: None
+    When this option is added, the program does not output the fourth class, poor gene models, to the standard output. The file final_all.gff3 in the temporary directory still keeps all four types of gene models.
+
+    --output_raw_GFF3 <string>    default: None
+    Make the program output a GFF3 file without forced end filling. This is the raw (redundancy-removed) result of the homology-based prediction.
+
+    --output_alignment_GFF3 <string>    default: None
+    Make the program output a GFF3 format homologous protein alignment file, containing the alignment information of the homologous proteins on the genome sequence. The program merges the overlapping spaln alignments on the same strand into one gene region, and for each gene region outputs the best (highest alignment score) alignment of each homologous protein.
+
+    --max_alignment_num_for_each_gene_region <int>    default: 5
+    When the GFF3 format homologous protein alignment file is output, the results of at most 5 homologous proteins are output for each gene region.
+
+    --cpu <int>    default: 1
+    Set the number of CPU threads. The value is passed to the spaln, GFF3_merging_and_removing_redundancy, fillingEndsOfGeneModels and GFF3Clear commands.
+
+    --help    default: None
+    Display this English usage and exit.
+
+    --chinese_help    default: None
+    显示中文用法说明并退出。
+
+    Running this program requires the spaln command in the terminal, and the GFF3_merging_and_removing_redundancy, fillingEndsOfGeneModels and GFF3Clear commands in the same directory as this program. If the location of the table directory of spaln has been changed, please set the environment variable ALN_TAB.

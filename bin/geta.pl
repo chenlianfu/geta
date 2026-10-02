@@ -63,7 +63,7 @@ Parameters:
     输入diamond数据库路径，用于对基因模型进行过滤。参数支持输入多个数据库路径，使用逗号进行分隔。当使用多个diamond数据库时，程序过滤在所有数据库中都没有匹配的基因模型。若不设置该参数，则以--protein参数输入的同源蛋白序列构建diamond数据库，进行基因模型过滤。
 
     --config <string>    default: None
-    输入一个参数配置文件路径，用于设置本程序调用的其它命令的详细参数。若不设置该参数，当基因组>1GB时，自动使用软件安装目录中的conf_for_big_genome.txt配置文件；当基因组<50MB时，自动使用软件安装目录中的conf_for_small_genome.txt配置文件；当基因组在50MB~1GB之间时，使用默认参数配置。此外，当软件预测的基因数量异常时往往要修改基因模型的过滤阈值。此时，通过修改软件安装目录中的conf_all_defaults.txt文件内容生成新的配置文件，并输入给本参来再次运行GETA流程。
+    输入一个参数配置文件路径，用于设置本程序调用的其它命令的详细参数。若不设置该参数，当基因组>1GB时，自动使用软件安装目录中的conf_for_big_genome.txt配置文件；当基因组<50MB时，自动使用软件安装目录中的conf_for_small_genome.txt配置文件；当基因组在50MB~1GB之间时，使用默认参数配置。此外，当软件预测的基因数量异常时往往要修改基因模型的过滤阈值。此时，通过修改软件安装目录中的conf_all_defaults.txt文件内容生成新的配置文件，并输入给本参来再次运行GETA流程。同源蛋白预测程序homolog_prediction的更多参数（如--max_intron_size、--miniprot_options、--spaln_species、--spaln_options等）也可以写在配置文件的[homolog_prediction]部分。
 
     --BUSCO_lineage_dataset <string>    default: None
     输入BUSCO数据库路径，则程序额外对基因预测得到的全基因组蛋白序列进行BUSCO分析。本参数支持输入多个BUSCO数据库路径，使用逗号进行分隔，则分别利用多个数据库进行分析。可以根据$software_dir/BUSCO_lineages_list.2021-12-14.txt文件内容选择合适的BUSCO数据库。BUSCO的结果输出到7.output_gene_models子目录下和gene_prediction.summary文件中。
@@ -89,7 +89,7 @@ Parameters:
     设置程序使用的NGSreads数据的最大数量。当程序输入了过量的NGSreads时，会自动根据基因组大小选择一定数据量的read。若添加该参数值，则指定使用的双末端测序的reads对数量或单端测序的read数量。若不设置该参数，程序自动计算使用的read对数量 = ( 2 ** (log10(genome_size / 1,000,000) - 1) )  * 50 M 。即10M的基因组最多使用50M个reads对，PE150测序数据量15G；100M基因组使用100M个reads对，PE150测序数据量30G；1G基因组使用200M个reads对，PE150测序数据量60G。
 
     --put_massive_temporary_data_into_memory    default: None
-    设置将海量的临时文件存放到内存中。这样能避免磁盘I/O不足而造成程序运行减缓，但需要消耗更多内存。本流程在很多步骤中对数据进行了分割，再通过并行化来加速计算，但这对磁盘形成了极大的I/O负荷。因此，当磁盘性能较差时会严重影响计算速度。若系统内存充足，推荐添加本参数，从而将海量的临时数据存放到代表内存的/dev/shm文件夹下，以加速程序运行。此外，程序在数据分割和并行化步骤运行完毕后，会自动删除/dev/shm中的临时数据以释放内存。
+    设置将海量的临时文件存放到内存中。这样能避免磁盘I/O不足而造成程序运行减缓，但需要消耗更多内存。本流程在很多步骤中对数据进行了分割，再通过并行化来加速计算，但这对磁盘形成了极大的I/O负荷。因此，当磁盘性能较差时会严重影响计算速度。若系统内存充足，推荐添加本参数，从而将海量的临时数据存放到代表内存的/dev/shm文件夹下，以加速程序运行。此外，程序在数据分割和并行化步骤运行完毕后，会自动删除/dev/shm中的临时数据以释放内存。需要注意的是，同源蛋白预测步骤（homolog_prediction）不使用本参数。
 
     --gene_predicted_by_unmasked_genome    default: None
     添加该参数后，程序在利用NGS read、homology和AUGUSTUS进行基因预测时，使用输入的基因组序列进行基因预测。而默认程序对输入的基因组序列进行重复序列屏蔽，再使用屏蔽了的基因组序列采用三种算法进行基因预测。
@@ -97,8 +97,8 @@ Parameters:
     --genetic_code <int>    default: 1
     设置遗传密码。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。本参数主要生效于同源蛋白进行基因预测的步骤，或对基因模型首尾进行强制补齐时使用的起始密码子和终止密码子信息的情形。
 
-    --homolog_prediction_method <string>    default: all
-    设置使用同源蛋白进行基因预测的方法。其值可以设定为exonerate、genewise、gth或all。若想使用多种方法进行分析，则输入使用逗号分割的多个值；若使用所有三种方法进行分析，可以设置--method参数值为all。使用的方法越多，越消耗计算时间，但结果更好。三种方法中：exonerate和genewise的准确性结果比较一致（），但gth方法预测基因模型的sensitivity下降很多，specificity提高很多。以三种方法对Oryza sativa基因组的预测为例，其预测结果的准确性如下表所示。和NCBI上标准的共28736个基因模型的注释结果进行比较，评估四个准确性值：基因水平sensitivity、基因水平specificity、exon水平sensitivity、exon水平specificity。可以看出，使用多种方法进行基因预测、合并结果后再过滤，得到的基因模型数量能接近真实的基因数量，且结果较准确。此外，使用本参数的优先级更高，能覆盖--config指定参数配置文件中homolog_prediction的参数值。
+    --homolog_prediction_method <string>    default: miniprot
+    设置使用同源蛋白进行基因预测的方法，与homolog_prediction程序的--method参数保持一致。其值可以设定为exonerate、genewise、gth、miniprot、spaln或all。若想使用多种方法进行分析，则输入使用逗号分割的多个值，例如exonerate,miniprot,spaln；设置为all则使用全部五种方法。各方法的说明如下：（1）exonerate、genewise和gth：先调用MMseqs2将同源蛋白比对到基因组以确定基因区域，再调用相应软件对基因结构进行精细预测；这三种方法在流程内部已按基因区域整合为一个来源（mmseqs），使用它们需要安装MMseqs2和GNU parallel；（2）miniprot：直接将同源蛋白比对到基因组并预测基因模型，作为一个来源；（3）spaln：直接将同源蛋白比对到基因组并预测基因模型，作为另一个来源。当同时使用了多个来源（mmseqs、miniprot、spaln）时，程序会对各来源的结果进行两两比较，按预测准确性排序后再整合去冗余，并根据intron的支持次数过滤低可信的C和D类基因模型；两两比较的汇总结果输出到文件\$out_prefix.homolog_method_comparison_stats.txt中。使用的方法越多，越消耗计算时间，但结果往往更好。三种基于MMseqs2的方法中：exonerate和genewise的准确性结果比较一致，但gth方法预测基因模型的sensitivity下降很多，specificity提高很多。以这三种方法对Oryza sativa基因组的预测为例，其预测结果的准确性如下表所示（表中all表示同时使用exonerate、genewise和gth）。和NCBI上标准的共28736个基因模型的注释结果进行比较，评估四个准确性值：基因水平sensitivity、基因水平specificity、exon水平sensitivity、exon水平specificity。可以看出，使用多种方法进行基因预测、合并结果后再过滤，得到的基因模型数量能接近真实的基因数量，且结果较准确。此外，使用本参数的优先级更高，能覆盖--config指定参数配置文件中homolog_prediction的--method参数值。
     方法       基因数量    gene_sensitivity    gene_specificity    exon_sensitivity    exon_specificity
     exonerate  31310       46.17%              42.37%              62.15%              78.45%
     genewise   32407       46.47%              41.21%              64.66%              77.15%
@@ -108,7 +108,7 @@ Parameters:
 
     --optimize_augustus_method <int>    default: 3
     设置AUGUSTUS Training时的参数优化方法。1，表示仅调用BGM2AT.optimize_augustus进行优化，能充分利用所有CPU线程对所有参数并行化测试，速度快；2，表示仅调用AUGUSTUS软件自带的optimize_augustus.pl程序进行优化，该方法的速度较慢，但结果更好；3，表示先使用BGM2AT.optimize_augustus优化完毕后，再使用AUGUSTUS软件自带的optimize_augustus.pl程序接着再进行优化，同时兼顾运算速度和效果。使用本参数的优先级更高，能覆盖--config指定参数配置文件中BGM2AT相同参数的值。
-    
+
     --no_alternative_splicing_analysis    default: None
     添加该参数后，程序不会进行可变剪接分析。需要注意的时，当输入了NGS reads数据时，程序默认会根据intron和碱基测序深度信息进行基因的可变剪接分析。
 
@@ -135,6 +135,8 @@ Parameters:
 15. hmmscan (version: 3.3.2)
 16. busco (Version: 5.4.7)
 
+此外，当--homolog_prediction_method使用了miniprot或spaln方法时，还需要安装miniprot或spaln软件，并确保能在终端中直接运行。
+
 Version of GETA: 2.7.1
 
 USAGE
@@ -147,6 +149,14 @@ my ($out_prefix, $gene_prefix, $chinese_help, $help);
 my ($cpu, $max_used_read_num, $put_massive_temporary_data_into_memory, $genetic_code, $homolog_prediction_method, $optimize_augustus_method, $no_alternative_splicing_analysis, $delete_unimportant_intermediate_files);
 my ($cmdString, $cmdString1, $cmdString2, $cmdString3, $cmdString4, $cmdString5, @cmdString);
 my ($start_codon, $stop_codon);
+
+# homolog_prediction程序支持的同源蛋白基因预测方法（顺序与homolog_prediction保持一致）。
+# 其中exonerate、genewise和gth属于同一个来源(mmseqs)，miniprot和spaln各为一个来源。
+my @ALL_HOMOLOG_METHODS = qw/gth exonerate genewise miniprot spaln/;
+my %MMSEQS_HOMOLOG_METHODS = map { $_ => 1 } qw/gth exonerate genewise/;
+# 解析--homolog_prediction_method得到的方法列表和对应的以逗号分隔的字符串
+my (@homolog_methods, $homolog_method_str);
+
 GetOptions(
     "genome:s" => \$genome,
     "RM_species:s" => \$RM_species,
@@ -324,10 +334,15 @@ chdir $tmp_dir; print STDERR "\nPWD: $tmp_dir\n";
 mkdir "$tmp_dir/2.homolog_prediction" unless -e "$tmp_dir/2.homolog_prediction";
 
 if ( $protein ) {
-    $cmdString = "$bin_path/homolog_prediction --tmp_dir $tmp_dir/2.homolog_prediction --cpu $cpu $config{'homolog_prediction'} --genetic_code $genetic_code --output_alignment_GFF3 $tmp_dir/2.homolog_prediction/homolog_alignment.gff3 --output_raw_GFF3 $tmp_dir/2.homolog_prediction/homolog_prediction.raw.gff3 $protein $genome > $tmp_dir/2.homolog_prediction/homolog_prediction.gff3 2> $tmp_dir/2.homolog_prediction/homolog_prediction.log";
+    # 当使用了两个及以上来源（mmseqs、miniprot、spaln）时，homolog_prediction才能输出各方法的两两比较结果。
+    my $method_comparison_option = "";
+    if ( &count_homolog_sources() >= 2 ) {
+        $method_comparison_option = "--method_comparison_stats $tmp_dir/2.homolog_prediction/method_comparison_stats.txt";
+    }
+    $cmdString = "$bin_path/homolog_prediction --tmp_dir $tmp_dir/2.homolog_prediction --cpu $cpu $config{'homolog_prediction'} --genetic_code $genetic_code --output_alignment_GFF3 $tmp_dir/2.homolog_prediction/homolog_alignment.gff3 --output_raw_GFF3 $tmp_dir/2.homolog_prediction/homolog_prediction.raw.gff3 $method_comparison_option $protein $genome > $tmp_dir/2.homolog_prediction/homolog_prediction.gff3 2> $tmp_dir/2.homolog_prediction/homolog_prediction.log";
 }
 else {
-    $cmdString = "touch $tmp_dir/2.homolog_prediction/homolog_prediction.gff3";
+    $cmdString = "touch $tmp_dir/2.homolog_prediction/homolog_prediction.gff3 $tmp_dir/2.homolog_prediction/homolog_prediction.raw.gff3";
 }
 
 &execute_cmds($cmdString, "$tmp_dir/2.homolog_prediction.ok");
@@ -347,7 +362,7 @@ if (($pe1 && $pe2) or $single_end or $sam) {
     push @input_parameter, "--strand_specific" if defined $strand_specific;
     push @input_parameter, "--genetic_code $genetic_code" if defined $genetic_code;
     push @input_parameter, "--put_massive_temporary_data_into_memory" if defined $put_massive_temporary_data_into_memory;
-    push @input_parameter, "--homolog_gene_models $tmp_dir/2.homolog_prediction/homolog_prediction.raw.gff3" if defined $protein;
+    push @input_parameter, "--homolog_protein $protein" if defined $protein;
 
     # 设置最大使用的双末端测序数据量 = ( 2 ** (log10(genome_size / 1,000,000) - 1) )  * 50 M reads pair。即10M的基因组最多使用50M个reads对，PE150测序数据量15G；100M基因组使用100M个reads对，PE150测序数据量30G；1G基因组使用200M个reads对，PE150测序数据量60G；
     my $max_support_read_pair = 50000000;
@@ -359,7 +374,7 @@ if (($pe1 && $pe2) or $single_end or $sam) {
     push @input_parameter, "--pe_used_pair_num $max_support_read_pair --se_used_read_num $max_support_read_pair";
 
     my $input_parameter = join " ", @input_parameter;
-    $cmdString = "$bin_path/NGSReads_prediction $input_parameter --config $tmp_dir/config.txt --cpu $cpu --tmp_dir $tmp_dir/3.NGSReads_prediction --output_alignment_GFF3 $tmp_dir/3.NGSReads_prediction/NGSReads_alignment.gff3 --output_raw_GFF3 $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.raw.gff3 --intron_info_out $tmp_dir/3.NGSReads_prediction/intron.txt --base_depth_out $tmp_dir/3.NGSReads_prediction/base_depth.txt $genome > $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.gff3 2> $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.log";
+    $cmdString = "$bin_path/NGSReads_prediction $input_parameter --cpu $cpu --tmp_dir $tmp_dir/3.NGSReads_prediction --output_alignment_GFF3 $tmp_dir/3.NGSReads_prediction/NGSReads_alignment.gff3 --output_raw_GFF3 $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.raw.gff3 --intron_info_out $tmp_dir/3.NGSReads_prediction/intron.txt --base_depth_out $tmp_dir/3.NGSReads_prediction/base_depth.txt $genome > $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.gff3 2> $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.log";
 }
 else {
     $cmdString = "touch $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.gff3 $tmp_dir/3.NGSReads_prediction/intron.txt; touch $tmp_dir/3.NGSReads_prediction/base_depth.txt; touch $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.raw.gff3";
@@ -379,27 +394,30 @@ mkdir "$tmp_dir/4.augustus/training" unless -e "$tmp_dir/4.augustus/training";
 chdir "$tmp_dir/4.augustus/training"; print STDERR "\nPWD: $tmp_dir/4.augustus/training\n";
 
 # 4.1.1 合并Transcript和Homolog预测的基因模型
-$cmdString = "$bin_path/GFF3_merging_and_removing_redundancy_Parallel --cpu $cpu $config{'GFF3_merging_and_removing_redundancy'} $genome $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.raw.gff3 $tmp_dir/2.homolog_prediction/homolog_prediction.raw.gff3 > evidence_gene_models.gff3 2> GFF3_merging_and_removing_redundancy.log";
+@cmdString = ();
+push @cmdString, "$bin_path/GFF3_filling_gene_models --genetic_code 1 --attribute_for_filling_complete 'Filled_by_homolog=True' --cpu $cpu --output_filling_detail_tab GFF3_filling_detail.tab $genome $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.raw.gff3 $tmp_dir/2.homolog_prediction/homolog_prediction.raw.gff3 > NGSReads_prediction.raw_filled.gff3 2> GFF3_filling_gene_models.log";
+push @cmdString, "$bin_path/GFF3_merging_and_removing_redundancy --cpu $cpu $config{'GFF3_merging_and_removing_redundancy'} --compare_2gff3_stats compare_2gff3_stats.txt $genome NGSReads_prediction.raw_filled.gff3 $tmp_dir/2.homolog_prediction/homolog_prediction.raw.gff3 > evidence_prediction.raw.gff3 2> GFF3_merging_and_removing_redundancy.log";
 
-&execute_cmds($cmdString, "01.evidence_gene_models.ok");
+&execute_cmds(@cmdString, "01.evidence_gene_models.ok");
 
 # 4.1.2 选择完整且准确的基因模型
-unless ( -s "excellent.gff3" ) {
-    my $input = "$tmp_dir/4.augustus/training/evidence_gene_models.gff3";
+unless ( -s "02.evidence_gene_models.AB.ok" ) {
+    my $input = "$tmp_dir/4.augustus/training/evidence_prediction.raw.gff3";
     open IN, $input or die "Error: Can not open file $input, $!";
-    my $output = "$tmp_dir/4.augustus/training/evidence_gene_models.excellent.gff3";
+    my $output = "$tmp_dir/4.augustus/training/evidence_prediction.AB.gff3";
     open OUT, ">", $output or die "Error: Can not create file $output, $!";
     $/ = "\n\n";
     while (<IN>) {
-        print OUT if m/excellent/;
+        print OUT if (m/Type=excellent/ or m/Type=good/);
     }
     $/ = "\n";
     close IN; close OUT;
-    open OUT, ">", "02.evidence_gene_models.excellent.ok" or die $!; close OUT;
+    open OUT, ">", "02.evidence_gene_models.AB.ok" or die $!; close OUT;
 }
 
 # 4.1.3 选择CDS数量较多、CDS长度较长、CDS/exon比例较大且去冗余的基因模型。
-$cmdString = "$bin_path/geneModels2AugusutsTrainingInput $config{'geneModels2AugusutsTrainingInput'} --out_prefix ati --cpu $cpu evidence_gene_models.excellent.gff3 $genome &> geneModels2AugusutsTrainingInput.log";
+#$cmdString = "$bin_path/geneModels2AugusutsTrainingInput $config{'geneModels2AugusutsTrainingInput'} --out_prefix ati --cpu $cpu evidence_prediction.AB.gff3 $genome &> geneModels2AugusutsTrainingInput.log";
+$cmdString = "$bin_path/geneModels2AugusutsTrainingInput --out_prefix ati --cpu $cpu evidence_prediction.AB.gff3 $genome &> geneModels2AugusutsTrainingInput.log";
 unless ( -e "03.geneModels2AugusutsTrainingInput.ok" ) {
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -413,7 +431,7 @@ unless ( -e "03.geneModels2AugusutsTrainingInput.ok" ) {
     }
     close IN;
     if ( $training_genes_number < 1000 ) {
-        $cmdString = "$bin_path/geneModels2AugusutsTrainingInput --min_evalue 1e-9 --min_identity 0.9 --min_coverage_ratio 0.9 --min_cds_num 1 --min_cds_length 450 --min_cds_exon_ratio 0.40 --keep_ratio_for_excluding_too_long_gene 0.99 --out_prefix ati --cpu $cpu evidence_gene_models.excellent.gff3 $genome &> geneModels2AugusutsTrainingInput.log.Loose_thresholds";
+        $cmdString = "$bin_path/geneModels2AugusutsTrainingInput --min_evalue 1e-9 --min_identity 0.9 --min_coverage_ratio 0.9 --min_cds_num 1 --min_cds_length 450 --min_cds_exon_ratio 0.40 --keep_ratio_for_excluding_too_long_gene 0.99 --out_prefix ati --cpu $cpu evidence_prediction.AB.gff3 $genome &> geneModels2AugusutsTrainingInput.log.Loose_thresholds";
         print STDERR (localtime) . ": CMD: $cmdString\n";
         system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
     }
@@ -429,7 +447,7 @@ my $flanking_length;
 unless ( -e "04.get_flanking_length.ok" && -s "$tmp_dir/4.augustus/training/flanking_length.txt" ) {
     my (%gene_info, @intergenic_length, @gene_length);
     # 读取基因模型信息
-    my $input_file = "$tmp_dir/4.augustus/training/evidence_gene_models.gff3";
+    my $input_file = "$tmp_dir/4.augustus/training/evidence_prediction.AB.gff3";
     open IN, $input_file or die "Error: Can not open file $input_file, $!";
     while (<IN>) {
         if (m/\tgene\t/) {
@@ -490,7 +508,7 @@ $cmdString3 = "cp -a $tmp_dir/4.augustus/config/species/$augustus_species $ENV{'
 
 # 4.2 准备Hints信息
 chdir "$tmp_dir/4.augustus"; print STDERR "\nPWD: $tmp_dir/4.augustus\n";
-$cmdString = "$bin_path/prepareAugusutusHints $config{'prepareAugusutusHints'} --intron_tab $tmp_dir/3.NGSReads_prediction/intron.txt $tmp_dir/4.augustus/training/evidence_gene_models.gff3 > hints.gff 2> prepareAugusutusHints.log";
+$cmdString = "$bin_path/prepareAugusutusHints $config{'prepareAugusutusHints'} --intron_tab $tmp_dir/3.NGSReads_prediction/intron.txt $tmp_dir/4.augustus/training/evidence_prediction.AB.gff3 > hints.gff 2> prepareAugusutusHints.log";
 
 &execute_cmds($cmdString, "prepareAugusutusHints.ok");
 
@@ -499,7 +517,7 @@ $cmdString = "$bin_path/prepareAugusutusHints $config{'prepareAugusutusHints'} -
 my ($segmentSize, $overlapSize) = (1000000, 100000);
 unless ( -e "get_segmentSize.ok" ) {
     # 获取最长的基因长度
-    my $input_file = "$tmp_dir/4.augustus/training/evidence_gene_models.gff3";
+    my $input_file = "$tmp_dir/4.augustus/training/evidence_prediction.AB.gff3";
     open IN, $input_file or die "Error: Can not open file $input_file, $!";
     my @gene_length;
     while (<IN>) {
@@ -536,7 +554,7 @@ else {
 
 # 4.3.2 Augustus gene prediction
 $cmdString1 = "$bin_path/paraAugusutusWithHints $config{'paraAugusutusWithHints'} --species $augustus_species --AUGUSTUS_CONFIG_PATH $tmp_dir/4.augustus/config --cpu $cpu --segmentSize $segmentSize --overlapSize $overlapSize --tmp_dir aug_para_with_hints $genome hints.gff > augustus.raw.gff3";
-$cmdString2 = "$bin_path/addHintRatioToAugustusResult $tmp_dir/4.augustus/training/evidence_gene_models.gff3 hints.gff augustus.raw.gff3 > augustus.gff3";
+$cmdString2 = "$bin_path/addHintRatioToAugustusResult $tmp_dir/4.augustus/training/evidence_prediction.AB.gff3 hints.gff augustus.raw.gff3 > augustus.gff3";
 
 &execute_cmds($cmdString1, $cmdString2, "$tmp_dir/4.augustus.ok");
 
@@ -571,17 +589,17 @@ close OUT;
 # 5.1 合并三种算法的基因预测结果
 @cmdString = ();
 # a. 利用同源蛋白预测的基因模型对转录本预测的基因模型进行填补
-push @cmdString, "$bin_path/GFF3_filling_gene_models_Parallel --cpu $cpu --tmp_dir FillingGeneModelsByHomolog --ouput_filling_detail_tab FillingGeneModelsByHomolog.tab --start_codon $start_codon --stop_codon $stop_codon --attribute_for_filling_complete Filled_by_Homolog=True $genome $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.raw.gff3 $tmp_dir/2.homolog_prediction/homolog_prediction.raw.gff3 > geneModels.a.gff3 2> GFF3_filling_gene_models.1.log";
+push @cmdString, "$bin_path/GFF3_filling_gene_models_Parallel --cpu $cpu --output_filling_detail_tab FillingGeneModelsByHomolog.tab --start_codon $start_codon --stop_codon $stop_codon --attribute_for_filling_complete Filled_by_Homolog=True $genome $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.raw.gff3 $tmp_dir/2.homolog_prediction/homolog_prediction.raw.gff3 > geneModels.a.gff3 2> GFF3_filling_gene_models.1.log";
 # b. 合并同源蛋白预测基因模型和上一步结果
-push @cmdString, "$bin_path/GFF3_merging_and_removing_redundancy_Parallel --cpu $cpu $config{'GFF3_merging_and_removing_redundancy'} $genome geneModels.a.gff3 $tmp_dir/2.homolog_prediction/homolog_prediction.raw.gff3 > geneModels.b.gff3 2> GFF3_merging_and_removing_redundancy.1.log";
+push @cmdString, "$bin_path/GFF3_merging_and_removing_redundancy --cpu $cpu $config{'GFF3_merging_and_removing_redundancy'} $genome geneModels.a.gff3 $tmp_dir/2.homolog_prediction/homolog_prediction.raw.gff3 > geneModels.b.gff3 2> GFF3_merging_and_removing_redundancy.1.log";
 # c. 利用augustus预测基因模型进行填补
-push @cmdString, "$bin_path/GFF3_filling_gene_models_Parallel --cpu $cpu --tmp_dir FillingGeneModelsByAugustus --ouput_filling_detail_tab FillingGeneModelsByAugustus.tab --start_codon $start_codon --stop_codon $stop_codon --attribute_for_filling_complete Filled_by_AUGUSTUS=True $genome geneModels.b.gff3 $tmp_dir/4.augustus/augustus.gff3 > geneModels.c.gff3 2> GFF3_filling_gene_models.2.log";
+push @cmdString, "$bin_path/GFF3_filling_gene_models_Parallel --cpu $cpu --output_filling_detail_tab FillingGeneModelsByAugustus.tab --start_codon $start_codon --stop_codon $stop_codon --attribute_for_filling_complete Filled_by_AUGUSTUS=True $genome geneModels.b.gff3 $tmp_dir/4.augustus/augustus.gff3 > geneModels.c.gff3 2> GFF3_filling_gene_models.2.log";
 # d. 强制填补末端
-push @cmdString, "$bin_path/fillingEndsOfGeneModels $config{'fillingEndsOfGeneModels'} --start_codon $start_codon --stop_codon $stop_codon $genome geneModels.c.gff3 > geneModels.d.gff3 2> fillingEndsOfGeneModels.1.log";
+push @cmdString, "$bin_path/fillingEndsOfGeneModels $config{'fillingEndsOfGeneModels'} --cpu $cpu --start_codon $start_codon --stop_codon $stop_codon $genome geneModels.c.gff3 > geneModels.d.gff3 2> fillingEndsOfGeneModels.1.log";
 # e. 合并Augustus预测基因模型和上一步结果
-push @cmdString, "$bin_path/GFF3_merging_and_removing_redundancy_Parallel --cpu $cpu $config{'GFF3_merging_and_removing_redundancy'} $genome geneModels.d.gff3 $tmp_dir/4.augustus/augustus.gff3 > geneModels.e.gff3 2> GFF3_merging_and_removing_redundancy.2.log";
+push @cmdString, "$bin_path/GFF3_merging_and_removing_redundancy --cpu $cpu $config{'GFF3_merging_and_removing_redundancy'} $genome geneModels.d.gff3 $tmp_dir/4.augustus/augustus.gff3 > geneModels.e.gff3 2> GFF3_merging_and_removing_redundancy.2.log";
 # f. 强制填补末端，生成不完整基因模型
-push @cmdString, "$bin_path/fillingEndsOfGeneModels $config{'fillingEndsOfGeneModels'} --start_codon $start_codon --stop_codon $stop_codon --nonCompletedGeneModels incomplete.gff3 $genome geneModels.e.gff3 > geneModels.f.gff3 2> fillingEndsOfGeneModels.2.log";
+push @cmdString, "$bin_path/fillingEndsOfGeneModels $config{'fillingEndsOfGeneModels'} --cpu $cpu --start_codon $start_codon --stop_codon $stop_codon --nonCompletedGeneModels incomplete.gff3 $genome geneModels.e.gff3 > geneModels.f.gff3 2> fillingEndsOfGeneModels.2.log";
 
 &execute_cmds(@cmdString, "01.combineGeneModels.ok");
 
@@ -666,6 +684,10 @@ if ( ($pe1 && $pe2) or $single_end or $sam ) {
 if ( $protein ) {
     push @cmdString, "cp $tmp_dir/2.homolog_prediction/homolog_alignment.gff3 $out_prefix.homolog_alignment.gff3";
     push @cmdString, "cp $tmp_dir/2.homolog_prediction/homolog_prediction.gff3 $out_prefix.homolog_prediction.gff3";
+    # 使用了两个及以上来源时，输出同源蛋白预测各方法的两两比较结果
+    if ( -s "$tmp_dir/2.homolog_prediction/method_comparison_stats.txt" ) {
+        push @cmdString, "cp $tmp_dir/2.homolog_prediction/method_comparison_stats.txt $out_prefix.homolog_method_comparison_stats.txt";
+    }
 }
 push @cmdString, "cp $tmp_dir/4.augustus/augustus.gff3 $out_prefix.augustus_prediction.gff3";
 
@@ -754,8 +776,9 @@ unless ( -e "$tmp_dir/6.output_gene_models.ok" ) {
     # (4) 获取同源蛋白预测的基因数量的统计信息
     if ( $protein ) {
         my $input_file = "$tmp_dir/2.homolog_prediction/homolog_prediction.log";
-        print OUT "The statistics of gene models predicted by homolog:\n";
-        print OUT `tail -n 3 $input_file`;
+        print OUT "The statistics of gene models predicted by homolog (method: $homolog_method_str):\n";
+        print OUT &get_homolog_prediction_summary($input_file);
+        print OUT "\n";
     }
     # (5) 获取AUGUSTUS基因预测数量
     if (-e "$tmp_dir/4.augustus/augustus.gff3") {
@@ -770,7 +793,7 @@ unless ( -e "$tmp_dir/6.output_gene_models.ok" ) {
     print OUT <IN>;
     close IN;
     print OUT "\n";
-    
+
     # (7) 获取基因预测整合过滤的统计信息
     print OUT &statistics_combination();
 
@@ -794,8 +817,8 @@ if ( $delete_unimportant_intermediate_files ) {
     push @cmdString, "rm -rf $tmp_dir/1.RepeatMasker/repeatMasker_Dfam $tmp_dir/1.RepeatMasker/repeatMasker_RepBase $tmp_dir/1.RepeatMasker/repeatModeler";
     # 删除 3.NGSReads_prediction 文件夹下的数据
     push @cmdString, "rm -rf $tmp_dir/3.NGSReads_prediction/a.trimmomatic $tmp_dir/3.NGSReads_prediction/b.hisat2 $tmp_dir/3.NGSReads_prediction/c.transcript";
-    # 删除 2.homolog_prediction 文件夹下的数据
-    push @cmdString, "rm -rf $tmp_dir/2.homolog_prediction/a.MMseqs2CalHits $tmp_dir/2.homolog_prediction/b.hitToGenePrediction $tmp_dir/2.homolog_prediction/c.getGeneModels";
+    # 删除 2.homolog_prediction 文件夹下的数据（包含MMseqs2、exonerate/genewise/gth、miniprot和spaln各来源的大型中间文件）
+    push @cmdString, "rm -rf $tmp_dir/2.homolog_prediction/a.MMseqs2CalHits $tmp_dir/2.homolog_prediction/b.hitToGenePrediction $tmp_dir/2.homolog_prediction/c.getGeneModels $tmp_dir/2.homolog_prediction/d.miniprot $tmp_dir/2.homolog_prediction/e.spaln";
     # 删除 4.augustus 文件夹下的数据
     push @cmdString, "rm -rf $tmp_dir/4.augustus/aug_para_with_hints";
     # 删除 5.combine_gene_models 文件夹下的数据
@@ -817,6 +840,47 @@ print STDERR "\n============================================\n";
 print STDERR "GETA complete successfully! " . "(" . (localtime) . ")" . "\n\n";
 
 
+# 从homolog_prediction的日志文件中提取最终基因模型的统计信息：
+# 包括四类基因模型数量、各来源基因模型数量以及各预测方法在A、B、C、D四类基因模型中的数量矩阵。
+sub get_homolog_prediction_summary {
+    my ($file) = @_;
+    my $out = "";
+    open my $fh, "<", $file or return $out;
+    local $_;
+    my $on = 0;
+    while ( <$fh> ) {
+        if ( m/^Finally, total \d+ gene models/ ) {
+            $on = 1;
+        }
+        elsif ( $on && m/^All the gene models before intron filtering/ ) {
+            last;
+        }
+        $out .= $_ if $on;
+    }
+    close $fh;
+    return $out;
+}
+
+# 统计--homolog_prediction_method设置的方法对应的来源数量（exonerate/genewise/gth合并为mmseqs一个来源，miniprot和spaln各为一个来源）。
+sub count_homolog_sources {
+    my %source;
+    foreach my $m ( @homolog_methods ) {
+        $source{ $MMSEQS_HOMOLOG_METHODS{$m} ? "mmseqs" : $m } = 1;
+    }
+    return scalar(keys %source);
+}
+
+# 检测命令是否可以在终端中直接运行（存在于PATH环境变量的目录中，且具有可执行权限）。
+sub command_in_path {
+    my ($cmd) = @_;
+    foreach my $dir ( split /:/, ($ENV{"PATH"} || "") ) {
+        next if $dir eq "";
+        my $path = "$dir/$cmd";
+        return $path if ( -f $path && -x $path );
+    }
+    return;
+}
+
 sub statistics_combination {
     my $output;
 
@@ -826,13 +890,14 @@ sub statistics_combination {
     my $input_file = "$tmp_dir/2.homolog_prediction/homolog_prediction.log";
     open IN, $input_file or die "Error: Can not open file $input_file, $!";
     while (<IN>) {
-        if ( m/^Finally, total (\d+) gene models were divided into 4 classes (:.*)/ ) {
-            $output .= "(1) After using MMseq2 to align the homologous protein sequences of closely related species with the reference genome, we successfully predicted $1 gene models. These models were then divided into four categories$2";
+        if ( m/^Finally, total (\d+) gene models were divided into 4 classes\s*(:.*)/ ) {
+            $output .= "(1) Using the homologous protein sequences of closely related species and the gene prediction method(s) of $homolog_method_str, we successfully predicted $1 gene models. These models were then divided into four categories$2\n";
         }
-        elsif ( m/Predicited by gth, (\d+); predicted by exonerate, (\d+), predicted by genewise, (\d+)/ ) {
-            $output .= "Among them, gth predicted $1; exonerate predicted $2; and genewise predicted $3.\n";
+        elsif ( m/^Source of gene models:\s*(.+)/ ) {
+            $output .= "Among them, the numbers of gene models from each source (prediction method) were: $1\n";
         }
     }
+    close IN;
 
     # （2）分析转录本预测基因情况
     my ($transcript_num, $ORF_num, $NGSreads_gene_num) = (0, 0);
@@ -907,9 +972,8 @@ sub statistics_combination {
     while ( <IN> ) {
         $alternative_gene_num = $1 if m/AS_gene number:\s+(\d+)/;
     }
-    close IN;
     $output .= "(7) Ultimately, the GETA software predicted $final_gene_num gene models, with $alternative_gene_num showing alternative splicing.\n\n";
-    
+
     return $output;
 }
 
@@ -982,41 +1046,55 @@ sub detecting_dependent_softwares {
         }
     }
 
-    # 检测mmseqs / genewise / gth / exonerate
+    # 检测同源蛋白预测所依赖的软件：mmseqs / parallel（exonerate、genewise、gth方法需要） 以及各方法对应的软件
     if ( $protein ) {
-        # 检测parallel
-        $software_info = `parallel --version`;
-        if ($software_info =~ m/GNU parallel/) {
-            print STDERR "parallel:\tOK\n";
-        }
-        else {
-            die "parallel:\tFailed\n\n";
-        }
+        my @mmseqs_methods = grep { $MMSEQS_HOMOLOG_METHODS{$_} } @homolog_methods;
 
-        $software_info = `mmseqs -h`;
-        if ($software_info =~ m/MMseqs2/) {
-            print STDERR "mmseqs:\tOK\n";
-        }
-        else {
-            die "mmseqs:\tFailed\n\n";
-        }
-
-        my $homolog_prediction_method = $1 if $config{"homolog_prediction"} =~ m/--method\s+(\S+)/;
-        $homolog_prediction_method = "exonerate,genewise,gth" if $homolog_prediction_method eq "all";
-        foreach ( split /,/, $homolog_prediction_method ) {
-            $cmdString = "$_ -version";
-            $cmdString =~ s/-version/--version/ if $_ eq "exonerate";
-            $software_info = `$cmdString`;
-            if ($software_info =~ m/$_/) {
-                print STDERR "$_:\tOK\n";
+        if ( @mmseqs_methods ) {
+            # 检测parallel
+            $software_info = `parallel --version`;
+            if ($software_info =~ m/GNU parallel/) {
+                print STDERR "parallel:\tOK\n";
             }
             else {
-                die "$_:\tFailed\n\n";
+                die "parallel:\tFailed\n\n";
+            }
+
+            # 检测mmseqs
+            $software_info = `mmseqs -h`;
+            if ($software_info =~ m/MMseqs2/) {
+                print STDERR "mmseqs:\tOK\n";
+            }
+            else {
+                die "mmseqs:\tFailed\n\n";
+            }
+        }
+
+        foreach my $method ( @homolog_methods ) {
+            if ( $method eq "miniprot" or $method eq "spaln" ) {
+                # miniprot和spaln的版本输出信息中不一定含有软件名称，因此仅检测其能否在终端中直接运行。
+                if ( &command_in_path($method) ) {
+                    print STDERR "$method:\tOK\n";
+                }
+                else {
+                    die "$method:\tFailed (the command '$method' can not be found in \$PATH)\n\n";
+                }
+            }
+            else {
+                $cmdString = "$method -version 2>&1";
+                $cmdString = "exonerate --version 2>&1" if $method eq "exonerate";
+                $software_info = `$cmdString`;
+                if ($software_info =~ m/$method/) {
+                    print STDERR "$method:\tOK\n";
+                }
+                else {
+                    die "$method:\tFailed\n\n";
+                }
             }
         }
     }
 
-    # 检测hmmer 
+    # 检测hmmer
     $software_info = `hmmscan -h`;
     if ($software_info =~ m/HMMER 3.(\d+)/) {
         print STDERR "hmmer:\tOK\n";
@@ -1037,7 +1115,7 @@ sub detecting_dependent_softwares {
     print STDERR "============================================\n\n";
     my $pwd = `pwd`; chomp($pwd);
     print STDERR "\nPWD: $pwd\n";
-    print STDERR (localtime) . ": CMD: $0 $command_line_geta\n\n"; 
+    print STDERR (localtime) . ": CMD: $0 $command_line_geta\n\n";
 }
 
 
@@ -1068,10 +1146,10 @@ Parameters:
     Enter the name of a species or class for RepeatMakser to perform a repeat sequence analysis for the genome using the nucleotide sequences of corresponding taxonomic species in the RepBase database. The file $software_dir/RepeatMasker_lineage.txt has the values that can be provided for this parameter to represent the class of species. For example, Eukaryota is for eukaryotes, Viridiplantae is for plants, Metazoa is for animals, and Fungi is for fungi. Before attempting to enter this parameter, the RepeatMasker program needed to be installed and the RepBase database needed to be configured. Note that RepBase is no longer providing free downloads and that the most recent version of the database, 20181026, is older and contains few repetitive sequence data.
 
     --RM_lib <string>    default: None
-    Enter a FASTA file and use the repetitive sequence to conduct genome-wide repeat analysis. This file is usually the output of RepeatModeler software's analysis of the entire genome sequence, indicating the repeated sequences across the genome. By default, the GETA program calls RepeatModeler to look up the entire genome sequence and acquire the species' repetitive sequence database. RepeatMakser is then called to search the repeated sequences. After adding this argument, the time-consuming RepeatModler step is skipped, which may significantly reduce the running time of the program. Additionally, the software supports the simultaneous use of the --RM_species_Dfam, --RM_species_RepBase, and --RM_lib arguments, so that multiple methods can be used for repeat sequence analysis, and eventually multiple results can be combined and the result of any method can be recognized.
+    Enter a FASTA file and use the repetitive sequence to conduct genome-wide repeat analysis. This file is usually the output of RepeatModeler software's analysis of the entire genome sequence, indicating the repeated sequences across the genome. By default, the GETA program calls RepeatModeler to look up the entire genome sequence and acquire the species' repetitive sequence database. RepeatMakser is then called to search the repeated sequences. After adding this argument, the time-consuming RepeatModler step is skipped, which may significantly reduce the running time of the program. Additionally, the software supports the simultaneous use of the --RM_species_Dfam, --RM_species_RepBase, and --RM_lib arguments, so that multiple methods can be used for repeat sequence analysis, and eventually multiple results can be combined and the result of any method can be recognized.
 
     --no_RepeatModeler    default: None
-    When this parameter is added, the program will no longer run the RepeatModeler step, which is suitable for cases where the repeats have been masked in the input genome file.
+    When this parameter is added, the program will no longer run the RepeatModeler step, which is suitable for cases where the repeats have been masked in the input genome file.
 
     --pe1 <string> --pe2 <string>    default: None
     Enter one or more pairs of FASTQ format files from Paired-End next-generation sequencing technology. This parameter supports the input of multiple pairs of FASTQ files, using commas to separate the FASTQ file paths of different libraries. This parameter also accepts compressed files in .gz format.
@@ -1086,19 +1164,19 @@ Parameters:
     When this parameter is added, all input next-generation sequencing data are treated as strand-specific, and the program will predict gene models only on the forward strand of the transcript. When two neighboring genes overlap in the genome, strand-specific sequencing data and this parameter can help accurately estimate gene borders.
 
     --protein <string>    default: None
-    Enter a FASTA file containing whole genome protein sequences from neighboring species. It is recommended to use whole genome homologous protein sequences from 3 ~ 10 different species. It is also recommended to modify the name of the protein sequence by appending the Species information, which begins with the species character, to the end of its original name. For example, if the protein sequence is XP_002436309.2, it will be better renamed XP_002436309_2_SpeciesSorghumBicolor. In this way, it is beneficial to retain the homologous matching results of more species in a gene region, improving gene prediction accuracy. The fasta_remove_redundancy.pl script included in GETA can be used to integrate the whole genome protein sequences from multiple species, and species information can be appended while redundancy is removed. The more species employed, the more accurate gene models may be predicted, but the computational time required increases. Note that evidence-supported gene prediction requires at least one type of homologous protein or next-generation sequencing data. 
+    Enter a FASTA file containing whole genome protein sequences from neighboring species. It is recommended to use whole genome homologous protein sequences from 3 ~ 10 different species. It is also recommended to modify the name of the protein sequence by appending the Species information, which begins with the species character, to the end of its original name. For example, if the protein sequence is XP_002436309.2, it will be better renamed XP_002436309_2_SpeciesSorghumBicolor. In this way, it is beneficial to retain the homologous matching results of more species in a gene region, improving gene prediction accuracy. The fasta_remove_redundancy.pl script included in GETA can be used to integrate the whole genome protein sequences from multiple species, and species information can be appended while redundancy is removed. The more species employed, the more accurate gene models may be predicted, but the computational time required increases. Note that evidence-supported gene prediction requires at least one type of homologous protein or next-generation sequencing data.
 
     --augustus_species <string>    default: None
-    When an AUGUSTUS species name is provided, the program starts from an existing species model or retrains a new species model when performing AUGUSTUS Training using gene models predicted by transcripts or homologous proteins. If the input AUGUSTUS species model exists, its parameters will be optimized. If not, a new AUGUSTUS species HMM model will be trained and then its parameters will be optimized. The AUGUSTUS Training step requires the installation of AUGUSTUS software and configuration of the \$AUGUSTUS_CONFIG_PATH environment variable. A species configuration folder from AUGUSTUS Training with the name provided in this parameter is generated in the temporary folder following the program's successful execution. If the user executing the program has write access, the produced species configuration folder can be copied to the species folder specified in \$AUGUSTUS_CONFIG_PATH. If you do not enter this parameter, the program will automatically set the value of this parameter to "GETA + prefix of genome FASTA file name + date + process ID".
+    When an AUGUSTUS species name is provided, the program starts from an existing species model or retrains a new species model when performing AUGUSTUS Training using gene models predicted by transcripts or homologous proteins. If the input AUGUSTUS species model exists, its parameters will be optimized. If not, a new AUGUSTUS species HMM model will be trained and then its parameters will be optimized. The AUGUSTUS Training step requires the installation of AUGUSTUS software and configuration of the \$AUGUSTUS_CONFIG_PATH environment variable. A species configuration folder from AUGUSTUS Training with the name provided in this parameter is generated in the temporary folder following the program's successful execution. If the user executing the program has write access, the produced species configuration folder can be copied to the species folder specified in \$AUGUSTUS_CONFIG_PATH. If you do not enter this parameter, the program will automatically set the value of this parameter to "GETA + prefix of genome FASTA file name + date + process ID".
 
     --HMM_db <string>    default: None
     Enter one or more HMM databases, for filtering gene models. This parameter supports the input of multiple HMM databases, separated by commas. The program filters those gene models that do not match in all databases when using multiple HMM databases.
 
     --BLASTP_db <string>    default: None
-    Enter one or more diamond databases, for filtering gene models. This parameter supports the input of multiple diamond databases, separated by commas. The program filters those gene models that do not match in all databases when using multiple diamond databases. When this parameter is left unset, the homologous proteins provided by the --protein parameter will be used to build the diamond database for filtering gene models.
+    Enter one or more diamond databases, for filtering gene models. This parameter supports the input of multiple diamond databases, separated by commas. The program filters those gene models that do not match in all databases when using multiple diamond databases. When this parameter is left unset, the homologous proteins provided by the --protein parameter will be used to build the diamond database for filtering gene models.
 
     --config <string>    default: None
-    Enter a parameter profile path to set the detailed parameters of other commands called by this program. If this parameter is left unset, When the genome size exceeds 1GB, the software installation directory's conf_for_big_genome.txt configuration file is automatically used. conf_for_small_genome.txt for genome size < 50MB, conf_all_defaults.txt for genome size between 50MB and 1GB.  Additionally, the thresholds for filtering the gene models typically need to be adjusted when GETA predicts an abnormally high number of genes. Then, the GETA pipeline can be rerun by setting this parameter to a new configuration file that is made by modifying the contents of the conf_all_defaults.txt file in the software installation directory.
+    Enter a parameter profile path to set the detailed parameters of other commands called by this program. If this parameter is left unset, When the genome size exceeds 1GB, the software installation directory's conf_for_big_genome.txt configuration file is automatically used. conf_for_small_genome.txt for genome size < 50MB, conf_all_defaults.txt for genome size between 50MB and 1GB.  Additionally, the thresholds for filtering the gene models typically need to be adjusted when GETA predicts an abnormally high number of genes. Then, the GETA pipeline can be rerun by setting this parameter to a new configuration file that is made by modifying the contents of the conf_all_defaults.txt file in the software installation directory. More parameters of the homolog_prediction program (such as --max_intron_size, --miniprot_options, --spaln_species and --spaln_options) can also be written in the [homolog_prediction] section of the configuration file.
 
     --BUSCO_lineage_dataset <string>    default: None
     Enter one or more BUSCO databases, the program will additionally perform BUSCO analysis on the whole genome protein sequences obtained by gene prediction. This parameter supports the input of multiple BUSCO databases, separated by commas. The information contained in the $software_dir/BUSCO_lineages_list.2021-12-14.txt file can be used to choose the proper BUSCO databases. Finally, the BUSCO results are exported to the 7.output_gene_models subdirectory and to the gene_prediction.summary file.
@@ -1124,13 +1202,13 @@ Parameters:
     Set the maximum number of NGSreads used by the program. When the program is given too many NGSreads, it will automatically select a certain amount of data based on the size of the genome. If you add this parameter value, it specifies the number of paired reads or single-end reads used in Paired-end sequencing or single-end sequencing, respectively. If you do not set this parameter, the program automatically calculates the number of read pairs used, which is equal to ((2 ** (log10(genome_size / 1,000,000) - 1)) * 50 M). That is, 10M genome uses up to 50M read pairs, PE150 sequencing data volume of 15G; 100M genome uses up to 100M read pairs, PE150 sequencing data volume of 30G; 1G genome uses up to 200M read pairs, PE150 sequencing data volume of 60G.
 
     --put_massive_temporary_data_into_memory    default: None
-    Set up massive temporary files to be stored in memory. This prevents the program from running slowly due to insufficient disk I/O, but it requires more RAM. Many steps in this pipeline would split the input data into numerous pieces and then parallelize its command lines to speed up the computation, although this results in a significant I/O load on the disk. Therefore, low disk performance has a significant impact on computation speed. If your system memory is sufficient, you are advised to add this parameter so that massive temporary data can be stored in the /dev/shm folder, which represents the memory, to speed up program execution. In addition, the program automatically deletes temporary data in /dev/shm to free up memory after the data splitting and parallelization steps are completed.
+    Set up massive temporary files to be stored in memory. This prevents the program from running slowly due to insufficient disk I/O, but it requires more RAM. Many steps in this pipeline would split the input data into numerous pieces and then parallelize its command lines to speed up the computation, although this results in a significant I/O load on the disk. Therefore, low disk performance has a significant impact on computation speed. If your system memory is sufficient, you are advised to add this parameter so that massive temporary data can be stored in the /dev/shm folder, which represents the memory, to speed up program execution. In addition, the program automatically deletes temporary data in /dev/shm to free up memory after the data splitting and parallelization steps are completed. Note that the homolog prediction step (homolog_prediction) does not use this parameter.
 
     --genetic_code <int>    default: 1
-    Enter the genetic code. The values for this parameter can be found on the NCBI Genetic Codes website at: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi. This parameter is mainly effective for the gene prediction steps through homologous proteins, as well as the situation where start and stop codon information is used for filling the end of incomplete gene models.
+    Enter the genetic code. The values for this parameter can be found on the NCBI Genetic Codes website at: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi. This parameter is mainly effective for the gene prediction steps through homologous proteins, as well as the situation where start and stop codon information is used for filling the end of incomplete gene models.
 
-    --homolog_prediction_method <string>    default: all
-    Enter a method for gene prediction using homologous proteins. The value can be set to exonerate, genewise, gth, or all. This parameter supports the input of multiple methods, separated by commas. If the value was set to all, it indicates all three methods were used. The more methods you use, the more computation time you consume, but the better the result will be. Of the three methods, exonerate and genewise produced similar accuracy results, but gth showed a significant decrease in sensitivity and a significant increase in specificity. The following table shows the accuracy of the prediction results for the Oryza sativa genome using three methods. We compared the annotation results of 28736 gene models on NCBI to assess four accuracy metrics: gene level sensitivity, gene level specificity, exon level specificity, and exon level specificity. It is obvious that using multiple methods for gene prediction, combining results, and then filtering can result in a closer number of gene models to the actual number of genes and more accurate results. In addition, this parameter has a higher priority and can override the homolog_prediction parameter value in the parameter configuration file specified by --config.
+    --homolog_prediction_method <string>    default: miniprot
+    Enter the method(s) for gene prediction using homologous proteins. It is consistent with the --method parameter of the homolog_prediction program. The value can be set to exonerate, genewise, gth, miniprot, spaln, or all. This parameter supports the input of multiple methods, separated by commas, e.g. exonerate,miniprot,spaln; if the value was set to all, all five methods are used. The methods are: (1) exonerate, genewise and gth: MMseqs2 first aligns the homologous proteins to the genome to locate the gene regions, and then the corresponding software predicts the gene structures in detail. These three methods are already integrated region by region inside the pipeline, so they are regarded as one source (mmseqs). Using them requires the installation of MMseqs2 and GNU parallel; (2) miniprot: aligns the homologous proteins to the genome directly and predicts gene models; it is regarded as one source; (3) spaln: aligns the homologous proteins to the genome directly and predicts gene models; it is regarded as another source. When two or more sources (mmseqs, miniprot, spaln) are used, the program compares the results of every two sources, ranks the sources by prediction accuracy, merges the gene models with redundancy removed, and filters the low-confidence class C and D gene models according to the support of introns. The summarized pairwise comparison results are written to the file \$out_prefix.homolog_method_comparison_stats.txt. The more methods you use, the more computation time you consume, but the result is often better. Of the three MMseqs2-based methods, exonerate and genewise produced similar accuracy results, but gth showed a significant decrease in sensitivity and a significant increase in specificity. The following table shows the accuracy of the prediction results for the Oryza sativa genome using these three methods (all in the table means that exonerate, genewise and gth were used together). We compared the annotation results of 28736 gene models on NCBI to assess four accuracy metrics: gene level sensitivity, gene level specificity, exon level specificity, and exon level specificity. It is obvious that using multiple methods for gene prediction, combining results, and then filtering can result in a closer number of gene models to the actual number of genes and more accurate results. In addition, this parameter has a higher priority and can override the --method parameter value of homolog_prediction in the parameter configuration file specified by --config.
     Method     Gene_num    gene_sensitivity    gene_specificity    exon_sensitivity    exon_specificity
     exonerate  31310       46.17%              42.37%              62.15%              78.45%
     genewise   32407       46.47%              41.21%              64.66%              77.15%
@@ -1140,7 +1218,7 @@ Parameters:
 
     --optimize_augustus_method <int>    default: 3
     Enter the method for AUGUSTUS parameters optimization. 1, indicates that only BGM2AT.optimize_augustus is called for optimization, which can fully utilize all CPU threads and run at a fast speed; 2, indicates that only the optimize_augustus.pl program provided by the AUGUSTUS software is used for optimization, which is slower than the first method, but the results are better; 3, indicates that BGM2AT.optimize_augustus is optimized first, then the optimize_augustus.pl program provided by the AUGUSTUS software is used, followed by further optimization. This method prioritizes both speed and effectiveness. It can cover the values of the same parameters specified in the --config parameter configuration file for BGM2AT.
-    
+
     --no_alternative_splicing_analysis    default: None
     When this parameter is added, the program does not perform alternative splicing analysis. Note that GETA defaults to perform alternative splicing analysis based on intron and base sequencing depth information when NGS reads were input.
 
@@ -1166,6 +1244,8 @@ This software has been tested and successfully run on Rocky 9.2 system using the
 14. diamond (version 2.1.8)
 15. hmmscan (version: 3.3.2)
 16. busco (Version: 5.4.7)
+
+In addition, when the miniprot or spaln method is used by --homolog_prediction_method, the miniprot or spaln software must be installed and can be executed directly in the terminal.
 
 Version of GETA: 2.7.1
 
@@ -1198,6 +1278,26 @@ sub parsing_input_parameters {
     die "No RNA-Seq short reads or homologous proteins was input\n" unless (($pe1 && $pe2) or $single_end or $sam or $protein);
     # 检测AUGUSTUS的环境变量\$AUGUSTUS_CONFIG_PATH
     die "The directory assigned by \$AUGUSTUS_CONFIG_PATH was not exists.\n" unless -e $ENV{"AUGUSTUS_CONFIG_PATH"};
+
+    # 解析--homolog_prediction_method，与homolog_prediction程序的--method参数保持一致：
+    # 可选exonerate、genewise、gth、miniprot、spaln或all（使用全部五种），多个值用逗号分割，默认为miniprot。
+    $homolog_prediction_method ||= "miniprot";
+    my %selected_method;
+    foreach my $m ( split /[\s,]+/, lc($homolog_prediction_method) ) {
+        next if $m eq "";
+        if ( $m eq "all" ) {
+            $selected_method{$_} = 1 foreach @ALL_HOMOLOG_METHODS;
+        }
+        elsif ( grep { $_ eq $m } @ALL_HOMOLOG_METHODS ) {
+            $selected_method{$m} = 1;
+        }
+        else {
+            die "Error: The supported value of --homolog_prediction_method should be exonerate, genewise, gth, miniprot, spaln or all, you input '$m' was wrong.\n";
+        }
+    }
+    @homolog_methods = grep { $selected_method{$_} } @ALL_HOMOLOG_METHODS;
+    die "Error: No method was specified by --homolog_prediction_method.\n" unless @homolog_methods;
+    $homolog_method_str = join ",", @homolog_methods;
 
     my $date = `date +%Y%m%d%H%M%S`; chomp($date);
     unless ( $augustus_species ) {
@@ -1544,12 +1644,15 @@ sub choose_config_file {
     close IN;
 
     # 覆盖%config数据
-    $homolog_prediction_method ||= "all";
-    $homolog_prediction_method = "exonerate,genewise,gth" if $homolog_prediction_method eq "all";
-    foreach ( split /,/, $homolog_prediction_method ) {
-        die "Error: The supported value of --homolog_prediction_method should be exonerate, genewise or gth, you input '$_' was wrong.\n" unless ( $_ eq "exonerate" or $_ eq "genewise" or $_ eq "gth" );
+    # --homolog_prediction_method参数（已在parsing_input_parameters中解析和检查）的优先级高于配置文件中homolog_prediction的--method参数。
+    # 若配置文件中没有--method参数，则追加之，避免homolog_prediction使用其自身的默认方法。
+    my $method_option = "--method $homolog_method_str";
+    if ( defined $config{"homolog_prediction"} && $config{"homolog_prediction"} =~ m/--method\s+\S+/ ) {
+        $config{"homolog_prediction"} =~ s/--method\s+\S+/$method_option/;
     }
-    $config{"homolog_prediction"} =~ s/--method \S+/--method $homolog_prediction_method/;
+    else {
+        $config{"homolog_prediction"} .= " $method_option ";
+    }
 
     $optimize_augustus_method ||= 3;
     unless ( $optimize_augustus_method == 1 or $optimize_augustus_method == 2 or $optimize_augustus_method == 3 ) {
@@ -1557,8 +1660,8 @@ sub choose_config_file {
     }
     $config{"BGM2AT"} =~ s/--optimize_augustus_method \d+/--optimize_augustus_method $optimize_augustus_method/;
 
+    # 注意：homolog_prediction程序不支持--put_massive_temporary_data_into_memory参数，因此该参数仅对BGM2AT等步骤生效。
     if ( defined $put_massive_temporary_data_into_memory ) {
-        $config{"homolog_prediction"} =~ s/\s*$/ --put_massive_temporary_data_into_memory/;
         $config{"BGM2AT"} =~ s/\s*$/ --put_massive_temporary_data_into_memory/;
     }
 

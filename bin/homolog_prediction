@@ -11,30 +11,9 @@ use POSIX qw/strftime :sys_wait_h/;
 use Fcntl qw/:flock/;
 use Digest::MD5;
 
-my $command_line = "$0 " . join(" ", @ARGV);
-my $prog_name    = basename($0);
-my $self_path    = abs_path($0) or die "Error: can not resolve the real path of $0.\n";
-my $bin_path     = dirname($self_path);
-
-my @ALL_METHODS = qw/gth exonerate genewise miniprot spaln/;
-my %MM_METHOD   = map { $_ => 1 } qw/gth exonerate genewise/;
-
-# 传给01MMseqs2CalHits的固定阈值（写入断点续跑的签名，若以后修改这里，相应步骤会自动重算）
-my $HIT_COVER_RATIO = 0.9;
-my $HIT_SCORE_RATIO = 0.4;
-
-# 全局状态：临时目录、文件锁、当前正在运行的子进程
-my ($tmp_dir, $tmp_dir_ready, $lock_fh);
-my $child_pid;
-
-# 无论是正常报错、被Ctrl-C/kill中断，还是子命令失败，只要临时目录已经建立，退出时都提示如何续跑。
-END {
-    if ($tmp_dir_ready && $? != 0) {
-        print STDERR "\n$prog_name did not finish. The finished steps are kept in $tmp_dir .\n"
-                   . "To resume, run the same command again (you may also change --method or other parameters) with: --tmp_dir $tmp_dir\n";
-    }
-}
-
+########################################################################
+# 中文用法说明（放在代码最前面；英文用法说明放在文件最末尾的__DATA__部分）
+########################################################################
 my $usage_cn = <<'USAGE';
 Usage:
     __PROG__ [options] homolog_proteins.fasta genome_seq.fasta > out.gff3
@@ -52,7 +31,7 @@ Usage:
     程序运行流程：
       0. 检查参数、输入文件，并根据--method检测所需的命令是否能在终端中直接执行（不满足则在开始运行前报错退出）。
       1. 依次运行--method指定的各个预测流程，每个来源得到一份GFF3结果（含A~D四类基因模型）、一份未补齐末端的原始GFF3和一份同源蛋白比对GFF3。
-      2. 若存在多个来源，程序会先按步骤2.5得到的准确性排序，对各来源的GFF3文件重新排列先后顺序，再调用GFF3_merging_and_removing_redundancy（--first_file_score 0.0，同一顺位下各来源地位平等，但输入顺序已按预测准确性由高到低排列）整合各来源的基因模型，再调用GFF3Clear去重叠、重新编号，得到临时文件夹下的 results/all.clear.gff3（含四类基因模型，尚未按intron过滤）。
+      2. 若存在多个来源，程序会先按步骤2.5得到的准确性排序，对各来源的GFF3文件重新排列先后顺序，再调用GFF3_merging_and_removing_redundancy（--first_file_score 0.0，同一顺位下各来源地位平等，但输入顺序已按预测准确性由高到低排列；遗传密码通过--genetic_code传递，起始密码子和终止密码子由该程序根据遗传密码自动确定）整合各来源的基因模型，再调用GFF3Clear去重叠、重新编号，得到临时文件夹下的 results/all.clear.gff3（含四类基因模型，尚未按intron过滤）。
       2.5 只要存在两个及以上来源，程序就会在整合之前，对每两个来源两两调用GFF3_merging_and_removing_redundancy命令的--compare_2gff3_stats功能，比较每两个来源基因模型的CDS重叠冲突情况和得分高低；再汇总每个来源在所有两两比较中的胜出比例，得到mmseqs、miniprot、spaln这些来源的预测准确性排序，并按该顺序（准确性从高到低）排列输入给步骤2的GFF3_merging_and_removing_redundancy命令的GFF3文件顺序：由于该命令在多个基因模型得分打平时（--first_file_score 0.0下得分打平很常见）优先保留排在前面的输入文件，因此让预测更准确的来源排在前面，有助于在打分打平的情况下优先保留更可信的基因模型，得到更好的整合结果。这一步骤本身不改变各来源的基因模型内容，只影响它们在步骤2中的输入顺序。若设置了--method_comparison_stats参数，程序还会将两两比较的详细统计信息汇总输出到该参数指定的文件中，用于评估各方法的预测效果及彼此之间的一致性；不设置该参数时，两两比较仍会执行以确定准确性排序，只是不额外生成该汇总报告文件（每一对来源详细的逐基因冲突记录，以及排序时依据的胜出比例，仍会保留在--tmp_dir目录下的 compare.<来源1>_vs_<来源2>.stats.txt 文件中）。
       3. 用intron的Supported_times过滤C和D类基因模型：分别对每个来源的GFF3文件，根据其A和B类基因模型所有introns的Supported_times，按--threshod_ratio_of_intron_Supported_times指定的分位置计算出该来源的阈值threshold_value（默认0.5，即中位数）；然后对整合后的每个C或D类基因模型，依据其来源（GFF3第2列：gth/exonerate/genewise属于mmseqs来源，miniprot，spaln）选取对应阈值：若该基因模型所有introns的Supported_times都低于阈值，则过滤该基因模型；没有intron的（单外显子）C/D类基因模型不做过滤。A和B类基因模型不过滤。过滤后再次调用GFF3Clear重新编号，输出到标准输出。
       4. 若指定--output_raw_GFF3或--output_alignment_GFF3，则输出的是多个来源整合后的内容：raw GFF3调用GFF3_merging_and_removing_redundancy整合后再GFF3Clear（整合顺序同样使用步骤2.5得到的准确性排序）；比对GFF3为各来源比对结果去重后按基因组位置排序的合并。
@@ -86,11 +65,10 @@ Usage:
     设置MMseqs2比对结果的Identity、E-value和homolog_coverage过滤阈值（用于exonerate/genewise/gth方法）。
 
     --method <string>    default: miniprot
-    设置基因预测的方法，可选exonerate、genewise、gth、miniprot、spaln或all（使用全部五种）。使用多种方法时用逗号分割，例如 exonerate,miniprot,spaln。
-    使用相同的--tmp_dir重新运行并修改该参数时，已完成的方法结果会被复用（见上文"断点续跑"说明）。
+    设置基因预测的方法，可选exonerate、genewise、gth、miniprot、spaln或all（使用全部五种）。使用多种方法时用逗号分割，例如 exonerate,miniprot,spaln。使用相同的--tmp_dir重新运行并修改该参数时，已完成的方法结果会被复用（见上文"断点续跑"说明）。
 
     --genetic_code <int>    default: 1
-    设置遗传密码，参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。
+    设置遗传密码，起始密码子和终止密码子由遗传密码自动确定（该参数同时传递给各个预测流程、fillingEndsOfGeneModels、GFF3_merging_and_removing_redundancy和GFF3Clear相关步骤，不再使用--start_codon和--stop_codon参数），参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。支持的遗传密码表编号为：1~6、9~16、21~33。
 
     --threshod_ratio_of_intron_Supported_times <float>    default: 0.5
     （也可写作--threshold_ratio_of_intron_Supported_times）取值范围[0, 1]。对每个来源，将其A和B类基因模型所有introns的Supported_times从小到大排序，取该参数所处位置的值作为threshold_value（0.5即中位数）。C或D类基因模型所有introns的Supported_times都低于其来源的threshold_value时被过滤。设置为0则不过滤；值越大过滤越严格。
@@ -129,149 +107,45 @@ Usage:
     程序运行的临时文件夹。指定已有的临时文件夹重新运行时，已经完成且参数和输入文件没有变化的步骤会被跳过（断点续跑）；某一步的参数或输入文件发生变化时，只有受影响的步骤及其依赖的中间结果会自动重新计算（详见上文"断点续跑"说明）。若不设置该参数，每次运行都会新建一个带日期和进程号的临时文件夹，无法续跑；程序被中断时会提示应使用的--tmp_dir。
 
     --help    default: None
-    显示英文帮助信息并退出（默认的帮助信息为英文）。
+    Display the English help and exit.
 
     --chinese_help    default: None
     显示中文帮助信息并退出。
 
-    依赖：本程序所在目录需要有 GFF3_merging_and_removing_redundancy、fillingEndsOfGeneModels、GFF3Clear，以及所选方法对应的 homolog_prediction.0X 脚本；
-    终端中需要能直接运行所选方法对应的命令：mmseqs（exonerate/genewise/gth方法需要）、exonerate、genewise、gth、miniprot、spaln。
-    输入文件、临时文件夹和输出路径中不能包含空格或shell特殊字符。
+    依赖：本程序所在目录需要有 GFF3_merging_and_removing_redundancy、fillingEndsOfGeneModels、GFF3Clear，以及所选方法对应的 homolog_prediction.0X 脚本；终端中需要能直接运行所选方法对应的命令：mmseqs（exonerate/genewise/gth方法需要）、exonerate、genewise、gth、miniprot、spaln。输入文件、临时文件夹和输出路径中不能包含空格或shell特殊字符。
 
 USAGE
 
-my $usage_en = <<'USAGE_EN';
-Usage:
-    __PROG__ [options] homolog_proteins.fasta genome_seq.fasta > out.gff3
+my $command_line = "$0 " . join(" ", @ARGV);
+my $prog_name    = basename($0);
+my $self_path    = abs_path($0) or die "Error: can not resolve the real path of $0.\n";
+my $bin_path     = dirname($self_path);
 
-    This program predicts genes in the genome of a target species using the whole-genome protein sequences of closely related species, and writes the result to STDOUT in GFF3 format.
-    Five prediction methods are supported. They can be used alone or in any combination; the results of multiple methods are merged and redundancy-removed by the program:
-      (1) exonerate / genewise / gth: MMseqs2 first aligns the homologous proteins to the genome to locate the gene regions, and then the corresponding software predicts the exon-intron structures
-          (homolog_prediction.01MMseqs2CalHits, .02HitToGenePrediction and .03GetGeneModels are called in turn).
-          These three methods are already integrated region by region inside this pipeline, so the program regards them as one source (mmseqs);
-      (2) miniprot: calls homolog_prediction.04miniprot2GeneModels; the source is miniprot;
-      (3) spaln: calls homolog_prediction.05spaln2GeneModels; the source is spaln.
+my @ALL_METHODS = qw/gth exonerate genewise miniprot spaln/;
+my %MM_METHOD   = map { $_ => 1 } qw/gth exonerate genewise/;
 
-    The gene models in the result are divided into four classes: A, excellent gene models: 100% coverage of the homologous protein, and the start codon and stop codon are consistent with the protein alignment; B, good gene models: coverage of the homologous protein >= 80%, and the length of the complete gene model after forced end-filling >= 80% of the homologous protein length; C, fair gene models: coverage >= 40%, and the length of the complete gene model after forced end-filling >= 40% of the homologous protein length; D, poor gene models: coverage < 40%, or the length of the complete gene model after forced end-filling < 40% of the homologous protein length, or the gene model can not be completed by forced end-filling. All gene models of the first three classes are complete (the last CDS contains the stop codon); some class D gene models are complete and some are not.
+# GFF3_merging_and_removing_redundancy和fillingEndsOfGeneModels的--genetic_code支持的NCBI遗传密码表编号
+# （起始密码子和终止密码子由遗传密码自动确定，不再使用--start_codon和--stop_codon参数）
+my @SUPPORTED_GENETIC_CODES = (1 .. 6, 9 .. 16, 21 .. 33);
 
-    Each intron line in the output contains the tag Supported_times, the number of times that the intron is supported by different prediction methods or different homologous proteins. For example, if an intron is supported by 10 homologous proteins in each of 3 prediction methods, its Supported_times is 30.
+# 传给01MMseqs2CalHits的固定阈值（写入断点续跑的签名，若以后修改这里，相应步骤会自动重算）
+my $HIT_COVER_RATIO = 0.9;
+my $HIT_SCORE_RATIO = 0.4;
 
-    Workflow:
-      0. Check the parameters and input files, and check that the commands required by --method can be executed directly in the terminal (if not, the program exits with an error before running anything).
-      1. Run the prediction pipeline of each source specified by --method. Each source yields a GFF3 result (containing gene models of classes A~D), a raw GFF3 (the ends are not filled) and a homolog alignment GFF3.
-      2. If there are multiple sources, the program first reorders the sources' GFF3 files by the prediction-accuracy ranking obtained in step 2.5,
-         then GFF3_merging_and_removing_redundancy (--first_file_score 0.0, sources are otherwise equal in priority, but the input order now reflects
-         accuracy from high to low) merges the gene models of the sources, and then GFF3Clear removes overlaps and renumbers the genes.
-         The result is results/all.clear.gff3 in the temporary directory (all four classes, before intron filtering).
-      2.5 As long as there are two or more sources, before merging the program compares every two sources with the --compare_2gff3_stats function of
-          GFF3_merging_and_removing_redundancy, and summarizes each source's overall win proportion across all pairwise comparisons to obtain an
-          accuracy ranking of the sources (mmseqs, miniprot, spaln). The sources are then fed into the step-2 GFF3_merging_and_removing_redundancy
-          command in this order (highest accuracy first): since that command keeps the earlier input file when two gene models tie in score
-          (ties are common with --first_file_score 0.0), placing the more accurate source first means a tied gene model from the more reliable
-          source is kept, improving the merged result. This step itself never changes the gene models of any source, it only affects the order in
-          which they are fed into step 2. If --method_comparison_stats is set, the program additionally writes the summarized pairwise comparison
-          statistics to the file it specifies, for evaluating the prediction performance of the methods and their consistency; if it is not set,
-          the pairwise comparisons still run to determine the accuracy ranking, they just do not produce this extra summary report file (the
-          detailed gene-by-gene conflict records of each pair of sources, and the win proportions the ranking is based on, are still kept in the
-          file compare.<source1>_vs_<source2>.stats.txt in the --tmp_dir directory).
-      3. Filter class C and D gene models by the Supported_times of introns: for each source, the threshold_value is calculated from the Supported_times of all introns of its class A and B gene models
-         at the quantile given by --threshod_ratio_of_intron_Supported_times (default 0.5, the median).
-         Each class C or D gene model of the merged result then uses the threshold of its source (column 2 of the GFF3: gth/exonerate/genewise belong to the mmseqs source, then miniprot and spaln);
-         if the Supported_times of all its introns are lower than the threshold, the gene model is removed. Class C/D gene models without an intron (single-exon) are not filtered.
-         Class A and B gene models are never filtered. After filtering, GFF3Clear is run again to renumber the genes, and the result is written to STDOUT.
-      4. If --output_raw_GFF3 or --output_alignment_GFF3 is specified, the output contains the merged content of all sources:
-         the raw GFF3 is merged by GFF3_merging_and_removing_redundancy (using the same accuracy-based ordering from step 2.5) and then processed
-         by GFF3Clear; the alignment GFF3 is the combination of the alignment results of all sources, de-duplicated and sorted by genome position.
-      5. At the end, the program prints the statistics of the final gene models to STDERR: the number of gene models in each of the four classes, the number of gene models of each source (prediction method),
-         and a matrix of the number of gene models of each method in each of the classes A, B, C and D.
+# 全局状态：临时目录、文件锁、当前正在运行的子进程
+my ($tmp_dir, $tmp_dir_ready, $lock_fh);
+my $child_pid;
 
-    Resuming an interrupted run (--tmp_dir):
-      For each step the program records in the temporary directory a signature (content fingerprints of the input files + the relevant parameters, *.sig) and a completion mark (*.ok).
-      After the program is interrupted (Ctrl-C, kill, power failure, or a failed command), run the same command again with the same --tmp_dir to continue: the finished steps are skipped,
-      and an unfinished step continues from the position where its own program can resume.
-      (1) The fingerprint of an input file consists of its size and the MD5 values of several data blocks spread over the whole file. It does not depend on the modification time, so copying or touching a file does not cause recomputation.
-      (2) When --method is changed in a re-run:
-            - The finished sources (mmseqs, miniprot, spaln) and their results are reused directly and only the newly added sources are run. For example, after running --method exonerate,
-              running --method exonerate,miniprot,spaln skips the whole exonerate part and only runs miniprot and spaln;
-            - When exonerate/genewise/gth is added to or removed from the mmseqs source, the MMseqs2 alignment and the finished "gene region chunk x prediction method" results are reused,
-              only the newly added method is calculated, and then the best gene model of each region is picked out again;
-            - After a source is removed, its results stay in the temporary directory and can still be reused if it is added back later; the final merging and filtering are always redone for the current --method;
-      (3) When other parameters are changed, only the steps affected by them are recomputed: for example, changing --identity/--evalue/--homolog_coverage only redoes the MMseqs2 Hit filtering and not the time-consuming mmseqs search;
-          changing --overlap_coverage only redoes the steps after the miniprot/spaln alignment without realigning; changing --threshod_ratio_of_intron_Supported_times only redoes the final filtering;
-          parameters that do not affect the intermediate results, such as --cpu and --gene_prefix, do not trigger recomputation;
-      (4) Only one program may use the same --tmp_dir at a time (file lock); when the program is interrupted or fails, it prints the --tmp_dir needed for resuming at the end.
-      (5) If the --tmp_dir was generated by an older version of the program, the completion records have a different format and their parameters can not be verified, so the corresponding steps are recomputed once.
+# 无论是正常报错、被Ctrl-C/kill中断，还是子命令失败，只要临时目录已经建立，退出时都提示如何续跑。
+END {
+    if ($tmp_dir_ready && $? != 0) {
+        print STDERR "\n$prog_name did not finish. The finished steps are kept in $tmp_dir .\n"
+                   . "To resume, run the same command again (you may also change --method or other parameters) with: --tmp_dir $tmp_dir\n";
+    }
+}
 
-    Theoretically, the more homologous proteins are used, the better the accuracy and completeness of the predicted gene models, and the longer the running time. Whole-genome protein sequences of 5~10 species are recommended as input.
-
-    --max_hits_num_per_match_region <int>    default: 10
-    Set the maximum number of homologous protein hits in one homologous match region (one gene region) of the genome (for the exonerate/genewise/gth methods).
-
-    --max_hit_num_per_single_species <int>    default: 2
-    Set the maximum number of homologous protein hits from a single species in one homologous match region of the genome (for the exonerate/genewise/gth methods). To make this parameter work, the protein names must contain the species name: the program recognizes the keyword species (case-insensitive) in the name and the characters [a-zA-Z0-9] following it as the species name, e.g. the species name of XP_002436309_2_SpeciesSorghumBicolor is SpeciesSorghumBicolor.
-
-    --cpu <int>    default: 8
-    Set the number of threads or parallel processes used by each software.
-
-    --identity <float>    default: 0.2
-    --evalue <float>    default: 1e-9
-    --homolog_coverage <float>    default: 0.3
-    Set the Identity, E-value and homolog_coverage thresholds used to filter the MMseqs2 results (for the exonerate/genewise/gth methods).
-
-    --method <string>    default: miniprot
-    Set the gene prediction methods. The value can be exonerate, genewise, gth, miniprot, spaln or all (use all five methods). Use commas to separate multiple methods, e.g. exonerate,miniprot,spaln.
-    When the program is re-run with the same --tmp_dir and this parameter is changed, the results of the finished methods are reused (see "Resuming an interrupted run" above).
-
-    --genetic_code <int>    default: 1
-    Set the genetic code. Please refer to NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi.
-
-    --threshod_ratio_of_intron_Supported_times <float>    default: 0.5
-    (Can also be written as --threshold_ratio_of_intron_Supported_times.) Range [0, 1]. For each source, the Supported_times of all introns of its class A and B gene models are sorted from small to large, and the value at the position given by this parameter is taken as threshold_value (0.5 is the median). A class C or D gene model is removed if the Supported_times of all its introns are lower than the threshold_value of its source. Set to 0 to disable filtering; the larger the value, the stricter the filtering.
-
-    --output_raw_GFF3 <string>    default: None
-    Output the merged GFF3 file of all sources in which the ends of the gene models are not forcibly filled. It is the raw result of the homology-based prediction.
-
-    --output_alignment_GFF3 <string>    default: None
-    Output the merged homolog alignment GFF3 file of all sources, containing the alignments of the homologous proteins to the genome (the best alignment of each homologous protein is output for each gene region).
-
-    --max_alignment_num_for_each_gene_region <int>    default: 5
-    When outputting the homolog alignment GFF3, the maximum number of homologous proteins output for each gene region of each source.
-
-    --method_comparison_stats <string>    default: None
-    Effective when --method specifies two or more sources (any combination of the three sources mmseqs, miniprot and spaln). Whenever this is the case, the program always compares every two sources with the --compare_2gff3_stats parameter of GFF3_merging_and_removing_redundancy before merging, and uses the result to compute a prediction-accuracy ranking of the sources that decides the order in which their GFF3 files are fed into the merging step (see item 2.5 of "Workflow" above); this pairwise comparison runs regardless of whether this parameter is set. Setting this parameter additionally writes the summarized pairwise comparison results (the details of each pair of sources, and the overall win proportion of every source in all pairwise comparisons — the very proportion the accuracy ranking is based on) to the file specified by this parameter, to evaluate which method predicts better and how consistent the methods are. The detailed gene-by-gene conflict records of each pair of sources are always kept in the file compare.<source1>_vs_<source2>.stats.txt in the --tmp_dir directory for further reference, regardless of whether this parameter is set. Pairwise comparisons that have finished with unchanged input are not repeated when the program is resumed.
-
-    --overlap_coverage <float>    default: 0.30
-    The CDS overlap coverage threshold, passed to --overlap_coverage of GFF3_merging_and_removing_redundancy and --coverage of GFF3Clear to remove redundant gene models with overlapping CDS; it is also passed to the miniprot and spaln pipelines.
-
-    --max_intron_size <int>    default: None
-    Set the maximum intron length, passed to exonerate (--maxintron), miniprot (-G) and spaln (-yM). If not set, each pipeline uses its own default value.
-
-    --miniprot_options <string>    default: None
-    Extra options passed to miniprot. If the value starts with --, join it with an equals sign and quote it, e.g. --miniprot_options="--outs=0.95 -N 20".
-
-    --spaln_species <string>    default: None
-    The species-specific parameter set used by spaln (the -T option of spaln). It is recommended to set it to the species most closely related to the target species, e.g. arabidopsis_thaliana, zea_mays.
-
-    --spaln_options <string>    default: None
-    Extra options passed to the spaln alignment command, e.g. --spaln_options="-LS -yX2".
-
-    --gene_prefix <string>    default: homolog
-    Set the prefix of the final gene IDs.
-
-    --tmp_dir <string>    default: tmp_$date$pid
-    The temporary directory of the program. When an existing temporary directory is specified, the steps that have finished and whose parameters and input files are unchanged are skipped (resuming an interrupted run); when the parameters or input files of a step change, only the affected steps and the intermediate results they depend on are recomputed automatically (see "Resuming an interrupted run" above). If this parameter is not set, a new temporary directory named with the date and process ID is created in each run and the run can not be resumed; when the program is interrupted, it prints the --tmp_dir that should be used.
-
-    --help    default: None
-    Display this help (English) and exit.
-
-    --chinese_help    default: None
-    Display the Chinese help and exit.
-
-    Dependencies: GFF3_merging_and_removing_redundancy, fillingEndsOfGeneModels and GFF3Clear, and the homolog_prediction.0X scripts corresponding to the selected methods must be in the directory of this program;
-    the commands corresponding to the selected methods must be executable directly in the terminal: mmseqs (required by the exonerate/genewise/gth methods), exonerate, genewise, gth, miniprot and spaln.
-    The paths of the input files, the temporary directory and the output files can not contain spaces or shell special characters.
-
-USAGE_EN
+# 英文用法说明位于文件最末尾的__DATA__部分
+my $usage_en = do { local $/; my $t = <DATA>; defined $t ? $t : "" };
 $usage_cn =~ s/__PROG__/$prog_name/g;
 $usage_en =~ s/__PROG__/$prog_name/g;
 
@@ -336,6 +210,9 @@ die "Error: --overlap_coverage must be in [0, 1].\n" if $o{overlap_coverage} < 0
 die "Error: --threshod_ratio_of_intron_Supported_times must be in [0, 1].\n"
     if $o{threshod_ratio_of_intron_Supported_times} < 0 || $o{threshod_ratio_of_intron_Supported_times} > 1;
 die "Error: --genetic_code must be a positive integer.\n" if $o{genetic_code} < 1;
+# --genetic_code会直接传给GFF3_merging_and_removing_redundancy和fillingEndsOfGeneModels，因此在开始运行前就检查其是否被支持，避免耗时的预测完成后才在整合步骤报错
+die "Error: --genetic_code $o{genetic_code} is not supported, the supported genetic code tables are: 1-6, 9-16, 21-33.\n"
+    unless grep { $_ == $o{genetic_code} } @SUPPORTED_GENETIC_CODES;
 die "Error: --max_intron_size must be > 0.\n" if defined $o{max_intron_size} && $o{max_intron_size} <= 0;
 die "Error: --gene_prefix must not be empty.\n" if $o{gene_prefix} eq "";
 
@@ -422,9 +299,6 @@ if (@mm_methods && $protein_info->{with_species} == 0) {
     print STDERR "Warning: no protein name contains the keyword 'species', so --max_hit_num_per_single_species can not take effect (each protein name is regarded as a species).\n";
 }
 my %genome_order = %{ $genome_info->{order} };
-
-# 密码子
-my ($start_codon, $stop_codon) = &codon_sets($o{genetic_code});
 
 # 输入文件指纹（基于内容，不依赖修改时间）
 my $prot_fp   = &file_fp($input_protein);
@@ -584,7 +458,8 @@ foreach my $s (@sources) {
 @sources = @valid_sources;
 die "Error: no gene model was predicted by any method, please check the logs in $tmp_dir.\n" unless @sources;
 
-my $merge_extra = "--cpu $o{cpu} --first_file_score 0.0 --overlap_coverage $o{overlap_coverage} --start_codon $start_codon --stop_codon $stop_codon";
+# GFF3_merging_and_removing_redundancy通过--genetic_code自动确定起始密码子和终止密码子，不需要也不再使用--start_codon和--stop_codon
+my $merge_extra = "--cpu $o{cpu} --first_file_score 0.0 --overlap_coverage $o{overlap_coverage} --genetic_code $o{genetic_code}";
 my $clear_extra = "--genome $input_genome --gene_prefix $o{gene_prefix} --coverage $o{overlap_coverage} --cpu $o{cpu}";
 
 ########################################################################
@@ -1316,64 +1191,106 @@ sub write_method_comparison_report {
     close $fh;
 }
 
-# 根据遗传密码返回GFF3_merging_and_removing_redundancy所需的起始密码子和终止密码子（逗号分割）。
-sub codon_sets {
-    my ($gc) = @_;
-    my @bases = qw/T C A G/;
-    my $aa = "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG";
-    my (%code, $i);
-    $i = 0;
-    foreach my $b1 (@bases) { foreach my $b2 (@bases) { foreach my $b3 (@bases) {
-        $code{"$b1$b2$b3"} = substr($aa, $i ++, 1);
-    } } }
-    my %change = (
-        1  => {},
-        2  => { AGA => "*", AGG => "*", ATA => "M", TGA => "W" },
-        3  => { ATA => "M", CTT => "T", CTC => "T", CTA => "T", CTG => "T", TGA => "W" },
-        4  => { TGA => "W" },
-        5  => { AGA => "S", AGG => "S", ATA => "M", TGA => "W" },
-        6  => { TAA => "Q", TAG => "Q" },
-        9  => { AAA => "N", AGA => "S", AGG => "S", TGA => "W" },
-        10 => { TGA => "C" },
-        11 => {},
-        12 => { CTG => "S" },
-        13 => { AGA => "G", AGG => "G", ATA => "M", TGA => "W" },
-        14 => { AAA => "N", AGA => "S", AGG => "S", TAA => "Y", TGA => "W" },
-        16 => { TAG => "L" },
-        21 => { TGA => "W", ATA => "M", AGA => "S", AGG => "S", AAA => "N" },
-        22 => { TCA => "*", TAG => "L" },
-        23 => { TTA => "*" },
-        24 => { AGA => "S", AGG => "K", TGA => "W" },
-        25 => { TGA => "G" },
-        26 => { CTG => "A" },
-        27 => { TAG => "Q", TAA => "Q" },
-        29 => { TAA => "Y", TAG => "Y" },
-        30 => { TAA => "E", TAG => "E" },
-        31 => { TGA => "W" },
-        33 => { TAA => "Y", TGA => "Y", AGA => "S", AGG => "K" },
-    );
-    my %extra_start = (
-        2  => [qw/ATA ATT ATC GTG/],
-        3  => [qw/ATA GTG/],
-        4  => [qw/ATA ATT ATC GTG CTG TTA TTG/],
-        5  => [qw/ATA ATT ATC GTG TTG/],
-        9  => [qw/GTG/],
-        11 => [qw/ATA ATT ATC GTG CTG TTG/],
-        12 => [qw/CTG/],
-        13 => [qw/ATA GTG TTG/],
-        21 => [qw/GTG/],
-        23 => [qw/ATT GTG/],
-        24 => [qw/GTG CTG TTG/],
-        25 => [qw/GTG TTG/],
-        26 => [qw/GTG TTG/],
-    );
-    unless (exists $change{$gc}) {
-        print STDERR "Warning: genetic code $gc is not supported when setting start and stop codons for merging, the standard genetic code is used for them.\n";
-        $gc = 1;
-    }
-    $code{$_} = $change{$gc}{$_} foreach keys %{ $change{$gc} };
-    my %start = (ATG => 1);
-    $start{$_} = 1 foreach @{ $extra_start{$gc} || [] };
-    my @stop = sort grep { $code{$_} eq "*" } keys %code;
-    return (join(",", sort keys %start), join(",", @stop));
-}
+########################################################################
+# 英文用法说明（放在文件最末尾，运行时通过DATA文件句柄读取）
+########################################################################
+__DATA__
+Usage:
+    __PROG__ [options] homolog_proteins.fasta genome_seq.fasta > out.gff3
+
+    This program predicts genes in the genome of a target species using the whole-genome protein sequences of closely related species, and writes the result to STDOUT in GFF3 format.
+    Five prediction methods are supported. They can be used alone or in any combination; the results of multiple methods are merged and redundancy-removed by the program:
+      (1) exonerate / genewise / gth: MMseqs2 first aligns the homologous proteins to the genome to locate the gene regions, and then the corresponding software predicts the exon-intron structures (homolog_prediction.01MMseqs2CalHits, .02HitToGenePrediction and .03GetGeneModels are called in turn). These three methods are already integrated region by region inside this pipeline, so the program regards them as one source (mmseqs);
+      (2) miniprot: calls homolog_prediction.04miniprot2GeneModels; the source is miniprot;
+      (3) spaln: calls homolog_prediction.05spaln2GeneModels; the source is spaln.
+
+    The gene models in the result are divided into four classes: A, excellent gene models: 100% coverage of the homologous protein, and the start codon and stop codon are consistent with the protein alignment; B, good gene models: coverage of the homologous protein >= 80%, and the length of the complete gene model after forced end-filling >= 80% of the homologous protein length; C, fair gene models: coverage >= 40%, and the length of the complete gene model after forced end-filling >= 40% of the homologous protein length; D, poor gene models: coverage < 40%, or the length of the complete gene model after forced end-filling < 40% of the homologous protein length, or the gene model can not be completed by forced end-filling. All gene models of the first three classes are complete (the last CDS contains the stop codon); some class D gene models are complete and some are not.
+
+    Each intron line in the output contains the tag Supported_times, the number of times that the intron is supported by different prediction methods or different homologous proteins. For example, if an intron is supported by 10 homologous proteins in each of 3 prediction methods, its Supported_times is 30.
+
+    Workflow:
+      0. Check the parameters and input files, and check that the commands required by --method can be executed directly in the terminal (if not, the program exits with an error before running anything).
+      1. Run the prediction pipeline of each source specified by --method. Each source yields a GFF3 result (containing gene models of classes A~D), a raw GFF3 (the ends are not filled) and a homolog alignment GFF3.
+      2. If there are multiple sources, the program first reorders the sources' GFF3 files by the prediction-accuracy ranking obtained in step 2.5, then GFF3_merging_and_removing_redundancy (--first_file_score 0.0, sources are otherwise equal in priority, but the input order now reflects accuracy from high to low; the genetic code is passed through --genetic_code, and the start and stop codons are determined automatically from the genetic code by that program) merges the gene models of the sources, and then GFF3Clear removes overlaps and renumbers the genes. The result is results/all.clear.gff3 in the temporary directory (all four classes, before intron filtering).
+      2.5 As long as there are two or more sources, before merging the program compares every two sources with the --compare_2gff3_stats function of GFF3_merging_and_removing_redundancy, and summarizes each source's overall win proportion across all pairwise comparisons to obtain an accuracy ranking of the sources (mmseqs, miniprot, spaln). The sources are then fed into the step-2 GFF3_merging_and_removing_redundancy command in this order (highest accuracy first): since that command keeps the earlier input file when two gene models tie in score (ties are common with --first_file_score 0.0), placing the more accurate source first means a tied gene model from the more reliable source is kept, improving the merged result. This step itself never changes the gene models of any source, it only affects the order in which they are fed into step 2. If --method_comparison_stats is set, the program additionally writes the summarized pairwise comparison statistics to the file it specifies, for evaluating the prediction performance of the methods and their consistency; if it is not set, the pairwise comparisons still run to determine the accuracy ranking, they just do not produce this extra summary report file (the detailed gene-by-gene conflict records of each pair of sources, and the win proportions the ranking is based on, are still kept in the file compare.<source1>_vs_<source2>.stats.txt in the --tmp_dir directory).
+      3. Filter class C and D gene models by the Supported_times of introns: for each source, the threshold_value is calculated from the Supported_times of all introns of its class A and B gene models at the quantile given by --threshod_ratio_of_intron_Supported_times (default 0.5, the median). Each class C or D gene model of the merged result then uses the threshold of its source (column 2 of the GFF3: gth/exonerate/genewise belong to the mmseqs source, then miniprot and spaln); if the Supported_times of all its introns are lower than the threshold, the gene model is removed. Class C/D gene models without an intron (single-exon) are not filtered. Class A and B gene models are never filtered. After filtering, GFF3Clear is run again to renumber the genes, and the result is written to STDOUT.
+      4. If --output_raw_GFF3 or --output_alignment_GFF3 is specified, the output contains the merged content of all sources: the raw GFF3 is merged by GFF3_merging_and_removing_redundancy (using the same accuracy-based ordering from step 2.5) and then processed by GFF3Clear; the alignment GFF3 is the combination of the alignment results of all sources, de-duplicated and sorted by genome position.
+      5. At the end, the program prints the statistics of the final gene models to STDERR: the number of gene models in each of the four classes, the number of gene models of each source (prediction method), and a matrix of the number of gene models of each method in each of the classes A, B, C and D.
+
+    Resuming an interrupted run (--tmp_dir):
+      For each step the program records in the temporary directory a signature (content fingerprints of the input files + the relevant parameters, *.sig) and a completion mark (*.ok). After the program is interrupted (Ctrl-C, kill, power failure, or a failed command), run the same command again with the same --tmp_dir to continue: the finished steps are skipped, and an unfinished step continues from the position where its own program can resume.
+      (1) The fingerprint of an input file consists of its size and the MD5 values of several data blocks spread over the whole file. It does not depend on the modification time, so copying or touching a file does not cause recomputation.
+      (2) When --method is changed in a re-run:
+            - The finished sources (mmseqs, miniprot, spaln) and their results are reused directly and only the newly added sources are run. For example, after running --method exonerate, running --method exonerate,miniprot,spaln skips the whole exonerate part and only runs miniprot and spaln;
+            - When exonerate/genewise/gth is added to or removed from the mmseqs source, the MMseqs2 alignment and the finished "gene region chunk x prediction method" results are reused, only the newly added method is calculated, and then the best gene model of each region is picked out again;
+            - After a source is removed, its results stay in the temporary directory and can still be reused if it is added back later; the final merging and filtering are always redone for the current --method;
+      (3) When other parameters are changed, only the steps affected by them are recomputed: for example, changing --identity/--evalue/--homolog_coverage only redoes the MMseqs2 Hit filtering and not the time-consuming mmseqs search; changing --overlap_coverage only redoes the steps after the miniprot/spaln alignment without realigning; changing --threshod_ratio_of_intron_Supported_times only redoes the final filtering; parameters that do not affect the intermediate results, such as --cpu and --gene_prefix, do not trigger recomputation;
+      (4) Only one program may use the same --tmp_dir at a time (file lock); when the program is interrupted or fails, it prints the --tmp_dir needed for resuming at the end.
+      (5) If the --tmp_dir was generated by an older version of the program, the completion records have a different format and their parameters can not be verified, so the corresponding steps are recomputed once.
+
+    Theoretically, the more homologous proteins are used, the better the accuracy and completeness of the predicted gene models, and the longer the running time. Whole-genome protein sequences of 5~10 species are recommended as input.
+
+    --max_hits_num_per_match_region <int>    default: 10
+    Set the maximum number of homologous protein hits in one homologous match region (one gene region) of the genome (for the exonerate/genewise/gth methods).
+
+    --max_hit_num_per_single_species <int>    default: 2
+    Set the maximum number of homologous protein hits from a single species in one homologous match region of the genome (for the exonerate/genewise/gth methods). To make this parameter work, the protein names must contain the species name: the program recognizes the keyword species (case-insensitive) in the name and the characters [a-zA-Z0-9] following it as the species name, e.g. the species name of XP_002436309_2_SpeciesSorghumBicolor is SpeciesSorghumBicolor.
+
+    --cpu <int>    default: 8
+    Set the number of threads or parallel processes used by each software.
+
+    --identity <float>    default: 0.2
+    --evalue <float>    default: 1e-9
+    --homolog_coverage <float>    default: 0.3
+    Set the Identity, E-value and homolog_coverage thresholds used to filter the MMseqs2 results (for the exonerate/genewise/gth methods).
+
+    --method <string>    default: miniprot
+    Set the gene prediction methods. The value can be exonerate, genewise, gth, miniprot, spaln or all (use all five methods). Use commas to separate multiple methods, e.g. exonerate,miniprot,spaln. When the program is re-run with the same --tmp_dir and this parameter is changed, the results of the finished methods are reused (see "Resuming an interrupted run" above).
+
+    --genetic_code <int>    default: 1
+    Set the genetic code. The start codons and stop codons are determined automatically from the genetic code (this parameter is passed to the prediction pipelines, fillingEndsOfGeneModels, GFF3_merging_and_removing_redundancy and the related GFF3Clear steps; the --start_codon and --stop_codon parameters are no longer used). Please refer to NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi. The supported genetic code numbers are: 1-6, 9-16, 21-33.
+
+    --threshod_ratio_of_intron_Supported_times <float>    default: 0.5
+    (Can also be written as --threshold_ratio_of_intron_Supported_times.) Range [0, 1]. For each source, the Supported_times of all introns of its class A and B gene models are sorted from small to large, and the value at the position given by this parameter is taken as threshold_value (0.5 is the median). A class C or D gene model is removed if the Supported_times of all its introns are lower than the threshold_value of its source. Set to 0 to disable filtering; the larger the value, the stricter the filtering.
+
+    --output_raw_GFF3 <string>    default: None
+    Output the merged GFF3 file of all sources in which the ends of the gene models are not forcibly filled. It is the raw result of the homology-based prediction.
+
+    --output_alignment_GFF3 <string>    default: None
+    Output the merged homolog alignment GFF3 file of all sources, containing the alignments of the homologous proteins to the genome (the best alignment of each homologous protein is output for each gene region).
+
+    --max_alignment_num_for_each_gene_region <int>    default: 5
+    When outputting the homolog alignment GFF3, the maximum number of homologous proteins output for each gene region of each source.
+
+    --method_comparison_stats <string>    default: None
+    Effective when --method specifies two or more sources (any combination of the three sources mmseqs, miniprot and spaln). Whenever this is the case, the program always compares every two sources with the --compare_2gff3_stats parameter of GFF3_merging_and_removing_redundancy before merging, and uses the result to compute a prediction-accuracy ranking of the sources that decides the order in which their GFF3 files are fed into the merging step (see item 2.5 of "Workflow" above); this pairwise comparison runs regardless of whether this parameter is set. Setting this parameter additionally writes the summarized pairwise comparison results (the details of each pair of sources, and the overall win proportion of every source in all pairwise comparisons — the very proportion the accuracy ranking is based on) to the file specified by this parameter, to evaluate which method predicts better and how consistent the methods are. The detailed gene-by-gene conflict records of each pair of sources are always kept in the file compare.<source1>_vs_<source2>.stats.txt in the --tmp_dir directory for further reference, regardless of whether this parameter is set. Pairwise comparisons that have finished with unchanged input are not repeated when the program is resumed.
+
+    --overlap_coverage <float>    default: 0.30
+    The CDS overlap coverage threshold, passed to --overlap_coverage of GFF3_merging_and_removing_redundancy and --coverage of GFF3Clear to remove redundant gene models with overlapping CDS; it is also passed to the miniprot and spaln pipelines.
+
+    --max_intron_size <int>    default: None
+    Set the maximum intron length, passed to exonerate (--maxintron), miniprot (-G) and spaln (-yM). If not set, each pipeline uses its own default value.
+
+    --miniprot_options <string>    default: None
+    Extra options passed to miniprot. If the value starts with --, join it with an equals sign and quote it, e.g. --miniprot_options="--outs=0.95 -N 20".
+
+    --spaln_species <string>    default: None
+    The species-specific parameter set used by spaln (the -T option of spaln). It is recommended to set it to the species most closely related to the target species, e.g. arabidopsis_thaliana, zea_mays.
+
+    --spaln_options <string>    default: None
+    Extra options passed to the spaln alignment command, e.g. --spaln_options="-LS -yX2".
+
+    --gene_prefix <string>    default: homolog
+    Set the prefix of the final gene IDs.
+
+    --tmp_dir <string>    default: tmp_$date$pid
+    The temporary directory of the program. When an existing temporary directory is specified, the steps that have finished and whose parameters and input files are unchanged are skipped (resuming an interrupted run); when the parameters or input files of a step change, only the affected steps and the intermediate results they depend on are recomputed automatically (see "Resuming an interrupted run" above). If this parameter is not set, a new temporary directory named with the date and process ID is created in each run and the run can not be resumed; when the program is interrupted, it prints the --tmp_dir that should be used.
+
+    --help    default: None
+    Display the English help and exit.
+
+    --chinese_help    default: None
+    显示中文帮助信息并退出。
+
+    Dependencies: GFF3_merging_and_removing_redundancy, fillingEndsOfGeneModels and GFF3Clear, and the homolog_prediction.0X scripts corresponding to the selected methods must be in the directory of this program; the commands corresponding to the selected methods must be executable directly in the terminal: mmseqs (required by the exonerate/genewise/gth methods), exonerate, genewise, gth, miniprot and spaln. The paths of the input files, the temporary directory and the output files can not contain spaces or shell special characters.
+

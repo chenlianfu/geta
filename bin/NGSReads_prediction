@@ -27,51 +27,10 @@ my %gene_type_name = (
 );
 my %type_name_to_class = reverse %gene_type_name;
 
-# 终止密码子表和起始密码子表（按NCBI遗传密码表编号）。
-# 与NGSReads_prediction.04Transfrag2ORF中判断基因模型完整性(Integrity)时使用的密码子表保持一致，
-# 主程序据此确定第5步（合并去冗余）和第7步（末端强制填补）所用的起始/终止密码子。
-my %stop_table = (
-    1  => [qw(TAA TAG TGA)],
-    2  => [qw(TAA TAG AGA AGG)],
-    3  => [qw(TAA TAG)],
-    4  => [qw(TAA TAG)],
-    5  => [qw(TAA TAG)],
-    6  => [qw(TGA)],
-    9  => [qw(TAA TAG)],
-    10 => [qw(TAA TAG)],
-    11 => [qw(TAA TAG TGA)],
-    12 => [qw(TAA TAG TGA)],
-    13 => [qw(TAA TAG)],
-    14 => [qw(TAG)],
-    15 => [qw(TAA TGA)],
-    16 => [qw(TAA TGA)],
-    21 => [qw(TAA TAG)],
-    22 => [qw(TCA TAA TGA)],
-    23 => [qw(TTA TAA TAG TGA)],
-    24 => [qw(TAA TAG)],
-    25 => [qw(TAA TAG)],
-    26 => [qw(TAA TAG TGA)],
-);
-my %start_table = (
-    1  => [qw(ATG)],
-    2  => [qw(ATG ATT ATC ATA GTG)],
-    3  => [qw(ATG ATA GTG)],
-    4  => [qw(ATG TTA TTG CTG ATT ATC ATA GTG)],
-    5  => [qw(ATG TTG ATT ATC ATA GTG)],
-    6  => [qw(ATG)],
-    9  => [qw(ATG GTG)],
-    10 => [qw(ATG)],
-    11 => [qw(ATG TTG CTG ATT ATC ATA GTG)],
-    12 => [qw(ATG CTG)],
-    13 => [qw(ATG ATA GTG TTG)],
-    14 => [qw(ATG)],
-    16 => [qw(ATG)],
-    21 => [qw(ATG GTG)],
-    22 => [qw(ATG)],
-    23 => [qw(ATG ATT GTG)],
-    24 => [qw(ATG TTG CTG GTG)],
-    25 => [qw(ATG TTG CTG GTG)],
-);
+# GFF3_merging_and_removing_redundancy（第5步）和fillingEndsOfGeneModels（第7步）支持的NCBI遗传密码表编号。
+# 这两个程序通过--genetic_code自动确定起始密码子和终止密码子，本程序只需把遗传密码编号传给它们，
+# 它们所用的密码子与NGSReads_prediction.04Transfrag2ORF判断基因模型完整性(Integrity)时使用的密码子一致。
+my %supported_genetic_code = map { $_ => 1 } ( 1 .. 6, 9 .. 16, 21 .. 33 );
 
 # 传递给子程序的关键参数（统一归为一类），按接收它们的子程序分组（用于校验、传递和日志输出）。
 # 传给01RNASeq2Sam：字符串型参数，含空格或以"-"开头，传递时使用 --name='value' 形式。
@@ -84,7 +43,8 @@ my @s2t_num_opts = qw/
 # 03Stringtie不通过本程序传递任何参数，直接使用子程序自身的默认值，stringtie从系统PATH中调用。
 # 传给04Transfrag2ORF的关键参数：--ORF_predictor、--min_protein_length、--genetic_code、--TIdeS_partial/--noTIdeS_partial；
 #   04Transfrag2ORF的其它参数（如TIdeS的可执行程序、训练模型的聚类相似度等）使用子程序自身的默认值。
-# 传给GFF3_merging_and_removing_redundancy的关键参数：--overlap_coverage。
+# 传给GFF3_merging_and_removing_redundancy的关键参数：--overlap_coverage、--genetic_code。
+# 传给fillingEndsOfGeneModels的关键参数：--genetic_code。
 
 
 
@@ -103,9 +63,9 @@ sub usage_cn {
     (2) 调用NGSReads_prediction.02Sam2Transfrag，基于BAM比对结果，采用Sam2Transfrag算法组装转录本（含可变剪接分析），生成GFF3，同时输出intron和exon碱基测序深度信息。
     (3) 调用NGSReads_prediction.03Stringtie，基于同一BAM文件，采用StringTie算法组装转录本，生成GFF3。
     (4) 调用NGSReads_prediction.04Transfrag2ORF，分别对Sam2Transfrag和StringTie两种方法得到的转录本进行ORF分析，预测基因模型。这两个分析并行运行，线程数平分，总线程数不超过--cpu；ORF预测软件由--ORF_predictor指定（TransDecoder或TIdeS）；TIdeS必须使用同源蛋白序列作为数据库；使用TIdeS时默认同时预测完整和不完整（5'或3'端缺失）的ORF。
-    (5) 调用GFF3_merging_and_removing_redundancy，整合上述两种方法预测的基因模型并去除冗余（可用--overlap_coverage调节；判断基因完整性所用的起始/终止密码子由--genetic_code自动确定），结果保存为results/merged.ORF.gff3。
+    (5) 调用GFF3_merging_and_removing_redundancy，整合上述两种方法预测的基因模型并去除冗余（可用--overlap_coverage调节；判断基因完整性和内部终止密码子所用的遗传密码由--genetic_code指定），结果保存为results/merged.ORF.gff3。
     (6) 根据基因完整性、CDS长度、CDS之间的intron数量和CDS占exon的碱基比例（取自GFF3第9列Form信息），将第5步得到的基因模型按准确性分为A/B/C/D四类，并在GFF3第9列以Type=标记（gene行中Type=紧跟在ID=之后；mRNA行中Type=紧跟在Parent=之后，其后依次为Integrity=、CDS_Length=、CDS_intron_Num=、CDS_exon_Ratio=），结果保存为results/merged_classified.ORF.gff3。
-    (7) 调用fillingEndsOfGeneModels，对第6步分类结果中不完整基因模型的5'端或3'端进行强制补齐（可用--no_filling_ends跳过；起始/终止密码子由--genetic_code自动确定），补齐后的结果保存为results/merged_classified.ORF.fillEnd.gff3；然后将最终的基因模型以GFF3格式输出到标准输出（以##gff-version 3开头，基因ID统一重命名，默认前缀为RNASeqORF），并在标准错误输出中给出基因模型数量、完整性、填补情况、分类结果等统计。
+    (7) 调用fillingEndsOfGeneModels，对第6步分类结果中不完整基因模型的5'端或3'端进行强制补齐（可用--no_filling_ends跳过；补齐所用的遗传密码由--genetic_code指定），补齐后的结果保存为results/merged_classified.ORF.fillEnd.gff3；然后将最终的基因模型以GFF3格式输出到标准输出（以##gff-version 3开头，基因ID统一重命名，默认前缀为RNASeqORF），并在标准错误输出中给出基因模型数量、完整性、填补情况、分类结果等统计。
 
     使用说明：
     (1) 各类RNA-Seq输入数据的质控、比对、排序与合并均由NGSReads_prediction.01RNASeq2Sam完成，本程序仅将相关参数透传给它。同一类型的数据可输入多个文库，文库之间以逗号分隔。--sam输入的文件必须以.sam、.bam或.cram结尾。
@@ -115,12 +75,13 @@ sub usage_cn {
         传递给NGSReads_prediction.01RNASeq2Sam：--pe_used_pair_num、--se_used_read_num、--trimmomatic_opts、--hisat2_opts、--star_opts。其中--trimmomatic_opts、--hisat2_opts、--star_opts一旦设置，就整体替换该软件的内置默认参数（而不是在其基础上追加），因此请写出完整的参数内容；含空格或以"-"开头的值请用引号括起来，例如 --hisat2_opts="--dta -k 5"。仅有--sam输入（不执行质控和比对）时，这三个参数不生效。
         传递给NGSReads_prediction.02Sam2Transfrag：--fraction、--min_expressed_base_depth、--max_expressed_base_depth、--min_junction_depth、--max_junction_depth、--min_fragment_count_per_transfrag。未设置时使用内置默认值：--fraction 0.05 --min_expressed_base_depth 2 --max_expressed_base_depth 50 --min_junction_depth 2 --max_junction_depth 50 --min_fragment_count_per_transfrag 10，并显式传给子程序。
         传递给NGSReads_prediction.04Transfrag2ORF：--ORF_predictor、--min_protein_length、--genetic_code、--TIdeS_partial/--noTIdeS_partial。04Transfrag2ORF的其它参数（例如TIdeS可执行程序、训练模型所用的聚类相似度等）使用该子程序自身的默认值。
-        传递给GFF3_merging_and_removing_redundancy：--overlap_coverage（未设置时使用该子程序自身的默认值）。
+        传递给GFF3_merging_and_removing_redundancy：--overlap_coverage（未设置时使用该子程序自身的默认值）、--genetic_code（与04Transfrag2ORF所用的遗传密码一致，见使用说明第14条）。
+        传递给fillingEndsOfGeneModels：--genetic_code（同上）。
         除上述参数外，子程序的其它参数不再通过本程序传递，均使用各子程序自身的默认值；NGSReads_prediction.03Stringtie不接收任何来自本程序的关键参数，stringtie从系统PATH中调用。
-        以下参数由本程序统一设置：--input_single_sorted_BAM_file、--tmp_dir、--cpu、--strand_specific（02）、--strand_specific_library（03）、--intron_info_out、--base_depth_out、--gene_prefix（03、04）、--source（04）、--start_codon与--stop_codon（GFF3_merging_and_removing_redundancy、fillingEndsOfGeneModels）、--keep_tmp_files。其它子程序的详细参数请参见各子程序的--help输出。
+        以下参数由本程序统一设置：--input_single_sorted_BAM_file、--tmp_dir、--cpu、--strand_specific（02）、--strand_specific_library（03）、--intron_info_out、--base_depth_out、--gene_prefix（03、04）、--source（04）、--keep_tmp_files。其它子程序的详细参数请参见各子程序的--help输出。
     (5) 在第4步中，每个ORF对应一个基因模型，因此同一基因的可变剪接转录本会产生冗余的基因模型；这些冗余将在第5步中去除。为避免合并时基因ID冲突，两个ORF分析使用不同的基因前缀（Sam2Transfrag_ORF、stringtie_ORF）；最终结果的基因ID默认统一重命名为RNASeqORF000001、RNASeqORF000002 ...，可用--gene_prefix修改前缀。
     (6) 使用--output_raw_GFF3可获得第6步分类之后、第7步末端强制填补之前的结果（内容与results/merged_classified.ORF.gff3相同，含Type分类标记）。该结果准确度较高，但包含较多不完整的基因模型。第7步强制填补得到的基因模型不一定准确，使用时请注意甄别。
-    (7) TIdeS软件做ORF分析必须输入同源蛋白序列作为数据库。因此，若未提供--homolog_protein参数，则--ORF_predictor会被自动设置为TransDecoder（即使用户指定了TIdeS，也会被改为TransDecoder，并给出警告）。提供了--homolog_protein且未设置--ORF_predictor时，默认使用TIdeS。--min_protein_length对两种软件均有效（TransDecoder：传给-m；TIdeS：乘以3后传给--min-orf）；--genetic_code的遗传密码编号仅对TIdeS的ORF预测有效（但它同时决定第5、7步的起始/终止密码子），--TIdeS_partial/--noTIdeS_partial仅对TIdeS有效。
+    (7) TIdeS软件做ORF分析必须输入同源蛋白序列作为数据库。因此，若未提供--homolog_protein参数，则--ORF_predictor会被自动设置为TransDecoder（即使用户指定了TIdeS，也会被改为TransDecoder，并给出警告）。提供了--homolog_protein且未设置--ORF_predictor时，默认使用TIdeS。--min_protein_length对两种软件均有效（TransDecoder：传给-m；TIdeS：乘以3后传给--min-orf）；--genetic_code的遗传密码编号仅对TIdeS的ORF预测有效（但它同时作为--genetic_code传给第5步的GFF3_merging_and_removing_redundancy和第7步的fillingEndsOfGeneModels），--TIdeS_partial/--noTIdeS_partial仅对TIdeS有效。
         使用TIdeS时，本程序默认给04Transfrag2ORF添加--TIdeS_partial，即tides除了预测完整ORF（有起始和终止密码子）外，还预测5'或3'不完整的ORF（partial ORF）。此时Integrity按基因组序列上的起始/终止密码子判断，基因模型的完整性可以是complete、5prime_partial、3prime_partial、internal，分类时A类与B类的区分同时取决于基因完整性和CDS/exon比例。若只需要完整ORF，请添加--noTIdeS_partial：此时所有基因模型的Integrity都被标注为complete，"基因完整"这一条件对所有模型都成立，A类与B类的区分将只取决于CDS/exon比例。
     (8) 【断点续跑】每个步骤完成后会在临时文件夹中生成.ok标记文件和记录命令与输入文件信息的.sig签名文件。使用相同的--tmp_dir重新运行时：已完成且参数、输入均未改变的步骤会被跳过；程序中途中断的步骤会由子程序断点续跑；若修改了某步骤的参数或输入（包括是否使用--keep_tmp_files），该步骤及其下游步骤会自动清理后重新运行。基因模型分类在第6步完成，每次运行都会重新计算（耗时很短），修改分类参数无需重跑第1至第5步；分类结果若发生改变，第7步会自动重新运行。
         【不检查签名】添加--ignore_signature后，不再用.sig签名文件判断参数或输入文件是否改变：只要某步骤已有.ok标记且其输出文件非空，就直接跳过，即使命令行参数、输入文件的路径/大小/修改时间已经改变（例如移动了临时文件夹或输入文件、touch过文件、或只修改了无关紧要的参数）。此时：(a) 中途中断的步骤仍由子程序断点续跑，不会被清理；(b) 若某上游步骤在本次运行中实际重新执行了（如.ok缺失或输出缺失），其下游步骤仍会自动重新运行，以免结果与上游不一致；(c) 第7步仍会检查第6步的分类结果是否改变，改变则重新运行；(d) 已完成步骤不会因参数改变而重跑，若确实需要重跑某一步，请手动删除临时文件夹中对应的.ok文件（或整个步骤的输出），再运行。该参数仅在重新使用已有的--tmp_dir时有意义。
@@ -156,7 +117,7 @@ sub usage_cn {
         C类 Type=fair_gene_models_predicted_by_NGSReads：不要求完整性；CDS长度>=较短阈值、CDS间intron数>=较小阈值、CDS占exon比例>=较小阈值，三个条件同时满足（且不属于A、B类）。
         D类 Type=poor_gene_models_predicted_by_NGSReads：除A、B、C类以外的其它基因模型。
         阈值的确定：未用--cds_length_high等参数手动指定时，CDS长度和CDS间intron数的阈值根据--quantile_high、--quantile_low自动计算。计算所用的参考基因模型，来自临时文件夹中的compare_2gff3_stats.txt（第5步产生）：选取Sam2Transfrag和StringTie两种算法的基因模型有重叠、且在去冗余后被保留下来的基因模型（这些基因模型有两种方法相互印证，可信度较高），使用其在第5步整合去冗余之后的CDS长度和CDS间intron数，按分位数计算阈值。自动计算出的全部阈值及参考基因模型数量会输出到日志（标准错误输出）中。若compare_2gff3_stats.txt不存在或未能提取到参考基因模型，则改用第5步结果中的全部基因模型作为参考，并给出警告。CDS占exon比例的阈值不自动计算，由--cds_ratio_high（仅用于A类）和--cds_ratio_low（用于B、C类）指定。
-    (14) 【起始/终止密码子】第5步（合并去冗余时判断基因完整性并计分）和第7步（末端强制填补）所用的起始密码子和终止密码子，由本程序根据--genetic_code自动确定，并通过--start_codon、--stop_codon传给GFF3_merging_and_removing_redundancy和fillingEndsOfGeneModels，与第4步（04Transfrag2ORF判断Integrity）所用的密码子完全一致，因此不再需要（也不提供）--start_codon、--stop_codon参数。使用TIdeS时按--genetic_code选择NCBI遗传密码表（内置了常用的密码表，如1、2、3、4、5、6、9、10、11、12、13、14、15、16、21-26；未内置的编号会使用标准密码子并在日志中给出提示）；使用TransDecoder时只支持标准遗传密码（表1）：起始密码子ATG，终止密码子TAA、TAG、TGA。实际使用的密码子会输出到日志（标准错误输出）。注意：部分非标准遗传密码表含有多个起始密码子，此时第7步补齐5'端时，会定位到上游终止密码子之后的第一个起始密码子。
+    (14) 【遗传密码】第5步（合并去冗余时判断基因完整性、检测内部终止密码子并计分）和第7步（末端强制填补）所用的遗传密码，由--genetic_code指定。本程序直接把遗传密码编号作为--genetic_code参数传给GFF3_merging_and_removing_redundancy和fillingEndsOfGeneModels，这两个程序据此自动确定起始密码子和终止密码子，与第4步（04Transfrag2ORF判断Integrity）所用的遗传密码一致，因此不再需要（也不提供）--start_codon、--stop_codon参数。使用TIdeS时按--genetic_code选择NCBI遗传密码表；使用TransDecoder时只支持标准遗传密码（表1），此时无论--genetic_code为何值，传给第5、7步的均为1（起始密码子ATG，终止密码子TAA、TAG、TGA）。第5、7步支持的遗传密码编号为：1-6、9-16、21-33，使用其它编号时程序在启动时报错退出。实际使用的遗传密码编号会输出到日志（标准错误输出）。注意：部分非标准遗传密码表含有多个起始密码子，此时第7步补齐5'端时，会定位到上游终止密码子之后的第一个起始密码子。
 
 参数:
 [输入参数]
@@ -254,12 +215,12 @@ sub usage_cn {
     设置鉴定ORF时蛋白质序列的最小长度（氨基酸数）。TransDecoder：传给TransDecoder.LongOrfs的-m；TIdeS：乘以3后传给tides的--min-orf。
 
     --genetic_code <int>    默认值: 1
-    设置遗传密码，编号参见NCBI遗传密码表: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi 。该参数有两方面作用：(a) 传递给04Transfrag2ORF的--TIdeS_genetic_code，用于TIdeS的ORF预测（TransDecoder目前不支持，只使用标准遗传密码）；(b) 本程序据此自动确定起始密码子和终止密码子，并同时传给第5步（GFF3_merging_and_removing_redundancy）和第7步（fillingEndsOfGeneModels）的--start_codon和--stop_codon（详见使用说明第14条）。使用TransDecoder时，起始/终止密码子固定为标准密码子（ATG；TAA,TAG,TGA）。
+    设置遗传密码，编号参见NCBI遗传密码表: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi 。该参数有两方面作用：(a) 传递给04Transfrag2ORF的--TIdeS_genetic_code，用于TIdeS的ORF预测（TransDecoder目前不支持，只使用标准遗传密码）；(b) 同时作为--genetic_code传给第5步的GFF3_merging_and_removing_redundancy和第7步的fillingEndsOfGeneModels，由这两个程序自动确定起始密码子和终止密码子（详见使用说明第14条）。使用TransDecoder时，传给第5、7步的遗传密码固定为1（标准密码：起始密码子ATG；终止密码子TAA,TAG,TGA）。支持的编号：1-6、9-16、21-33。
 
     --TIdeS_partial / --noTIdeS_partial    默认值: 启用--TIdeS_partial
     默认情况下，本程序给04Transfrag2ORF添加--TIdeS_partial，即使用TIdeS时同时预测完整ORF和5'或3'不完整的ORF（Integrity按基因组序列上的起始/终止密码子判断）。添加--noTIdeS_partial可关闭该功能，此时TIdeS只报告完整ORF，所有基因模型的Integrity均为complete（详见使用说明第7条）。仅在使用TIdeS时生效。
 
-传递给GFF3_merging_and_removing_redundancy的关键参数：
+传递给GFF3_merging_and_removing_redundancy的关键参数（另外，--genetic_code见上，也会传给该程序和fillingEndsOfGeneModels）：
     --overlap_coverage <float>    默认值: 0.30
     第5步中，两个基因模型CDS重叠碱基数占较小基因模型CDS碱基数的比例超过该阈值时，去除得分较低者。取值范围(0, 1]。
 
@@ -347,7 +308,7 @@ GetOptions(\%o,
     'fraction=f', 'min_expressed_base_depth=i', 'max_expressed_base_depth=i',
     'min_junction_depth=i', 'max_junction_depth=i',
     'min_fragment_count_per_transfrag=i',
-    # 关键子程序参数：传给04Transfrag2ORF
+    # 关键子程序参数：传给04Transfrag2ORF（--genetic_code同时传给GFF3_merging_and_removing_redundancy和fillingEndsOfGeneModels）
     'ORF_predictor=s', 'min_protein_length=i', 'genetic_code=i', 'TIdeS_partial!',
     # 关键子程序参数：传给GFF3_merging_and_removing_redundancy
     'overlap_coverage=f',
@@ -467,7 +428,7 @@ else {
     $ORF_predictor = 'TransDecoder';
 }
 if ( $ORF_predictor eq 'TransDecoder' ) {
-    print STDERR "Warning: --genetic_code only takes effect when the ORF predictor is TIdeS; TransDecoder uses the standard genetic code, so the standard start/stop codons are also used in step 5 and step 7.\n" if $o{genetic_code} != 1;
+    print STDERR "Warning: --genetic_code only takes effect when the ORF predictor is TIdeS; TransDecoder uses the standard genetic code, so the standard genetic code (table 1) is also passed to step 5 and step 7.\n" if $o{genetic_code} != 1;
     print STDERR "Warning: --TIdeS_partial/--noTIdeS_partial only takes effect when the ORF predictor is TIdeS; it is ignored.\n" if $user_set{TIdeS_partial};
 }
 else {
@@ -476,20 +437,13 @@ else {
         unless $o{TIdeS_partial};
 }
 
-# ---- 根据--genetic_code确定起始/终止密码子（第5步合并去冗余、第7步末端强制填补使用） ----
-# 使用TransDecoder时只支持标准遗传密码（表1）；使用TIdeS时按--genetic_code选择。
-# 密码子表与04Transfrag2ORF判断Integrity时所用的表一致。
+# ---- 确定传给第5步（合并去冗余）和第7步（末端强制填补）的遗传密码编号 ----
+# 使用TransDecoder时只支持标准遗传密码（表1）；使用TIdeS时按--genetic_code。
+# GFF3_merging_and_removing_redundancy和fillingEndsOfGeneModels根据--genetic_code自动确定起始/终止密码子，
+# 与04Transfrag2ORF判断Integrity时所用的密码子一致。
 my $codon_table_id = ( $ORF_predictor eq 'TIdeS' ) ? $o{genetic_code} : 1;
-my (@start_codons, @stop_codons);
-{
-    if ( !( exists $stop_table{$codon_table_id} && exists $start_table{$codon_table_id} ) ) {
-        print STDERR "Note: genetic code $codon_table_id has no complete built-in start/stop codon list; the standard codons (start ATG; stop TAA,TAG,TGA) are used where the list is missing.\n";
-    }
-    @start_codons = @{ $start_table{$codon_table_id} || [ 'ATG' ] };
-    @stop_codons  = @{ $stop_table{$codon_table_id}  || $stop_table{1} };
-}
-my $start_codon_str = join(",", @start_codons);
-my $stop_codon_str  = join(",", @stop_codons);
+die "Error: genetic code table $codon_table_id is not supported by GFF3_merging_and_removing_redundancy and fillingEndsOfGeneModels (supported: 1-6, 9-16, 21-33).\n"
+    unless $supported_genetic_code{$codon_table_id};
 
 print STDERR "Warning: --chunk_num ($o{chunk_num}) is larger than --cpu ($o{cpu}); all chunks are aligned at the same time, so CPU (and, for STAR, memory) may be oversubscribed.\n"
     if $o{chunk_num} > $o{cpu};
@@ -630,7 +584,7 @@ print STDERR "To resume after an interruption, run the same command with: --tmp_
 print STDERR "--keep_tmp_files is set: the sub-programs will keep their own temporary directories.\n" if $o{keep_tmp_files};
 print STDERR "--ignore_signature is set: the .sig signature files are NOT checked; finished steps (.ok present and outputs non-empty) are skipped even if their parameters or inputs changed.\n" if $o{ignore_signature};
 print STDERR "ORF predictor: $ORF_predictor" . ( $ORF_predictor eq 'TIdeS' ? " (" . ( $o{TIdeS_partial} ? "with" : "without" ) . " --TIdeS_partial)" : "" ) . "; aligner: " . uc($o{aligner}) . "; cpu: $o{cpu} (passed to every sub-program)\n";
-print STDERR "Genetic code table: $codon_table_id; start codons: $start_codon_str; stop codons: $stop_codon_str (used by step 5 and step 7)\n";
+print STDERR "Genetic code table: $codon_table_id (passed as --genetic_code to step 5 and step 7" . ( $ORF_predictor eq 'TIdeS' ? " and to the TIdeS ORF prediction of step 4" : "" ) . ")\n";
 print STDERR "01RNASeq2Sam options set by the user: " . ( $align_params ne '' ? $align_params : "(none; built-in defaults are used)" ) . "\n" if $need_alignment;
 print STDERR "02Sam2Transfrag options: $sam2transfrag_params\n";
 print STDERR "03Stringtie options: (none; the defaults of the sub-program are used)\n";
@@ -799,8 +753,8 @@ my $compare_stats = "$tmp_dir/compare_2gff3_stats.txt";
     my $log  = "$tmp_dir/e.merging_and_removing_redundancy.log";
     my @mp;
     push @mp, "--overlap_coverage $o{overlap_coverage}" if defined $o{overlap_coverage};
-    # 起始/终止密码子由--genetic_code自动确定
-    push @mp, "--start_codon $start_codon_str", "--stop_codon $stop_codon_str";
+    # 遗传密码：GFF3_merging_and_removing_redundancy据此自动确定起始/终止密码子
+    push @mp, "--genetic_code $codon_table_id";
     my $mp = " " . join(" ", @mp);
     my $cmd = "$bin_path/GFF3_merging_and_removing_redundancy --cpu $o{cpu} --first_file_score 0.0 --compare_2gff3_stats $compare_stats$mp $input_genome $sam2transfrag_orf $stringtie_orf > $merged 2> $log";
     my @outs = ($merged);
@@ -866,8 +820,8 @@ else {
     $final_gff3 = "$results_dir/merged_classified.ORF.fillEnd.gff3";
     my @fp;
     push @fp, "--cpu $o{cpu}";
-    # 起始/终止密码子由--genetic_code自动确定
-    push @fp, "--start_codon $start_codon_str", "--stop_codon $stop_codon_str";
+    # 遗传密码：fillingEndsOfGeneModels据此自动确定起始/终止密码子
+    push @fp, "--genetic_code $codon_table_id";
     my $cmd = "$bin_path/fillingEndsOfGeneModels " . join(" ", @fp) . " $input_genome $classified > $final_gff3 2> $log";
     my @outs = ($final_gff3);
     print STDERR "\nStep 7. Enforcing padding at the 5' or 3' end of incomplete gene models (" . &now() . ")\n";
@@ -1546,9 +1500,9 @@ Usage:
     (2) Call NGSReads_prediction.02Sam2Transfrag to assemble transcripts (including alternative splicing analysis) from the BAM file with the Sam2Transfrag algorithm, producing a GFF3 file plus intron and exon base-depth information.
     (3) Call NGSReads_prediction.03Stringtie to assemble transcripts from the same BAM file with StringTie, producing a GFF3 file.
     (4) Call NGSReads_prediction.04Transfrag2ORF to perform ORF analysis on the transcripts from Sam2Transfrag and StringTie separately and predict gene models. The two analyses run in parallel, sharing the threads so that the total does not exceed --cpu. The ORF predictor is chosen by --ORF_predictor (TransDecoder or TIdeS); TIdeS requires homologous proteins as its database; with TIdeS, complete and partial (5'/3' incomplete) ORFs are both predicted by default.
-    (5) Call GFF3_merging_and_removing_redundancy to merge the gene models of the two methods and remove redundancy (adjustable with --overlap_coverage; the start/stop codons used to judge gene completeness are determined automatically from --genetic_code); the result is saved as results/merged.ORF.gff3.
+    (5) Call GFF3_merging_and_removing_redundancy to merge the gene models of the two methods and remove redundancy (adjustable with --overlap_coverage; the genetic code used to judge gene completeness and to detect internal stop codons is given by --genetic_code); the result is saved as results/merged.ORF.gff3.
     (6) Classify the gene models of step 5 into four accuracy classes A/B/C/D according to gene completeness, CDS length, the number of introns between CDSs and the proportion of exon bases that are CDS (taken from the Form information in column 9 of the GFF3 file), and mark the class with a Type= tag in column 9 (on gene lines the Type= tag directly follows ID=; on mRNA lines it directly follows Parent=, and is followed by Integrity=, CDS_Length=, CDS_intron_Num= and CDS_exon_Ratio=). The result is saved as results/merged_classified.ORF.gff3.
-    (7) Call fillingEndsOfGeneModels to forcibly fill in the 5' or 3' ends of the incomplete gene models in the classified result of step 6 (can be skipped with --no_filling_ends; the start/stop codons are determined automatically from --genetic_code); the filled result is saved as results/merged_classified.ORF.fillEnd.gff3. Then write the final gene models in GFF3 format to standard output (starting with ##gff-version 3; gene IDs are uniformly renamed, default prefix RNASeqORF), and report statistics (number of gene models, integrity, filling, classification, ...) to standard error.
+    (7) Call fillingEndsOfGeneModels to forcibly fill in the 5' or 3' ends of the incomplete gene models in the classified result of step 6 (can be skipped with --no_filling_ends; the genetic code used for filling is given by --genetic_code); the filled result is saved as results/merged_classified.ORF.fillEnd.gff3. Then write the final gene models in GFF3 format to standard output (starting with ##gff-version 3; gene IDs are uniformly renamed, default prefix RNASeqORF), and report statistics (number of gene models, integrity, filling, classification, ...) to standard error.
 
     Usage notes:
     (1) Quality control, alignment and sorting/merging are all done by NGSReads_prediction.01RNASeq2Sam; this program only passes the parameters through. Multiple libraries of the same type can be given, separated by commas. Files given by --sam must end with .sam, .bam or .cram.
@@ -1558,12 +1512,13 @@ Usage:
         Passed to NGSReads_prediction.01RNASeq2Sam: --pe_used_pair_num, --se_used_read_num, --trimmomatic_opts, --hisat2_opts, --star_opts. Once --trimmomatic_opts, --hisat2_opts or --star_opts is set, it REPLACES the built-in default parameters of that software as a whole (it is not appended to them), so write out the complete parameter string; values that contain spaces or start with "-" must be quoted, e.g. --hisat2_opts="--dta -k 5". These three options have no effect when only --sam input is given (no quality control or alignment is performed).
         Passed to NGSReads_prediction.02Sam2Transfrag: --fraction, --min_expressed_base_depth, --max_expressed_base_depth, --min_junction_depth, --max_junction_depth, --min_fragment_count_per_transfrag. Built-in defaults when not set: --fraction 0.05 --min_expressed_base_depth 2 --max_expressed_base_depth 50 --min_junction_depth 2 --max_junction_depth 50 --min_fragment_count_per_transfrag 10; they are always passed to the sub-program explicitly.
         Passed to NGSReads_prediction.04Transfrag2ORF: --ORF_predictor, --min_protein_length, --genetic_code, --TIdeS_partial/--noTIdeS_partial. The other options of 04Transfrag2ORF (e.g. the TIdeS executable, the clustering identity used for model training, ...) use the defaults of that sub-program.
-        Passed to GFF3_merging_and_removing_redundancy: --overlap_coverage (the default of that sub-program is used when it is not set).
+        Passed to GFF3_merging_and_removing_redundancy: --overlap_coverage (the default of that sub-program is used when it is not set) and --genetic_code (the same genetic code as used by 04Transfrag2ORF, see usage note 14).
+        Passed to fillingEndsOfGeneModels: --genetic_code (same as above).
         All the other options of the sub-programs are no longer passed through this program and use the defaults of the sub-programs themselves; NGSReads_prediction.03Stringtie receives no key parameters from this program, and stringtie is called from PATH.
-        The following options are set by this program itself: --input_single_sorted_BAM_file, --tmp_dir, --cpu, --strand_specific (02), --strand_specific_library (03), --intron_info_out, --base_depth_out, --gene_prefix (03, 04), --source (04), --start_codon and --stop_codon (GFF3_merging_and_removing_redundancy, fillingEndsOfGeneModels), --keep_tmp_files. For the detailed options of the sub-programs, see the --help output of each of them.
+        The following options are set by this program itself: --input_single_sorted_BAM_file, --tmp_dir, --cpu, --strand_specific (02), --strand_specific_library (03), --intron_info_out, --base_depth_out, --gene_prefix (03, 04), --source (04), --keep_tmp_files. For the detailed options of the sub-programs, see the --help output of each of them.
     (5) In step 4 each ORF yields one gene model, so alternative isoforms of the same gene produce redundant models, which are removed in step 5. To avoid gene ID collisions when merging, the two ORF analyses use different gene prefixes (Sam2Transfrag_ORF, stringtie_ORF); the gene IDs of the final result are uniformly renamed to RNASeqORF000001, RNASeqORF000002 ... by default; use --gene_prefix to change the prefix.
     (6) Use --output_raw_GFF3 to obtain the result of step 6, i.e. after classification and before the forced end filling of step 7 (identical to results/merged_classified.ORF.gff3, with the Type classification tags). These are highly accurate but contain more incomplete gene models. Gene models completed by forced end filling in step 7 are not necessarily accurate; please examine them with care.
-    (7) TIdeS requires homologous proteins as its database. If --homolog_protein is not provided, --ORF_predictor is automatically set to TransDecoder (with a warning if TIdeS was requested). If --homolog_protein is provided and --ORF_predictor is not set, TIdeS is used. --min_protein_length applies to both predictors (TransDecoder: passed to -m; TIdeS: multiplied by 3 and passed to --min-orf); the genetic code table number of --genetic_code only applies to the ORF prediction of TIdeS (but it also determines the start/stop codons of steps 5 and 7), and --TIdeS_partial/--noTIdeS_partial only applies to TIdeS.
+    (7) TIdeS requires homologous proteins as its database. If --homolog_protein is not provided, --ORF_predictor is automatically set to TransDecoder (with a warning if TIdeS was requested). If --homolog_protein is provided and --ORF_predictor is not set, TIdeS is used. --min_protein_length applies to both predictors (TransDecoder: passed to -m; TIdeS: multiplied by 3 and passed to --min-orf); the genetic code table number of --genetic_code only applies to the ORF prediction of TIdeS (but it is also passed as --genetic_code to GFF3_merging_and_removing_redundancy in step 5 and to fillingEndsOfGeneModels in step 7), and --TIdeS_partial/--noTIdeS_partial only applies to TIdeS.
         When TIdeS is used, this program passes --TIdeS_partial to 04Transfrag2ORF by default, i.e. tides predicts 5'/3' partial ORFs in addition to complete ORFs (with start and stop codons). Integrity is then judged from the start/stop codons on the genome sequence, so gene models can be complete, 5prime_partial, 3prime_partial or internal, and classes A and B are distinguished by both gene completeness and the CDS/exon ratio. If only complete ORFs are wanted, add --noTIdeS_partial: every gene model is then labeled Integrity=complete, the "complete gene" condition of the classification is satisfied by all models, and classes A and B are distinguished only by the CDS/exon ratio.
     (8) [Resuming] When a step finishes, a .ok marker and a .sig signature file (recording the command and input file information) are written to the temporary directory. When re-run with the same --tmp_dir: finished steps whose parameters and inputs are unchanged are skipped; a step interrupted midway is resumed by its sub-program; if the parameters or inputs of a step were changed (including whether --keep_tmp_files is used), that step and all downstream steps are cleaned and re-run automatically. The gene model classification is done in step 6 and is recalculated in every run (it takes very little time), so changing the classification parameters does not require re-running steps 1 to 5; if the classified result changes, step 7 is re-run automatically.
         [Ignoring signatures] With --ignore_signature the .sig signature files are no longer used to decide whether parameters or inputs changed: any step that has a .ok marker and non-empty output files is skipped, even if its command-line parameters or the path/size/modification time of its input files have changed (e.g. the temporary directory or input files were moved, files were touched, or only unimportant parameters were changed). In this mode: (a) a step interrupted midway is still resumed by its sub-program and is not cleaned; (b) if an upstream step was actually re-executed in this run (e.g. its .ok or output file was missing), its downstream steps are still re-run, so that results stay consistent with the upstream; (c) step 7 still checks whether the classified result of step 6 has changed, and is re-run if so; (d) finished steps are NOT re-run when parameters change; to force a step to re-run, delete its .ok file (or its outputs) in the temporary directory manually. This option is only meaningful when an existing --tmp_dir is reused.
@@ -1599,7 +1554,7 @@ Usage:
         Class C, Type=fair_gene_models_predicted_by_NGSReads: completeness is not required; CDS length >= the lower threshold, CDS intron number >= the lower threshold, CDS/exon ratio >= the lower threshold; all three conditions must be met (and the model is neither class A nor B).
         Class D, Type=poor_gene_models_predicted_by_NGSReads: all the other gene models.
         Thresholds: unless given manually (--cds_length_high etc.), the thresholds of CDS length and CDS intron number are calculated automatically from --quantile_high and --quantile_low. The reference gene models are taken from compare_2gff3_stats.txt in the temporary directory (produced in step 5): the gene models that overlap between the Sam2Transfrag and StringTie methods and were retained after redundancy removal (these are supported by both methods and are more reliable). Their CDS lengths and CDS intron numbers after step 5 are used to calculate the quantiles. All the thresholds and the number of reference gene models are reported in the log (standard error). If compare_2gff3_stats.txt is missing or no reference gene model can be extracted, all gene models after step 5 are used as the reference, with a warning. The CDS/exon ratio thresholds are not calculated automatically; they are set by --cds_ratio_high (used by class A only) and --cds_ratio_low (used by classes B and C).
-    (14) [Start/stop codons] The start and stop codons used in step 5 (merging; gene completeness is judged with them for scoring) and step 7 (end filling) are determined automatically by this program from --genetic_code and passed as --start_codon and --stop_codon to GFF3_merging_and_removing_redundancy and fillingEndsOfGeneModels. They are exactly the codons that 04Transfrag2ORF uses to judge Integrity in step 4, so the --start_codon and --stop_codon options are no longer needed (and no longer provided). With TIdeS the NCBI genetic code table given by --genetic_code is used (the common tables are built in, e.g. 1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 21-26; for a number that is not built in, the standard codons are used and a note is logged). With TransDecoder only the standard genetic code (table 1) is supported: start codon ATG, stop codons TAA, TAG, TGA. The codons actually used are reported in the log (standard error). Note: some non-standard genetic code tables have several start codons; step 7 then fills the 5' end up to the first start codon after the upstream stop codon.
+    (14) [Genetic code] The genetic code used in step 5 (merging; gene completeness is judged and internal stop codons are detected with it, for scoring) and step 7 (end filling) is given by --genetic_code. This program passes the genetic code number directly as --genetic_code to GFF3_merging_and_removing_redundancy and fillingEndsOfGeneModels, and these two programs determine the start and stop codons from it automatically. It is the same genetic code that 04Transfrag2ORF uses to judge Integrity in step 4, so the --start_codon and --stop_codon options are no longer needed (and no longer provided). With TIdeS the NCBI genetic code table given by --genetic_code is used; with TransDecoder only the standard genetic code (table 1) is supported, so table 1 is passed to steps 5 and 7 whatever the value of --genetic_code is (start codon ATG; stop codons TAA, TAG, TGA). The genetic code numbers supported in steps 5 and 7 are 1-6, 9-16 and 21-33; any other number causes an error at start-up. The genetic code number actually used is reported in the log (standard error). Note: some non-standard genetic code tables have several start codons; step 7 then fills the 5' end up to the first start codon after the upstream stop codon.
 
 Parameters:
 [Input]
@@ -1697,12 +1652,12 @@ Key parameters passed to NGSReads_prediction.04Transfrag2ORF:
     Minimum protein length (amino acids) when identifying ORFs. TransDecoder: passed to -m; TIdeS: multiplied by 3 and passed to --min-orf.
 
     --genetic_code <int>    default: 1
-    Genetic code, see NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi . It has two effects: (a) it is passed to --TIdeS_genetic_code of 04Transfrag2ORF for the ORF prediction of TIdeS (TransDecoder is not supported and always uses the standard code); (b) this program derives the start and stop codons from it and passes them as --start_codon and --stop_codon to both step 5 (GFF3_merging_and_removing_redundancy) and step 7 (fillingEndsOfGeneModels) (see usage note 14). With TransDecoder the start/stop codons are always the standard ones (ATG; TAA,TAG,TGA).
+    Genetic code, see NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi . It has two effects: (a) it is passed to --TIdeS_genetic_code of 04Transfrag2ORF for the ORF prediction of TIdeS (TransDecoder is not supported and always uses the standard code); (b) it is also passed as --genetic_code to step 5 (GFF3_merging_and_removing_redundancy) and step 7 (fillingEndsOfGeneModels), which determine the start and stop codons from it automatically (see usage note 14). With TransDecoder the genetic code passed to steps 5 and 7 is always 1 (the standard code: ATG; TAA,TAG,TGA). Supported numbers: 1-6, 9-16, 21-33.
 
     --TIdeS_partial / --noTIdeS_partial    default: --TIdeS_partial is enabled
     By default this program passes --TIdeS_partial to 04Transfrag2ORF, so with TIdeS both complete ORFs and 5'/3' partial ORFs are predicted (Integrity is judged from the start/stop codons on the genome sequence). Add --noTIdeS_partial to turn it off: TIdeS then reports only complete ORFs and all gene models get Integrity=complete (see usage note 7). Only effective with TIdeS.
 
-Key parameters passed to GFF3_merging_and_removing_redundancy:
+Key parameters passed to GFF3_merging_and_removing_redundancy (in addition, --genetic_code, see above, is also passed to this program and to fillingEndsOfGeneModels):
     --overlap_coverage <float>    default: 0.30
     In step 5, when the overlapping CDS bases of two gene models divided by the CDS bases of the smaller model exceeds this threshold, the lower-scoring model is removed. Range: (0, 1].
 

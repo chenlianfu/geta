@@ -6,15 +6,24 @@ use Cwd qw/abs_path getcwd cwd/;
 use File::Basename;
 use File::Temp qw/tempdir/;
 
-my $usage = <<USAGE;
+my $usage_chinese = <<USAGE;
 Usage:
     $0 [options] genome.fasta GeneModelsInput.gff3 > GeneModelsOutput.gff3
 
     本程序用于填补基因模型的首尾，使之完整。在GETA基因预测过程中，有一些基因模型未能被Augustus预测出来，此时仅根据transcripts或homolog预测的结果，往往首尾缺失。此时，使用本程序将首尾缺失的基因模型进行补齐。
-    本程序补齐基因模型首尾的原理：（1）对基因模型尾部直接进行延长，直至遇到终止密码子或到基因组序列最尾部；（2）对基因模型首部直接进行延长，直至遇到终止密码子，再吐出密码子碱基直至遇到起始密码子;（3）若遇到没有CDS信息的转录本，例如lnc_RNA，不会对其进行补齐，程序同时支持含有可变剪接的GFF3文件。
+
+    本程序补齐基因模型首尾的原理：（1）对基因模型尾部直接进行延长，直至遇到终止密码子或到基因组序列最尾部；（2）对基因模型首部直接进行延长，直至遇到终止密码子，再吐出密码子碱基直至遇到起始密码子；（3）若遇到没有CDS信息的转录本，例如lnc_RNA，不会对其进行补齐，程序同时支持含有可变剪接的GFF3文件。
+
+    本程序根据 --genetic_code 参数设置的遗传密码，自动确定起始密码子和终止密码子。
+
     程序最终输出包含所有基因模型的GFF3文件，并给出统计信息：所有的基因模型数量、完整基因模型数量、不完整的基因模型数量、填补成完整的基因模型数量、不能填补成完整基因模型的数量。
+
     程序对成功填补完整的mRNA，在GFF3文件第九列增加Filling2Complete=True信息；对未能填补完整的mRNA，在GFF3文件第九列增加Filling2Uncomplete=True信息。
+
     程序对转录本进行强制填补后，会导致基因的范围发生改变，于是会对基因的范围信息和其它转录本的范围和exon边界进行修正。
+
+    --genetic_code <int>    default: 1
+    设置遗传密码，程序据此自动确定起始密码子和终止密码子。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi 。支持的遗传密码编号为：1、2、3、4、5、6、9、10、11、12、13、14、15、16、21、22、23、24、25、26、27、28、29、30、31、32、33。例如：1为标准遗传密码（起始密码子为ATG，终止密码子为TAA、TAG、TGA），11为细菌/古菌/植物质体遗传密码，2为脊椎动物线粒体遗传密码。
 
     --nonCompletedGeneModels <string>    default: None
     添加该参数后，程序将不能填补完整的基因模型输入到指定的文件中，在默认的标准输出中仅给完整基因模型。若不添加该参数，则将所有的基因模型都输出到标准输出。
@@ -22,35 +31,37 @@ Usage:
     --filling_need_transcriptID <string>    default: None
     添加该参数后，程序将需要进行填补的转录本ID输出到指定的文件中。
 
-    --start_codon <string>    default: ATG
-    设置起始密码子。若有多个起始密码子，则使用逗号分割。
-
-    --stop_codon <string>    default: TAA,TAG,TGA
-    设置终止密码子。若有多个终止密码子，则使用逗号分割。
-
     --cpu <int>    default: 1
-    设置并行计算使用的CPU线程（进程）数。由于各个基因模型（gene model）的首尾填补计算相互独立，程序会将所有基因模型按ID排序后尽量平均切分为--cpu指定的份数，
-    分别fork多个子进程并行处理，处理完成后父进程再按照基因模型原有顺序合并各子进程结果并输出，因此最终输出结果与单线程运行完全一致，只是运行速度更快。
+    设置并行计算使用的CPU线程（进程）数。由于各个基因模型（gene model）的首尾填补计算相互独立，程序会将所有基因模型按ID排序后尽量平均切分为--cpu指定的份数，分别fork多个子进程并行处理，处理完成后父进程再按照基因模型原有顺序合并各子进程结果并输出，因此最终输出结果与单线程运行完全一致，只是运行速度更快。
 
     --help    default: None
-    display this help and exit.
+    显示英文用法说明并退出。
+
+    --chinese_help    default: None
+    显示中文用法说明并退出。
 
 USAGE
-if (@ARGV==0){die $usage}
+my $usage_english = &get_usage_english();
+if (@ARGV==0){die $usage_english}
 
-my ($help_flag, $start_codon, $stop_codon, $nonCompletedGeneModels, $filling_need_transcriptID, $cpu_num);
+my ($help_flag, $chinese_help_flag, $genetic_code, $start_codon, $stop_codon, $nonCompletedGeneModels, $filling_need_transcriptID, $cpu_num);
 GetOptions(
     "help" => \$help_flag,
+    "chinese_help" => \$chinese_help_flag,
+    "genetic_code:i" => \$genetic_code,
+    # 为兼容旧版本而保留，不在用法说明中给出：若设置，则优先于 --genetic_code 所确定的起始密码子和终止密码子。
     "start_codon:s" => \$start_codon,
     "stop_codon:s" => \$stop_codon,
     "nonCompletedGeneModels:s" => \$nonCompletedGeneModels,
     "filling_need_transcriptID:s" => \$filling_need_transcriptID,
     "cpu:i" => \$cpu_num,
-);
+) or die $usage_english;
 
-if ( $help_flag ) { die $usage }
-$start_codon ||= "ATG";
-$stop_codon ||= "TAA,TAG,TGA";
+if ( $chinese_help_flag ) { die $usage_chinese }
+if ( $help_flag ) { die $usage_english }
+die "Error: genome.fasta and GeneModelsInput.gff3 are required (exactly two input files).\n\n$usage_english" unless @ARGV == 2;
+
+$genetic_code = 1 unless ( defined $genetic_code && $genetic_code > 0 );
 $cpu_num ||= 1;
 $cpu_num = 1 if $cpu_num < 1;
 
@@ -61,9 +72,30 @@ if ($filling_need_transcriptID) {
     open OUT1, ">", $filling_need_transcriptID or die "Can not create file $filling_need_transcriptID, $!";
 }
 
+# 根据遗传密码得到起始密码子和终止密码子；若用户通过 --start_codon 或 --stop_codon 显式设置，则以用户设置为准（兼容旧版本）。
+my ($code_ref, $start_codon_ref, $stop_codon_ref) = &codon_table($genetic_code);
 my (%start_codon, %stop_codon);
-foreach (split /,/, $start_codon) { $start_codon{$_} = 1; }
-foreach (split /,/, $stop_codon) { $stop_codon{$_} = 1; }
+if ( defined $start_codon && $start_codon ne "" ) {
+    foreach ( split /,/, $start_codon ) {
+        s/\s+//g; $_ = uc($_); tr/U/T/;
+        $start_codon{$_} = 1 if $_ ne "";
+    }
+}
+else {
+    %start_codon = %$start_codon_ref;
+}
+if ( defined $stop_codon && $stop_codon ne "" ) {
+    foreach ( split /,/, $stop_codon ) {
+        s/\s+//g; $_ = uc($_); tr/U/T/;
+        $stop_codon{$_} = 1 if $_ ne "";
+    }
+}
+else {
+    %stop_codon = %$stop_codon_ref;
+}
+die "Error: no start codon is available.\n" unless %start_codon;
+die "Error: no stop codon is available.\n" unless %stop_codon;
+print STDERR "遗传密码 $genetic_code 对应的起始密码子为 " . (join ",", sort keys %start_codon) . " ，终止密码子为 " . (join ",", sort keys %stop_codon) . " 。\n";
 
 # 读取基因组序列
 my $seq = &read_genome($ARGV[0]);
@@ -996,10 +1028,6 @@ sub correct_ends_of_transcript_and_exon {
     my $out;
 
     # 解析转录本ID。有些转录本Feature Name可能不是mRNA，同时输入数据中不包含Gene Feature Name，因此使用parent信息来确定转录本ID。
-    # 修正bug：原代码用字符串"null"作为ID/Parent未匹配到时的哨兵默认值，而"null"在Perl中是
-    # 真值，导致 "if ($ID && $parent)" 这一判断实际上恒为真（不论是否真的匹配到ID/Parent），
-    # 可能把"null"=>"null"这样的伪造键值对混入%parent中。这里改为使用undef并显式用defined()
-    # 判断，语义更准确，避免引入无意义的哨兵条目。
     my (%parent, %transcript_ID);
     foreach ( split /\n/, $transcript_info ) {
         my ($ID, $parent);
@@ -1080,4 +1108,205 @@ sub get_content {
     $add_attr = $gff3_score_attr{"$chr\t$strand\t$feature_type\t$start\t$end"}{"attr"} if exists $gff3_score_attr{"$chr\t$strand\t$feature_type\t$start\t$end"};
     my $out_content = "$chr\t$source\t$feature_type\t$start\t$end\t$score\t$strand\t$frame\tID=$mRNA_ID.$feature_showname$num;Parent=$mRNA_ID;$add_attr\n";
     return $out_content;
+}
+
+# 子程序，根据遗传密码编号返回（密码子表、起始密码子表、终止密码子表）的哈希引用。
+# 遗传密码的设置参考NCBI Genetic Codes，代码来自 homolog_prediction.04miniprot2GeneModels 并经过核对和修正。
+sub codon_table {
+    my ($genetic_code) = @_;
+    my %code = (
+        "TTT" => "F", "TTC" => "F", "TTA" => "L", "TTG" => "L",
+        "TCT" => "S", "TCC" => "S", "TCA" => "S", "TCG" => "S",
+        "TAT" => "Y", "TAC" => "Y", "TAA" => "X", "TAG" => "X",
+        "TGT" => "C", "TGC" => "C", "TGA" => "X", "TGG" => "W",
+        "CTT" => "L", "CTC" => "L", "CTA" => "L", "CTG" => "L",
+        "CCT" => "P", "CCC" => "P", "CCA" => "P", "CCG" => "P",
+        "CAT" => "H", "CAC" => "H", "CAA" => "Q", "CAG" => "Q",
+        "CGT" => "R", "CGC" => "R", "CGA" => "R", "CGG" => "R",
+        "ATT" => "I", "ATC" => "I", "ATA" => "I", "ATG" => "M",
+        "ACT" => "T", "ACC" => "T", "ACA" => "T", "ACG" => "T",
+        "AAT" => "N", "AAC" => "N", "AAA" => "K", "AAG" => "K",
+        "AGT" => "S", "AGC" => "S", "AGA" => "R", "AGG" => "R",
+        "GTT" => "V", "GTC" => "V", "GTA" => "V", "GTG" => "V",
+        "GCT" => "A", "GCC" => "A", "GCA" => "A", "GCG" => "A",
+        "GAT" => "D", "GAC" => "D", "GAA" => "E", "GAG" => "E",
+        "GGT" => "G", "GGC" => "G", "GGA" => "G", "GGG" => "G",
+    );
+    my %start_codon;
+    $start_codon{"ATG"} = 1;
+    if ( $genetic_code == 1 ) {
+        # The Standard Code
+        #$start_codon{"TTG"} = 1;
+        #$start_codon{"CTG"} = 1;
+    }
+    elsif ( $genetic_code == 2 ) {
+        # The Vertebrate Mitochondrial Code
+        $code{"AGA"} = "X"; $code{"AGG"} = "X"; $code{"ATA"} = "M"; $code{"TGA"} = "W";
+        $start_codon{$_} = 1 foreach qw/ATA ATT ATC GTG/;
+    }
+    elsif ( $genetic_code == 3 ) {
+        # The Yeast Mitochondrial Code
+        $code{"ATA"} = "M"; $code{"CTT"} = "T"; $code{"CTC"} = "T"; $code{"CTA"} = "T"; $code{"CTG"} = "T"; $code{"TGA"} = "W";
+        $start_codon{$_} = 1 foreach qw/ATA GTG/;
+    }
+    elsif ( $genetic_code == 4 ) {
+        # The Mold, Protozoan, and Coelenterate Mitochondrial Code and the Mycoplasma/Spiroplasma Code
+        $code{"TGA"} = "W";
+        $start_codon{$_} = 1 foreach qw/ATA ATT ATC GTG CTG TTA TTG/;
+    }
+    elsif ( $genetic_code == 5 ) {
+        # The Invertebrate Mitochondrial Code
+        $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"ATA"} = "M"; $code{"TGA"} = "W";
+        $start_codon{$_} = 1 foreach qw/ATA ATT ATC GTG TTG/;
+    }
+    elsif ( $genetic_code == 6 ) {
+        # The Ciliate, Dasycladacean and Hexamita Nuclear Code
+        $code{"TAA"} = "Q"; $code{"TAG"} = "Q";
+    }
+    elsif ( $genetic_code == 9 ) {
+        # The Echinoderm and Flatworm Mitochondrial Code
+        $code{"AAA"} = "N"; $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"TGA"} = "W";
+        $start_codon{"GTG"} = 1;
+    }
+    elsif ( $genetic_code == 10 ) {
+        # The Euplotid Nuclear Code
+        $code{"TGA"} = "C";
+    }
+    elsif ( $genetic_code == 11 ) {
+        # The Bacterial, Archaeal and Plant Plastid Code
+        $start_codon{$_} = 1 foreach qw/ATA ATT ATC GTG CTG TTG/;
+    }
+    elsif ( $genetic_code == 12 ) {
+        # The Alternative Yeast Nuclear Code
+        $code{"CTG"} = "S";
+        $start_codon{"CTG"} = 1;
+    }
+    elsif ( $genetic_code == 13 ) {
+        # The Ascidian Mitochondrial Code
+        $code{"AGA"} = "G"; $code{"AGG"} = "G"; $code{"ATA"} = "M"; $code{"TGA"} = "W";
+        $start_codon{$_} = 1 foreach qw/ATA GTG TTG/;
+    }
+    elsif ( $genetic_code == 14 ) {
+        # The Alternative Flatworm Mitochondrial Code
+        $code{"AAA"} = "N"; $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"TAA"} = "Y"; $code{"TGA"} = "W";
+    }
+    elsif ( $genetic_code == 15 ) {
+        # Blepharisma Nuclear Code
+        $code{"TAG"} = "Q";
+    }
+    elsif ( $genetic_code == 16 ) {
+        # Chlorophycean Mitochondrial Code
+        $code{"TAG"} = "L";
+    }
+    elsif ( $genetic_code == 21 ) {
+        # Trematode Mitochondrial Code
+        $code{"TGA"} = "W"; $code{"ATA"} = "M"; $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"AAA"} = "N";
+        $start_codon{"GTG"} = 1;
+    }
+    elsif ( $genetic_code == 22 ) {
+        # Scenedesmus obliquus Mitochondrial Code
+        $code{"TCA"} = "X"; $code{"TAG"} = "L";
+    }
+    elsif ( $genetic_code == 23 ) {
+        # Thraustochytrium Mitochondrial Code
+        $code{"TTA"} = "X";
+        $start_codon{$_} = 1 foreach qw/ATT GTG/;
+    }
+    elsif ( $genetic_code == 24 ) {
+        # Rhabdopleuridae Mitochondrial Code
+        $code{"AGA"} = "S"; $code{"AGG"} = "K"; $code{"TGA"} = "W";
+        $start_codon{$_} = 1 foreach qw/GTG CTG TTG/;
+    }
+    elsif ( $genetic_code == 25 ) {
+        # Candidate Division SR1 and Gracilibacteria Code
+        $code{"TGA"} = "G";
+        $start_codon{$_} = 1 foreach qw/GTG TTG/;
+    }
+    elsif ( $genetic_code == 26 ) {
+        # Pachysolen tannophilus Nuclear Code
+        $code{"CTG"} = "A";
+        $start_codon{"CTG"} = 1;
+    }
+    elsif ( $genetic_code == 27 ) {
+        # Karyorelict Nuclear Code
+        # TAA和TAG编码Gln；TGA既可编码Trp也可作为终止密码子，这里仍将TGA视为终止密码子。
+        $code{"TAG"} = "Q"; $code{"TAA"} = "Q";
+    }
+    elsif ( $genetic_code == 28 ) {
+        # Condylostoma Nuclear Code
+        # TAA、TAG编码Gln，TGA编码Trp，但三者均可根据上下文作为终止密码子，因此这里仍将TAA、TAG、TGA都视为终止密码子。
+    }
+    elsif ( $genetic_code == 29 ) {
+        # Mesodinium Nuclear Code
+        $code{"TAA"} = "Y"; $code{"TAG"} = "Y";
+    }
+    elsif ( $genetic_code == 30 ) {
+        # Peritrich Nuclear Code
+        $code{"TAA"} = "E"; $code{"TAG"} = "E";
+    }
+    elsif ( $genetic_code == 31 ) {
+        # Blastocrithidia Nuclear Code
+    }
+    elsif ( $genetic_code == 32 ) {
+        # Balanophoraceae Plastid Code
+        $code{"TAG"} = "W";
+        $start_codon{$_} = 1 foreach qw/ATA ATT ATC GTG CTG TTG/;
+    }
+    elsif ( $genetic_code == 33 ) {
+        # Cephalodiscidae Mitochondrial UAA-Tyr Code
+        $code{"TAA"} = "Y"; $code{"TGA"} = "W"; $code{"AGA"} = "S"; $code{"AGG"} = "K";
+        $start_codon{$_} = 1 foreach qw/GTG CTG TTG/;
+    }
+    else {
+        print STDERR "Warning: 不支持的遗传密码 $genetic_code ，起始和终止密码子按标准遗传密码设置。\n";
+    }
+
+    my %stop_codon;
+    foreach ( keys %code ) {
+        $stop_codon{$_} = 1 if $code{$_} eq "X";
+    }
+
+    return (\%code, \%start_codon, \%stop_codon);
+}
+
+# 英文用法说明
+sub get_usage_english {
+
+my $usage = <<USAGE;
+Usage:
+    $0 [options] genome.fasta GeneModelsInput.gff3 > GeneModelsOutput.gff3
+
+    This program fills in the ends of gene models so that they become complete. During GETA gene prediction, some gene models cannot be predicted by Augustus; in that case the results predicted only from transcripts or homologs are often missing their starts or ends. This program is used to complete such gene models.
+
+    Principle of filling the ends: (1) the 3' end of a gene model is extended directly until a stop codon is met or the end of the genome sequence is reached; (2) the 5' end of a gene model is extended directly until an in-frame upstream stop codon is met, and then the sequence is shortened codon by codon downstream until a start codon is found; (3) transcripts without CDS information, such as lnc_RNA, are not filled, and GFF3 files containing alternative splicing are supported.
+
+    The start codons and stop codons are determined automatically from the genetic code set by --genetic_code.
+
+    The program finally outputs a GFF3 file containing all gene models, and reports statistics: the number of all gene models, complete gene models, incomplete gene models, gene models successfully filled to complete ones, and gene models that cannot be filled to complete ones.
+
+    For an mRNA that is successfully filled to complete, the information Filling2Complete=True is added to the 9th column of the GFF3 file; for an mRNA that cannot be filled to complete, the information Filling2Uncomplete=True is added to the 9th column.
+
+    After the transcripts are force-filled, the range of the gene may change, so the range of the gene and the ranges and exon boundaries of the other transcripts are corrected accordingly.
+
+    --genetic_code <int>    default: 1
+    Set the genetic code, from which the start codons and stop codons are determined automatically. For the corresponding values, please refer to NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi . The supported genetic code numbers are: 1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33. For example: 1 is the standard code (start codon ATG; stop codons TAA, TAG, TGA), 11 is the bacterial/archaeal/plant plastid code, and 2 is the vertebrate mitochondrial code.
+
+    --nonCompletedGeneModels <string>    default: None
+    If this option is added, the gene models that cannot be filled to complete ones are written to the specified file, and only complete gene models are written to the standard output. If this option is not added, all gene models are written to the standard output.
+
+    --filling_need_transcriptID <string>    default: None
+    If this option is added, the IDs of the transcripts that need filling are written to the specified file.
+
+    --cpu <int>    default: 1
+    Set the number of CPU threads (processes) used for parallel computing. Since the end filling of each gene model is independent, the program sorts all gene models by ID and splits them as evenly as possible into the number of parts specified by --cpu, forks multiple child processes to process them in parallel, and the parent process then merges the results of the child processes in the original order of the gene models and outputs them. The final output is therefore identical to that of a single-thread run, only faster.
+
+    --help    default: None
+    Display this English usage and exit.
+
+    --chinese_help    default: None
+    Display the Chinese usage and exit.
+
+USAGE
+
+return $usage;
 }

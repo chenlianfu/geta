@@ -244,7 +244,7 @@ foreach my $seq_id (sort keys %out_id) {
     }
 
     # 输出GFF3_merging_and_removing_redundancy命令
-    print CMD2 "$bin_path/GFF3_merging_and_removing_redundancy_Parallel --cpu $cpu --first_file_score 0.0 $ARGV[0] ";
+    print CMD2 "$bin_path/GFF3_merging_and_removing_redundancy --cpu $cpu --first_file_score 0.0 $ARGV[0] ";
     foreach ( @partition ) {
         print CMD2 "$tmp_dir/$_.gff3 ";
     }

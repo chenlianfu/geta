@@ -9,7 +9,7 @@ use Storable qw(store retrieve);
 use POSIX qw(floor);
 
 my $usage_chinese = <<'USAGE_CN';
-Usage:
+用法:
     __PROG__ [options] genome.fasta target.gff3 supplementary.gff3 > target_filled.gff3
 
     程序功能：利用 supplementary.gff3 中的编码蛋白基因模型，对 target.gff3 中5'端或3'端不完整的编码蛋白基因模型进行末端填补。填补后的完整 target.gff3 输出到标准输出，统计信息输出到标准错误输出，可通过 --output_filling_detail_tab 参数输出每个填补事件的明细表格。
@@ -22,74 +22,36 @@ Usage:
 
 [填补参数]
 
-    --genetic_code <int>    default: 1
-    设置基因所用的遗传密码表编号，与NCBI translation table编号一致，参见 NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi 。程序据此确定起始密码子（该密码表中编码甲硫氨酸的密码子）和终止密码子（该密码表中编码终止的密码子），并用于：（1）判断基因模型的5'端和3'端是否完整；（2）识别填补时补入序列中的框内终止密码子，并据此截断3'端或重定位5'端的起点；（3）检查填补后的模型，其框内终止密码子数量不得增加。
+    --genetic_code <int>    默认值: 1
+    设置基因所用的遗传密码表编号，与NCBI translation table编号一致，参见 NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi 。程序据此自动确定起始密码子（ATG以及该密码表允许使用的备用起始密码子）和终止密码子（该密码表中编码终止的密码子），并用于：（1）判断基因模型的5'端和3'端是否完整；（2）识别填补时补入序列中的框内终止密码子，并据此截断3'端或重定位5'端的起点；（3）检查填补后的模型，其框内终止密码子数量不得增加。支持的遗传密码编号为：1、2、3、4、5、6、9、10、11、12、13、14、15、16、21、22、23、24、25、26、27、28、29、30、31、32、33。例如：1为标准遗传密码（起始密码子为ATG，终止密码子为TAA、TAG、TGA），11为细菌/古菌/植物质体遗传密码，2为脊椎动物线粒体遗传密码。
 
-    --attribute_for_filling_complete <string>    default: None
+    --attribute_for_filling_complete <string>    默认值: 无
     添加该参数，用于给经填补后变为完整的mRNA在GFF3第9列添加attribute标签。例如，使用同源蛋白进行补齐时，设置 Filled_by_homolog=True。
 
 [并行参数]
 
-    --cpu <int>    default: 8
+    --cpu <int>    默认值: 8
     设置并行进程数。程序内部使用 fork 并行，不再依赖 ParaFly。设置为1时不启动子进程。
 
-    --tmp_dir <string>    default: None
+    --tmp_dir <string>    默认值: 无
     设置存放并行运算中间文件的目录，程序结束后其中的临时子目录会被自动删除。默认使用系统临时目录。
 
 [输出参数]
 
-    --output_filling_detail_tab <string>    default: None
+    --output_filling_detail_tab <string>    默认值: 无
     添加该参数，将每个填补事件输出到指定的表格文件，各列依次为：基因ID、mRNA ID、Multi_CDS或Single_CDS、填补前的完整性、Filled_5p或Filled_3p、用于填补的mRNA ID、填补后该mRNA是否完整（Yes/No）。
 
 [帮助参数]
 
-    --help    default: None
+    --help    默认值: 无
     Display the English usage information and exit.
 
-    --chinese_help    default: None
+    --chinese_help    默认值: 无
     显示中文用法说明并退出。
 
 USAGE_CN
 
-# ------------------------------------------------------------------ genetic codes
-# 数据来自 NCBI Genetic Codes (https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi, last update Sep. 23, 2024)。
-# aa 为 NCBI 的 "AAs" 行；64个密码子的顺序为：第1、2、3位碱基均按 T,C,A,G 排列。
-# 终止密码子 = aa 中为 '*' 的密码子，再加上 extra_stop 中的密码子；
-# 起始密码子 = aa 中为 'M' 的密码子（不使用 NCBI Starts 行中的 CTG、TTG、GTG 等备用起始密码子）。
-# extra_stop：NCBI 中"终止或编码氨基酸"二义的密码子，本程序按终止密码子处理：
-#   表27的TGA；表28的TAA、TAG、TGA；表31的TAA、TAG。
-my %GENETIC_CODE = (
-     1 => { name => 'Standard',                                   aa => 'FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG' },
-     2 => { name => 'Vertebrate Mitochondrial',                   aa => 'FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIMMTTTTNNKKSS**VVVVAAAADDEEGGGG' },
-     3 => { name => 'Yeast Mitochondrial',                        aa => 'FFLLSSSSYY**CCWWTTTTPPPPHHQQRRRRIIMMTTTTNNKKSSRRVVVVAAAADDEEGGGG' },
-     4 => { name => 'Mold, Protozoan, and Coelenterate Mitochondrial; Mycoplasma/Spiroplasma', aa => 'FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG' },
-     5 => { name => 'Invertebrate Mitochondrial',                 aa => 'FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIMMTTTTNNKKSSSSVVVVAAAADDEEGGGG' },
-     6 => { name => 'Ciliate, Dasycladacean and Hexamita Nuclear', aa => 'FFLLSSSSYYQQCC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG' },
-     9 => { name => 'Echinoderm and Flatworm Mitochondrial',      aa => 'FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIIMTTTTNNNKSSSSVVVVAAAADDEEGGGG' },
-    10 => { name => 'Euplotid Nuclear',                           aa => 'FFLLSSSSYY**CCCWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG' },
-    11 => { name => 'Bacterial, Archaeal and Plant Plastid',      aa => 'FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG' },
-    12 => { name => 'Alternative Yeast Nuclear',                  aa => 'FFLLSSSSYY**CC*WLLLSPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG' },
-    13 => { name => 'Ascidian Mitochondrial',                     aa => 'FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIMMTTTTNNKKSSGGVVVVAAAADDEEGGGG' },
-    14 => { name => 'Alternative Flatworm Mitochondrial',         aa => 'FFLLSSSSYYY*CCWWLLLLPPPPHHQQRRRRIIIMTTTTNNNKSSSSVVVVAAAADDEEGGGG' },
-    15 => { name => 'Blepharisma Nuclear',                        aa => 'FFLLSSSSYY*QCC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG' },
-    16 => { name => 'Chlorophycean Mitochondrial',                aa => 'FFLLSSSSYY*LCC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG' },
-    21 => { name => 'Trematode Mitochondrial',                    aa => 'FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIMMTTTTNNNKSSSSVVVVAAAADDEEGGGG' },
-    22 => { name => 'Scenedesmus obliquus Mitochondrial',         aa => 'FFLLSS*SYY*LCC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG' },
-    23 => { name => 'Thraustochytrium Mitochondrial',             aa => 'FF*LSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG' },
-    24 => { name => 'Rhabdopleuridae Mitochondrial',              aa => 'FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSSKVVVVAAAADDEEGGGG' },
-    25 => { name => 'Candidate Division SR1 and Gracilibacteria', aa => 'FFLLSSSSYY**CCGWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG' },
-    26 => { name => 'Pachysolen tannophilus Nuclear',             aa => 'FFLLSSSSYY**CC*WLLLAPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG' },
-    27 => { name => 'Karyorelict Nuclear',                        aa => 'FFLLSSSSYYQQCCWWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG', extra_stop => [qw(TGA)] },
-    28 => { name => 'Condylostoma Nuclear',                       aa => 'FFLLSSSSYYQQCCWWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG', extra_stop => [qw(TAA TAG TGA)] },
-    29 => { name => 'Mesodinium Nuclear',                         aa => 'FFLLSSSSYYYYCC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG' },
-    30 => { name => 'Peritrich Nuclear',                          aa => 'FFLLSSSSYYEECC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG' },
-    31 => { name => 'Blastocrithidia Nuclear',                    aa => 'FFLLSSSSYYEECCWWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG', extra_stop => [qw(TAA TAG)] },
-    32 => { name => 'Balanophoraceae Plastid',                    aa => 'FFLLSSSSYY*WCC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG' },
-    33 => { name => 'Cephalodiscidae Mitochondrial UAA-Tyr',      aa => 'FFLLSSSSYYY*CCWWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSSKVVVVAAAADDEEGGGG' },
-);
-my $GC_IDS = join ", ", sort { $a <=> $b } keys %GENETIC_CODE;
-
-# 起始/终止密码子（由 --genetic_code 决定）
+# 起始/终止密码子（由 --genetic_code 决定，见子程序 codon_table）
 my (%start_codon, %stop_codon);
 
 # ------------------------------------------------------------------ options
@@ -111,8 +73,15 @@ if (@ARGV != 3) { print STDERR "Error: exactly 3 input files are required.\n\n" 
 
 $cpu = 8 unless defined $cpu;
 die "Error: --cpu must be a positive integer.\n" if $cpu < 1;
-$genetic_code = 1 unless defined $genetic_code;
-setup_genetic_code($genetic_code);
+$genetic_code = 1 unless ( defined $genetic_code && $genetic_code > 0 );
+
+# 根据遗传密码得到起始密码子和终止密码子
+my ($code_ref, $start_codon_ref, $stop_codon_ref) = codon_table($genetic_code);
+%start_codon = %$start_codon_ref;
+%stop_codon = %$stop_codon_ref;
+die "Error: no start codon is available.\n" unless %start_codon;
+die "Error: no stop codon is available.\n" unless %stop_codon;
+
 $attr_complete =~ s/^\s+|[\s;]+$//g if defined $attr_complete;
 undef $attr_complete if defined $attr_complete && $attr_complete eq '';
 
@@ -254,7 +223,7 @@ if (defined $detail_tab) {
 my $c = sub { my ($t, $k) = @_; return scalar(keys %{ $cnt{$t}{$k} || {} }); };
 $stat{$_} ||= 0 foreach qw(total complete_before partial_before filled filled_to_complete no_seq);
 $stat{no_seq} += ($no_chr || 0);
-print STDERR "Genetic code: $genetic_code ($GENETIC_CODE{$genetic_code}{name}); start codon(s): " . join(",", sort keys %start_codon) . "; stop codon(s): " . join(",", sort keys %stop_codon) . ".\n";
+print STDERR "Genetic code: $genetic_code; start codon(s): " . join(",", sort keys %start_codon) . "; stop codon(s): " . join(",", sort keys %stop_codon) . ".\n";
 print STDERR "Target mRNAs with CDS: $stat{total}; already complete: $stat{complete_before}; incomplete: $stat{partial_before}; skipped (sequence unavailable): $stat{no_seq}.\n";
 print STDERR "Filled " . scalar(keys %m_all) . " mRNAs of " . scalar(keys %g_all) . " genes; $stat{filled_to_complete} mRNAs (" . scalar(keys %g_complete) . " genes) became complete after filling.\n";
 print STDERR "Multi-CDS genes filled: " . $c->("Multi_CDS", "all") . " (5prime_partial, 3prime_partial, internal: " . join(", ", map { $c->("Multi_CDS", $_) } qw(5prime_partial 3prime_partial internal)) . ").\n";
@@ -278,22 +247,163 @@ sub english_usage {
     return $u;
 }
 
-# 根据NCBI遗传密码表编号设置起始密码子和终止密码子：
-# 终止密码子 = 编码终止(*)的密码子（加上二义密码子 extra_stop）；起始密码子 = 编码甲硫氨酸(M)的密码子。
-sub setup_genetic_code {
-    my ($id) = @_;
-    die "Error: unsupported --genetic_code $id. Supported genetic codes: $GC_IDS\n" unless exists $GENETIC_CODE{$id};
-    my $gc = $GENETIC_CODE{$id};
-    die "Error: internal error, malformed table for genetic code $id.\n" unless length($gc->{aa}) == 64;
-    my @b = qw(T C A G);
-    my (%aa, $i);
-    $i = 0;
-    foreach my $x (@b) { foreach my $y (@b) { foreach my $z (@b) { $aa{"$x$y$z"} = substr($gc->{aa}, $i++, 1); } } }
-    $aa{$_} = '*' foreach @{ $gc->{extra_stop} || [] };
-    %start_codon = map { $_ => 1 } grep { $aa{$_} eq 'M' } keys %aa;
-    %stop_codon = map { $_ => 1 } grep { $aa{$_} eq '*' } keys %aa;
-    die "Error: genetic code $id has no stop codon.\n" unless %stop_codon;
-    die "Error: genetic code $id has no start codon.\n" unless %start_codon;
+# 子程序，根据遗传密码编号返回（密码子表、起始密码子表、终止密码子表）的哈希引用。
+# 遗传密码的设置参考NCBI Genetic Codes，代码来自 GFF3_merging_and_removing_redundancy。
+sub codon_table {
+    my ($genetic_code) = @_;
+    my %code = (
+        "TTT" => "F", "TTC" => "F", "TTA" => "L", "TTG" => "L",
+        "TCT" => "S", "TCC" => "S", "TCA" => "S", "TCG" => "S",
+        "TAT" => "Y", "TAC" => "Y", "TAA" => "X", "TAG" => "X",
+        "TGT" => "C", "TGC" => "C", "TGA" => "X", "TGG" => "W",
+        "CTT" => "L", "CTC" => "L", "CTA" => "L", "CTG" => "L",
+        "CCT" => "P", "CCC" => "P", "CCA" => "P", "CCG" => "P",
+        "CAT" => "H", "CAC" => "H", "CAA" => "Q", "CAG" => "Q",
+        "CGT" => "R", "CGC" => "R", "CGA" => "R", "CGG" => "R",
+        "ATT" => "I", "ATC" => "I", "ATA" => "I", "ATG" => "M",
+        "ACT" => "T", "ACC" => "T", "ACA" => "T", "ACG" => "T",
+        "AAT" => "N", "AAC" => "N", "AAA" => "K", "AAG" => "K",
+        "AGT" => "S", "AGC" => "S", "AGA" => "R", "AGG" => "R",
+        "GTT" => "V", "GTC" => "V", "GTA" => "V", "GTG" => "V",
+        "GCT" => "A", "GCC" => "A", "GCA" => "A", "GCG" => "A",
+        "GAT" => "D", "GAC" => "D", "GAA" => "E", "GAG" => "E",
+        "GGT" => "G", "GGC" => "G", "GGA" => "G", "GGG" => "G",
+    );
+    my %start_table;
+    $start_table{"ATG"} = 1;
+    if ( $genetic_code == 1 ) {
+        # The Standard Code
+        #$start_table{"TTG"} = 1;
+        #$start_table{"CTG"} = 1;
+    }
+    elsif ( $genetic_code == 2 ) {
+        # The Vertebrate Mitochondrial Code
+        $code{"AGA"} = "X"; $code{"AGG"} = "X"; $code{"ATA"} = "M"; $code{"TGA"} = "W";
+        $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG/;
+    }
+    elsif ( $genetic_code == 3 ) {
+        # The Yeast Mitochondrial Code
+        $code{"ATA"} = "M"; $code{"CTT"} = "T"; $code{"CTC"} = "T"; $code{"CTA"} = "T"; $code{"CTG"} = "T"; $code{"TGA"} = "W";
+        $start_table{$_} = 1 foreach qw/ATA GTG/;
+    }
+    elsif ( $genetic_code == 4 ) {
+        # The Mold, Protozoan, and Coelenterate Mitochondrial Code and the Mycoplasma/Spiroplasma Code
+        $code{"TGA"} = "W";
+        $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG CTG TTA TTG/;
+    }
+    elsif ( $genetic_code == 5 ) {
+        # The Invertebrate Mitochondrial Code
+        $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"ATA"} = "M"; $code{"TGA"} = "W";
+        $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG TTG/;
+    }
+    elsif ( $genetic_code == 6 ) {
+        # The Ciliate, Dasycladacean and Hexamita Nuclear Code
+        $code{"TAA"} = "Q"; $code{"TAG"} = "Q";
+    }
+    elsif ( $genetic_code == 9 ) {
+        # The Echinoderm and Flatworm Mitochondrial Code
+        $code{"AAA"} = "N"; $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"TGA"} = "W";
+        $start_table{"GTG"} = 1;
+    }
+    elsif ( $genetic_code == 10 ) {
+        # The Euplotid Nuclear Code
+        $code{"TGA"} = "C";
+    }
+    elsif ( $genetic_code == 11 ) {
+        # The Bacterial, Archaeal and Plant Plastid Code
+        $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG CTG TTG/;
+    }
+    elsif ( $genetic_code == 12 ) {
+        # The Alternative Yeast Nuclear Code
+        $code{"CTG"} = "S";
+        $start_table{"CTG"} = 1;
+    }
+    elsif ( $genetic_code == 13 ) {
+        # The Ascidian Mitochondrial Code
+        $code{"AGA"} = "G"; $code{"AGG"} = "G"; $code{"ATA"} = "M"; $code{"TGA"} = "W";
+        $start_table{$_} = 1 foreach qw/ATA GTG TTG/;
+    }
+    elsif ( $genetic_code == 14 ) {
+        # The Alternative Flatworm Mitochondrial Code
+        $code{"AAA"} = "N"; $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"TAA"} = "Y"; $code{"TGA"} = "W";
+    }
+    elsif ( $genetic_code == 15 ) {
+        # Blepharisma Nuclear Code
+        $code{"TAG"} = "Q";
+    }
+    elsif ( $genetic_code == 16 ) {
+        # Chlorophycean Mitochondrial Code
+        $code{"TAG"} = "L";
+    }
+    elsif ( $genetic_code == 21 ) {
+        # Trematode Mitochondrial Code
+        $code{"TGA"} = "W"; $code{"ATA"} = "M"; $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"AAA"} = "N";
+        $start_table{"GTG"} = 1;
+    }
+    elsif ( $genetic_code == 22 ) {
+        # Scenedesmus obliquus Mitochondrial Code
+        $code{"TCA"} = "X"; $code{"TAG"} = "L";
+    }
+    elsif ( $genetic_code == 23 ) {
+        # Thraustochytrium Mitochondrial Code
+        $code{"TTA"} = "X";
+        $start_table{$_} = 1 foreach qw/ATT GTG/;
+    }
+    elsif ( $genetic_code == 24 ) {
+        # Rhabdopleuridae Mitochondrial Code
+        $code{"AGA"} = "S"; $code{"AGG"} = "K"; $code{"TGA"} = "W";
+        $start_table{$_} = 1 foreach qw/GTG CTG TTG/;
+    }
+    elsif ( $genetic_code == 25 ) {
+        # Candidate Division SR1 and Gracilibacteria Code
+        $code{"TGA"} = "G";
+        $start_table{$_} = 1 foreach qw/GTG TTG/;
+    }
+    elsif ( $genetic_code == 26 ) {
+        # Pachysolen tannophilus Nuclear Code
+        $code{"CTG"} = "A";
+        $start_table{"CTG"} = 1;
+    }
+    elsif ( $genetic_code == 27 ) {
+        # Karyorelict Nuclear Code
+        # TAA和TAG编码Gln；TGA既可编码Trp也可作为终止密码子，这里仍将TGA视为终止密码子。
+        $code{"TAG"} = "Q"; $code{"TAA"} = "Q";
+    }
+    elsif ( $genetic_code == 28 ) {
+        # Condylostoma Nuclear Code
+        # TAA、TAG编码Gln，TGA编码Trp，但三者均可根据上下文作为终止密码子，因此这里仍将TAA、TAG、TGA都视为终止密码子。
+    }
+    elsif ( $genetic_code == 29 ) {
+        # Mesodinium Nuclear Code
+        $code{"TAA"} = "Y"; $code{"TAG"} = "Y";
+    }
+    elsif ( $genetic_code == 30 ) {
+        # Peritrich Nuclear Code
+        $code{"TAA"} = "E"; $code{"TAG"} = "E";
+    }
+    elsif ( $genetic_code == 31 ) {
+        # Blastocrithidia Nuclear Code
+    }
+    elsif ( $genetic_code == 32 ) {
+        # Balanophoraceae Plastid Code
+        $code{"TAG"} = "W";
+        $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG CTG TTG/;
+    }
+    elsif ( $genetic_code == 33 ) {
+        # Cephalodiscidae Mitochondrial UAA-Tyr Code
+        $code{"TAA"} = "Y"; $code{"TGA"} = "W"; $code{"AGA"} = "S"; $code{"AGG"} = "K";
+        $start_table{$_} = 1 foreach qw/GTG CTG TTG/;
+    }
+    else {
+        print STDERR "Warning: unsupported genetic code $genetic_code, the start and stop codons are set according to the standard genetic code.\n";
+    }
+
+    my %stop_table;
+    foreach ( keys %code ) {
+        $stop_table{$_} = 1 if $code{$_} eq "X";
+    }
+
+    return (\%code, \%start_table, \%stop_table);
 }
 
 sub set_phases {
@@ -741,7 +851,7 @@ Usage:
 [Filling Options]
 
     --genetic_code <int>    default: 1
-    Set the ID of the genetic code used by the genes, identical to the NCBI translation table ID, see NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi . The program uses it to determine the start codons (the codons encoding methionine in that code) and the stop codons (the codons encoding termination in that code), which are used to: (1) judge whether the 5' and 3' ends of a gene model are complete; (2) recognize in-frame stop codons in the sequence added during filling, in order to truncate the 3' end or to relocate the start of the 5' end; (3) check the filled model, whose number of in-frame stop codons must not increase.
+    Set the ID of the genetic code used by the genes, identical to the NCBI translation table ID, see NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi . The program determines the start codons (ATG plus the alternative start codons allowed by that code) and the stop codons (the codons encoding termination in that code) automatically, and uses them to: (1) judge whether the 5' and 3' ends of a gene model are complete; (2) recognize in-frame stop codons in the sequence added during filling, in order to truncate the 3' end or to relocate the start of the 5' end; (3) check the filled model, whose number of in-frame stop codons must not increase. The supported genetic code numbers are: 1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33. For example: 1 is the standard code (start codon ATG; stop codons TAA, TAG, TGA), 11 is the bacterial/archaeal/plant plastid code, and 2 is the vertebrate mitochondrial code.
 
     --attribute_for_filling_complete <string>    default: None
     Add this attribute to column 9 of the mRNA lines that became complete after filling. For example, when filling with homologous proteins, set Filled_by_homolog=True.
@@ -765,4 +875,4 @@ Usage:
     Display this English usage information and exit.
 
     --chinese_help    default: None
-    Display the Chinese usage information and exit.
+    显示中文用法说明并退出。

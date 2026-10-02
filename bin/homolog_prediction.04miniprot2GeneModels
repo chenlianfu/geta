@@ -9,7 +9,7 @@ use File::Spec;
 
 my $binPath = abs_path(dirname($0));
 
-my $usage = <<USAGE;
+my $usage_chinese = <<USAGE;
 Usage:
     $0 [options] genome.fasta homolog.fasta > out.geneModels.gff3
 
@@ -24,8 +24,8 @@ Usage:
     (0) 检测本程序依赖的miniprot命令能否在终端直接运行，检测依赖的GFF3_merging_and_removing_redundancy、fillingEndsOfGeneModels和GFF3Clear命令在同目录下是否存在且可执行。
     (1) 调用 miniprot 命令设置 -I --gff -t <int> -T <int> 参数将同源蛋白和参考基因组序列进行比对。其中 -t 参数值来自本程序的 --cpu 参数，-T 参数来自本程序的 --genetic_code 参数；若设置了 --max_intron_size 参数，则将其参数值传递给 miniprot 命令的 -G 参数（此时不再使用根据基因组大小自动计算最大intron长度的 -I 参数，避免两者冲突）；--miniprot_options 参数的值会原样追加到 miniprot 命令中。miniprot 运行完毕后在临时目录生成 miniprot.gff 文件，并生成 miniprot.ok 标记文件；若复用同一临时目录重新运行，检测到 miniprot.ok 后跳过该比对步骤。
     (2) 对 miniprot.gff 文件的格式进行修改，得到标准的GFF3格式文件 miniprot.gff3：每个比对结果生成 gene、mRNA、exon、CDS 和 intron 信息；若 miniprot 给出的 stop_codon 紧邻末端CDS，则将其并入CDS；因移码(frameshift)导致相互重叠或首尾相接的CDS片段被合并；在gene和mRNA的第9列记录同源蛋白名称、长度、匹配区间、覆盖度、Identity、Positive、移码数量、内部终止密码子数量、比对排名和比对得分；intron的第9列记录所有比对结果中支持该intron的次数（Supported_times）。
-    (3) 调用GFF3_merging_and_removing_redundancy程序对 miniprot.gff3 进行分析，去除冗余基因模型，得到 miniprot_filtered.gff3 文件。
-    (4) 调用fillingEndsOfGeneModels命令对基因模型进行强制补齐，得到 miniprot_filtered_filled.gff3 文件。
+    (3) 调用GFF3_merging_and_removing_redundancy程序对 miniprot.gff3 进行分析，去除冗余基因模型，得到 miniprot_filtered.gff3 文件。本程序的 --genetic_code 参数值会传递给GFF3_merging_and_removing_redundancy的 --genetic_code 参数，由其自动确定起始密码子和终止密码子。
+    (4) 调用fillingEndsOfGeneModels命令对基因模型进行强制补齐，得到 miniprot_filtered_filled.gff3 文件。本程序的 --genetic_code 参数值会传递给fillingEndsOfGeneModels的 --genetic_code 参数，由其自动确定起始密码子和终止密码子。
     (5) 将基因模型分成四类，并在GFF3文件gene和mRNA行第9列进行标注成四种类型：Type=excellent_gene_models_predicted_by_homolog、Type=good_gene_models_predicted_by_homolog、Type=fair_gene_models_predicted_by_homolog或Type=poor_gene_models_predicted_by_homolog。分类规则：先根据对同源蛋白的覆盖度进行初步分类；无需补齐即完整的基因模型保持初步分类；进行过补齐的基因模型，根据补齐后CDS长度 / (同源蛋白长度 * 3) 的比值降级为B、C或D类（A类和B类可降级为B、C或D类，C类可降级为D类）；不能补齐完整的基因模型归为D类。四类基因模型分别输出到临时目录的 A_out.gff3、B_out.gff3、C_out.gff3 和 D_out.gff3 文件中。
     (6) 调用GFF3Clear程序对格式进行修改，按A、B、C、D的顺序输入四类基因模型（类型更好的基因模型在CDS重叠冲突时优先保留），设置基因ID前缀为miniprot，得到 final_all.gff3 文件，并将结果输出到标准输出。默认是输出所有四种类型的基因模型，若是添加--no_fair_gene_models或--no_poor_gene_models，则不输出第三类或第四类基因模型。
     (7) 若设置了 --output_raw_GFF3 参数，则将强制补齐前的去冗余基因模型输出到指定文件中，包含所有四种类型的基因模型，同时也在其GFF3文件第9列标注四种类型（与最终分类结果一致）。
@@ -35,7 +35,7 @@ Usage:
     设置对同源蛋白覆盖度阈值。若基因模型对同源蛋白的覆盖率不低于--threshold_homolog_coverage_good，则评估为good gene models；若基因模型对同源蛋白的覆盖率不低于--threshold_homolog_coverage_fair，则评估成fair gene models。
 
     --genetic_code <int>    default: 1
-    设置遗传密码。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。该参数值传递给miniprot的-T参数，并用于设置对基因模型去冗余和强制补齐时的起始密码子和终止密码子。
+    设置遗传密码，由此自动确定起始密码子和终止密码子。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。该参数值传递给miniprot的-T参数，以及GFF3_merging_and_removing_redundancy和fillingEndsOfGeneModels的--genetic_code参数。
 
     --max_intron_size <int>    default: None
     设置最大intron长度，该参数值传递给miniprot命令的-G参数。若不设置该参数，则使用miniprot的-I参数，根据基因组大小自动计算最大intron长度。
@@ -71,16 +71,21 @@ Usage:
     设置CPU线程数。该参数值将传递给miniprot、GFF3_merging_and_removing_redundancy、fillingEndsOfGeneModels和GFF3Clear命令。
 
     --help    default: None
-    display this help and exit.
+    Display the English usage and exit.
+
+    --chinese_help    default: None
+    显示中文用法并退出。
 
     本程序的运行需要调用终端中的miniprot命令，以及其同目录下的GFF3_merging_and_removing_redundancy、fillingEndsOfGeneModels和GFF3Clear命令。
 
 USAGE
-if (@ARGV==0){die $usage}
+my $usage_english = &get_usage_english();
+if (@ARGV==0){die $usage_english}
 
-my ($help_flag, $threshold_homolog_coverage_good, $threshold_homolog_coverage_fair, $genetic_code, $max_intron_size, $miniprot_options, $overlap_coverage, $gene_prefix, $tmp_dir, $no_fair_gene_models, $no_poor_gene_models, $output_raw_GFF3, $output_alignment_GFF3, $max_alignment_num_for_each_gene_region, $cpu);
+my ($help_flag, $chinese_help_flag, $threshold_homolog_coverage_good, $threshold_homolog_coverage_fair, $genetic_code, $max_intron_size, $miniprot_options, $overlap_coverage, $gene_prefix, $tmp_dir, $no_fair_gene_models, $no_poor_gene_models, $output_raw_GFF3, $output_alignment_GFF3, $max_alignment_num_for_each_gene_region, $cpu);
 GetOptions(
     "help" => \$help_flag,
+    "chinese_help" => \$chinese_help_flag,
     "threshold_homolog_coverage_good:f" => \$threshold_homolog_coverage_good,
     "threshold_homolog_coverage_fair:f" => \$threshold_homolog_coverage_fair,
     "genetic_code:i" => \$genetic_code,
@@ -95,9 +100,10 @@ GetOptions(
     "output_alignment_GFF3:s" => \$output_alignment_GFF3,
     "max_alignment_num_for_each_gene_region:i" => \$max_alignment_num_for_each_gene_region,
     "cpu:i" => \$cpu,
-) or die $usage;
-if ( $help_flag ) { die $usage }
-die "Error: 需要且仅需要输入 genome.fasta 和 homolog.fasta 两个文件。\n\n$usage" unless @ARGV == 2;
+) or die $usage_english;
+if ( $chinese_help_flag ) { die $usage_chinese }
+if ( $help_flag ) { die $usage_english }
+die "Error: 需要且仅需要输入 genome.fasta 和 homolog.fasta 两个文件。\n\n$usage_english" unless @ARGV == 2;
 
 ########## 设置参数默认值并检查参数 ##########
 $threshold_homolog_coverage_good = 0.8 unless defined $threshold_homolog_coverage_good;
@@ -141,12 +147,7 @@ foreach my $program ( qw/GFF3_merging_and_removing_redundancy fillingEndsOfGeneM
     die "Error: 程序所在目录 $binPath 中的命令 $program 没有可执行权限，请使用 chmod +x 添加可执行权限。\n" unless -x "$binPath/$program";
 }
 print STDERR (localtime) . ": 依赖程序检测通过：miniprot、$binPath/GFF3_merging_and_removing_redundancy、$binPath/fillingEndsOfGeneModels、$binPath/GFF3Clear 。\n";
-
-# 根据遗传密码得到起始密码子和终止密码子
-my ($codon_ref, $start_codon_ref, $stop_codon_ref) = &codon_table();
-my $start_codon = join ",", sort keys %$start_codon_ref;
-my $stop_codon = join ",", sort keys %$stop_codon_ref;
-print STDERR "遗传密码 $genetic_code 对应的起始密码子为 $start_codon ，终止密码子为 $stop_codon 。\n";
+print STDERR "使用遗传密码 $genetic_code ，起始密码子和终止密码子由各依赖程序根据该遗传密码自动确定。\n";
 
 ########## (1) 运行 miniprot 比对 ##########
 my $miniprot_gff = "$tmp_dir/miniprot.gff";
@@ -208,14 +209,14 @@ if ( $output_alignment_GFF3 ) {
 }
 
 ########## (3) 去除冗余基因模型 ##########
-$cmdString = "$binPath/GFF3_merging_and_removing_redundancy --cpu $cpu --overlap_coverage $overlap_coverage --start_codon $start_codon --stop_codon $stop_codon --output_delete_info $tmp_dir/GFF3_merging_and_removing_redundancy.delete_info.txt $input_genome $tmp_dir/miniprot.gff3 > $tmp_dir/miniprot_filtered.gff3 2> $tmp_dir/GFF3_merging_and_removing_redundancy.log";
+$cmdString = "$binPath/GFF3_merging_and_removing_redundancy --cpu $cpu --overlap_coverage $overlap_coverage --genetic_code $genetic_code --output_delete_info $tmp_dir/GFF3_merging_and_removing_redundancy.delete_info.txt $input_genome $tmp_dir/miniprot.gff3 > $tmp_dir/miniprot_filtered.gff3 2> $tmp_dir/GFF3_merging_and_removing_redundancy.log";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 my $num_filtered = &count_gene_num("$tmp_dir/miniprot_filtered.gff3");
 print STDERR "去冗余后剩余 $num_filtered 个基因模型。\n";
 
 ########## (4) 对基因模型进行强制补齐 ##########
-$cmdString = "$binPath/fillingEndsOfGeneModels --cpu $cpu --start_codon $start_codon --stop_codon $stop_codon $input_genome $tmp_dir/miniprot_filtered.gff3 > $tmp_dir/miniprot_filtered_filled.gff3 2> $tmp_dir/fillingEndsOfGeneModels.log";
+$cmdString = "$binPath/fillingEndsOfGeneModels --cpu $cpu --genetic_code $genetic_code $input_genome $tmp_dir/miniprot_filtered.gff3 > $tmp_dir/miniprot_filtered_filled.gff3 2> $tmp_dir/fillingEndsOfGeneModels.log";
 print STDERR (localtime) . ": CMD: $cmdString\n";
 system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
 
@@ -747,145 +748,79 @@ sub count_gene_num {
     return $num;
 }
 
-sub codon_table {
-    my %code = (
-        "TTT" => "F", "TTC" => "F", "TTA" => "L", "TTG" => "L",
-        "TCT" => "S", "TCC" => "S", "TCA" => "S", "TCG" => "S",
-        "TAT" => "Y", "TAC" => "Y", "TAA" => "X", "TAG" => "X",
-        "TGT" => "C", "TGC" => "C", "TGA" => "X", "TGG" => "W",
-        "CTT" => "L", "CTC" => "L", "CTA" => "L", "CTG" => "L",
-        "CCT" => "P", "CCC" => "P", "CCA" => "P", "CCG" => "P",
-        "CAT" => "H", "CAC" => "H", "CAA" => "Q", "CAG" => "Q",
-        "CGT" => "R", "CGC" => "R", "CGA" => "R", "CGG" => "R",
-        "ATT" => "I", "ATC" => "I", "ATA" => "I", "ATG" => "M",
-        "ACT" => "T", "ACC" => "T", "ACA" => "T", "ACG" => "T",
-        "AAT" => "N", "AAC" => "N", "AAA" => "K", "AAG" => "K",
-        "AGT" => "S", "AGC" => "S", "AGA" => "R", "AGG" => "R",
-        "GTT" => "V", "GTC" => "V", "GTA" => "V", "GTG" => "V",
-        "GCT" => "A", "GCC" => "A", "GCA" => "A", "GCG" => "A",
-        "GAT" => "D", "GAC" => "D", "GAA" => "E", "GAG" => "E",
-        "GGT" => "G", "GGC" => "G", "GGA" => "G", "GGG" => "G",
-    );
-    my %start_codon;
-    $start_codon{"ATG"} = 1;
-    if ( $genetic_code == 1 ) {
-        # The Standard Code
-        #$start_codon{"TTG"} = 1;
-        #$start_codon{"CTG"} = 1;
-    }
-    elsif ( $genetic_code == 2 ) {
-        # The Vertebrate Mitochondrial Code
-        $code{"AGA"} = "X"; $code{"AGG"} = "X"; $code{"ATA"} = "M"; $code{"TGA"} = "W";
-        $start_codon{$_} = 1 foreach qw/ATA ATT ATC GTG/;
-    }
-    elsif ( $genetic_code == 3 ) {
-        # The Yeast Mitochondrial Code
-        $code{"ATA"} = "M"; $code{"CTT"} = "T"; $code{"CTC"} = "T"; $code{"CTA"} = "T"; $code{"CTG"} = "T"; $code{"TGA"} = "W";
-        $start_codon{$_} = 1 foreach qw/ATA GTG/;
-    }
-    elsif ( $genetic_code == 4 ) {
-        # The Mold, Protozoan, and Coelenterate Mitochondrial Code and the Mycoplasma/Spiroplasma Code
-        $code{"TGA"} = "W";
-        $start_codon{$_} = 1 foreach qw/ATA ATT ATC GTG CTG TTA TTG/;
-    }
-    elsif ( $genetic_code == 5 ) {
-        # The Invertebrate Mitochondrial Code
-        $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"ATA"} = "M"; $code{"TGA"} = "W";
-        $start_codon{$_} = 1 foreach qw/ATA ATT ATC GTG TTG/;
-    }
-    elsif ( $genetic_code == 6 ) {
-        # The Ciliate, Dasycladacean and Hexamita Nuclear Code
-        $code{"TAA"} = "Q"; $code{"TAG"} = "Q";
-    }
-    elsif ( $genetic_code == 9 ) {
-        # The Echinoderm and Flatworm Mitochondrial Code
-        $code{"AAA"} = "N"; $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"TGA"} = "W";
-        $start_codon{"GTG"} = 1;
-    }
-    elsif ( $genetic_code == 10 ) {
-        # The Euplotid Nuclear Code
-        $code{"TGA"} = "C";
-    }
-    elsif ( $genetic_code == 11 ) {
-        # The Bacterial, Archaeal and Plant Plastid Code
-        $start_codon{$_} = 1 foreach qw/ATA ATT ATC GTG CTG TTG/;
-    }
-    elsif ( $genetic_code == 12 ) {
-        # The Alternative Yeast Nuclear Code
-        $code{"CTG"} = "S";
-        $start_codon{"CTG"} = 1;
-    }
-    elsif ( $genetic_code == 13 ) {
-        # The Ascidian Mitochondrial Code
-        $code{"AGA"} = "G"; $code{"AGG"} = "G"; $code{"ATA"} = "M"; $code{"TGA"} = "W";
-        $start_codon{$_} = 1 foreach qw/ATA GTG TTG/;
-    }
-    elsif ( $genetic_code == 14 ) {
-        # The Alternative Flatworm Mitochondrial Code
-        $code{"AAA"} = "N"; $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"TAA"} = "Y"; $code{"TGA"} = "W";
-    }
-    elsif ( $genetic_code == 16 ) {
-        # Chlorophycean Mitochondrial Code
-        $code{"TAG"} = "L";
-    }
-    elsif ( $genetic_code == 21 ) {
-        # Trematode Mitochondrial Code
-        $code{"TGA"} = "W"; $code{"ATA"} = "M"; $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"AAA"} = "N";
-        $start_codon{"GTG"} = 1;
-    }
-    elsif ( $genetic_code == 22 ) {
-        # Scenedesmus obliquus Mitochondrial Code
-        $code{"TCA"} = "X"; $code{"TAG"} = "L";
-    }
-    elsif ( $genetic_code == 23 ) {
-        # Thraustochytrium Mitochondrial Code
-        $code{"TTA"} = "X";
-        $start_codon{$_} = 1 foreach qw/ATT GTG/;
-    }
-    elsif ( $genetic_code == 24 ) {
-        # Rhabdopleuridae Mitochondrial Code
-        $code{"AGA"} = "S"; $code{"AGG"} = "K"; $code{"TGA"} = "W";
-        $start_codon{$_} = 1 foreach qw/GTG CTG TTG/;
-    }
-    elsif ( $genetic_code == 25 ) {
-        # Candidate Division SR1 and Gracilibacteria Code
-        $code{"TGA"} = "G";
-        $start_codon{$_} = 1 foreach qw/GTG TTG/;
-    }
-    elsif ( $genetic_code == 26 ) {
-        # Pachysolen tannophilus Nuclear Code
-        # warning: The descritpions of initiation codons by 2 methods are confict according to the NCBI web site.
-        $code{"CTG"} = "A";
-        $start_codon{$_} = 1 foreach qw/GTG TTG/;
-    }
-    elsif ( $genetic_code == 27 ) {
-        # Karyorelict Nuclear Code
-        $code{"TAG"} = "Q"; $code{"TAA"} = "Q";
-    }
-    elsif ( $genetic_code == 29 ) {
-        # Mesodinium Nuclear Code
-        $code{"TAA"} = "Y"; $code{"TAG"} = "Y";
-    }
-    elsif ( $genetic_code == 30 ) {
-        # Peritrich Nuclear Code
-        $code{"TAA"} = "E"; $code{"TAG"} = "E";
-    }
-    elsif ( $genetic_code == 31 ) {
-        # Blastocrithidia Nuclear Code
-        $code{"TGA"} = "W";
-    }
-    elsif ( $genetic_code == 33 ) {
-        # Cephalodiscidae Mitochondrial UAA-Tyr Code
-        $code{"TAA"} = "Y"; $code{"TGA"} = "Y"; $code{"AGA"} = "S"; $code{"AGG"} = "K";
-    }
-    else {
-        print STDERR "Warning: 不支持的遗传密码 $genetic_code ，起始和终止密码子按标准遗传密码设置。\n";
-    }
+# 英文用法说明
+sub get_usage_english {
 
-    my %stop_codon;
-    foreach ( keys %code ) {
-        $stop_codon{$_} = 1 if $code{$_} eq "X";
-    }
+my $usage = <<USAGE;
+Usage:
+    $0 [options] genome.fasta homolog.fasta > out.geneModels.gff3
 
-    return (\%code, \%start_codon, \%stop_codon);
+    This program calls miniprot to align homologous proteins to the reference genome, removes redundancy, and finally classifies the gene models into four types:
+    (A) Gene models that cover 100% of the homologous protein, have no frameshifts or internal stop codons in the alignment, and whose start and stop codons are consistent with the homologous protein match (i.e. complete gene models without any forced filling); excellent gene models
+    (B) Gene models that cover no less than 80% of the homologous protein, and whose complete gene model length after forced filling is no less than 80% of the homologous protein length; good gene models
+    (C) Gene models that cover no less than 40% of the homologous protein, and whose complete gene model length after forced filling is no less than 40% of the homologous protein length; fair gene models
+    (D) Gene models that cover less than 40% of the homologous protein, or whose complete gene model length after forced filling is less than 40% of the homologous protein length, or that cannot be completed by forced filling; poor gene models
+    The program generates the file final_all.gff3 in the temporary directory, which contains all gene models. The final result is written to standard output, and the third and/or fourth types of gene models can optionally be excluded from it.
+
+    Workflow:
+    (0) Check that the miniprot command can be run directly in the terminal, and that the dependent commands GFF3_merging_and_removing_redundancy, fillingEndsOfGeneModels and GFF3Clear exist in the same directory as this program and are executable.
+    (1) Call miniprot with the options -I --gff -t <int> -T <int> to align the homologous proteins to the genome sequence. The value of -t comes from the --cpu option of this program, and the value of -T comes from the --genetic_code option of this program; if --max_intron_size is set, its value is passed to the -G option of miniprot (the -I option, which automatically calculates the maximum intron size from the genome size, is then no longer used, to avoid a conflict between the two); the value of --miniprot_options is appended to the miniprot command as is. After miniprot finishes, the file miniprot.gff and the marker file miniprot.ok are generated in the temporary directory; if the program is rerun with the same temporary directory and miniprot.ok is detected, the alignment step is skipped.
+    (2) Convert miniprot.gff into the standard GFF3 file miniprot.gff3: gene, mRNA, exon, CDS and intron features are generated for each alignment; if the stop_codon reported by miniprot is adjacent to the last CDS, it is merged into that CDS; CDS segments that overlap or are end-to-end adjacent because of frameshifts are merged; the 9th column of gene and mRNA records the homologous protein name, length, matched interval, coverage, Identity, Positive, number of frameshifts, number of internal stop codons, alignment rank and alignment score; the 9th column of intron records the number of alignments that support the intron (Supported_times).
+    (3) Call GFF3_merging_and_removing_redundancy to analyze miniprot.gff3 and remove redundant gene models, producing the file miniprot_filtered.gff3. The value of the --genetic_code option of this program is passed to the --genetic_code option of GFF3_merging_and_removing_redundancy, which determines the start and stop codons automatically.
+    (4) Call fillingEndsOfGeneModels to force-fill the gene models, producing the file miniprot_filtered_filled.gff3. The value of the --genetic_code option of this program is passed to the --genetic_code option of fillingEndsOfGeneModels, which determines the start and stop codons automatically.
+    (5) Classify the gene models into four types and annotate the type in the 9th column of the gene and mRNA lines of the GFF3 file: Type=excellent_gene_models_predicted_by_homolog, Type=good_gene_models_predicted_by_homolog, Type=fair_gene_models_predicted_by_homolog or Type=poor_gene_models_predicted_by_homolog. Classification rules: first, a preliminary classification is made according to the coverage of the homologous protein; gene models that are complete without filling keep the preliminary class; for gene models that were filled, the class is downgraded to B, C or D according to the ratio CDS length after filling / (homologous protein length * 3) (types A and B can be downgraded to B, C or D, and type C can be downgraded to D); gene models that cannot be completed by filling are classified as D. The four types of gene models are written to the files A_out.gff3, B_out.gff3, C_out.gff3 and D_out.gff3 in the temporary directory, respectively.
+    (6) Call GFF3Clear to fix the format. The four types of gene models are input in the order A, B, C, D (gene models of a better type are preferentially kept when CDS overlap conflicts occur), the gene ID prefix is set to miniprot, the file final_all.gff3 is generated, and the result is written to standard output. By default all four types of gene models are output; if --no_fair_gene_models or --no_poor_gene_models is added, the third or fourth type of gene models is not output.
+    (7) If --output_raw_GFF3 is set, the redundancy-removed gene models before forced filling are written to the specified file, containing all four types of gene models, and the four types are also annotated in the 9th column of its GFF3 file (consistent with the final classification result).
+
+    --threshold_homolog_coverage_good <float>    default: 0.8
+    --threshold_homolog_coverage_fair <float>    default: 0.4
+    Set the thresholds for the coverage of the homologous protein. If the coverage of the homologous protein by a gene model is not lower than --threshold_homolog_coverage_good, it is evaluated as a good gene model; if the coverage is not lower than --threshold_homolog_coverage_fair, it is evaluated as a fair gene model.
+
+    --genetic_code <int>    default: 1
+    Set the genetic code, from which the start codons and stop codons are determined automatically. For the corresponding values, please refer to NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi. The value is passed to the -T option of miniprot, and to the --genetic_code option of GFF3_merging_and_removing_redundancy and fillingEndsOfGeneModels.
+
+    --max_intron_size <int>    default: None
+    Set the maximum intron size. The value is passed to the -G option of miniprot. If this option is not set, the -I option of miniprot is used, which automatically calculates the maximum intron size from the genome size.
+
+    --miniprot_options <string>    default: None
+    Set additional options to be passed to miniprot. They must be enclosed in quotation marks, for example --miniprot_options "--outs=0.95 -N 20".
+
+    --overlap_coverage <float>    default: 0.30
+    Set the CDS overlap coverage threshold. It is passed to the --overlap_coverage option of GFF3_merging_and_removing_redundancy and the --coverage option of GFF3Clear, and is used to remove redundant gene models whose CDS regions overlap.
+
+    --gene_prefix <string>    default: miniprot
+    Set the prefix of the gene IDs in the final output. It is passed to the --gene_prefix option of GFF3Clear.
+
+    --tmp_dir <string>    default: tmp_\$date\$pid
+    Name of the temporary directory used while the program is running.
+
+    --no_fair_gene_models    default: None
+    If this option is added, the program does not output the third type (fair gene models) to standard output. All four types of gene models are still kept in the file final_all.gff3 in the temporary directory.
+
+    --no_poor_gene_models    default: None
+    If this option is added, the program does not output the fourth type (poor gene models) to standard output. All four types of gene models are still kept in the file final_all.gff3 in the temporary directory.
+
+    --output_raw_GFF3 <string>    default: None
+    Make the program output the GFF3 file without forced end filling. This is the raw result (redundancy removed) of gene prediction from homologous proteins.
+
+    --output_alignment_GFF3 <string>    default: None
+    Make the program output a GFF3 file of the homologous protein alignments, containing the alignment information of the homologous proteins against the genome sequence. The program merges miniprot alignments that overlap each other on the same strand into one gene region, and for each gene region outputs the best alignment (the one with the highest alignment score) of each homologous protein.
+
+    --max_alignment_num_for_each_gene_region <int>    default: 5
+    When outputting the GFF3 file of homologous protein alignments, the results of at most 5 homologous proteins are output for each gene region.
+
+    --cpu <int>    default: 1
+    Set the number of CPU threads. The value is passed to the miniprot, GFF3_merging_and_removing_redundancy, fillingEndsOfGeneModels and GFF3Clear commands.
+
+    --help    default: None
+    Display this English usage and exit.
+
+    --chinese_help    default: None
+    显示中文用法并退出。
+
+    Running this program requires the miniprot command in the terminal, as well as the GFF3_merging_and_removing_redundancy, fillingEndsOfGeneModels and GFF3Clear commands in the same directory as this program.
+
+USAGE
+
+return $usage;
 }

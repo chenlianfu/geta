@@ -1,6 +1,7 @@
 #!/usr/bin/perl
 use strict;
 use Getopt::Long;
+use File::Temp qw(tempfile);
 
 my $usage = <<USAGE;
 Usage:
@@ -9,8 +10,8 @@ Usage:
 For example
     perl $0 --intron_info_out intron_info.txt --base_depth_out base_depth.txt scaffold_1.10000-15000.sam > scaffold_1.10000-15000.gtf
 
-    程序能分析HISAT2比对得到的SAM文件，得到每个reads匹配区域覆盖度最高的转录本序列，以GTF文件格式为其结果文件。虽然本程序支持输入比对到全基因组序列的SAM文件，但运行速度会会较慢。推荐输入NGSReads_prediction.01SplitSam的结果文件，从而实现并行化运行。
-    此外，本程序能同时支持链特异性测序或非连特异性测序的HISAT2比对结果。推荐使用链特异性测序数据进行Hisat2分析后，再使用本程序进行转录本搜索。
+    程序能分析HISAT2比对得到的SAM文件，得到每个reads匹配区域覆盖度最高的转录本序列，以GTF文件格式为其结果文件。虽然本程序支持输入比对到全基因组序列的SAM文件，但运行速度会会较慢。
+    此外，本程序能同时支持链特异性测序或非链特异性测序的比对结果，且由于链特异性信息是根据SAM文件第二列的FLAG值并结合RF建库方案推断得到，不再依赖比对结果中的XS标签，因此除了Hisat2之外，对STAR等比对软件得到的比对结果同样友好。推荐使用链特异性测序数据进行比对后，再使用本程序进行转录本搜索。
     程序分两步走：（1）首先，程序根据碱基和intron的测序深度来对有基因表达的区域进行打断，打断后的每个区域相当于一个基因表达区域；（2）然后，对各个区域进行转录本序列搜索，输出覆盖度最高的转录本序列。
     程序通过分析SAM第二列Flag值，检测到是双末端测序数据，则要求第七列是=符号(表示双端数据比对到不同的染色体上)时，否则忽略该比对结果。
 
@@ -18,16 +19,19 @@ For example
     对下面两类参数expressed_base_depth和junction_depth取阈值的时候，其阈值与SAM文件比对区域的最高碱基测序深度Dmax相关。Dmax乘以该系数得到阈值D。D值和下面4个参数一起决定参数expressed_base_depth和junction_depth的设定。
 
     --min_expressed_base_depth <INT>  default: 2
-    --max_expressed_base_depth <INT>  default: 10
+    --max_expressed_base_depth <INT>  default: 50
     这两个参数和--fraction参数一起决定expressed_base_depth的阈值。对SAM文件中的连续比对区域区进行打断的时候，若位点的碱基测序深度低于expressed_base_depth阈值，则在该位点前后对比对区域进行打断。默认设置表示：对某个比对区域进行分析的时候，根据SAM文件计算出该区域的最高单碱基测序深度Dmax；D=Dmax * 0.05；若D小于2，则expressed_base_depth阈值=2；若D值大于10，则expressed_base_depth阈值=10；若D值在2和10之间，则expressed_base_depth阈值=D。
 
     --min_junction_depth <INT>  default:2
-    --max_junction_depth <INT>  default:10
+    --max_junction_depth <INT>  default:50
     这两个参数和--fraction参数一起决定junction_depth的阈值。对SAM文件中的不连续比对位点进行打断的时候，若intron的碱基测深度低于junction_depth的阈值，则在该位点前对比对区域进行打断。默认设置表示：对某个比对区域进行分析的时候，根据SAM文件计算出该区域的最高单碱基测序深度Dmax；；D=Dmax * 0.05；若D小于取2，则junction_depth=2；若D值大于10，则junction_depth=10；若D值在2和10之间，则junction_depth=D。
 
     --min_fragment_count_per_transfrag <INT>  default: 10
     输出transfrags信息的时候，必须要求transfrags被支持的fragment数目大于该值。
-    
+
+    --min_split_fragment_length <INT>  default: 100
+    程序在打断比对区域的时候，长度小于该值的连续比对片段会被直接丢弃，不参与后续任何分析。默认值100对大多数正常长度的基因是合适的，但若某个内嵌在其它基因内含子中的基因本身长度很短（例如小于100bp），无论其测序深度信号多么清晰，都会被这个硬性长度门槛过滤掉而永远无法被找到。若你的目标是寻找基因内部的短的内嵌基因，可以适当调低该参数（例如50），但过低会增加迭代次数和输出噪音。
+
     --intron_info_out <String>
     若设定此参数，则会输出intron信息到指定的文件中，否则不会输出intron信息。虽然程序仅输出覆盖度最高的转录本，但是输出的intron信息是包含可变剪接信息的。且intron是经过一定阈值过滤后的结果。该文件有利于后续可变剪接分析。
 
@@ -43,14 +47,14 @@ For example
 
     --gff3
     程序默认输出结果为GTF文件，若加入此参数，则输出gff3结果。
-    
+
     --no_strand_specific
-    程序默认是对链特异性测序的数据进行分析，要求输入的SAM文件中每行的比对信息都必须包含XS标签信息。若是非链特异性测序，则需要加入此参数来保证程序的正常运行，同时要求输入的SAM文件中有剪接性比对的Reds必须含有XS标签信息。相比于链特异性测序，分析非连特异性测序数据时，程序在两条链上分别进行转录本序列搜索后，排除掉有Intron的转录本区域后，再对剩下的比对区域进行单exon的转录本搜索。
+    程序默认是根据SAM文件第二列的FLAG值来判断该条比对记录是read1还是read2、以及该read比对到了参考序列的正义链还是负义链，并按照常规RF链特异性建库方案（read1应比对到transcript的负义链，read2应比对到transcript的正义链；单端测序数据按read1的方式处理）来推断该比对记录所支持的transcript链，不再依赖比对结果中的XS标签，因此对Hisat2、STAR等不同比对软件得到的比对结果都很友好。若是非链特异性测序，则需要加入此参数来保证程序的正常运行，此时程序会改为尝试读取比对结果中剪接性比对可能含有的XS标签（该标签通常是比对软件根据剪接位点GT-AG等保守序列自动判断得到的，与建库是否链特异性无关）来获取intron的链信息，若没有XS标签，则该条比对记录的链信息记为无链信息（用.表示）。相比于链特异性测序，分析非连特异性测序数据时，程序在两条链上分别进行转录本序列搜索后，排除掉有Intron的转录本区域后，再对剩下的比对区域进行单exon的转录本搜索。
 
 USAGE
 if (@ARGV==0){die $usage}
 
-my ($fraction, $min_expressed_base_depth, $max_expressed_base_depth, $min_junction_depth, $max_junction_depth, $min_fragment_count_per_transfrag, $filter_transcript, $gff3, $intron_info_out, $base_depth_out, $genome_fasta, $min_intron_length, $no_strand_specific);
+my ($fraction, $min_expressed_base_depth, $max_expressed_base_depth, $min_junction_depth, $max_junction_depth, $min_fragment_count_per_transfrag, $min_split_fragment_length, $gff3, $intron_info_out, $base_depth_out, $genome_fasta, $min_intron_length, $no_strand_specific);
 GetOptions(
     "fraction:s" => \$fraction,
     "min_expressed_base_depth:s" => \$min_expressed_base_depth,
@@ -58,7 +62,7 @@ GetOptions(
     "min_junction_depth:s" => \$min_junction_depth,
     "max_junction_depth:s" => \$max_junction_depth,
     "min_fragment_count_per_transfrag:s" => \$min_fragment_count_per_transfrag,
-    "filter_transcript:s" => \$filter_transcript,
+    "min_split_fragment_length:i" => \$min_split_fragment_length,
     "intron_info_out:s" => \$intron_info_out,
     "base_depth_out:s" => \$base_depth_out,
     "genome_fasta:s" => \$genome_fasta,
@@ -67,21 +71,13 @@ GetOptions(
     "no_strand_specific!" => \$no_strand_specific,
 );
 
-$fraction ||= 0.05;
-$min_expressed_base_depth ||= 2;
-$max_expressed_base_depth ||= 10;
-$min_junction_depth ||= 2;
-$max_junction_depth ||= 10;
-$min_fragment_count_per_transfrag ||= 10;
-$filter_transcript ||= "0.25 150";
-
-my ($filter_transcript_1, $filter_transcript_2);
-if ($filter_transcript =~ m/(\S+)\s+(\d+)/) {
-   ($filter_transcript_1, $filter_transcript_2) = ($1, $2);
-}
-else {
-    die "The value of --filter_transcript should not be '$filter_transcript'! \n";
-}
+$fraction = 0.05 unless defined $fraction;
+$min_expressed_base_depth = 2 unless defined $min_expressed_base_depth;
+$max_expressed_base_depth = 10 unless defined $max_expressed_base_depth;
+$min_junction_depth = 2 unless defined $min_junction_depth;
+$max_junction_depth = 10 unless defined $max_junction_depth;
+$min_fragment_count_per_transfrag = 10 unless defined $min_fragment_count_per_transfrag;
+$min_split_fragment_length = 100 unless defined $min_split_fragment_length;
 
 if ($intron_info_out) {
     open INTRON_OUT, ">", $intron_info_out or die "Can not create file $intron_info_out, $!";
@@ -104,77 +100,109 @@ open IN, $ARGV[0] or die $!;
 while (<IN>) {
     next if m/^\@/;
     @_ = split /\t/;
-    my $strand = '.'; # Non Strand Specificity
-    if (m/XS:A:([+-])/) {
-        $strand = $1;
-    }
-    else {
-        if (! $no_strand_specific) {
-            die "Read $_[0] 的比对信息中没有XS标签信息，您的RNA-Seq数据可能是非链特异性测序，请设置--no_strand_specific参数后再运行本程序!\n";
-        }
-    }
     my ($read_name, $flag, $scaffold_id, $site, $cigar) = ($_[0], $_[1], $_[2], $_[3], $_[5]);
-    # 分析read是否双端测序数据，若是的话，则要求第7行值必须是 = 。否则忽略该行。
-    my $flag_binary = "";
-    while ( $flag > 0 ) {
-        $flag_binary = ($flag % 2) . $flag_binary;
-        $flag = int($flag / 2);
-    }
-    if ( $flag =~ m/(\d)$/ && $1 eq "1" ) {
-        next if $_[6] ne '=';
+
+    # 分析read是否双末端测序数据，若是的话，则要求第7列值必须是 = 。否则忽略该行。
+    # (原代码通过手动将FLAG转换为二进制字符串来判断最低位是否为1，效果与直接位运算$flag & 1完全相同，这里改为直接使用位运算，代码更清晰。)
+    if ( ($flag & 1) && ($_[6] ne '=') ) {
+        next;
     }
 
-    my @cigar = $cigar =~ m/(\d+\w)/g;
-    my $start_site = $site;
-    foreach (@cigar) {
-        m/(\d+)(\w)/;
+    # 确定该条比对记录所支持的transcript链信息。
+    my $strand = '.'; # Non Strand Specificity
+    if (! $no_strand_specific) {
+        # 默认按链特异性测序数据处理：不再依赖比对结果中的XS标签（很多比对软件，例如STAR，
+        # 默认不会给每条比对记录都添加XS标签，只依靠XS标签会导致大量数据丢失或程序报错退出）。
+        # 而是直接根据SAM第二列的FLAG值，判断该read是双端测序中的read1还是read2，以及该read
+        # 是比对到了参考序列（基因组）的正义链还是负义链，然后按照常规RF链特异性建库方案来推断
+        # 该比对记录所支持的transcript链：read1应比对到transcript的负义链，read2应比对到
+        # transcript的正义链；若是单端测序数据（没有read1/read2的区分），则按read1的方式处理。
+        my $is_reverse = ($flag & 16)  ? 1 : 0; # 0x10, read比对到了参考序列的负链(reverse complement)
+        my $is_read1   = ($flag & 64)  ? 1 : 0; # 0x40, 双端测序中的第一条read
+        my $is_read2   = ($flag & 128) ? 1 : 0; # 0x80, 双端测序中的第二条read
 
-        if ($2 eq "M") {
-            my $start = $site;
-            $site += $1;
-            if ($no_strand_specific) {
-                foreach ($start..($site-1)) { $depth{$scaffold_id}{"+"}{$_} ++; }
-                foreach ($start..($site-1)) { $depth{$scaffold_id}{"-"}{$_} ++; }
-            }
-            else {
-                foreach ($start..($site-1)) { $depth{$scaffold_id}{$strand}{$_} ++; }
-            }
+        if ($is_read1) {
+            $strand = $is_reverse ? '+' : '-';
         }
-        elsif ($2 eq "D") {
-            my $start = $site;
-            $site += $1;
-            if ($no_strand_specific) {
-                foreach ($start..($site-1)) { $depth{$scaffold_id}{"+"}{$_} ++; }
-                foreach ($start..($site-1)) { $depth{$scaffold_id}{"-"}{$_} ++; }
-            }
-            else {
-                foreach ($start..($site-1)) { $depth{$scaffold_id}{$strand}{$_} ++; }
-            }
-        }
-        elsif ($2 eq "I") {
-            next;
-        }
-        elsif ($2 eq "S") {
-            next;
-        }
-        elsif ($2 eq "N") {
-            if ($strand eq '.') {
-                #die "SAM文件中，Read $_[0] 的比对信息中没有XS标签信息，从而无法判断Intron的方向，导致无法得到转录本序列的方向，程序结束运行!\n";
-            }
-            my $start = $site;
-            my $end = $start + $1 - 1;
-            $intron{$scaffold_id}{$strand}{$start}{$end} ++ if $strand ne '.';
-            $site += $1;
+        elsif ($is_read2) {
+            $strand = $is_reverse ? '-' : '+';
         }
         else {
-            print STDERR "Other Cigar code: $2 at position $site .\n";
+            # 单端测序数据，按RF方案中read1的比对方式处理
+            $strand = $is_reverse ? '+' : '-';
         }
-        my $end_site = $site - 1;
-        my $index1 = int($start_site / 1000);
-        my $index2 =  int($end_site / 1000);
-        $reads{$scaffold_id}{$strand}{$index1}{"$start_site\t$end_site"}{$read_name} = 1;
-        $reads{$scaffold_id}{$strand}{$index2}{"$start_site\t$end_site"}{$read_name} = 1;
     }
+    else {
+        # 非链特异性测序：比对记录本身不携带建库层面的链信息，但若该比对是剪接性比对，
+        # 比对软件常会依据剪接位点GT-AG等保守序列自动给出XS标签，可用于辅助确定intron的链，
+        # 与文库是否链特异性无关。若没有XS标签，则该条比对记录的链信息记为无链信息(.)。
+        if (m/XS:A:([+-])/) {
+            $strand = $1;
+        }
+    }
+
+    my ($depth_plus_ref, $depth_minus_ref, $depth_ref);
+    if ($no_strand_specific) {
+        $depth{$scaffold_id}{"+"} ||= {};
+        $depth{$scaffold_id}{"-"} ||= {};
+        $depth_plus_ref = $depth{$scaffold_id}{"+"};
+        $depth_minus_ref = $depth{$scaffold_id}{"-"};
+    }
+    else {
+        $depth{$scaffold_id}{$strand} ||= {};
+        $depth_ref = $depth{$scaffold_id}{$strand};
+    }
+
+    my $start_site = $site; # 当前外显子片段(exon block)的起始位点
+    while ($cigar =~ m/(\d+)(\w)/g) {
+        my ($cigar_len, $cigar_op) = ($1, $2);
+
+        if ($cigar_op eq "M" or $cigar_op eq "D") {
+            # M和D都需要往后移动比对位置，并且都需要计入碱基测序深度（合并原本重复的M/D两段代码）
+            my $start = $site;
+            $site += $cigar_len;
+            if ($no_strand_specific) {
+                foreach ($start..($site-1)) {
+                    $depth_plus_ref->{$_} ++;
+                    $depth_minus_ref->{$_} ++;
+                }
+            }
+            else {
+                foreach ($start..($site-1)) { $depth_ref->{$_} ++; }
+            }
+        }
+        elsif ($cigar_op eq "I") {
+            next;
+        }
+        elsif ($cigar_op eq "S") {
+            next;
+        }
+        elsif ($cigar_op eq "N") {
+            my $intron_start = $site;
+            my $intron_end = $intron_start + $cigar_len - 1;
+            $intron{$scaffold_id}{$strand}{$intron_start}{$intron_end} ++ if $strand ne '.';
+
+            my $end_site = $intron_start - 1;
+            my $index1 = int($start_site / 1000);
+            my $index2 = int($end_site / 1000);
+            $reads{$scaffold_id}{$strand}{$index1}{"$start_site\t$end_site"}{$read_name} = 1;
+            $reads{$scaffold_id}{$strand}{$index2}{"$start_site\t$end_site"}{$read_name} = 1;
+
+            $site += $cigar_len;
+            $start_site = $site; # 下一个外显子片段从intron之后开始
+            next;
+        }
+        else {
+            print STDERR "Other Cigar code: $cigar_op at position $site .\n";
+            next;
+        }
+    }
+    # 记录最后一个（若read没有跨越intron，则是唯一一个）外显子片段
+    my $end_site = $site - 1;
+    my $index1 = int($start_site / 1000);
+    my $index2 = int($end_site / 1000);
+    $reads{$scaffold_id}{$strand}{$index1}{"$start_site\t$end_site"}{$read_name} = 1;
+    $reads{$scaffold_id}{$strand}{$index2}{"$start_site\t$end_site"}{$read_name} = 1;
 }
 close IN;
 #print STDERR "Sam file read over\n";
@@ -196,32 +224,64 @@ if ($min_intron_length) {
 
 # 若输入基因组序列信息，则对Intron信息进行过滤
 if ($genome_fasta) {
-    my %old_intron = %intron;
-    %intron = ();
-    foreach my $scaffold_id (sort keys %old_intron) {
-        foreach my $strand (sort keys %{$old_intron{$scaffold_id}}) {
-            foreach my $start (sort {$a <=> $b} keys %{$old_intron{$scaffold_id}{$strand}}) {
-                foreach my $end (sort {$a <=> $b} keys %{$old_intron{$scaffold_id}{$strand}{$start}}) {
-                    my $start1 = $start + 1;
-                    my $cmdString = "samtools faidx $genome_fasta $scaffold_id:$start-$start1";
-                    my $donor = `$cmdString`;
-                    $donor =~ s/>.*\n//; $donor =~ s/\n//;
-                    my $end1 = $end - 1;
-                    $cmdString = "samtools faidx $genome_fasta $scaffold_id:$end1-$end";
-                    my $acceptor = `$cmdString`;
-                    $acceptor =~ s/>.*\n//; $acceptor =~ s/\n//;
-                    my $donnor_acceptor = "$donor$acceptor";
-                    if ($strand eq "-") {
-                        $donnor_acceptor = reverse $donnor_acceptor;
-                        $donnor_acceptor =~ tr/ATCGatcg/TAGCtagc/;
-                    }
-                    if (($donnor_acceptor eq "GTAG") or ($donnor_acceptor eq "GCAG") or ($donnor_acceptor eq "ATAC")) {
-                        $intron{$scaffold_id}{$strand}{$start}{$end} = $old_intron{$scaffold_id}{$strand}{$start}{$end};
-                        ##print STDERR "$scaffold_id\t$start\t$end\t$strand\t$old_intron{$scaffold_id}{$strand}{$start}{$end}\n";
-                    }
+    my @intron_list; # [scaffold_id, strand, start, end]
+    foreach my $scaffold_id (keys %intron) {
+        foreach my $strand (keys %{$intron{$scaffold_id}}) {
+            foreach my $start (keys %{$intron{$scaffold_id}{$strand}}) {
+                foreach my $end (keys %{$intron{$scaffold_id}{$strand}{$start}}) {
+                    push @intron_list, [$scaffold_id, $strand, $start, $end];
                 }
             }
         }
+    }
+
+    if (@intron_list) {
+        my @regions;
+        foreach my $item (@intron_list) {
+            my ($scaffold_id, $strand, $start, $end) = @$item;
+            my $start1 = $start + 1;
+            my $end1 = $end - 1;
+            push @regions, "$scaffold_id:$start-$start1";
+            push @regions, "$scaffold_id:$end1-$end";
+        }
+
+        my ($rf, $region_file) = tempfile(SUFFIX => '.regions.txt', UNLINK => 1);
+        print $rf join("\n", @regions), "\n";
+        close $rf;
+
+        my $faidx_out = `samtools faidx -r $region_file $genome_fasta`;
+
+        # 解析批量查询结果，按区域名建立索引，兼容序列被换行的情况
+        my %region_seq;
+        my @entries = split /\n(?=>)/, $faidx_out;
+        foreach my $entry (@entries) {
+            next unless $entry =~ /^>(\S+)\n(.*)/s;
+            my ($region_name, $seq) = ($1, $2);
+            $seq =~ s/\s+//g;
+            $region_seq{$region_name} = $seq;
+        }
+
+        my %intron_filtered;
+        foreach my $item (@intron_list) {
+            my ($scaffold_id, $strand, $start, $end) = @$item;
+            my $start1 = $start + 1;
+            my $end1 = $end - 1;
+            my $donor = $region_seq{"$scaffold_id:$start-$start1"};
+            my $acceptor = $region_seq{"$scaffold_id:$end1-$end"};
+            next unless defined $donor && defined $acceptor;
+            my $donor_acceptor = "$donor$acceptor";
+            if ($strand eq "-") {
+                $donor_acceptor = reverse $donor_acceptor;
+                $donor_acceptor =~ tr/ATCGatcg/TAGCtagc/;
+            }
+            if (($donor_acceptor eq "GTAG") or ($donor_acceptor eq "GCAG") or ($donor_acceptor eq "ATAC")) {
+                $intron_filtered{$scaffold_id}{$strand}{$start}{$end} = $intron{$scaffold_id}{$strand}{$start}{$end};
+            }
+        }
+        %intron = %intron_filtered;
+    }
+    else {
+        %intron = ();
     }
 }
 
@@ -231,9 +291,11 @@ foreach my $scaffold_id (sort keys %depth) {
     my @strand = ("+", "-");
     foreach my $strand (@strand) {
         my @site;
-        foreach (sort {$a <=> $b} keys %{$depth{$scaffold_id}{$strand}}) {
-            push @site, $_ if $depth{$scaffold_id}{$strand}{$_} >= $min_expressed_base_depth;
-            print BASE_DEPTH_OUT "$scaffold_id\t$strand\t$_\t$depth{$scaffold_id}{$strand}{$_}\n" if $base_depth_out;
+        my $depth_href = $depth{$scaffold_id}{$strand} || {};
+        foreach (sort {$a <=> $b} keys %$depth_href) {
+            my $d = $depth_href->{$_};
+            push @site, $_ if $d >= $min_expressed_base_depth;
+            print BASE_DEPTH_OUT "$scaffold_id\t$strand\t$_\t$d\n" if $base_depth_out;
         }
 
         my %intron_start;
@@ -249,8 +311,16 @@ foreach my $scaffold_id (sort keys %depth) {
         my %depth_targetRegion;
         foreach (@site) { $depth_targetRegion{$_} = $depth{$scaffold_id}{$strand}{$_}; }
 
+        my @intron_start_sorted;
+        foreach my $is (keys %intron_start) {
+            foreach my $ie (keys %{$intron_start{$is}}) {
+                push @intron_start_sorted, [$is, $ie, $intron_start{$is}{$ie}];
+            }
+        }
+        @intron_start_sorted = sort { $a->[0] <=> $b->[0] } @intron_start_sorted;
+
         #print STDERR "$scaffold_id\t$strand\n";
-        my %split_site = &split_aligned_region(\@site, \%intron_start, \%depth_targetRegion, $min_expressed_base_depth, $max_expressed_base_depth, $min_junction_depth, $max_junction_depth, $fraction);
+        my %split_site = &split_aligned_region(\@site, \%intron_start, \%depth_targetRegion, $min_expressed_base_depth, $max_expressed_base_depth, $min_junction_depth, $max_junction_depth, $fraction, $min_split_fragment_length);
 
         foreach (keys %split_site) {
             next unless $_;
@@ -261,7 +331,7 @@ foreach my $scaffold_id (sort keys %depth) {
             my $split_site_num = @split_site;
             ##print STDERR "$scaffold_id\t$strand\t$split_site[0]\t$split_site[-1]\t$split_site_num\t$expressed_base_depth_threshold\t$junction_depth_threshold\t$max_depth\n";
 
-            my $isoform = &find_isoforms(\@split_site, \%intron_start, \%depth_targetRegion, $expressed_base_depth_threshold, $junction_depth_threshold);
+            my $isoform = &find_isoforms(\@split_site, \@intron_start_sorted, \%depth_targetRegion, $expressed_base_depth_threshold, $junction_depth_threshold);
             ##print STDERR "$scaffold_id\t$strand\t$split_site[0]\t$split_site[-1]\t$split_site_num\t$expressed_base_depth_threshold\t$junction_depth_threshold\t$max_depth\t$isoform\n";
             # 若是非链特异性测序数据, 则让single exon transfrag的strand变成点号
             my $strand_out = $strand;
@@ -398,14 +468,15 @@ foreach my $scaffold_id (sort {$a cmp $b} keys %transfrags) {
                         print STDERR "Warning: discontinuous\t$ARGV[0]\t$scaffold_id\t$strand\t$region\t$_\n$path\n" if ( (! (($2 == $last_end + 1) or ($3 == $last_start - 1))) && $feature_number > 1 );
                         $last_end = $3; $last_start = $2;
                         if ($1 eq "intron") {
+                            $intron_number ++;
                             my $intron_supported_reads_number = $intron{$scaffold_id}{$strand}{$2}{$3};
-                            $feature_out_gff3 .= "$scaffold_id\tChenLianfu\tintron\t$2\t$3\t$intron_supported_reads_number\t$strand\t\.\tID=$scaffold_id\_$strand_name\_$region[0]\_$region[1].t0$mRNA_number.intron$intron_number;Parent=$scaffold_id\_$strand_name\_$region[0]\_$region[1].t0$mRNA_number;\n";
-                            $feature_out_gtf .= "$scaffold_id\tChenLianfu\tintron\t$2\t$3\t$intron_supported_reads_number\t$strand\t\.\tgene_id \"$scaffold_id\_$strand_name\_$region[0]\_$region[1]\"; transcript_id \"$scaffold_id\_$strand_name\_$region[0]\_$region[1].t0$mRNA_number\";\n";
+                            $feature_out_gff3 .= "$scaffold_id\tSam2Tranfrag\tintron\t$2\t$3\t$intron_supported_reads_number\t$strand\t\.\tID=$scaffold_id\_$strand_name\_$region[0]\_$region[1].t0$mRNA_number.intron$intron_number;Parent=$scaffold_id\_$strand_name\_$region[0]\_$region[1].t0$mRNA_number;\n";
+                            $feature_out_gtf .= "$scaffold_id\tSam2Tranfrag\tintron\t$2\t$3\t$intron_supported_reads_number\t$strand\t\.\tgene_id \"$scaffold_id\_$strand_name\_$region[0]\_$region[1]\"; transcript_id \"$scaffold_id\_$strand_name\_$region[0]\_$region[1].t0$mRNA_number\";\n";
                         }
                         elsif ($1 eq "exon") {
                             $exon_number ++;
-                            $feature_out_gff3 .= "$scaffold_id\tChenLianfu\texon\t$2\t$3\t\.\t$strand\t\.\tID=$scaffold_id\_$strand_name\_$region[0]\_$region[1].t0$mRNA_number.exon$exon_number;Parent=$scaffold_id\_$strand_name\_$region[0]\_$region[1].t0$mRNA_number;\n";
-                            $feature_out_gtf .= "$scaffold_id\tChenLianfu\texon\t$2\t$3\t\.\t$strand\t\.\tgene_id \"$scaffold_id\_$strand_name\_$region[0]\_$region[1]\"; transcript_id \"$scaffold_id\_$strand_name\_$region[0]\_$region[1].t0$mRNA_number\";\n";
+                            $feature_out_gff3 .= "$scaffold_id\tSam2Tranfrag\texon\t$2\t$3\t\.\t$strand\t\.\tID=$scaffold_id\_$strand_name\_$region[0]\_$region[1].t0$mRNA_number.exon$exon_number;Parent=$scaffold_id\_$strand_name\_$region[0]\_$region[1].t0$mRNA_number;\n";
+                            $feature_out_gtf .= "$scaffold_id\tSam2Tranfrag\texon\t$2\t$3\t\.\t$strand\t\.\tgene_id \"$scaffold_id\_$strand_name\_$region[0]\_$region[1]\"; transcript_id \"$scaffold_id\_$strand_name\_$region[0]\_$region[1].t0$mRNA_number\";\n";
                         }
                         else {
                             print STDERR "Warning: $ARGV[0]\t$scaffold_id\t$strand\t$region\t$_\n";
@@ -416,56 +487,71 @@ foreach my $scaffold_id (sort {$a cmp $b} keys %transfrags) {
                     }
                 }
                 my @mRNA_start_end = sort {$a <=> $b} keys %mRNA_start_end;
-                $gff3_out .= "$scaffold_id\tChenLianfu\tmRNA\t$mRNA_start_end[0]\t$mRNA_start_end[-1]\t\.\t$strand\t\.\tID=$scaffold_id\_$strand_name\_$region[0]\_$region[1].t0$mRNA_number;Parent=$scaffold_id\_$strand_name\_$region[0]\_$region[1];\n$feature_out_gff3" if $feature_out_gff3;
-                $gtf_out .= "$scaffold_id\tChenLianfu\ttranscript\t$mRNA_start_end[0]\t$mRNA_start_end[-1]\t\.\t$strand\t\.\tgene_id \"$scaffold_id\_$strand_name\_$region[0]\_$region[1]\"; transcript_id \"$scaffold_id\_$strand_name\_$region[0]\_$region[1].t0$mRNA_number\";\n$feature_out_gtf" if $feature_out_gtf;
+                $gff3_out .= "$scaffold_id\tSam2Tranfrag\tmRNA\t$mRNA_start_end[0]\t$mRNA_start_end[-1]\t\.\t$strand\t\.\tID=$scaffold_id\_$strand_name\_$region[0]\_$region[1].t0$mRNA_number;Parent=$scaffold_id\_$strand_name\_$region[0]\_$region[1];\n$feature_out_gff3" if $feature_out_gff3;
+                $gtf_out .= "$scaffold_id\tSam2Tranfrag\ttranscript\t$mRNA_start_end[0]\t$mRNA_start_end[-1]\t\.\t$strand\t\.\tgene_id \"$scaffold_id\_$strand_name\_$region[0]\_$region[1]\"; transcript_id \"$scaffold_id\_$strand_name\_$region[0]\_$region[1].t0$mRNA_number\";\n$feature_out_gtf" if $feature_out_gtf;
 
                 if ($gff3 && $gff3_out) {
-                    print "$scaffold_id\tChenLianfu\tgene\t$region\t\.\t$strand\t\.\tID=$scaffold_id\_$strand_name\_$region[0]\_$region[1];FragmentCount=$fragment;JunctionThreshold=$junction_threshold{$scaffold_id}{$strand}{$region};BaseDepthThreshold=$expressed_base_depth_threshold{$scaffold_id}{$strand}{$region};MaxDepth=$max_depth{$scaffold_id}{$strand}{$region};\n$gff3_out\n";
+                    print "$scaffold_id\tSam2Tranfrag\tgene\t$region\t\.\t$strand\t\.\tID=$scaffold_id\_$strand_name\_$region[0]\_$region[1];FragmentCount=$fragment;JunctionThreshold=$junction_threshold{$scaffold_id}{$strand}{$region};BaseDepthThreshold=$expressed_base_depth_threshold{$scaffold_id}{$strand}{$region};MaxDepth=$max_depth{$scaffold_id}{$strand}{$region};\n$gff3_out\n";
                 }
                 elsif ($gtf_out) {
-                    print "$scaffold_id\tChenLianfu\tgene\t$region\t\.\t$strand\t\.\tgene_id \"$scaffold_id\_$strand_name\_$region[0]\_$region[1]\"; FragmentCount \"$fragment\"; JunctionThreshold \"$junction_threshold{$scaffold_id}{$strand}{$region}\"; BaseDepthThreshold \"$expressed_base_depth_threshold{$scaffold_id}{$strand}{$region}\"; MaxDepth \"$max_depth{$scaffold_id}{$strand}{$region}\";\n$gtf_out\n";
+                    print "$scaffold_id\tSam2Tranfrag\tgene\t$region\t\.\t$strand\t\.\tgene_id \"$scaffold_id\_$strand_name\_$region[0]\_$region[1]\"; FragmentCount \"$fragment\"; JunctionThreshold \"$junction_threshold{$scaffold_id}{$strand}{$region}\"; BaseDepthThreshold \"$expressed_base_depth_threshold{$scaffold_id}{$strand}{$region}\"; MaxDepth \"$max_depth{$scaffold_id}{$strand}{$region}\";\n$gtf_out\n";
                 }
             }
         }
     }
 }
 
-close INTRON_OUT;
-close BASE_DEPTH_OUT;
+close INTRON_OUT if $intron_info_out;
+close BASE_DEPTH_OUT if $base_depth_out;
 
 # 子程序 find_isoforms 用于寻找指定区域的 transfrags
 sub find_isoforms {
     my @site_raw = @{$_[0]};
-    my %intron_start_raw = %{$_[1]};
-    my %depth_raw = %{$_[2]};
+    my $intron_start_sorted = $_[1]; # 按起点排序的[intron_start, intron_end, depth]数组引用（只读）
+    my $depth_raw = $_[2]; # 该scaffold+strand全部表达位点深度的哈希引用（只读，不整体拷贝）
     my $expressed_base_depth_threshold = $_[3];
     my $junction_depth_threshold = $_[4];
 
     my (@site, %siteee, %depth);
     foreach (@site_raw) {
-        #print STDERR "$_\t$depth_raw{$_}\n";
-        if ($depth_raw{$_} >= $expressed_base_depth_threshold) {
+        #print STDERR "$_\t$depth_raw->{$_}\n";
+        if ($depth_raw->{$_} >= $expressed_base_depth_threshold) {
             push @site, $_;
             $siteee{$_} = 1;
-            $depth{$_} = $depth_raw{$_};
+            $depth{$_} = $depth_raw->{$_};
         }
     }
 
     my (%intron_start, %intron_region_for_filter1, %intron_region_for_filter2);
     # 根据junction_depth_threshold过滤introns
-    foreach my $intron_start (sort {$a <=> $b}  keys %intron_start_raw) {
-        foreach my $intron_end(sort {$a <=> $b} keys %{$intron_start_raw{$intron_start}}) {
-            if ($intron_start > $site[0] && $intron_end < $site[-1] && $intron_start_raw{$intron_start}{$intron_end} >= $junction_depth_threshold) {
-                $intron_start{$intron_start}{$intron_end} = $intron_start_raw{$intron_start}{$intron_end};
-                $intron_region_for_filter1{"$intron_start\t$intron_end"} = $intron_start;
-                $intron_region_for_filter2{"$intron_start\t$intron_end"} = $intron_end;
-            }
+    my ($lo, $hi) = (0, scalar(@$intron_start_sorted));
+    while ($lo < $hi) {
+        my $mid = int(($lo + $hi) / 2);
+        if ($intron_start_sorted->[$mid][0] <= $site[0]) { $lo = $mid + 1; }
+        else { $hi = $mid; }
+    }
+    for (my $i = $lo; $i < @$intron_start_sorted; $i++) {
+        my ($intron_start, $intron_end, $intron_depth) = @{$intron_start_sorted->[$i]};
+        last if $intron_start >= $site[-1];
+        next unless $intron_end < $site[-1];
+        if ($intron_depth >= $junction_depth_threshold) {
+            $intron_start{$intron_start}{$intron_end} = $intron_depth;
+            $intron_region_for_filter1{"$intron_start\t$intron_end"} = $intron_start;
+            $intron_region_for_filter2{"$intron_start\t$intron_end"} = $intron_end;
         }
     }
     # 若两个intron有重叠，则过滤掉depth较低的那个intron。注意，若一个intron和其它多个introns有重叠，该intron的depth必须高于所有其它多个introns的depth，才能保留。
     while (%intron_region_for_filter1) {
-        my @start_end = sort {$intron_region_for_filter1{$a} <=> $intron_region_for_filter1{$b} or $intron_region_for_filter2{$b} <=> $intron_region_for_filter2{$a}} keys %intron_region_for_filter1;
-        my $first = shift @start_end;
+        my $first;
+        foreach my $key (keys %intron_region_for_filter1) {
+            if ( (!defined $first)
+                || $intron_region_for_filter1{$key} < $intron_region_for_filter1{$first}
+                || ( $intron_region_for_filter1{$key} == $intron_region_for_filter1{$first}
+                     && $intron_region_for_filter2{$key} > $intron_region_for_filter2{$first} ) ) {
+                $first = $key;
+            }
+        }
+        my @start_end = grep { $_ ne $first } keys %intron_region_for_filter1;
         $first =~ m/(\d+)\t(\d+)/;
         my ($intron_start, $intron_end) = ($1, $2);
         my $keep = 1;
@@ -530,17 +616,16 @@ sub find_isoforms {
     my %intron_end;
     foreach my $intron_start (sort keys %intron_start) {
         foreach my $intron_end(sort keys %{$intron_start{$intron_start}}) {
-            $intron_start{$intron_start}{$intron_end} = $intron_start{$intron_start}{$intron_end};
             $intron_end{$intron_end} = $intron_start;
             #print STDERR "find_sioforms,IntroInfo:\t$intron_start\t$intron_end\t$intron_start{$intron_start}{$intron_end}\n";
         }
     }
 
     my (@site, %depth);
-    foreach (sort {$a <=> $b} sort %siteee) {
-        if ($depth_raw{$_} >= $expressed_base_depth_threshold) {
+    foreach (sort {$a <=> $b} keys %siteee) {
+        if ($depth_raw->{$_} >= $expressed_base_depth_threshold) {
             push @site, $_;
-            $depth{$_} = $depth_raw{$_};
+            $depth{$_} = $depth_raw->{$_};
         }
     }
 
@@ -579,7 +664,8 @@ sub split_aligned_region {
     my $min_junction_depth = $_[5];
     my $max_junction_depth = $_[6];
     my $fraction = $_[7];
-    
+    my $min_split_fragment_length = $_[8];
+
     #foreach (@site) { print "$_\n"; }
     #foreach (sort {$a <=> $b} keys %depth) { print STDERR "$_\t$depth{$_}\n"; }
     #print STDERR "$min_expressed_base_depth\t$max_expressed_base_depth\t$min_junction_depth\t$max_junction_depth\n";
@@ -598,19 +684,25 @@ sub split_aligned_region {
         }
     }
 
+    my @intron_intervals = map { my ($s, $e) = split /\t/; [$s, $e, $intron_depth_all{$_}] } keys %intron_depth_all;
+    @intron_intervals = sort { $a->[0] <=> $b->[0] } @intron_intervals;
+    my @active_introns;
+    my $interval_ptr = 0;
+    my $interval_total = @intron_intervals;
+
     my $last_site = $site[0] - 1;
     my $arrary_num = 0;
     foreach my $site (@site) {
         $arrary_num ++;
-        my (@intron_depth, $depth);
-        foreach (keys %intron_depth_all) {
-            my ($intron_start, $intron_end) = split /\t/;
-            push @intron_depth, $intron_depth_all{$_} if ($site >= $intron_start && $site <= $intron_end);
+        my $depth;
+        while ($interval_ptr < $interval_total && $intron_intervals[$interval_ptr][0] <= $site) {
+            push @active_introns, $intron_intervals[$interval_ptr];
+            $interval_ptr ++;
         }
-        @intron_depth = sort {$b <=> $a} @intron_depth;
+        @active_introns = grep { $_->[1] >= $site } @active_introns;
         my $intron_depth = 0;
-        $intron_depth = $intron_depth[0] if @intron_depth;
-        $depth = $depth{$site}; 
+        foreach (@active_introns) { $intron_depth = $_->[2] if $_->[2] > $intron_depth; }
+        $depth = $depth{$site};
         ##print "Site:Intron_depth:Depth\t$site:$intron_depth:$depth\n";
         # 若分析的位点和上一个位点是紧挨着的
         #   若该位点和存在的下一个位点不是紧挨着的
@@ -668,7 +760,7 @@ sub split_aligned_region {
         foreach (@site) {
             if (exists $split_position{$_}) {
                 my $split_site = join "\t", @split_site;
-                $split_site{$split_site} = 1 if @split_site >= 100;
+                $split_site{$split_site} = 1 if @split_site >= $min_split_fragment_length;
                 @split_site = ($_);
             }
             else {
@@ -676,7 +768,7 @@ sub split_aligned_region {
             }
         }
         my $split_site = join "\t", @split_site;
-        $split_site{$split_site} = 1 if @split_site >= 100;
+        $split_site{$split_site} = 1 if @split_site >= $min_split_fragment_length;
 
         # 对每个片段设定相应的阈值（碱基测序深度和intron测序深度）再进行打断。
         # 若在 %split_site 中存在的片段，则不进行上述分析
@@ -684,7 +776,7 @@ sub split_aligned_region {
         # 若检测的阈值不是最低阈值的时候，则使用相应的阈值对相应的片段打断，仅将打断后片段中平均碱基测序深度最大的片段添加到 %split_site 中，将此最大片段两端的打断位点添加到 %split_position 中
         foreach my $site (keys %split_site) {
             my @sites = split /\t/, $site;
-            next if @sites < 100;
+            next if @sites < $min_split_fragment_length;
             if (! exists $split_region{$site}) {
                 # 确定碱基测序深度和intron测序深度的阈值
                 my ($max_depth, $expressed_base_depth_threshold, $junction_depth_threshold);
@@ -701,26 +793,35 @@ sub split_aligned_region {
                 ##print STDERR "$max_depth\t$expressed_base_depth_threshold\t$junction_depth_threshold\n";
 
                 # 根据阈值找打断位点
-                my %low_depth_position;
-                my %intron_depth;
-                foreach (keys %intron_depth_all) {
-                    @_ = split /\t/;
-                    $intron_depth{$_} = $intron_depth_all{$_} if ($_[0] >= $sites[0] && $_[1] <= $sites[-1]);
+                my ($lo, $hi) = (0, scalar(@intron_intervals));
+                while ($lo < $hi) {
+                    my $mid = int(($lo + $hi) / 2);
+                    if ($intron_intervals[$mid][0] < $sites[0]) { $lo = $mid + 1; }
+                    else { $hi = $mid; }
                 }
+                my @sub_intervals;
+                for (my $i = $lo; $i < @intron_intervals; $i++) {
+                    last if $intron_intervals[$i][0] > $sites[-1];
+                    push @sub_intervals, $intron_intervals[$i] if $intron_intervals[$i][1] <= $sites[-1];
+                }
+                my @active_sub;
+                my $sub_ptr = 0;
+                my $sub_total = @sub_intervals;
 
+                my %low_depth_position;
                 my $last_site = $sites[0] - 1;
                 my $arrary_num = 0;
                 foreach my $site (@sites) {
                     $arrary_num ++;
-                    my (@intron_depth, $depth);
-                    foreach (keys %intron_depth) {
-                        my ($intron_start, $intron_end) = split /\t/;
-                        push @intron_depth, $intron_depth{$_} if ($site >= $intron_start && $site <= $intron_end);
+                    my $depth;
+                    while ($sub_ptr < $sub_total && $sub_intervals[$sub_ptr][0] <= $site) {
+                        push @active_sub, $sub_intervals[$sub_ptr];
+                        $sub_ptr ++;
                     }
-                    @intron_depth = sort {$b <=> $a} @intron_depth;
+                    @active_sub = grep { $_->[1] >= $site } @active_sub;
                     my $intron_depth = 0;
-                    $intron_depth = $intron_depth[0] if @intron_depth;
-                    $depth = $depth{$site}; 
+                    foreach (@active_sub) { $intron_depth = $_->[2] if $_->[2] > $intron_depth; }
+                    $depth = $depth{$site};
                     if ($site - $last_site == 1) {
                         if  ($sites[$arrary_num] - $site > 1) {
                             if ($intron_depth < $junction_depth_threshold) {
@@ -762,7 +863,7 @@ sub split_aligned_region {
                 foreach (@sites) {
                     if (exists $low_depth_position{$_}) {
                         my $split_sites = join "\t", @split_sites;
-                        $split_sites{$split_sites} = 1 if @split_sites >= 100;
+                        $split_sites{$split_sites} = 1 if @split_sites >= $min_split_fragment_length;
                         @split_sites = ($_);
                     }
                     else {
@@ -770,7 +871,7 @@ sub split_aligned_region {
                     }
                 }
                 my $split_sites = join "\t", @split_sites;
-                $split_sites{$split_sites} = 1 if @split_sites >= 100;
+                $split_sites{$split_sites} = 1 if @split_sites >= $min_split_fragment_length;
 
                 # 若检测的阈值是最低阈值的时候，将打断后的片段都添加到 %split_site 中，将打断位点信息添加到 %split_position 中
                 if ($expressed_base_depth_threshold == $min_expressed_base_depth && $junction_depth_threshold == $min_junction_depth) {
@@ -806,9 +907,9 @@ sub split_aligned_region {
                     $split_position{$split_sites[0]} = 1;
                     my @sites1 = @site;
                     while (@sites1) {
-                        my $aaa = shift @sites1; 
+                        my $aaa = shift @sites1;
                         if ($aaa == $split_sites[-1]) {
-                            $aaa = shift @sites1; 
+                            $aaa = shift @sites1;
                             $split_position{$aaa} = 1;
                             last;
                         }

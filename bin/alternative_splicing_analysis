@@ -1,6 +1,7 @@
 #!/usr/bin/env perl
 
 use strict;
+use warnings;
 use Getopt::Long;
 use Cwd qw/abs_path getcwd cwd/;
 use File::Basename;
@@ -29,11 +30,7 @@ Usage:
     （6）对于evidence introns中特有的intron，计算 intron测序深度 / 基因测序深度 比值。若超过阈值0.2，则表示intron是可信的，将该intron进行标记；否则忽略之。
     （7）对于ref introns和evidence introns中共有的intron，计算 碱基测序深度 / 基因测序深度 比值。若超过阈值0.2，则属于IR事件，将intron进行标记。
     （8）对所有的可信introns根据重叠进行聚类。
-    （9）对聚类的introns进行可变剪接分析，是核心算法。
-        对有重叠的introns类进行可变剪接分析，计算各种intron剪接类型及其比例：（1）将有重叠的introns分成多套没有重叠的introns，根据各套introns的平均测序深度来分配其比例；（2）每套没有重叠的introns可能存在IR剪接类型，根据intron测序深度和内部碱基测序深度分配比例；（3）再进一步
-算出所有，并得到各个intron_splicing的比例。
-        没有重叠的single intron若被标记了，则进行IR分析，计算两种剪接方式的比例。
-        没有重叠的single intron若未被标记，则不进行IR分析。
+    （9）对聚类的introns进行可变剪接分析，是核心算法。对有重叠的introns类进行可变剪接分析，计算各种intron剪接类型及其比例：（1）将有重叠的introns分成多套没有重叠的introns，根据各套introns的平均测序深度来分配其比例；（2）每套没有重叠的introns可能存在IR剪接类型，根据intron测序深度和内部碱基测序深度分配比例；（3）再进一步算出所有，并得到各个intron_splicing的比例。没有重叠的single intron若被标记了，则进行IR分析，计算两种剪接方式的比例。没有重叠的single intron若未被标记，则不进行IR分析。
     （10）输出比例不小于指定阈值的可变剪接转录本GFF3文件，包含原有的所有可变剪接转录本，并在mRNA信息中添加其比例信息。
 
     --min_intron_depth <int>    default: 1
@@ -46,7 +43,7 @@ Usage:
     比较evidence introns和ref introns，对于evidence introns中特有的intron，计算 intron测序深度 / 基因测序深度 比值，若超过该参数阈值，则表示intron是可信的。基因测序深度计算：基因非inron区域的碱基测序深度的中位数。
 
     --min_base_depth_ratio_for_common_intron <float>    default: 0.2
-    比较evidence introns和ref introns，对于ref introns和evidence introns中共有的intron，计算 碱基测序深度 / 基因测序深度 比值，若超过该参数阈值，则存在IR事件。基碱基测序深度计算：计算intron区域所有碱基测序深度的中位数；因测序深度计算：基因非inron区域的碱基测序深度的中位数。
+    比较evidence introns和ref introns，对于ref introns和evidence introns中共有的intron，计算 碱基测序深度 / 基因测序深度 比值，若超过该参数阈值，则存在IR事件。碱基测序深度计算：计算intron区域所有碱基测序深度的中位数；基因测序深度计算：基因非inron区域的碱基测序深度的中位数。
 
     --min_gene_depth <int>    default: 10
     在以上三个阈值中计算基因测序深度时，若基因测序深度值小于该参数值，则使基因测序深度值值等于该参数值。
@@ -69,24 +66,32 @@ if (@ARGV==0){die $usage}
 my ($help_flag, $min_intron_depth, $min_base_depth_ratio_for_ref_specific_intron, $min_intron_depth_ratio_for_evidence_specific_intron, $min_base_depth_ratio_for_common_intron, $min_transcript_confidence_for_output, $transcript_num_for_output_when_all_low_confidence, $min_gene_depth, $added_mRNA_ID_prefix);
 GetOptions(
     "help" => \$help_flag,
-    "min_intron_depth:i" => \$min_intron_depth,
-    "min_base_depth_ratio_for_ref_specific_intron:f" => \$min_base_depth_ratio_for_ref_specific_intron,
-    "min_intron_depth_ratio_for_evidence_specific_intron:f" => \$min_intron_depth_ratio_for_evidence_specific_intron,
-    "min_base_depth_ratio_for_common_intron:f" => \$min_base_depth_ratio_for_common_intron,
-    "min_transcript_confidence_for_output:f" => \$min_transcript_confidence_for_output,
-    "transcript_num_for_output_when_all_low_confidence:i" => \$transcript_num_for_output_when_all_low_confidence,
-    "min_gene_depth:i" => \$min_gene_depth,
-    "added_mRNA_ID_prefix:s" => \$added_mRNA_ID_prefix,
+    "min_intron_depth=i" => \$min_intron_depth,
+    "min_base_depth_ratio_for_ref_specific_intron=f" => \$min_base_depth_ratio_for_ref_specific_intron,
+    "min_intron_depth_ratio_for_evidence_specific_intron=f" => \$min_intron_depth_ratio_for_evidence_specific_intron,
+    "min_base_depth_ratio_for_common_intron=f" => \$min_base_depth_ratio_for_common_intron,
+    "min_transcript_confidence_for_output=f" => \$min_transcript_confidence_for_output,
+    "transcript_num_for_output_when_all_low_confidence=i" => \$transcript_num_for_output_when_all_low_confidence,
+    "min_gene_depth=i" => \$min_gene_depth,
+    "added_mRNA_ID_prefix=s" => \$added_mRNA_ID_prefix,
 );
-$min_intron_depth ||= 1;
-$min_base_depth_ratio_for_ref_specific_intron ||= 0.3;
-$min_intron_depth_ratio_for_evidence_specific_intron ||= 0.2;
-$min_base_depth_ratio_for_common_intron ||= 0.2;
-$min_gene_depth ||= 10;
-$min_transcript_confidence_for_output ||= 0.05;
-$transcript_num_for_output_when_all_low_confidence ||= 8;
-$added_mRNA_ID_prefix ||= "t";
 if ( $help_flag ) { die $usage }
+
+# BUG FIX: 原代码使用 ||= 赋默认值，会把用户显式传入的 0（如 --min_intron_depth 0）误判为“未设置”而被默认值覆盖。
+# 改用 //= （defined-or），只有在用户真的没有传值（undef）时才使用默认值。
+$min_intron_depth //= 1;
+$min_base_depth_ratio_for_ref_specific_intron //= 0.3;
+$min_intron_depth_ratio_for_evidence_specific_intron //= 0.2;
+$min_base_depth_ratio_for_common_intron //= 0.2;
+$min_gene_depth //= 10;
+$min_transcript_confidence_for_output //= 0.05;
+$transcript_num_for_output_when_all_low_confidence //= 8;
+$added_mRNA_ID_prefix //= "t";
+
+# BUG FIX: 原代码没有检查位置参数（输入文件）数量是否足够，若用户漏传文件，会在 open 时报出令人困惑的错误。
+if (@ARGV < 3) {
+    die "Error: 需要3个位置参数（geneModels.gff3 intron.txt base_depth.txt），实际收到 " . scalar(@ARGV) . " 个。\n\n$usage";
+}
 
 # (1) 读取GFF3文件
 my %gene_info = &get_geneModels_from_GFF3($ARGV[0]);
@@ -170,6 +175,9 @@ foreach my $gene_ID (sort keys %gene_info) {
                 $depth = $depth{$chr}{$strand}{$_} if $depth{$chr}{$strand}{$_};
                 push @site_depth, $depth;
             }
+            # BUG FIX: 原代码在取中位数前没有排序，@site_depth 是按基因组坐标顺序排列的，
+            # 直接取中间下标得到的只是中间坐标处的深度值，而不是真正的中位数。这里补上排序。
+            @site_depth = sort {$b <=> $a} @site_depth;
             $intron_ref_base_depth = $site_depth[@site_depth*0.5] if @site_depth;
             push @ref_mRNA_intron_out, "$_[0]\t$_[1]\t$intron_ref_depth\t$intron_ref_base_depth";
             push @ref_mRNA_intron_out_without_depth, "$_[0]\t$_[1]";
@@ -179,7 +187,11 @@ foreach my $gene_ID (sort keys %gene_info) {
         $ref_mRNA_intron_out = join "\n", @ref_mRNA_intron_out if @ref_mRNA_intron_out;
         my $ref_mRNA_intron_out_without_depth = "No_intron";
         $ref_mRNA_intron_out_without_depth = join "\n", @ref_mRNA_intron_out_without_depth if @ref_mRNA_intron_out_without_depth;
-        unless ( exists $ref_transcript_intron{$ref_mRNA_intron_out} ) {
+        # BUG FIX: 原代码判断 unless ( exists $ref_transcript_intron{$ref_mRNA_intron_out} )，
+        # 但 %ref_transcript_intron 实际是以 $ref_mRNA_intron_out_without_depth（不含深度信息）为 key 存储的，
+        # 两者不一致导致这个去重判断几乎恒为真，起不到“同一intron结构只记录一次”的去重作用。
+        # 改为检查同一个 key（不含深度的版本），使去重逻辑生效。
+        unless ( exists $ref_transcript_intron{$ref_mRNA_intron_out_without_depth} ) {
             $ref_transcript_intron{$ref_mRNA_intron_out_without_depth} = $ref_mRNA_ID;
             $ref_mRNA_ID{$ref_mRNA_ID} = $ref_mRNA_intron_out;
         }
@@ -201,7 +213,9 @@ foreach my $gene_ID (sort keys %gene_info) {
         }
     }
     @depth_exon_base = sort {$b <=> $a} @depth_exon_base;
-    my $exon_base_depth_median = $depth_exon_base[@depth_exon_base*0.5];
+    # BUG FIX: 当基因的所有外显子碱基都被intron覆盖（@depth_exon_base为空）时，原代码取到的是 undef，
+    # 后续数值比较会产生 uninitialized 警告。这里补上 // 0 防御。
+    my $exon_base_depth_median = $depth_exon_base[@depth_exon_base*0.5] // 0;
     my $GFF3_gene_depth = $exon_base_depth_median;
     $exon_base_depth_median = $min_gene_depth if $exon_base_depth_median < $min_gene_depth;
 
@@ -242,10 +256,10 @@ foreach my $gene_ID (sort keys %gene_info) {
     }
     my @valid_intron = sort {$a <=> $b} keys %valid_intron;
     my @intron_group = sort {$a <=> $b} keys %intron_group;
-    
+
     # 检测出基因所有的可信introns和被标记出有可变剪接事件的introns
     #print STDERR "\n$gene_ID\nexon_base_depth_median:$exon_base_depth_median\nvalid_intron:\n" . join("\n", @valid_intron) . "\n\nintron_group\n" . join("\n", @intron_group) . "\n";
-    
+
     # (8) 对所有的可信introns根据重叠进行聚类。
     my %cluster_intron = &cluster_intron(\@valid_intron);
 
@@ -264,7 +278,7 @@ foreach my $gene_ID (sort keys %gene_info) {
         # 对有重叠的introns类进行可变剪接分析，计算各种intron剪接类型及其比例：（1）将有重叠的introns分成多套没有重叠的introns，根据各套introns的平均测序深度来分配其比例；（2）每套没有重叠的introns可能存在IR剪接类型，根据intron测序深度和内部碱基测序深度分配比例；（3）再进一步算出所有，并得到各个intron_splicing的比例。
         if (@introns >= 2) {
             #print STDERR "TEST:9.2\n";
-            %intron_splicing = &intron_splcing(\@introns);
+            %intron_splicing = &intron_splcing(\@introns, $min_transcript_confidence_for_output);
             #foreach ( keys %intron_splicing ) { print "TEST3: $intron_splicing{$_}\t$_\n"; }
             #my $AS_type = &AS_type(\%intron_splcing, $strand);
         }
@@ -297,11 +311,9 @@ foreach my $gene_ID (sort keys %gene_info) {
             }
         }
 
-        my $number = %transcript_intron;
-        my $number_info = join "\n", keys %transcript_intron;
         #print STDERR "TEST:9.3\n";
 
-        # 当转录本数量过多时，仅挑选排名靠前（默认前20）的转录本，去除排名靠后的转录本。
+        # 当转录本数量过多时，仅挑选排名靠前的转录本，去除排名靠后的转录本。
         # 计算出一个基因允许的最大转录本数量。
         my $max_num_of_transcript = 10000;
         $max_num_of_transcript = int(1 / $min_transcript_confidence_for_output + 0.5) if $min_transcript_confidence_for_output;
@@ -337,11 +349,14 @@ foreach my $gene_ID (sort keys %gene_info) {
     foreach my $transcript_intron ( sort {$transcript_intron{$b} <=> $transcript_intron{$a}} keys %transcript_intron ) {
         # 准备新加入的转录本ID
         $added_mRNA_num ++;
-        my $added_mRNA_code = '0' x ( 2 - length($added_mRNA_num) ) . $added_mRNA_num;
+        # BUG FIX: 原代码用 '0' x (2 - length($added_mRNA_num)) 拼接补零，写法晦涩且在数字达到3位以上时
+        # 依赖 Perl 对负数重复次数的隐式处理（结果恰好正确，但容易在后续维护时被误改出错）。
+        # 改用 sprintf 明确表达“至少两位数字，不足补零”，与说明文档中的描述完全一致，且更易读。
+        my $added_mRNA_code = sprintf("%02d", $added_mRNA_num);
         my $added_mRNA_ID = "$gene_ID." . $added_mRNA_ID_prefix . $added_mRNA_code;
         while ( exists $ref_mRNA_ID{$added_mRNA_ID} ) {
             $added_mRNA_num ++;
-            $added_mRNA_code = '0' x ( 2 - length($added_mRNA_num) ) . $added_mRNA_num;
+            $added_mRNA_code = sprintf("%02d", $added_mRNA_num);
             $added_mRNA_ID = "$gene_ID." . $added_mRNA_ID_prefix . $added_mRNA_code;
         }
 
@@ -413,7 +428,7 @@ foreach my $gene_ID (sort keys %gene_info) {
         }
     }
 
-    # 当所有可变剪接转录本的比例都低于--min_transcript_confidence_for_output参数值时，强制最多输出8个转录本
+    # 当所有可变剪接转录本的比例都低于--min_transcript_confidence_for_output参数值时，强制最多输出指定数量的转录本
     if ($out_transcript_valid_ratio_num == 0) {
         while ($out_transcript_number < $transcript_num_for_output_when_all_low_confidence && @out_transcript_ID >= $transcript_num_for_output_when_all_low_confidence - $out_transcript_number) {
             my $mRNA_ID = shift @out_transcript_ID;
@@ -434,7 +449,9 @@ sub get_mRNA_GFF3_info {
     my ($out_mRNA_intron, $ratio, $chr, $source, $gene_start, $gene_end, $strand, $gene_ID, $mRNA_ID, $mRNA_header, $mRNA_info) = @_;
 
     $ratio = $ratio * 100;
-    $ratio = sprintf("%.2f%", $ratio);
+    # BUG FIX: 原代码 sprintf("%.2f%", $ratio) 中末尾的裸 % 不是合法的格式转义符（合法写法应为 %%），
+    # 会触发 "Invalid conversion in sprintf" 警告，并且不会真正输出百分号。这里改为 %%。
+    $ratio = sprintf("%.2f%%", $ratio);
 
     # 若输入了参考转录本信息，修改intron信息，再返回输出其信息
     if ($mRNA_header) {
@@ -511,7 +528,7 @@ sub get_mRNA_GFF3_info {
             $out{"$chr\t$source\texon\t$_[0]\t$_[1]\t.\t$strand\t\.\tID=$mRNA_ID.exon$num;Parent=$mRNA_ID;\n"} = $_[0];
         }
         # 输出intron
-        my $num = 0;
+        $num = 0;
         foreach ( @intron ) {
             $num ++;
             @_ = split /\t/, $_;
@@ -520,7 +537,7 @@ sub get_mRNA_GFF3_info {
             $out{"$chr\t$source\tintron\t$_[0]\t$_[1]\t$intron_depth\t$strand\t\.\tID=$mRNA_ID.intron$num;Parent=$mRNA_ID;intron_depth=$intron_depth;base_depth_median=$base_depth_median\n"} = $_[0];
         }
 
-        
+
         my @out = sort {$out{$a} <=> $out{$b}} keys %out;
         $out .= join "", @out;
 
@@ -545,6 +562,7 @@ sub get_mRNA_GFF3_info {
 # 分析时，对introns按首尾坐标从小到大排序，得到4个introns(注意两个introns之间间距0个碱基的特殊情况)。可以看到1、2和3互斥，2和4互斥，3和4互斥(特殊情况，两introns间距0个碱基)。于是得到5组introns: 1+4, 1+5, 2+5, 3+4, 3+5。
 sub intron_splcing {
     my @intron = @{$_[0]};
+    my $min_transcript_confidence_for_output = $_[1];
     #foreach ( @intron ) { print STDERR "TEST01: $_\n"; }
 
     # (0) 根据intron的起始和结束位点进行排序
@@ -616,7 +634,11 @@ sub intron_splcing {
             my $IR_intron_add_ok = 0;
             foreach ( keys %intron_splicing_end ) {
                 #print STDERR "TEST05: $_\n";
-                if ( $_[0] > $intron_splicing_end{$_} ) {
+                # BUG FIX: 原代码这里写的是 $_[0] > $intron_splicing_end{$_}，缺少与上面
+                # %group_intron_end 分组逻辑一致的 "+1" 间距容忍（两intron间距为0bp时仍应视为重叠/互斥，
+                # 与文档说明及 cluster_intron 中的处理保持一致）。这里补上 +1，避免0bp间距的相邻intron
+                # 被错误地当作不重叠而组合在同一条转录本路径里。
+                if ( $_[0] > ($intron_splicing_end{$_} + 1) ) {
                     $intron_splicing_ratio{"$_;$IR_intron"} = $intron_splicing_ratio{$_} * $ratio_intron;
                     $intron_splicing_ratio{"$_;Intron_Retention"} = $intron_splicing_ratio{$_} * $ratio_base_depth;
                     $intron_splicing_end{"$_;$IR_intron"} = $_[1];
@@ -634,7 +656,7 @@ sub intron_splcing {
                 $intron_splicing_end{"Intron_Retention"} = $_[1];
             }
 
-            # 当转录本数量过多时，仅挑选排名靠前（默认前20）的转录本，去除排名靠后的转录本。
+            # 当转录本数量过多时，仅挑选排名靠前的转录本，去除排名靠后的转录本。
             # 计算出一个基因允许的最大转录本数量。
             my $max_num_of_transcript = 10000;
             $max_num_of_transcript = int(1 / $min_transcript_confidence_for_output + 0.5) if $min_transcript_confidence_for_output;
@@ -679,6 +701,8 @@ sub cluster_intron {
     @intron = sort {$a <=> $b} @intron;
 
     my %out;
+    return %out unless @intron;
+
     my $intron = shift @intron;
     my ($last_start, $last_end) = split /\t/, $intron;
     foreach (@intron) {
@@ -835,6 +859,7 @@ sub add_attr {
     $attr =~ s/;$//;
 
     my (%attr, %attr_sort, $sort_num);
+    $sort_num = 0;
     foreach ( split /;/, $attr ) {
         if (m/(.*)\=(.*)/) {
             $sort_num ++;

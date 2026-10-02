@@ -8,32 +8,32 @@ use File::Temp qw/tempfile/;
 use Storable qw/nstore retrieve/;
 use POSIX qw/:sys_wait_h strftime/;
 
-my $usage = <<USAGE;
+my $usage_chinese = <<USAGE;
 Usage:
     $0 [options] genome.fasta in1.gff3 in2.gff3 in3.gff3 ... > out.gff3
 
     本程序用于将输入的一个或多个GFF3文件中的基因模型，进行去冗余处理，对基因模型进行打分并挑选更可信的结果。
 
     程序运行原理：
-    (1) 程序对所有输入的基因模型进行打分。首先，按CDS长度进行打分，每bp长度记1分，得到初步得分S；然后，根据intron数量打分，每增加一个intron，增加一定比例(相对S)得分，第一个intron增加分数最多，后续的intron增加的分数按比例递减，且所有intron增加的得分之和不超过S；然后，按基因完整性打分，5'端完整，增加一定比例(相对S)得分，3'端完整，增加一定比例(相对S)得分；最后，按输入文件的先后顺序，第一个输入文件，增加一定比例(相对S)得分，第二个输入文件分值不变。
-        （若使用了--use_exon参数，则上述"CDS"改为"exon"：按exon总长度计分，按exon数量推算intron数量，详见--use_exon参数说明。）
+
+    (1) 程序对所有输入的基因模型进行打分。首先，按CDS长度进行打分，每bp长度记1分，得到初步得分S；然后，根据intron数量打分，每增加一个intron，增加一定比例(相对S)得分，第一个intron增加分数最多，后续的intron增加的分数按比例递减，且所有intron增加的得分之和不超过S；然后，按基因完整性打分，5'端完整，增加一定比例(相对S)得分，3'端完整，增加一定比例(相对S)得分；然后，按输入文件的先后顺序，第一个输入文件，增加一定比例(相对S)得分，第二个输入文件分值不变；最后，若基因内部（CDS的阅读框内，不含末尾的终止密码子）含有终止密码子，则每含有一个终止密码子，扣除一定比例(相对S)的得分，扣分后得分允许为负数（内部终止密码子很多时，不会被截断为0，以便区分多个质量较差的基因模型）。所有得分均保留小数点后两位。若使用了--use_exon参数，则上述"CDS"改为"exon"：按exon总长度计分，按exon数量推算intron数量，详见--use_exon参数说明。
+
     (2) 当输入了多个GFF3文件时，程序会先对每个GFF3文件单独进行去冗余处理（只在该文件内部检测重叠冲突），并在标准错误中输出统计结果（每个文件包含的基因数量，以及去冗余后剩余的基因数量），此步骤仅用于统计展示，不影响最终输出结果。
+
     (3) 随后，程序将所有输入文件的基因模型合并，当两个基因模型在CDS上有重叠（默认模式），或在exon上有重叠（--use_exon模式），对其中任意一个基因模型重叠比例超过阈值时，则根据两个基因模型的打分，去除较低得分的基因模型。程序会按染色体+正负链将基因划分为互不重叠的分区，再对每个分区内两两重叠的基因类群，按得分从大到小进行去冗余处理；不同分区之间互不影响，因此可以安全并行。这是决定最终输出结果的去冗余步骤。若两个基因模型得分完全一致（例如将--first_file_score设为0.0时很容易出现这种情况），则优先保留来自较早输入文件的基因模型（即第一个输入文件 > 第二个输入文件 > ... 依此类推）；若两者恰好来自同一个文件且得分仍然一致（理论上极少见），则再按基因ID的字典序决定，以保证程序运行结果完全确定、可复现。
 
     程序使用须知：
-    (1) 程序需要输入基因组序列，用于检测基因模型的完整性（需要CDS信息；没有CDS的转录本不做完整性打分）。
+
+    (1) 程序需要输入基因组序列，用于检测基因模型的完整性以及内部终止密码子（需要CDS信息；没有CDS的转录本不做完整性打分，也不做内部终止密码子扣分）。
+
     (2) 本程序接受输入带可变剪接的GFF3文件，对一个基因的多个转录本进行打分后，选其中得分最高转录本的CDS（或--use_exon模式下的exon）信息作为基因的信息，再和其它基因模型进行重叠分析和得分比较。
+
     (3) 本程序输入的多个GFF3文件中不能有ID一致的基因，否则结果不准确。
+
     (4) 没有CDS的基因模型（例如只有exon的非编码基因，或没有任何转录本的基因）在默认模式下，CDS长度和得分均记为0，不参与CDS重叠检测，也不会被去冗余步骤删除，会原样保留在输出结果中。在--use_exon模式下，同理适用于没有exon的基因模型。
 
     --use_exon    default: 无（不设置时按CDS重叠去冗余）
-    这是一个开关参数，不需要给值。设置后，程序改为根据exon（而非CDS）的重叠比例进行去冗余，适用于只有exon而没有CDS信息的GFF3文件（例如lncRNA、转录组组装结果等）。该模式下：
-      * 转录本的长度、重叠比例均基于exon计算；
-      * intron数量由exon数量推算（intron数 = exon数 - 1），intron加分规则与默认模式一致；
-      * 完整性（5'端、3'端）仍然基于CDS+基因组序列判断，仅当转录本同时带有CDS行时才会判断，没有CDS行的转录本视为"internal"，不获得完整性加分；
-      * 没有exon行的转录本，得分为0，不参与重叠检测，也不会被删除；
-      * --overlap_coverage阈值此时表示exon重叠碱基数占较小基因模型exon去冗余碱基数的比例。
-    注意：不建议把带有CDS的GFF3文件和只有exon的GFF3文件混在默认（CDS）模式下比较；如需混合比较，请使用--use_exon模式，此时所有文件均以exon为基准。
+    这是一个开关参数，不需要给值。设置后，程序改为根据exon（而非CDS）的重叠比例进行去冗余，适用于只有exon而没有CDS信息的GFF3文件（例如lncRNA、转录组组装结果等）。该模式下：(a) 转录本的长度、重叠比例均基于exon计算；(b) intron数量由exon数量推算（intron数 = exon数 - 1），intron加分规则与默认模式一致；(c) 完整性（5'端、3'端）以及内部终止密码子仍然基于CDS+基因组序列判断，仅当转录本同时带有CDS行时才会判断，没有CDS行的转录本视为"internal"，不获得完整性加分，也不做内部终止密码子扣分，内部终止密码子的扣分比例相对于exon总长度计算；(d) 没有exon行的转录本，得分为0，不参与重叠检测，也不会被删除；(e) --overlap_coverage阈值此时表示exon重叠碱基数占较小基因模型exon去冗余碱基数的比例。注意：不建议把带有CDS的GFF3文件和只有exon的GFF3文件混在默认（CDS）模式下比较；如需混合比较，请使用--use_exon模式，此时所有文件均以exon为基准。
 
     --intron_score <float>    default: 0.3
     设置intron让基因模型得分提升比例。基因模型的一个intron让得分增加比例 = 该参数值；第二个及其它intron让得分增加比例 = (1 - 该参数值) ** (intron序号 - 1)。即多个intron让得分提升的比例呈一个无限等比数列，其首项 = 该参数值，公比 = (1 - 该参数值)，无限等比数列的和 = 1。默认设置下，首项 = 0.3，公比 = 0.7，即第一个intron让得分增加30%，第二个intron让得分增加21%，第三个intron让得分增加14.7%，第四个10.29%，以此类推，最终所有intron让得分增加比例不会超过100%。
@@ -47,14 +47,14 @@ Usage:
     --first_file_score <float>    default: 0.5
     设置第一个输入文件额外增加的得分比例。有利于优先选择第一个输入GFF3文件中的基因模型。注意：若将该参数设为0.0（或使多个文件的基因模型在CDS长度、intron数量、完整性上完全一致），不同文件的同类基因模型可能会得到完全相同的分数；此时程序在去冗余时会按输入文件的先后顺序决定取舍，优先保留较早输入文件中的基因模型（详见上文"程序运行原理"第(3)条）。
 
+    --internal_stop_penalty <float>    default: 0.5
+    设置基因模型内部含有终止密码子时的扣分比例。程序按CDS的阅读框（从CDS第一个碱基开始，每3个碱基为一个密码子，负链基因先取反向互补）检查终止密码子，CDS末尾的最后一个密码子若是终止密码子，则视为正常的终止密码子，不计入内部终止密码子。基因模型每含有一个内部终止密码子，就扣除 该参数值 * CDS总长度 的得分（即相对于初始得分S的比例，默认扣除50%）；若含有多个内部终止密码子，则扣分累加；扣分后得分允许为负数，不设下限（这样即使多个基因模型都含有很多内部终止密码子，也能根据得分高低区分优劣）。设为0则不扣分。终止密码子由--genetic_code参数决定。
+
     --overlap_coverage <float>    default: 0.30
-    设置一个覆盖度阈值。当两个基因型模型对应转录本的CDS（--use_exon模式下为exon）重叠区碱基数 / 较小基因模型CDS（或exon）去冗余碱基数 > 该覆盖度阈值时， 则需要去除冗余的基因模型。
+    设置一个覆盖度阈值。当两个基因模型对应转录本的CDS（--use_exon模式下为exon）重叠区碱基数 / 较小基因模型CDS（或exon）去冗余碱基数 > 该覆盖度阈值时，则需要去除冗余的基因模型。
 
-    --start_codon <string>    default: ATG
-    设置起始密码子。若有多个起始密码子，则使用逗号分割。
-
-    --stop_codon <string>    default: TAA,TAG,TGA
-    设置终止密码子。若有多个终止密码子，则使用逗号分割。
+    --genetic_code <int>    default: 1
+    设置遗传密码，程序据此自动确定起始密码子和终止密码子，用于判断基因模型的完整性以及检测内部终止密码子。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi 。支持的遗传密码编号为：1、2、3、4、5、6、9、10、11、12、13、14、15、16、21、22、23、24、25、26、27、28、29、30、31、32、33。例如：1为标准遗传密码（起始密码子为ATG，终止密码子为TAA、TAG、TGA），11为细菌/古菌/植物质体遗传密码，2为脊椎动物线粒体遗传密码。
 
     --cpu <int>    default: 8
     设置并行worker数量。设为1则完全串行运行，不fork子进程。
@@ -69,24 +69,27 @@ Usage:
     仅当输入了恰好两个GFF3文件时生效。设置一个文件路径，程序会将两个GFF3文件的基因模型比较和选择结果输出到该文件中。内容包括：两个文件各自去除文件内部冗余后的基因数量；两个文件之间CDS（或exon）重叠比例超过--overlap_coverage阈值的基因数量，及这些基因中双方得分高低的统计；以及每一对冲突基因的详细删除描述信息。若两个基因得分一致，则视为第一个文件（setA）得分较高处理，即优先保留第一个文件的基因模型。
 
     --help    default: None
-    display this help and exit.
+    显示英文用法说明并退出。
 
     --chinese_help    default: None
-    使用该参数后，程序给出中文用法并退出。
+    显示中文用法说明并退出。
 
 USAGE
 my $usage_english = &get_usage_english();
 if (@ARGV==0){die $usage_english}
 
-my ($intron_score, $complete5p_score, $complete3p_score, $first_file_score, $overlap_coverage, $start_codon, $stop_codon, $cpu, $tmp_dir, $output_delete_info, $compare_2gff3_stats, $use_exon, $help, $chinese_help);
+my ($intron_score, $complete5p_score, $complete3p_score, $first_file_score, $internal_stop_penalty, $overlap_coverage, $genetic_code, $start_codon_opt, $stop_codon_opt, $cpu, $tmp_dir, $output_delete_info, $compare_2gff3_stats, $use_exon, $help, $chinese_help);
 GetOptions(
     "intron_score:f" => \$intron_score,
     "complete5p_score:f" => \$complete5p_score,
     "complete3p_score:f" => \$complete3p_score,
     "first_file_score:f" => \$first_file_score,
+    "internal_stop_penalty:f" => \$internal_stop_penalty,
     "overlap_coverage:f" => \$overlap_coverage,
-    "start_codon:s" => \$start_codon,
-    "stop_codon:s" => \$stop_codon,
+    "genetic_code:i" => \$genetic_code,
+    # 为兼容旧版本而保留，不在用法说明中给出：若设置，则优先于 --genetic_code 所确定的起始密码子和终止密码子。
+    "start_codon:s" => \$start_codon_opt,
+    "stop_codon:s" => \$stop_codon_opt,
     "cpu:i" => \$cpu,
     "tmp_dir:s" => \$tmp_dir,
     "output_delete_info:s" => \$output_delete_info,
@@ -94,9 +97,10 @@ GetOptions(
     "use_exon!" => \$use_exon,
     "help" => \$help,
     "chinese_help" => \$chinese_help,
-);
-if ( $chinese_help ) { die $usage }
+) or die $usage_english;
+if ( $chinese_help ) { die $usage_chinese }
 if ( $help ) { die $usage_english }
+die "Error: genome.fasta and at least one GFF3 file are required.\n\n$usage_english" unless @ARGV >= 2;
 
 ########### 解析参数 #################
 # 使用绝对路径
@@ -114,14 +118,15 @@ $intron_score = 0.3 unless defined $intron_score;
 $complete5p_score = 0.5 unless defined $complete5p_score;
 $complete3p_score = 0.5 unless defined $complete3p_score;
 $first_file_score = 0.5 unless defined $first_file_score;
+$internal_stop_penalty = 0.5 unless defined $internal_stop_penalty;
+die "Error: --internal_stop_penalty 不能为负数\n" if $internal_stop_penalty < 0;
 $overlap_coverage = 0.3 unless defined $overlap_coverage;
-$start_codon ||= "ATG";
-$stop_codon ||= "TAA,TAG,TGA";
+$genetic_code = 1 unless ( defined $genetic_code && $genetic_code > 0 );
 $cpu = 8 unless defined $cpu;
 $cpu = 1 if $cpu < 1;
 
 # 用于计算长度、intron数量和重叠比例的特征类型：默认为CDS；设置--use_exon后为exon
-# 注意：完整性分析始终基于CDS行（若有）和基因组序列，与该设置无关
+# 注意：完整性分析和内部终止密码子检测始终基于CDS行（若有）和基因组序列，与该设置无关
 my $region_type = $use_exon ? "exon" : "CDS";
 
 # --tmp_dir 的默认值：tmp_$date$pid，$date为运行日期(YYYYMMDD)，$pid为当前进程号
@@ -130,9 +135,30 @@ unless ( defined $tmp_dir && $tmp_dir ne "" ) {
     my $pid = $$;
     $tmp_dir = "tmp_$date$pid";
 }
+
+# 根据遗传密码得到起始密码子和终止密码子；若用户通过 --start_codon 或 --stop_codon 显式设置，则以用户设置为准（兼容旧版本）。
+my ($code_ref, $start_codon_ref, $stop_codon_ref) = &codon_table($genetic_code);
 my (%start_codon, %stop_codon);
-foreach (split /,/, $start_codon) { $start_codon{$_} = 1; }
-foreach (split /,/, $stop_codon) { $stop_codon{$_} = 1; }
+if ( defined $start_codon_opt && $start_codon_opt ne "" ) {
+    foreach ( split /,/, $start_codon_opt ) {
+        s/\s+//g; $_ = uc($_); tr/U/T/;
+        $start_codon{$_} = 1 if $_ ne "";
+    }
+}
+else {
+    %start_codon = %$start_codon_ref;
+}
+if ( defined $stop_codon_opt && $stop_codon_opt ne "" ) {
+    foreach ( split /,/, $stop_codon_opt ) {
+        s/\s+//g; $_ = uc($_); tr/U/T/;
+        $stop_codon{$_} = 1 if $_ ne "";
+    }
+}
+else {
+    %stop_codon = %$stop_codon_ref;
+}
+die "Error: no start codon is available.\n" unless %start_codon;
+die "Error: no stop codon is available.\n" unless %stop_codon;
 
 # --compare_2gff3_stats 仅在恰好输入两个GFF3文件时才有意义
 if ( $compare_2gff3_stats && @input_GFF3 != 2 ) {
@@ -163,7 +189,7 @@ close IN;
 # 依次分析输入的GFF3文件，得到基因信息
 # 注意：以下变量名中的"CDS"，在默认模式下就是CDS区间；在--use_exon模式下存放的是exon区间（即 $region_type 对应的区间）。
 # %gene_CDS，存放所有基因的区间信息，键是基因ID，值是\n分隔的区间信息(起始结束正负链用\t分隔)。若基因有多个可变剪接，选择其得分最高转录本的区间信息。没有对应区间的基因，值为空字符串。
-# %gene_score，存放基因ID的得分。没有对应区间的基因得分为0。
+# %gene_score，存放基因ID的得分（保留两位小数）。没有对应区间的基因得分为0.00。
 # %chr 和 %strand 存放基因ID对应的染色体和正负链。优先取自转录本，若基因没有任何转录本，则取自基因自身的行。
 # %gene_CDS_length 存放基因ID对应的区间总长度。若基因有多个可变剪接，选择其得分最高转录本的长度。没有对应区间的基因，长度为0。
 # %gene_file_num，存放基因ID对应的输入文件序号（从1开始）。当多个基因模型得分完全一致时，用于按输入文件先后顺序决定取舍：文件序号越小（即越早输入的文件），优先级越高。
@@ -191,7 +217,7 @@ foreach ( @input_GFF3 ) {
         # 默认视为没有区间：区间信息为空，长度为0，得分为0
         $gene_CDS{$gene_ID} = "";
         $gene_CDS_length{$gene_ID} = 0;
-        $gene_score{$gene_ID} = 0;
+        $gene_score{$gene_ID} = "0.00";
 
         my @mRNA_ID = @{ $GFF3_info{$gene_ID}{"mRNA_ID"} || [] };
         next unless @mRNA_ID;
@@ -206,7 +232,7 @@ foreach ( @input_GFF3 ) {
             $chr{$gene_ID} = $this_chr; $strand{$gene_ID} = $this_strand;
 
             # @region: 用于计算长度/intron数/重叠的区间（默认为CDS，--use_exon模式下为exon）
-            # @CDS_all: 该转录本的所有CDS行，仅用于完整性分析
+            # @CDS_all: 该转录本的所有CDS行，仅用于完整性分析和内部终止密码子检测
             my (@region, @CDS_all);
             my $region_length = 0;
             foreach ( split /\n/, $mRNA_info ) {
@@ -226,8 +252,12 @@ foreach ( @input_GFF3 ) {
             # 没有对应区间的转录本：得分为0，不做完整性分析，也不参与后续的重叠检测
             my $score = 0;
             if ( @region ) {
-                # 完整性分析始终基于CDS；若转录本没有CDS行（例如只有exon的GFF3），则视为internal，不获得完整性加分
-                my $integrity = @CDS_all ? &analysis_geneModels_integrity(\@CDS_all, $this_chr, $this_strand) : "internal";
+                # 完整性分析和内部终止密码子检测始终基于CDS；若转录本没有CDS行（例如只有exon的GFF3），
+                # 则视为internal，不获得完整性加分，也不做内部终止密码子扣分
+                my ($integrity, $internal_stop_num) = ("internal", 0);
+                if ( @CDS_all ) {
+                    ($integrity, $internal_stop_num) = &analysis_geneModels_integrity(\@CDS_all, $this_chr, $this_strand);
+                }
 
                 $score = $region_length;
                 if ( @region == 1 ) {
@@ -254,14 +284,18 @@ foreach ( @input_GFF3 ) {
                     $score += $region_length * ($complete3p_score + $complete5p_score);
                 }
                 $score += $region_length * $first_file_score if $input_file_num == 1;
+
+                # 内部终止密码子扣分：每个内部终止密码子扣除 参数值 * 区间总长度 的得分；扣分后得分允许为负数，不设下限
+                $score -= $region_length * $internal_stop_penalty * $internal_stop_num;
             }
 
-            $mRNA_score{$mRNA_ID} = $score;
+            # 得分保留两位小数；此后排序、比较均使用保留两位小数后的得分，保证结果一致
+            $mRNA_score{$mRNA_ID} = sprintf("%.2f", $score);
         }
 
         @mRNA_ID = sort {$mRNA_score{$b} <=> $mRNA_score{$a} or $a cmp $b} @mRNA_ID;
         $gene_CDS{$gene_ID} = $mRNA_CDS{$mRNA_ID[0]};
-        $gene_score{$gene_ID} = sprintf("%d", $mRNA_score{$mRNA_ID[0]});
+        $gene_score{$gene_ID} = $mRNA_score{$mRNA_ID[0]};
         $gene_CDS_length{$gene_ID} = $mRNA_CDS_length{$mRNA_ID[0]};
     }
 }
@@ -465,7 +499,7 @@ foreach my $gene_ID ( @gene_ID ) {
 # 没有对应区间（默认为CDS，--use_exon模式下为exon）的基因不会进入区间索引，因此不会与任何基因产生重叠，也就不会被删除。
 #
 # 排序/取舍规则（从高到低优先级）：
-#   1) 得分（$gene_score）越高越优先保留；
+#   1) 得分（$gene_score，保留两位小数）越高越优先保留；
 #   2) 若得分相同，则来自越早输入的文件（$gene_file_num 越小）越优先保留；
 #   3) 若前两者都相同（理论上仅可能发生在同一文件内出现两个基因得分完全一致的情况），
 #      再按基因ID的字典序（$a cmp $b）决定，以保证结果完全确定、可复现。
@@ -660,7 +694,7 @@ sub get_match_length {
         my ($start1, $end1) = split /\t/, $region1;
         foreach my $region2 (@region2) {
             my ($start2, $end2) = split /\t/, $region2;
-            if ($start1 < $end2 && $start2 < $end1) {
+            if ($start1 <= $end2 && $start2 <= $end1) {
                 my ($start, $end) = ($start1, $end1);
                 $start = $start2 if $start2 > $start1;
                 $end = $end2 if $end2 < $end1;
@@ -703,14 +737,20 @@ sub get_gene_CDS_length {
 }
 
 
+# 分析基因模型的完整性，并统计内部终止密码子数量。
+# 返回值为列表：(完整性类型, 内部终止密码子数量)
+#   完整性类型：complete / 5prime_partial / 3prime_partial / internal
+#   内部终止密码子：按CDS阅读框（从CDS第一个碱基开始，负链为反向互补后的序列）逐个密码子检查，
+#   若最后一个完整密码子是终止密码子，则视为正常的终止密码子，不计入内部终止密码子。
+# 起始密码子、终止密码子由--genetic_code决定（或由兼容保留的--start_codon、--stop_codon决定）。
 sub analysis_geneModels_integrity {
     my @CDS = @{$_[0]};
     my ($chr, $strand) = ($_[1], $_[2]);
     my $out;
 
     # 没有CDS，或者GFF3中的染色体在基因组序列中不存在时，无法判断完整性，按"internal"处理
-    return "internal" unless @CDS;
-    return "internal" unless defined $seq{$chr};
+    return ("internal", 0) unless @CDS;
+    return ("internal", 0) unless defined $seq{$chr};
 
     @CDS = sort { (split /\t/, $a)[0] <=> (split /\t/, $b)[0] } @CDS;
     my $seq = "";
@@ -738,7 +778,172 @@ sub analysis_geneModels_integrity {
         $out = "internal";
     }
 
-    return $out;
+    # 统计内部终止密码子
+    my @codon = ( $seq =~ m/(\w{3})/g );
+    pop @codon if @codon && exists $stop_codon{$codon[-1]};
+    my $internal_stop_num = scalar( grep { exists $stop_codon{$_} } @codon );
+
+    return ($out, $internal_stop_num);
+}
+
+
+# 子程序，根据遗传密码编号返回（密码子表、起始密码子表、终止密码子表）的哈希引用。
+# 遗传密码的设置参考NCBI Genetic Codes，代码来自 fillingEndsOfGeneModels。
+sub codon_table {
+    my ($genetic_code) = @_;
+    my %code = (
+        "TTT" => "F", "TTC" => "F", "TTA" => "L", "TTG" => "L",
+        "TCT" => "S", "TCC" => "S", "TCA" => "S", "TCG" => "S",
+        "TAT" => "Y", "TAC" => "Y", "TAA" => "X", "TAG" => "X",
+        "TGT" => "C", "TGC" => "C", "TGA" => "X", "TGG" => "W",
+        "CTT" => "L", "CTC" => "L", "CTA" => "L", "CTG" => "L",
+        "CCT" => "P", "CCC" => "P", "CCA" => "P", "CCG" => "P",
+        "CAT" => "H", "CAC" => "H", "CAA" => "Q", "CAG" => "Q",
+        "CGT" => "R", "CGC" => "R", "CGA" => "R", "CGG" => "R",
+        "ATT" => "I", "ATC" => "I", "ATA" => "I", "ATG" => "M",
+        "ACT" => "T", "ACC" => "T", "ACA" => "T", "ACG" => "T",
+        "AAT" => "N", "AAC" => "N", "AAA" => "K", "AAG" => "K",
+        "AGT" => "S", "AGC" => "S", "AGA" => "R", "AGG" => "R",
+        "GTT" => "V", "GTC" => "V", "GTA" => "V", "GTG" => "V",
+        "GCT" => "A", "GCC" => "A", "GCA" => "A", "GCG" => "A",
+        "GAT" => "D", "GAC" => "D", "GAA" => "E", "GAG" => "E",
+        "GGT" => "G", "GGC" => "G", "GGA" => "G", "GGG" => "G",
+    );
+    my %start_table;
+    $start_table{"ATG"} = 1;
+    if ( $genetic_code == 1 ) {
+        # The Standard Code
+        #$start_table{"TTG"} = 1;
+        #$start_table{"CTG"} = 1;
+    }
+    elsif ( $genetic_code == 2 ) {
+        # The Vertebrate Mitochondrial Code
+        $code{"AGA"} = "X"; $code{"AGG"} = "X"; $code{"ATA"} = "M"; $code{"TGA"} = "W";
+        $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG/;
+    }
+    elsif ( $genetic_code == 3 ) {
+        # The Yeast Mitochondrial Code
+        $code{"ATA"} = "M"; $code{"CTT"} = "T"; $code{"CTC"} = "T"; $code{"CTA"} = "T"; $code{"CTG"} = "T"; $code{"TGA"} = "W";
+        $start_table{$_} = 1 foreach qw/ATA GTG/;
+    }
+    elsif ( $genetic_code == 4 ) {
+        # The Mold, Protozoan, and Coelenterate Mitochondrial Code and the Mycoplasma/Spiroplasma Code
+        $code{"TGA"} = "W";
+        $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG CTG TTA TTG/;
+    }
+    elsif ( $genetic_code == 5 ) {
+        # The Invertebrate Mitochondrial Code
+        $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"ATA"} = "M"; $code{"TGA"} = "W";
+        $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG TTG/;
+    }
+    elsif ( $genetic_code == 6 ) {
+        # The Ciliate, Dasycladacean and Hexamita Nuclear Code
+        $code{"TAA"} = "Q"; $code{"TAG"} = "Q";
+    }
+    elsif ( $genetic_code == 9 ) {
+        # The Echinoderm and Flatworm Mitochondrial Code
+        $code{"AAA"} = "N"; $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"TGA"} = "W";
+        $start_table{"GTG"} = 1;
+    }
+    elsif ( $genetic_code == 10 ) {
+        # The Euplotid Nuclear Code
+        $code{"TGA"} = "C";
+    }
+    elsif ( $genetic_code == 11 ) {
+        # The Bacterial, Archaeal and Plant Plastid Code
+        $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG CTG TTG/;
+    }
+    elsif ( $genetic_code == 12 ) {
+        # The Alternative Yeast Nuclear Code
+        $code{"CTG"} = "S";
+        $start_table{"CTG"} = 1;
+    }
+    elsif ( $genetic_code == 13 ) {
+        # The Ascidian Mitochondrial Code
+        $code{"AGA"} = "G"; $code{"AGG"} = "G"; $code{"ATA"} = "M"; $code{"TGA"} = "W";
+        $start_table{$_} = 1 foreach qw/ATA GTG TTG/;
+    }
+    elsif ( $genetic_code == 14 ) {
+        # The Alternative Flatworm Mitochondrial Code
+        $code{"AAA"} = "N"; $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"TAA"} = "Y"; $code{"TGA"} = "W";
+    }
+    elsif ( $genetic_code == 15 ) {
+        # Blepharisma Nuclear Code
+        $code{"TAG"} = "Q";
+    }
+    elsif ( $genetic_code == 16 ) {
+        # Chlorophycean Mitochondrial Code
+        $code{"TAG"} = "L";
+    }
+    elsif ( $genetic_code == 21 ) {
+        # Trematode Mitochondrial Code
+        $code{"TGA"} = "W"; $code{"ATA"} = "M"; $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"AAA"} = "N";
+        $start_table{"GTG"} = 1;
+    }
+    elsif ( $genetic_code == 22 ) {
+        # Scenedesmus obliquus Mitochondrial Code
+        $code{"TCA"} = "X"; $code{"TAG"} = "L";
+    }
+    elsif ( $genetic_code == 23 ) {
+        # Thraustochytrium Mitochondrial Code
+        $code{"TTA"} = "X";
+        $start_table{$_} = 1 foreach qw/ATT GTG/;
+    }
+    elsif ( $genetic_code == 24 ) {
+        # Rhabdopleuridae Mitochondrial Code
+        $code{"AGA"} = "S"; $code{"AGG"} = "K"; $code{"TGA"} = "W";
+        $start_table{$_} = 1 foreach qw/GTG CTG TTG/;
+    }
+    elsif ( $genetic_code == 25 ) {
+        # Candidate Division SR1 and Gracilibacteria Code
+        $code{"TGA"} = "G";
+        $start_table{$_} = 1 foreach qw/GTG TTG/;
+    }
+    elsif ( $genetic_code == 26 ) {
+        # Pachysolen tannophilus Nuclear Code
+        $code{"CTG"} = "A";
+        $start_table{"CTG"} = 1;
+    }
+    elsif ( $genetic_code == 27 ) {
+        # Karyorelict Nuclear Code
+        # TAA和TAG编码Gln；TGA既可编码Trp也可作为终止密码子，这里仍将TGA视为终止密码子。
+        $code{"TAG"} = "Q"; $code{"TAA"} = "Q";
+    }
+    elsif ( $genetic_code == 28 ) {
+        # Condylostoma Nuclear Code
+        # TAA、TAG编码Gln，TGA编码Trp，但三者均可根据上下文作为终止密码子，因此这里仍将TAA、TAG、TGA都视为终止密码子。
+    }
+    elsif ( $genetic_code == 29 ) {
+        # Mesodinium Nuclear Code
+        $code{"TAA"} = "Y"; $code{"TAG"} = "Y";
+    }
+    elsif ( $genetic_code == 30 ) {
+        # Peritrich Nuclear Code
+        $code{"TAA"} = "E"; $code{"TAG"} = "E";
+    }
+    elsif ( $genetic_code == 31 ) {
+        # Blastocrithidia Nuclear Code
+    }
+    elsif ( $genetic_code == 32 ) {
+        # Balanophoraceae Plastid Code
+        $code{"TAG"} = "W";
+        $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG CTG TTG/;
+    }
+    elsif ( $genetic_code == 33 ) {
+        # Cephalodiscidae Mitochondrial UAA-Tyr Code
+        $code{"TAA"} = "Y"; $code{"TGA"} = "W"; $code{"AGA"} = "S"; $code{"AGG"} = "K";
+        $start_table{$_} = 1 foreach qw/GTG CTG TTG/;
+    }
+    else {
+        print STDERR "Warning: 不支持的遗传密码 $genetic_code ，起始和终止密码子按标准遗传密码设置。\n";
+    }
+
+    my %stop_table;
+    foreach ( keys %code ) {
+        $stop_table{$_} = 1 if $code{$_} eq "X";
+    }
+
+    return (\%code, \%start_table, \%stop_table);
 }
 
 
@@ -783,73 +988,74 @@ sub get_geneModels_from_GFF3 {
 }
 
 
+# 英文用法说明
 sub get_usage_english {
 
 my $usage = <<USAGE;
 Usage:
-    $0 [options] genome.fasta in1.gff3 in2.gff3 in3.gff3 ...  > out.gff3
+    $0 [options] genome.fasta in1.gff3 in2.gff3 in3.gff3 ... > out.gff3
 
-    This program is designed to get rid of any unnecessary repetition in one or more GFF3 files containing gene models, evaluate the gene models, and choose the most reliable results.
+    This program removes redundancy among the gene models in one or more input GFF3 files, scores the gene models, and selects the more reliable ones.
 
-    Here's how the program works:
-    (1) It scores all input gene models. First, it gives points based on CDS length, with 1 point for each base pair, resulting in an initial score S. Then, it scores based on intron number, adding a certain percentage (relative to S) for each additional intron. The first intron adds the most points and subsequent ones add fewer proportionally. Also, the total points from all introns cannot exceed S. Next, it scores based on gene integrity by adding a certain percentage (relative to S) for a complete 5' end and another percentage for a complete 3' end. Finally, it adds a certain percentage (relative to S) to the score of the first input file while keeping the second input file's score unchanged.
-        (If --use_exon is set, "CDS" in the description above is replaced by "exon": the score is based on total exon length and the intron number is inferred from the exon number. See the --use_exon option below.)
-    (2) When more than one GFF3 file is given, the program first performs redundancy removal independently within each input file (only checking for overlap conflicts inside that single file), and prints statistics to STDERR (the total number of genes in each file, and how many genes remain after this within-file redundancy removal). This step is only for reporting purposes and does not affect the final output.
-    (3) The program then merges the gene models from all input files. If two gene models overlap in the CDS (default mode) or in the exons (--use_exon mode) and the overlap ratio of either model exceeds the threshold, the lower-scoring gene model will be removed based on their scores. The program partitions genes by chromosome + strand (overlaps are only possible within the same chromosome and strand), then within each partition finds clusters of mutually overlapping gene models and removes redundant ones from highest score to lowest. Partitions never affect one another, so they can be processed safely in parallel. This merged step is what determines the final output. If two gene models have exactly the same score (which can easily happen, for example, when --first_file_score is set to 0.0), the gene model from the earlier input file is kept in preference (i.e. 1st input file > 2nd input file > ... and so on). If both genes happen to come from the same file and still tie in score (extremely unlikely in practice), the gene ID (lexical order) is used as the final tiebreaker, so that the program's result is always fully deterministic and reproducible.
+    How the program works:
+
+    (1) The program scores all input gene models. First, it scores by CDS length, 1 point per bp, giving an initial score S. Then it scores by intron number: each additional intron adds a certain proportion (relative to S) of score; the first intron adds the most, the following introns add proportionally less, and the sum of the scores added by all introns never exceeds S. Then it scores by gene integrity: a complete 5' end adds a certain proportion (relative to S) of score, and a complete 3' end adds a certain proportion (relative to S) of score. Then, by input file order, the first input file receives an additional proportion (relative to S) of score, while the score of the second input file is unchanged. Finally, if the gene model contains in-frame internal stop codons (the terminal stop codon at the very end of the CDS is not counted), a certain proportion (relative to S) of score is deducted for each internal stop codon; the score after deduction is allowed to become negative (it is not truncated at 0, so that several poor gene models can still be told apart). All scores are rounded to two decimal places. If --use_exon is set, "CDS" in the description above is replaced by "exon": the score is based on the total exon length and the intron number is inferred from the exon number, see the --use_exon option below.
+
+    (2) When more than one GFF3 file is given, the program first performs redundancy removal independently within each input file (only checking for overlap conflicts inside that single file), and prints statistics to STDERR (the number of genes in each file, and the number of genes remaining after this within-file redundancy removal). This step is only for reporting purposes and does not affect the final output.
+
+    (3) The program then merges the gene models of all input files. If two gene models overlap in CDS (default mode) or in exon (--use_exon mode) and the overlap ratio of either gene model exceeds the threshold, the gene model with the lower score is removed. The program partitions genes by chromosome + strand, then within each partition finds clusters of mutually overlapping gene models and removes redundant ones from the highest score to the lowest; partitions never affect one another, so they can be processed safely in parallel. This is the redundancy removal step that determines the final output. If two gene models have exactly the same score (which can easily happen, for example, when --first_file_score is set to 0.0), the gene model from the earlier input file is kept (i.e. 1st input file > 2nd input file > ... and so on); if both genes come from the same file and still tie in score (extremely unlikely in practice), the lexical order of the gene IDs is used as the final tiebreaker, so that the result of the program is fully deterministic and reproducible.
 
     Usage instructions:
-    (1) The program needs a genome sequence as input to check the integrity of gene models (this requires CDS features; transcripts without CDS lines get no integrity score).
-    (2) This program can take in a GFF3 file with alternative splicing, score multiple transcripts of a gene, choose the CDS (or the exon, in --use_exon mode) information from the transcript with the highest score as the gene's information, and then compare its overlap and scores with other gene models.
-    (3) When you input multiple GFF3 files into this program, make sure there are no genes with the same ID, or else the results won't be accurate.
-    (4) In the default mode, gene models without any CDS (for example, non-coding genes that only have exon features, or genes that have no transcript at all) get a CDS length of 0 and a score of 0. They do not take part in the CDS overlap detection, are never removed by the redundancy-removal step, and are kept unchanged in the output. In --use_exon mode the same applies to gene models without any exon.
+
+    (1) The program needs the genome sequence as input to check the integrity of gene models and to detect internal stop codons (this requires CDS features; transcripts without CDS lines get no integrity score and no internal-stop-codon penalty).
+
+    (2) The program accepts GFF3 files with alternative splicing: after scoring the multiple transcripts of a gene, the CDS (or exon, in --use_exon mode) information of the highest-scoring transcript is used as the information of the gene for overlap analysis and score comparison with other gene models.
+
+    (3) The multiple input GFF3 files must not contain genes with identical IDs, otherwise the results will be inaccurate.
+
+    (4) In the default mode, gene models without any CDS (for example, non-coding genes that only have exon features, or genes that have no transcript at all) get a CDS length of 0 and a score of 0; they do not take part in the CDS overlap detection, are never removed by the redundancy removal step, and are kept unchanged in the output. In --use_exon mode the same applies to gene models without any exon.
 
     --use_exon    default: off (redundancy is judged by CDS overlap)
-    A switch that takes no value. When set, redundancy removal is based on the overlap of exons instead of CDS, which makes the program suitable for GFF3 files that only contain exon features and no CDS (for example lncRNAs or transcriptome assemblies). In this mode:
-      * transcript length and overlap ratios are calculated from exons;
-      * the intron number is inferred from the exon number (introns = exons - 1) and the intron bonus rule is the same as in the default mode;
-      * integrity (5' / 3' completeness) is still judged from CDS lines plus the genome sequence, and only if the transcript has CDS lines; a transcript without CDS lines is treated as "internal" and gets no integrity bonus;
-      * a transcript without any exon line gets a score of 0, takes no part in overlap detection and is never removed;
-      * --overlap_coverage then means the number of overlapping exon bases divided by the (redundancy-removed) exon bases of the smaller gene model.
-    Note: mixing GFF3 files that have CDS with files that only have exons is not recommended in the default (CDS) mode. To compare such files, use --use_exon so that every file is judged on the same basis (exons).
+    A switch that takes no value. When set, redundancy removal is based on the overlap of exons instead of CDS, which suits GFF3 files that only contain exon features and no CDS (for example lncRNAs or transcriptome assemblies). In this mode: (a) transcript length and overlap ratios are calculated from exons; (b) the intron number is inferred from the exon number (introns = exons - 1) and the intron bonus rule is the same as in the default mode; (c) integrity (5' and 3' completeness) and internal stop codons are still judged from CDS lines plus the genome sequence, and only if the transcript has CDS lines; a transcript without CDS lines is treated as "internal", gets no integrity bonus and no internal-stop-codon penalty, and the internal-stop-codon penalty is calculated relative to the total exon length; (d) a transcript without any exon line gets a score of 0, takes no part in overlap detection and is never removed; (e) the --overlap_coverage threshold then means the number of overlapping exon bases divided by the (redundancy-removed) exon bases of the smaller gene model. Note: mixing GFF3 files that have CDS with files that only have exons in the default (CDS) mode is not recommended; to compare such files, use --use_exon so that every file is judged on the same basis (exons).
 
     --intron_score <float>    default: 0.3
-    Set introns to increase the score of gene models proportionally. The increase in score of a gene model due to one intron = the parameter value; the increase in score of a gene model due to the second and other introns = (1 - the parameter value) ** (intron index - 1). That is, the increase in score due to multiple introns forms an infinite geometric series, with the first term = the parameter value, common ratio = (1 - the parameter value), and the sum of the infinite geometric series = 1. By default, the first term = 0.3, common ratio =0.7, so the first intron increases the score by 30%, the second intron by 21%, the third intron by 14.7%, the fourth by 10.29%, and so on, until the increase in score due to all introns does not exceed 100%.
+    Set the proportion by which introns increase the score of a gene model. The score increase due to the first intron = the parameter value; the score increase due to the second and later introns = (1 - the parameter value) ** (intron index - 1). That is, the score increases due to multiple introns form an infinite geometric series whose first term = the parameter value and common ratio = (1 - the parameter value), and the sum of the infinite series = 1. By default, the first term = 0.3 and the common ratio = 0.7, so the first intron increases the score by 30%, the second by 21%, the third by 14.7%, the fourth by 10.29%, and so on; the total increase due to all introns never exceeds 100%.
 
     --complete5p_score <float>    default: 0.5
-    Set the gene model to increase the score proportionally when the 5' end is complete.
+    Set the proportion by which the score of a gene model increases when its 5' end is complete.
 
     --complete3p_score <float>    default: 0.5
-    Set the gene model to increase the score proportionally when the 3' end is complete.
+    Set the proportion by which the score of a gene model increases when its 3' end is complete.
 
     --first_file_score <float>    default: 0.5
-    Set the additional score percentage for the first input file. This helps prioritize gene models from the first input GFF3 file. Note: if this parameter is set to 0.0 (or otherwise gene models from different files end up identical in CDS length, intron count, and completeness), gene models from different files may receive exactly the same score. In that case, the program breaks the tie by input file order and keeps the gene model from the earlier input file (see item (3) of "Here's how the program works" above).
+    Set the additional score proportion given to the first input file, which helps to prefer the gene models in the first input GFF3 file. Note: if this parameter is set to 0.0 (or gene models from different files otherwise end up identical in CDS length, intron number and integrity), gene models of the same kind from different files may get exactly the same score; in that case the program breaks the tie by input file order and keeps the gene model from the earlier input file (see item (3) of "How the program works" above).
+
+    --internal_stop_penalty <float>    default: 0.5
+    Set the score penalty for internal stop codons in a gene model. The program checks stop codons in the CDS reading frame (codons are counted from the first base of the CDS; for genes on the minus strand the reverse complement is used). If the last codon of the CDS is a stop codon it is regarded as the normal terminal stop codon and is not counted as an internal one. For each internal stop codon, (parameter value * total CDS length) is deducted from the score (i.e. a proportion of the initial score S; 50% by default). Penalties of multiple internal stop codons add up, and the score is allowed to become negative with no lower bound (so that gene models with many internal stop codons can still be ranked against each other). Set it to 0 to disable the penalty. Stop codons are determined by --genetic_code.
 
     --overlap_coverage <float>    default: 0.30
-    Set a coverage threshold. Suppose the number of base pairs in the overlapping region of CDS (exons in --use_exon mode) between two gene models exceeds the coverage threshold divided by the number of redundant base pairs in the CDS (or exons) of the smaller gene model. In that case, we need to remove the redundant gene model.
+    Set a coverage threshold. When the number of overlapping CDS (exon in --use_exon mode) base pairs between two gene models divided by the (redundancy-removed) CDS (or exon) base pairs of the smaller gene model is greater than this threshold, the redundant gene model is removed.
 
-    --start_codon <string>    default: ATG
-    Set the start codon. If there are multiple start codons, separate them with commas.
-
-    --stop_codon <string>    default: TAA,TAG,TGA
-    Set the stop codon. If there are multiple stop codons, separate them with commas.
+    --genetic_code <int>    default: 1
+    Set the genetic code, from which the start codons and stop codons are determined automatically; they are used to judge gene integrity and to detect internal stop codons. For the corresponding values, please refer to NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi . The supported genetic code numbers are: 1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33. For example: 1 is the standard code (start codon ATG; stop codons TAA, TAG, TGA), 11 is the bacterial/archaeal/plant plastid code, and 2 is the vertebrate mitochondrial code.
 
     --cpu <int>    default: 8
-    Number of parallel worker processes. Set to 1 to run fully serially with no forking.
+    Set the number of parallel worker processes. Set to 1 to run fully serially with no forking.
 
     --tmp_dir <string>    default: tmp_\$date\$pid
-    Scratch directory used by worker processes to exchange results (only used when --cpu > 1 and there is more than one partition). By default it is created in the current working directory and named tmp_\$date\$pid, where \$date is the run date (YYYYMMDD) and \$pid is the process ID of the program (for example tmp_2026092812345). If the directory was created by the program itself it is removed automatically on exit; an already existing directory given by the user is left in place.
+    Scratch directory used by worker processes to exchange results (only used when --cpu > 1 and there is more than one partition). By default it is created in the current working directory and named tmp_\$date\$pid, where \$date is the run date (YYYYMMDD) and \$pid is the process ID of the program, for example tmp_2026092812345. If the directory was created by the program itself it is removed automatically on exit; an already existing directory given by the user is left in place.
 
-    --output_delete_info <string>    default: none (deleted gene descriptions go to STDERR)
-    Set a file path. The descriptions of genes deleted during the final, merged redundancy-removal step will be written to this file instead of STDERR. (The per-file individual redundancy-removal statistics are always printed to STDERR, regardless of this option.)
+    --output_delete_info <string>    default: none (descriptions of deleted genes go to STDERR)
+    Set a file path. The descriptions of the genes deleted in the final merged redundancy-removal step will be written to this file instead of STDERR. (The per-file individual redundancy-removal statistics are always printed to STDERR, regardless of this option.)
 
     --compare_2gff3_stats <string>    default: none
-    Only takes effect when exactly two GFF3 files are given as input. Set a file path. The program will write a comparison report between the two GFF3 files' gene models to this file: the number of non-redundant genes each file contains after removing its own internal redundancy; how many genes from each file have a CDS (or exon) overlap ratio with the other file exceeding --overlap_coverage, and how these conflicting genes split by which file's gene scored higher; and, line by line, the detailed description of each deleted gene in these conflicts. If two genes have the same score, the first file's gene (setA) is treated as the winner and kept.
+    Only takes effect when exactly two GFF3 files are given as input. Set a file path; the program writes a comparison report of the gene models of the two GFF3 files to this file, including: the number of non-redundant genes in each file after removing its own internal redundancy; the number of genes whose CDS (or exon) overlap ratio between the two files exceeds the --overlap_coverage threshold, and statistics on which file's gene scored higher among these genes; and, line by line, the detailed deletion description of each pair of conflicting genes. If two genes have the same score, the first file (setA) is treated as the winner, i.e. the gene model of the first file is kept.
 
     --help    default: None
-    display this help and exit.
+    Display this English usage and exit.
 
     --chinese_help    default: None
-    display the chinese usage and exit.
+    Display the Chinese usage and exit.
 
 USAGE
 
