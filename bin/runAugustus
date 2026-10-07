@@ -1,0 +1,523 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use Getopt::Long;
+use File::Basename;
+use File::Path qw(make_path);
+use Cwd qw(abs_path getcwd);
+use POSIX qw(strftime);
+
+my $prog_name    = basename($0);
+my $bin_path     = dirname(abs_path($0));
+my $pwd          = getcwd();
+my $command_line = "$0 " . join(" ", map { shq($_) } @ARGV);
+
+########################################################################
+# 中文用法说明（放在代码最前面；英文用法说明放在文件最末尾的__DATA__部分）
+########################################################################
+my $usage_cn = <<'USAGE';
+名称:
+    runAugustus - 以证据基因模型训练Augustus，并结合hints预测全基因组基因
+
+用法:
+    perl $0 [选项] --input_evidence_gff3 证据1.gff3,证据2.gff3 \
+                   --augustus_species 物种名 genome.fasta > output.gff3
+
+示例:
+    # 证据文件有两个：NGSReads预测的基因模型（优先），同源蛋白预测的基因模型
+    export AUGUSTUS_CONFIG_PATH=/path/to/augustus/config
+    perl $0 --input_evidence_gff3 NGSReads.gff3,homolog.gff3 \
+            --augustus_species my_species --tmp_dir tmp_aug --cpu 16 \
+            genome.fasta > augustus.gff3
+
+功能简介:
+    程序以同源蛋白预测、NGSReads预测等得到的基因模型作为证据，训练Augustus的HMM模型，同时从证据中生成hints，再结合hints使用Augustus对全基因组进行基因预测。最终结果（GFF3格式）输出到标准输出，运行信息输出到标准错误。
+
+运行前准备:
+    1. 必须设置环境变量AUGUSTUS_CONFIG_PATH，指向Augustus的配置文件夹（其下有species子文件夹）。
+    2. 以下程序需在PATH中: augustus、etraining、optimize_augustus.pl、new_species.pl、gff2gbSmallDNA.pl、filterGenes.pl、randomSplit.pl、diamond。
+    3. 本程序调用的子程序（GFF3_filling_gene_models、GFF3_merging_and_removing_redundancy、GFF3Clear、runAugustus.01PickGeneModels、runAugustus.02BGM2AT、runAugustus.03PrepareHints、runAugustus.04.PredictWithHints）应放在本程序所在文件夹，或在PATH中。
+    4. 对输入证据GFF3文件的要求:
+       (1) 每个基因模型以gene行开头，含CDS行，且只有一个转录本（不能含可变剪接）；基因ID不能重复。
+       (2) 基因ID以homolog开头的，视为同源蛋白预测的基因模型；其它视为NGSReads预测的基因模型。去冗余时，优先保留NGSReads预测的、完整的、蛋白较长的基因模型。
+       (3) gene行或mRNA行含Integrity=complete的，视为完整基因模型（仅用于去冗余时的优先级判断）。
+       (4) gene行含type=excellent或type=good（值以excellent/good开头即可，不区分大小写）的基因模型，会生成可信度更高的hints（src=M或src=E）；不含type属性的基因模型只生成src=P的hints，影响较弱。
+
+运行流程:
+    (1) 整合证据: 将--input_evidence_gff3输入的多个GFF3文件整合为一个文件evidence_prediction.raw.gff3。先从最后两个文件开始：用后一个文件的基因模型，通过GFF3_filling_gene_models填补前一个文件中基因模型的首尾；再通过GFF3_merging_and_removing_redundancy对（填补后的前一个文件，后一个文件）去冗余，前者优先保留。得到的结果再与更前面的一个文件按同样方法整合，直至所有文件整合为一个。只输入一个文件时，仅做去冗余。
+    (2) 修复格式: 使用GFF3Clear对整合后的evidence_prediction.raw.gff3进一步检查并修复GFF3格式（校正相位、终止密码子、外显子、UTR等，并检测基因完整性），不重命名基因，得到evidence_prediction.gff3，用于后续筛选基因模型。
+    (3) 筛选基因模型: runAugustus.01PickGeneModels对evidence_prediction.gff3去除含内部终止密码子或移码的基因模型，并去冗余，得到用于etraining的ati.filter1.gff3（可含5'或3'不完整的基因），以及用于参数优化的最优完整基因模型ati.filter2.gff3。
+    (4) 训练: 确定flanking_length后，runAugustus.02BGM2AT完成etraining、准确性检测和参数优化。
+    (5) 生成hints: runAugustus.03PrepareHints根据evidence_prediction.gff3（以及可选的--intron_tab）生成hints.gff。
+    (6) 预测: runAugustus.04.PredictWithHints将基因组序列分段并行运行Augustus，得到augustus.raw.gff3。相邻分段有重叠区域，该文件中可能含有冗余基因。分段长度由程序根据最长基因长度自动确定，无需设置。
+    (7) 去冗余: GFF3_merging_and_removing_redundancy对预测结果去冗余，得到augustus.nr.gff3。
+    (8) 重命名: GFF3Clear对基因重命名并校正格式，得到final.gff3，同时输出到标准输出。
+
+输出文件（均位于--tmp_dir文件夹下）:
+    final.gff3                                 最终结果，内容与标准输出相同。
+    accuary_of_AUGUSTUS_HMM_Training.txt       Augustus HMM训练的准确性检测结果。
+    hints.gff                                  Augustus预测使用的hints。
+    augustus.raw.gff3                          Augustus预测的原始结果（未去冗余）。
+    augustus.nr.gff3                           去冗余后、重命名前的结果。
+    training/                                  训练步骤的中间文件和日志，其中evidence_prediction.raw.gff3是整合后的证据基因模型，evidence_prediction.gff3是经GFF3Clear修复格式后的证据基因模型，ati.filter1.gff3和ati.filter2.gff3是筛选后的基因模型。
+    config/species/<物种名>                     训练得到的物种模型。程序还会将其拷贝到$AUGUSTUS_CONFIG_PATH/species/下（会覆盖同名文件；若没有写权限，只给出提示，不影响本次预测）。
+    *.log                                      各步骤的运行日志，出错时请先查看。
+
+断点续跑:
+    各步骤完成后会生成.ok标记文件。使用相同的--tmp_dir重新运行，已完成的步骤会被跳过；若要重新运行某个步骤，请删除对应的.ok文件。若修改了会影响前面步骤结果的参数或输入文件，请使用新的--tmp_dir。
+
+[必需参数]
+    --input_evidence_gff3 <string>
+    输入作为证据的基因模型GFF3文件。多个文件用逗号分隔，也可多次使用该参数。文件的先后顺序表示优先级，靠前的优先。例如：NGSReads预测的结果放前面，同源蛋白预测的结果放后面。
+
+    --augustus_species <string>
+    Augustus物种名称，只能含字母、数字、下划线、点和连字符。若$AUGUSTUS_CONFIG_PATH/species/下已存在同名物种，则以其参数为起点继续训练和优化；否则从头开始训练。
+
+    genome.fasta
+    位置参数，基因组序列文件（FASTA格式），放在命令行最后。
+
+[可选参数]
+    --tmp_dir <string>    default: tmp_$date$pid
+    临时文件夹，所有中间文件和结果都保存在此。默认值为tmp_加日期（YYYYMMDD）再加进程号。已存在时直接使用（用于断点续跑）。
+
+    --intron_tab <string>    default: None
+    根据RNA-Seq比对得到的intron信息文件，用于生成src=W的intron hints。文件为制表符分隔，使用第2~6列：序列名、链方向、intron起始、intron结束、支持的reads数。不设置则不生成此类hints。
+
+    --gene_prefix <string>    default: augustus
+    最终基因ID的前缀。
+
+    --cpu <int>    default: 8
+    并行使用的CPU线程数。
+
+    --genetic_code <int>    default: 1
+    遗传密码编号（同NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi ），用于整合证据、修复证据GFF3格式、预测结果去冗余、重命名和生成hints时判断起始和终止密码子。支持的编号：1、2、3、4、5、6、9、10、11、12、13、14、15、16、21、22、23、24、25、26、27、28、29、30、31、32、33。注意：筛选基因模型（runAugustus.01PickGeneModels）固定按标准遗传密码（1）翻译。
+
+    --min_intron_len <int>    default: 20
+    Augustus和etraining使用的最小intron长度。Augustus自身默认值为39，对小基因组偏大。
+
+    --flanking_length <int>    default: 自动计算
+    训练时在每个基因两侧添加的侧翼序列长度。自动计算方法：取（基因间区长度中位数的1/8，基因长度中位数）中的较小值，且在1~10000之间（基因间区只统计同一条链上距离不小于50bp的相邻基因）。基因比较密集的物种（如真菌）建议手动设置，例如100。
+
+[帮助参数]
+    --help
+    显示英文用法说明并退出。不带任何参数运行程序时，也显示英文用法说明。
+
+    --chinese_help
+    显示中文用法说明并退出。
+
+USAGE
+
+my $usage_en = do { local $/; <DATA> };
+$usage_cn =~ s/\$0/$0/g;
+$usage_en =~ s/\$0/$0/g;
+
+########################################################################
+# 参数解析
+########################################################################
+if (@ARGV == 0) { print STDERR $usage_en; exit 1; }
+
+my (@input_evidence, $tmp_dir, $augustus_species, $intron_tab, $flanking_length, $help, $chinese_help);
+my $gene_prefix    = "augustus";
+my $cpu            = 8;
+my $genetic_code   = 1;
+my $min_intron_len = 20;
+
+GetOptions(
+    "input_evidence_gff3=s" => \@input_evidence,
+    "augustus_species=s"    => \$augustus_species,
+    "tmp_dir=s"             => \$tmp_dir,
+    "intron_tab=s"          => \$intron_tab,
+    "gene_prefix=s"         => \$gene_prefix,
+    "cpu=i"                 => \$cpu,
+    "genetic_code=i"        => \$genetic_code,
+    "min_intron_len=i"      => \$min_intron_len,
+    "flanking_length=i"     => \$flanking_length,
+    "help|h"                => \$help,
+    "chinese_help"          => \$chinese_help,
+) or do { print STDERR "\nError: invalid command line options.\n\n", $usage_en; exit 1; };
+
+if ($help)         { print $usage_en; exit 0; }
+if ($chinese_help) { print $usage_cn; exit 0; }
+
+# 检查参数
+@input_evidence = grep { length $_ } map { split /,/ } @input_evidence;
+die "Error: --input_evidence_gff3 is required.\n\n$usage_en" unless @input_evidence;
+die "Error: --augustus_species is required.\n\n$usage_en" unless defined $augustus_species && length $augustus_species;
+die "Error: --augustus_species can only contain letters, digits, underscore, dot and hyphen.\n"
+    unless $augustus_species =~ /^[A-Za-z0-9_.\-]+$/;
+die "Error: exactly one positional argument (genome.fasta) is required.\n\n$usage_en" unless @ARGV == 1;
+die "Error: --cpu must be a positive integer.\n"            unless $cpu =~ /^\d+$/ && $cpu > 0;
+die "Error: --genetic_code must be a positive integer.\n"   unless $genetic_code =~ /^\d+$/ && $genetic_code > 0;
+die "Error: --min_intron_len must be a positive integer.\n" unless $min_intron_len =~ /^\d+$/ && $min_intron_len > 0;
+die "Error: --flanking_length must be a positive integer.\n" if defined $flanking_length && $flanking_length <= 0;
+
+my $genome = $ARGV[0];
+die "Error: genome file $genome does not exist or is empty.\n" unless -s $genome;
+$genome = abs_path($genome);
+foreach my $f (@input_evidence) {
+    die "Error: evidence GFF3 file $f does not exist or is empty.\n" unless -s $f;
+    $f = abs_path($f);
+}
+if (defined $intron_tab && length $intron_tab) {
+    die "Error: intron file $intron_tab does not exist.\n" unless -e $intron_tab;
+    $intron_tab = abs_path($intron_tab);
+}
+
+# 依赖程序检查
+die "Error: environment variable AUGUSTUS_CONFIG_PATH is not set correctly (no species directory found).\n"
+    unless defined $ENV{AUGUSTUS_CONFIG_PATH} && -d "$ENV{AUGUSTUS_CONFIG_PATH}/species";
+my %tool;
+foreach my $name (qw(GFF3_filling_gene_models GFF3_merging_and_removing_redundancy GFF3Clear
+                     runAugustus.01PickGeneModels runAugustus.02BGM2AT runAugustus.03PrepareHints runAugustus.04.PredictWithHints)) {
+    $tool{$name} = find_tool($name) or die "Error: can not find program $name in $bin_path or PATH.\n";
+}
+my @missing = grep { !defined find_in_path($_) } qw(augustus etraining new_species.pl gff2gbSmallDNA.pl filterGenes.pl randomSplit.pl optimize_augustus.pl diamond);
+die "Error: the following programs were not found in PATH: @missing\n" if @missing;
+
+# 临时文件夹
+$tmp_dir = "tmp_" . strftime("%Y%m%d", localtime) . $$ unless defined $tmp_dir && length $tmp_dir;
+make_path($tmp_dir) unless -e $tmp_dir;
+die "Error: can not create or use directory $tmp_dir\n" unless -d $tmp_dir && -w $tmp_dir;
+$tmp_dir = abs_path($tmp_dir);
+
+my ($cmdString, $cmdString1, $cmdString2, $cmdString3);
+my $gp_q = shq($gene_prefix);
+
+print STDERR "\n#################### $prog_name | Start ####################\n";
+print STDERR "PWD: $pwd\n" . localtime() . ": CMD: $command_line\n";
+
+chdir $tmp_dir or die "Error: can not enter directory $tmp_dir, $!\n";
+
+# Augustus HMM Training
+make_path("$tmp_dir/training") unless -e "$tmp_dir/training";
+chdir "$tmp_dir/training" or die $!;
+print STDERR "\nPWD: $tmp_dir/training\n";
+
+# 1 合并Transcript和Homolog预测的基因模型
+# 从最后两个文件开始：用后者填补前者的首尾，再对（填补后的前者，后者）整合去冗余；得到的结果继续作为“后者”与再前一个文件整合。
+{
+    my @cmds;
+    my $raw = "evidence_prediction.raw.gff3";
+    if (@input_evidence == 1) {
+        push @cmds, "$tool{GFF3_merging_and_removing_redundancy} --cpu $cpu --genetic_code $genetic_code --stable_tie "
+                  . shq($genome) . " " . shq($input_evidence[0]) . " > $raw 2> evidence.merge.single.log";
+    }
+    else {
+        my $current = $input_evidence[-1];
+        for (my $i = $#input_evidence - 1; $i >= 0; $i--) {
+            my $filled = "evidence.filled$i.gff3";
+            my $merged = ($i == 0) ? $raw : "evidence.merged$i.gff3";
+            push @cmds, "$tool{GFF3_filling_gene_models} --cpu $cpu --genetic_code $genetic_code "
+                      . shq($genome) . " " . shq($input_evidence[$i]) . " " . shq($current)
+                      . " > $filled 2> evidence.filled$i.log";
+            push @cmds, "$tool{GFF3_merging_and_removing_redundancy} --cpu $cpu --genetic_code $genetic_code --stable_tie "
+                      . shq($genome) . " $filled " . shq($current) . " > $merged 2> evidence.merged$i.log";
+            $current = $merged;
+        }
+    }
+    push @cmds, "test -s $raw || { echo 'Error: $raw is empty, please check evidence.*.log' >&2; exit 1; }";
+    &execute_cmds(@cmds, "01.merge_evidence.ok");
+}
+
+# 1.1 使用GFF3Clear进一步检查并修复整合后证据基因模型的GFF3格式（不重命名基因，保留原有ID和属性），
+#     修复后的文件evidence_prediction.gff3用于后续runAugustus.01PickGeneModels的分析。
+$cmdString = "$tool{GFF3Clear} --genome " . shq($genome) . " --genetic_code $genetic_code --cpu $cpu "
+           . "evidence_prediction.raw.gff3 > evidence_prediction.gff3 2> GFF3Clear.evidence.log";
+&execute_cmds($cmdString,
+    "test -s evidence_prediction.gff3 || { echo 'Error: evidence_prediction.gff3 is empty, please check GFF3Clear.evidence.log' >&2; exit 1; }",
+    "01b.GFF3Clear_evidence.ok");
+
+# 2 选择CDS数量较多、CDS长度较长、CDS/exon比例较大且去冗余的基因模型用于Augustus training。
+$cmdString = "$tool{'runAugustus.01PickGeneModels'} --out_prefix ati --cpu $cpu --genetic_code $genetic_code evidence_prediction.gff3 " . shq($genome)
+           . " &> runAugustus.01PickGeneModels.log";
+&execute_cmds($cmdString,
+    "test -s ati.filter1.gff3 || { echo 'Error: ati.filter1.gff3 is empty, please check runAugustus.01PickGeneModels.log' >&2; exit 1; }",
+    "test -s ati.filter2.gff3 || { echo 'Error: ati.filter2.gff3 is empty, please check runAugustus.01PickGeneModels.log' >&2; exit 1; }",
+    "02.runAugustus.01PickGeneModels.ok");
+
+# 3 Augustus training
+# 3.1 分析基因长度和基因间区长度信息，从而确定Trainig时选择基因模型两侧翼序列长度。
+my $flanking_file = "$tmp_dir/training/flanking_length.txt";
+if (defined $flanking_length) {
+    write_file($flanking_file, $flanking_length);
+    print STDERR (localtime) . ": The flanking length was set to $flanking_length according to --flanking_length.\n";
+}
+elsif ( -e "03.get_flanking_length.ok" && -s $flanking_file ) {
+    open my $in, "<", $flanking_file or die "Error: Can not open file $flanking_file, $!";
+    $flanking_length = <$in>;
+    close $in;
+    chomp $flanking_length;
+    print STDERR (localtime) . ": The flanking length was set to $flanking_length for AUGUSTUS Training.\n";
+}
+else {
+    my %gene_info;
+    my $input_file = "$tmp_dir/training/evidence_prediction.gff3";
+    open my $in, "<", $input_file or die "Error: Can not open file $input_file, $!";
+    while (<$in>) {
+        next if /^#/;
+        my @f = split /\t/;
+        push @{ $gene_info{$f[0]}{$f[6]} }, [ $f[3], $f[4] ] if @f >= 9 && $f[2] eq "gene";
+    }
+    close $in;
+    my (@gene_length, @intergenic_length);
+    foreach my $chr (keys %gene_info) {
+        foreach my $strand (keys %{ $gene_info{$chr} }) {
+            my @region = sort { $a->[0] <=> $b->[0] || $a->[1] <=> $b->[1] } @{ $gene_info{$chr}{$strand} };
+            my $end;
+            foreach my $r (@region) {
+                push @gene_length, $r->[1] - $r->[0] + 1;
+                if (defined $end) {
+                    my $distance = $r->[0] - $end - 1;
+                    push @intergenic_length, $distance if $distance >= 50;
+                    $end = $r->[1] if $end < $r->[1];
+                }
+                else { $end = $r->[1]; }
+            }
+        }
+    }
+    die "Error: no gene was found in $input_file.\n" unless @gene_length;
+    @gene_length       = sort { $a <=> $b } @gene_length;
+    @intergenic_length = sort { $a <=> $b } @intergenic_length;
+    my $median_gene = $gene_length[ int(@gene_length / 2) ];
+    # flanking_length为(基因间区长度中位数的八分之一，基因长度中位数)的较小值。
+    if (@intergenic_length) {
+        $flanking_length = int( $intergenic_length[ int(@intergenic_length / 2) ] / 8 );
+        $flanking_length = $median_gene if $flanking_length >= $median_gene;
+    }
+    else { $flanking_length = $median_gene; }
+    $flanking_length = 10000 if $flanking_length > 10000;
+    $flanking_length = 1     if $flanking_length < 1;
+    write_file($flanking_file, $flanking_length);
+    write_file("03.get_flanking_length.ok", "");
+    print STDERR (localtime) . ": The flanking length was set to $flanking_length for AUGUSTUS Training.\n";
+}
+
+# 3.2 进行Augustus training
+# 若环境变量AUGUSTUS_CONFIG_PATH下已存在同名物种，则对其进行参数优化；不存在，则完全重新进行Training和优化。
+my $augustus_species_start_from = "";
+if ( -e "$ENV{'AUGUSTUS_CONFIG_PATH'}/species/$augustus_species/${augustus_species}_parameters.cfg" ) {
+    $augustus_species_start_from = "--augustus_species_start_from $augustus_species";
+}
+my $env_species_dir = "$ENV{'AUGUSTUS_CONFIG_PATH'}/species/";
+$cmdString1 = "$tool{'runAugustus.02BGM2AT'} --AUGUSTUS_CONFIG_PATH " . shq("$tmp_dir/config") . " $augustus_species_start_from"
+            . " --flanking_length $flanking_length --min_intron_len $min_intron_len --cpu $cpu"
+            . " --onlytrain_GFF3 ati.filter1.gff3 ati.filter2.gff3 " . shq($genome) . " " . shq($augustus_species)
+            . " &> runAugustus.02BGM2AT.log";
+$cmdString2 = "cp accuary_of_AUGUSTUS_HMM_Training.txt ../";
+$cmdString3 = "cp -a " . shq("$tmp_dir/config/species/$augustus_species") . " " . shq($env_species_dir)
+            . " || echo Can not create file in directory " . shq($env_species_dir);
+
+&execute_cmds($cmdString1, $cmdString2, $cmdString3, "$tmp_dir/training.ok");
+
+# 4.2 准备Hints信息
+chdir "$tmp_dir/" or die $!;
+print STDERR "\nPWD: $tmp_dir/\n";
+my $intron_option = (defined $intron_tab && length $intron_tab) ? "--intron_tab " . shq($intron_tab) : "";
+$cmdString = "$tool{'runAugustus.03PrepareHints'} --genome " . shq($genome) . " --genetic_code $genetic_code $intron_option "
+           . "$tmp_dir/training/evidence_prediction.gff3 > hints.gff 2> runAugustus.03PrepareHints.log";
+&execute_cmds($cmdString, "runAugustus.03PrepareHints.ok");
+
+# 4.3 进行Augustus基因预测
+# 4.3.1 先分析基因长度信息，从而计算基因组序列打断的长度，以利于并行化运行augustus命令。
+my ($segmentSize, $overlapSize) = (1000000, 100000);
+if ( -e "get_segmentSize.ok" && -s "$tmp_dir/segmentSize.txt" ) {
+    my $input_file = "$tmp_dir/segmentSize.txt";
+    open my $in, "<", $input_file or die "Error: Can not open file $input_file, $!";
+    my $line = <$in>;
+    close $in;
+    chomp $line;
+    ($segmentSize, $overlapSize) = split /\t/, $line;
+}
+else {
+    my $input_file = "$tmp_dir/training/evidence_prediction.gff3";
+    open my $in, "<", $input_file or die "Error: Can not open file $input_file, $!";
+    my @gene_length;
+    while (<$in>) {
+        push @gene_length, $2 - $1 + 1 if m/\tgene\t(\d+)\t(\d+)\t/;
+    }
+    close $in;
+    @gene_length = sort { $a <=> $b } @gene_length;
+    # 打断序列时，要求相邻序列重叠区域至少为最长基因长度的2倍，并取整（保留前两位数字并进一，后面的全为0）；片段长度为重叠序列长度10倍。
+    if ( @gene_length && $gene_length[-1] * 4 > $overlapSize ) {
+        $overlapSize = $gene_length[-1] * 2;
+        my $digits = length($overlapSize) - 2;
+        $overlapSize = int( $overlapSize / (10 ** $digits) + 1 ) * (10 ** $digits);
+        $segmentSize = $overlapSize * 10;
+    }
+    write_file("$tmp_dir/segmentSize.txt", "$segmentSize\t$overlapSize");
+    write_file("get_segmentSize.ok", "");
+}
+print STDERR (localtime) . ": When executing augustus command lines in parallel, the genome sequences were split into segments. The longest segment spanned $segmentSize bp, and two adjacent segments overlapped by $overlapSize bp.\n";
+
+# 4.3.2 Augustus gene prediction
+$cmdString1 = "$tool{'runAugustus.04.PredictWithHints'} --species " . shq($augustus_species)
+            . " --AUGUSTUS_CONFIG_PATH " . shq("$tmp_dir/config")
+            . " --cpu $cpu --min_intron_len $min_intron_len --segmentSize $segmentSize --overlapSize $overlapSize"
+            . " --tmp_dir aug_para_with_hints " . shq($genome) . " hints.gff > augustus.raw.gff3 2> runAugustus.04.PredictWithHints.log";
+$cmdString2 = "test -s augustus.raw.gff3 || { echo 'Error: augustus.raw.gff3 is empty, please check runAugustus.04.PredictWithHints.log' >&2; exit 1; }";
+&execute_cmds($cmdString1, $cmdString2, "$tmp_dir/predict.ok");
+
+# 5 对预测结果去冗余，并重命名基因
+$cmdString1 = "$tool{GFF3_merging_and_removing_redundancy} --cpu $cpu --genetic_code $genetic_code --stable_tie "
+            . shq($genome) . " augustus.raw.gff3 > augustus.nr.gff3 2> GFF3_merging_and_removing_redundancy.log";
+$cmdString2 = "$tool{GFF3Clear} --genome " . shq($genome) . " --genetic_code $genetic_code --gene_prefix $gp_q --cpu $cpu "
+            . "augustus.nr.gff3 > final.gff3 2> GFF3Clear.log";
+$cmdString3 = "test -s final.gff3 || { echo 'Error: final.gff3 is empty, please check GFF3Clear.log' >&2; exit 1; }";
+&execute_cmds($cmdString1, $cmdString2, $cmdString3, "$tmp_dir/final.ok");
+
+# 最终结果输出到标准输出
+open my $final_in, "<", "$tmp_dir/final.gff3" or die "Error: Can not open file $tmp_dir/final.gff3, $!";
+print while <$final_in>;
+close $final_in;
+
+print STDERR "\n#################### $prog_name | Done ####################\n";
+
+########################################################################
+# 子程序
+########################################################################
+# 执行命令。最后一个参数为.ok标记文件，已存在则跳过全部命令；使用bash执行，以支持&>重定向并检测管道中任一环节的失败。
+sub execute_cmds {
+    my $ok_file = pop @_;
+    my @cmds = @_;
+    if ( -e $ok_file ) {
+        print STDERR "Skip CMD: $_, for file $ok_file exists\n" foreach @cmds;
+        return;
+    }
+    foreach my $cmd (@cmds) {
+        print STDERR localtime() . ": CMD: $cmd\n";
+        my $ret = system("bash", "-o", "pipefail", "-c", $cmd);
+        if ($ret != 0) {
+            my $reason = $ret == -1     ? "failed to start: $!"
+                       : ($ret & 127)   ? "killed by signal " . ($ret & 127)
+                       :                  "exit status " . ($ret >> 8);
+            die "Error: failed to execute ($reason): $cmd\n";
+        }
+    }
+    write_file($ok_file, "");
+    return;
+}
+
+sub write_file {
+    my ($file, $text) = @_;
+    open my $out, ">", $file or die "Error: Can not create file $file, $!";
+    print $out $text;
+    close $out;
+    return;
+}
+
+sub shq {
+    my ($s) = @_;
+    $s =~ s/'/'\\''/g;
+    return "'$s'";
+}
+
+sub find_in_path {
+    my ($name) = @_;
+    foreach my $dir (split /:/, ($ENV{PATH} // "")) {
+        next unless length $dir;
+        my $p = "$dir/$name";
+        return $p if -f $p && -x $p;
+    }
+    return;
+}
+
+# 优先在本程序所在目录中查找，其次在PATH中查找。
+sub find_tool {
+    my ($name) = @_;
+    return "$bin_path/$name" if -f "$bin_path/$name" && -x "$bin_path/$name";
+    return find_in_path($name);
+}
+
+########################################################################
+# 英文用法说明（放在文件最末尾，运行时通过DATA文件句柄读取）
+########################################################################
+__DATA__
+Name:
+    runAugustus - train Augustus with evidence gene models and predict genes in the whole genome with hints
+
+Usage:
+    perl $0 [options] --input_evidence_gff3 evidence1.gff3,evidence2.gff3 \
+                      --augustus_species species_name genome.fasta > output.gff3
+
+Example:
+    # Two evidence files: gene models from NGS reads (preferred) and from homologous proteins
+    export AUGUSTUS_CONFIG_PATH=/path/to/augustus/config
+    perl $0 --input_evidence_gff3 NGSReads.gff3,homolog.gff3 \
+            --augustus_species my_species --tmp_dir tmp_aug --cpu 16 \
+            genome.fasta > augustus.gff3
+
+Description:
+    Using gene models predicted from homologous proteins, NGS reads, etc. as evidence, the program trains the Augustus HMM, generates hints from the same evidence, and then runs Augustus with the hints to predict genes in the whole genome. The final result (GFF3) is written to standard output and the progress messages to standard error.
+
+Before running:
+    1. The environment variable AUGUSTUS_CONFIG_PATH must be set to the Augustus configuration directory (it contains a species subdirectory).
+    2. These programs must be in PATH: augustus, etraining, optimize_augustus.pl, new_species.pl, gff2gbSmallDNA.pl, filterGenes.pl, randomSplit.pl, diamond.
+    3. The sub-programs called by this program (GFF3_filling_gene_models, GFF3_merging_and_removing_redundancy, GFF3Clear, runAugustus.01PickGeneModels, runAugustus.02BGM2AT, runAugustus.03PrepareHints, runAugustus.04.PredictWithHints) must be in the directory of this program or in PATH.
+    4. Requirements for the input evidence GFF3 files:
+       (1) Each gene model starts with a gene line, contains CDS lines, and has only one transcript (no alternative splicing); gene IDs must be unique.
+       (2) A gene whose ID starts with "homolog" is regarded as predicted from homologous proteins; all others are regarded as predicted from NGS reads. In redundancy removal, NGS-reads-derived, complete and longer-protein gene models are preferred.
+       (3) A gene whose gene line or mRNA line contains Integrity=complete is regarded as complete (used only for the priority in redundancy removal).
+       (4) Gene models whose gene line contains type=excellent or type=good (the value only needs to begin with excellent/good, case-insensitive) generate the more reliable hints (src=M or src=E); gene models without a type attribute generate only src=P hints, which have a weaker effect.
+
+Workflow:
+    (1) Integrate evidence: the GFF3 files given by --input_evidence_gff3 are integrated into one file, evidence_prediction.raw.gff3. Starting from the last two files, GFF3_filling_gene_models fills the 5'/3' ends of the gene models of the earlier file with the gene models of the later file, and then GFF3_merging_and_removing_redundancy removes the redundancy between (the filled earlier file, the later file), the former being preferred. The result is integrated with the previous file in the same way, until all files are integrated into one. With a single input file, only redundancy removal is done.
+    (2) Repair format: GFF3Clear further checks and repairs the GFF3 format of the integrated evidence_prediction.raw.gff3 (correcting phases, stop codons, exons, UTRs, etc., and detecting gene integrity) without renaming the genes, giving evidence_prediction.gff3, which is used for picking gene models.
+    (3) Pick gene models: runAugustus.01PickGeneModels removes gene models with internal stop codons or frameshifts and redundant ones from evidence_prediction.gff3, giving ati.filter1.gff3 (for etraining; may contain 5'/3' incomplete genes) and ati.filter2.gff3, the best complete gene models (for parameter optimization).
+    (4) Training: after determining flanking_length, runAugustus.02BGM2AT performs etraining, accuracy detection and parameter optimization.
+    (5) Generate hints: runAugustus.03PrepareHints generates hints.gff from evidence_prediction.gff3 (and, optionally, --intron_tab).
+    (6) Prediction: runAugustus.04.PredictWithHints splits the genome into segments and runs Augustus in parallel, giving augustus.raw.gff3. Adjacent segments overlap, so this file may contain redundant genes. The segment size is determined automatically from the longest gene and needs no setting.
+    (7) Redundancy removal: GFF3_merging_and_removing_redundancy removes the redundancy of the predictions, giving augustus.nr.gff3.
+    (8) Renaming: GFF3Clear renames the genes and corrects the format, giving final.gff3, which is also written to standard output.
+
+Output files (all in the --tmp_dir directory):
+    final.gff3                                 Final result, identical to the standard output.
+    accuary_of_AUGUSTUS_HMM_Training.txt       Accuracy of the Augustus HMM training.
+    hints.gff                                  Hints used by the Augustus prediction.
+    augustus.raw.gff3                          Raw Augustus prediction (redundancy not removed).
+    augustus.nr.gff3                           Result after redundancy removal, before renaming.
+    training/                                  Intermediate files and logs of the training steps; evidence_prediction.raw.gff3 is the integrated evidence, evidence_prediction.gff3 is the integrated evidence after format repair by GFF3Clear, ati.filter1.gff3 and ati.filter2.gff3 are the picked gene models.
+    config/species/<species_name>              The trained species model. It is also copied to $AUGUSTUS_CONFIG_PATH/species/ (files with the same names are overwritten; without write permission only a message is printed and the current prediction is not affected).
+    *.log                                      Logs of each step; check them first when an error occurs.
+
+Resuming:
+    A .ok marker file is created after each step finishes. Re-running with the same --tmp_dir skips the finished steps; delete the corresponding .ok file to rerun a step. If you change a parameter or input file that affects earlier steps, use a new --tmp_dir.
+
+[Required]
+    --input_evidence_gff3 <string>
+    Input GFF3 files of evidence gene models. Separate several files with commas, or use the option several times. The file order is the priority: earlier files are preferred. For example, put the NGS reads prediction first and the homology prediction after it.
+
+    --augustus_species <string>
+    Augustus species name; only letters, digits, underscore, dot and hyphen are allowed. If a species with this name already exists under $AUGUSTUS_CONFIG_PATH/species/, training and optimization continue from its parameters; otherwise training starts from scratch.
+
+    genome.fasta
+    Positional argument: genome sequence file (FASTA), placed at the end of the command line.
+
+[Optional]
+    --tmp_dir <string>    default: tmp_$date$pid
+    Temporary directory in which all intermediate files and results are kept. The default is "tmp_" followed by the date (YYYYMMDD) and the process ID. An existing directory is used as it is (for resuming).
+
+    --intron_tab <string>    default: None
+    Intron file obtained from RNA-Seq alignments, used to generate intron hints with src=W. Tab-separated; columns 2-6 are used: sequence name, strand, intron start, intron end, number of supporting reads. If not set, no such hints are generated.
+
+    --gene_prefix <string>    default: augustus
+    Prefix of the final gene IDs.
+
+    --cpu <int>    default: 8
+    Number of CPU threads used in parallel.
+
+    --genetic_code <int>    default: 1
+    Genetic code ID (NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi ), used to recognize start and stop codons when integrating the evidence, repairing the format of the evidence GFF3, removing redundancy of the predictions, renaming, and generating hints. Supported IDs: 1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33. Note: picking gene models (runAugustus.01PickGeneModels) always translates with the standard genetic code (1).
+
+    --min_intron_len <int>    default: 20
+    Minimum intron length used by Augustus and etraining. The Augustus default is 39, which is too large for small genomes.
+
+    --flanking_length <int>    default: auto calculated
+    Length of the flanking sequence added on both sides of each gene in training. Automatic calculation: the smaller of (one eighth of the median intergenic length, the median gene length), limited to 1-10000 (intergenic regions are counted only between neighbouring genes on the same strand with a distance of at least 50 bp). For species with dense genes (e.g. fungi) set it manually, e.g. 100.
+
+[Help]
+    --help
+    Show the English usage and exit. The English usage is also shown when the program is run without any argument.
+
+    --chinese_help
+    显示中文用法说明并退出。
+

@@ -5,96 +5,164 @@ use warnings;
 use Getopt::Long;
 use Cwd qw/abs_path/;
 use File::Temp qw/tempfile/;
-use Storable qw/nstore retrieve/;
+use Storable qw/store retrieve/;
 use POSIX qw/:sys_wait_h strftime/;
 
-my $usage_chinese = <<USAGE;
-Usage:
-    $0 [options] genome.fasta in1.gff3 in2.gff3 in3.gff3 ... > out.gff3
+########################################################################
+# 中文用法说明（放在代码最前面；英文用法说明放在文件最末尾的__DATA__部分）
+########################################################################
+my $usage_cn = <<'USAGE';
+用法:
+    __PROG__ [options] genome.fasta in1.gff3 in2.gff3 in3.gff3 ... > out.gff3
+    本程序用于将输入的一个或多个GFF3文件中的基因模型合并后一起进行去冗余处理，对基因模型进行打分并挑选更可信的结果。
 
-    本程序用于将输入的一个或多个GFF3文件中的基因模型，进行去冗余处理，对基因模型进行打分并挑选更可信的结果。
+一、基因模型打分规则：
+    基因模型的得分由"自身得分"、"被其它基因模型支持的得分"、"输入文件顺序降权"和"扣分"四部分组成，具体如下（默认模式下"区间"指CDS；使用--use_exon参数时"区间"指exon）：
+    (1) 首先，按区间长度打分，每bp记1分，得到得分S1。
+    (2) 然后，根据intron数量打分：每增加一个intron，增加一定比例(相对S1)的得分，第一个intron增加分数最多，后续intron增加的分数按比例递减，且所有intron增加的得分之和不超过S1。设--intron_bonus为p，则第k个intron增加 S1 * p * (1-p)^(k-1)，n个intron的总得分S2 = S1 * (1 - (1-p)^n)。此时，目标基因模型的得分为 S1 + S2。
+    (3) 然后，将目标基因模型与同一个类中每一个与它有区间重叠的基因模型（来自任何输入文件，包括同一文件内的其它基因模型）逐一比较：计算两者重叠的区间碱基数，每bp记1分，得到S3；再比较两者的intron，每共有一个边界（染色体、正负链、起止坐标）完全一致的intron，增加一定比例(相对于S3)的得分，第一个intron增加分数最多，后续intron增加的分数按比例递减，且所有intron增加的得分之和不超过S3，设共有m个一致的intron，则一致introns的总得分S4 = S3 * (1 - (1-p)^m)。目标基因模型每与一个有重叠的基因模型比较一次，就增加 S3 + S4 的得分。因此，目标基因模型能被越多其它基因模型支持（重叠越多、intron结构越一致），得分越高。
+    (4) 根据以上规则，目标基因模型的得分为 S = S1 + S2 + Σ(S3 + S4)。
+    (5) 得到S后，按基因模型所属输入GFF3文件的先后顺序对S降权：第一个输入文件的基因模型不降低；第二个文件的基因模型 S * r；第三个文件的基因模型 S * r^2，依此类推（即第i个文件乘以 r^(i-1)），r由--file_decay控制，默认0.8。
+    (6) 降权之后，再扣分（下面的S均指降权后的S）：若没有起始密码子，扣除 --missing_start_penalty * S 的得分，若没有终止密码子，扣除 --missing_stop_penalty * S 的得分；每一个移码扣除 --frameshift_penalty * S 的得分，每一个内部终止密码子扣除 --internal_stop_penalty * S 的得分。各项扣分累加，最终得分允许为负数，不设下限（以便区分多个质量较差的基因模型）。所有得分保留小数点后两位。
+    (7) 一个基因有多个转录本（可变剪接）时，先按"S1+S2并扣除完整性、移码、内部终止密码子扣分"的内在得分选出得分最高的转录本（得分相同时按转录本ID字典序，且优先选择有区间的转录本）作为该基因的代表，再用代表转录本的区间和intron计算上述支持得分和最终得分。
+    (8) 由于支持得分取决于同一类中的其它基因模型，因此所有输入文件的所有基因模型是合并在一起、一次性计算支持得分并去冗余的。
+    (9) 当两个基因模型在区间上有重叠，对其中任意一个基因模型的重叠比例超过阈值时，则根据两个基因模型的最终得分，去除较低得分的基因模型。程序默认按染色体+正负链将基因划分为互不重叠的分区（设置--both_strands后仅按染色体划分），再对每个分区内两两重叠的基因类群，按得分从大到小进行去冗余处理；不同分区之间互不影响，因此可以安全并行。
+    (10) 若两个基因模型最终得分完全一致，默认随机选择其中一个保留（每次运行结果可能不同）；若设置了--stable_tie，则依次按输入文件顺序（靠前优先）、扣分前的S得分（降权后、扣分前，高者优先）、基因ID字典序来决定，结果完全确定、可复现。
+    (11) Supported_times标签（仅当设置了--output_Supported_times时才输出，默认不输出）：
+        a. gene行：输出的每个保留的基因，其gene行（第9列）会增加一个标签 Supported_times=数值（若输入的gene行中已有该标签，则对其进行修改），数值 = S / 区间长度 / (1 + Σ(p*(1-p)^(k-1)))，其中S为"文件顺序降权和扣分之前"的得分，即上文(4)中的 S = S1 + S2 + Σ(S3 + S4)（不受输入文件顺序降权和各种扣分的影响，因此不会出现负数）；Σ对该基因代表转录本的n个intron求和（k=1..n），没有intron时分母为1，--use_exon模式下区间长度指exon长度。分母用于消除基因自身intron较多而带来的得分增加，因此该数值可大致表示该基因模型被其它基因模型支持了多少遍（基因自身记1遍）。没有区间的基因（得分为0）不添加该标签。
+        b. intron行：输出的每个保留的基因，其转录本下的每一条intron行（第3列为intron的子特征行）也会增加一个标签 Supported_times=整数（若输入的intron行中已有该标签，则对其进行修改）。该整数是这条intron（染色体、正负链、起始坐标、终止坐标完全一致）在所有输入GFF3文件的所有基因模型中出现的次数，统计范围包括之后被去冗余删除的基因模型；同一个基因的多个转录本共有的同一个intron只计一次，即该intron被多少个基因模型所拥有。intron出现次数按输入GFF3文件中intron行自身的坐标统计，与--use_exon参数无关；输入文件中没有intron行时，不会生成新的intron行。
+        c. 若不设置--output_Supported_times，则gene行不输出Supported_times标签，也不统计intron出现次数，也不更改intron行的第9列（attribute）信息。
 
-    程序运行原理：
+二、程序详细运行流程：
+    步骤1  解析参数，并根据--genetic_code确定起始密码子和终止密码子。
+    步骤2  读取基因组序列（用于完整性判断、移码和内部终止密码子检测）。
+    步骤3  读取每个输入GFF3文件并立即打分（--cpu > 1时，每个文件按基因序号分成若干片，各片由--cpu个worker并行处理，每个worker只保留自己分片内的基因）。每个文件只扫描一遍，同时识别gene行、Parent为gene的转录本行（mRNA等）和Parent为转录本的子特征行（exon、CDS、stop_codon等），父级行与子级行的先后顺序不限。对每个转录本记录其区间、全部CDS行（含phase）和stop_codon行；GFF3原文不常驻内存，只记录各行在文件中的偏移量（相邻的行合并为一段），输出时再按偏移量读回。若设置了--output_Supported_times，还会在同一遍扫描中统计各intron行（染色体、正负链、起止坐标）在各基因模型中出现的次数。
+    步骤4  （与步骤3在同一个worker中完成，原始转录本数据即用即弃）对每个转录本计算S1、S2，并检测起始/终止密码子、移码和内部终止密码子，得到内在得分；一个基因有多个转录本时，选择内在得分最高的转录本作为该基因的代表。worker只回传每个基因的紧凑结果（代表转录本合并后的区间、intron、长度、得分和输出所需的偏移量）。没有区间的基因，长度和得分均为0，不参与后续重叠检测，原样保留。
+    步骤5  将所有输入文件的全部基因合并（基因信息以整数编号和并行数组存放，以节省内存），按染色体+正负链（设置--both_strands时仅按染色体）划分为互不影响的分区；再按基因区间的坐标范围把每个分区切成互不重叠的块（块与块之间没有任何基因区间重叠，切开不影响结果），相邻的小块合并成若干批；各批按基因数量用贪心法预先分配给--cpu个worker，每个worker只fork一次。
+    步骤6  对每个分区执行下述"核心去冗余算法"（包含支持得分、文件顺序降权、扣分和最终得分的计算），得到应删除的基因列表、日志和每个基因的最终得分（设置--output_Supported_times时，还有每个基因降权和扣分之前的得分S，用于计算gene行的Supported_times）。
+    步骤7  汇总所有分区的结果，删除冗余基因，其余基因按染色体、起始坐标、终止坐标排序后以GFF3格式输出到标准输出（保留基因的全部转录本，包括可变剪接）。若设置了--output_Supported_times，则同时在gene行和intron行输出Supported_times标签。若设置了--output_delete_info，则将删除基因的信息写入该文件。
 
-    (1) 程序对所有输入的基因模型进行打分。首先，按CDS长度进行打分，每bp长度记1分，得到初步得分S；然后，根据intron数量打分，每增加一个intron，增加一定比例(相对S)得分，第一个intron增加分数最多，后续的intron增加的分数按比例递减，且所有intron增加的得分之和不超过S；然后，按基因完整性打分，5'端完整，增加一定比例(相对S)得分，3'端完整，增加一定比例(相对S)得分；然后，按输入文件的先后顺序，第一个输入文件，增加一定比例(相对S)得分，第二个输入文件分值不变；最后，若基因内部（CDS的阅读框内，不含末尾的终止密码子）含有终止密码子，则每含有一个终止密码子，扣除一定比例(相对S)的得分，扣分后得分允许为负数（内部终止密码子很多时，不会被截断为0，以便区分多个质量较差的基因模型）。所有得分均保留小数点后两位。若使用了--use_exon参数，则上述"CDS"改为"exon"：按exon总长度计分，按exon数量推算intron数量，详见--use_exon参数说明。
+三、核心去冗余算法（单个分区内）：
+    (A) 建立重叠关系：将所有基因的区间按起始坐标排序后做扫描线，找出所有"区间至少有1 bp重叠"的基因对，构成重叠关系图。没有区间的基因不参与。
+    (B) 打分：对每个基因，按上文规则，用其所有直接重叠的基因计算S3、S4，再经文件顺序降权和扣分，得到最终得分。
+    (C) 聚类：求重叠关系图的连通分量，每个连通分量称为一个"类"。聚类只进行一次。没有与任何基因重叠的基因直接保留。
+    (D) 类内排序：每一类中的基因按得分从大到小排序；得分相同时，默认随机排序，设置--stable_tie时依次按输入文件顺序、扣分前的S得分、基因ID字典序排序。
+    (E) 贪心去冗余：从得分最高的基因开始，依次取出每个仍被保留的基因G，将G与排在它之后、仍被保留、且与G直接重叠的每个基因T比较（只遍历G的直接重叠邻居）：重叠比例 = 重叠碱基数 / min(G的区间长度, T的区间长度)；若重叠比例 > --overlap_coverage，则删除T（排序靠后者）。已被删除的基因不再参与后续比较，也不会再去删除其它基因。
+    (F) 每一类中排序第一的基因一定被保留。
+    说明：
+    (a) 聚类条件是"任意1 bp重叠"，而删除条件是"重叠比例超过--overlap_coverage阈值"，因此一类中最终可能保留多个基因，它们之间只有少量重叠。
+    (b) 算法是"得分高者优先保留，并删除与其冲突的低分者"。例如得分A>B>C，A与B冲突，B与C冲突，但A与C不冲突：则A保留，B被删除，C因为其冲突对象B已被删除而被保留。
+    (c) 支持得分是在去冗余之前、基于所有直接重叠的基因（含之后会被删除的基因）计算的，得分在整个去冗余过程中保持不变。
 
-    (2) 当输入了多个GFF3文件时，程序会先对每个GFF3文件单独进行去冗余处理（只在该文件内部检测重叠冲突），并在标准错误中输出统计结果（每个文件包含的基因数量，以及去冗余后剩余的基因数量），此步骤仅用于统计展示，不影响最终输出结果。
-
-    (3) 随后，程序将所有输入文件的基因模型合并，当两个基因模型在CDS上有重叠（默认模式），或在exon上有重叠（--use_exon模式），对其中任意一个基因模型重叠比例超过阈值时，则根据两个基因模型的打分，去除较低得分的基因模型。程序会按染色体+正负链将基因划分为互不重叠的分区，再对每个分区内两两重叠的基因类群，按得分从大到小进行去冗余处理；不同分区之间互不影响，因此可以安全并行。这是决定最终输出结果的去冗余步骤。若两个基因模型得分完全一致（例如将--first_file_score设为0.0时很容易出现这种情况），则优先保留来自较早输入文件的基因模型（即第一个输入文件 > 第二个输入文件 > ... 依此类推）；若两者恰好来自同一个文件且得分仍然一致（理论上极少见），则再按基因ID的字典序决定，以保证程序运行结果完全确定、可复现。
-
-    程序使用须知：
-
-    (1) 程序需要输入基因组序列，用于检测基因模型的完整性以及内部终止密码子（需要CDS信息；没有CDS的转录本不做完整性打分，也不做内部终止密码子扣分）。
-
-    (2) 本程序接受输入带可变剪接的GFF3文件，对一个基因的多个转录本进行打分后，选其中得分最高转录本的CDS（或--use_exon模式下的exon）信息作为基因的信息，再和其它基因模型进行重叠分析和得分比较。
-
+程序使用须知：
+    (1) 程序需要输入基因组序列，用于检测基因模型的起始/终止密码子、移码以及内部终止密码子（需要CDS信息；没有CDS的转录本不做这些扣分）。
+    (2) 本程序接受输入带可变剪接的GFF3文件，选其中代表转录本的区间信息作为基因的信息，再和其它基因模型进行重叠分析和得分比较。
     (3) 本程序输入的多个GFF3文件中不能有ID一致的基因，否则结果不准确。
+    (4) 没有区间的基因模型（例如默认模式下只有exon的非编码基因，或没有任何转录本的基因），长度和得分均记为0，不参与重叠检测，也不会被去冗余步骤删除，会原样保留在输出结果中。
+    (5) 起始密码子、终止密码子和内部终止密码子按CDS阅读框判断：以5'端第一个CDS的phase（第8列）确定阅读框，phase不为0时视为缺少起始密码子（开头phase个碱基属于上游缺失的密码子，无法拼接，予以丢弃）；CDS总长度不是3的整数倍，或末尾不是终止密码子时视为缺少终止密码子；若GFF3中有单独的stop_codon行（例如miniprot的输出）且不与CDS重叠，则该终止密码子会并入序列。各CDS的序列沿转录方向依次拼接后再按3个碱基切分密码子，因此被内含子隔开的密码子（上一个CDS末尾的1~2个碱基加下一个CDS开头的碱基）会被拼接成完整的三联体密码子，包括跨内含子的终止密码子，同样参与内部终止密码子的统计。
+    (6) 移码按相邻CDS的phase是否连续判断：沿转录方向，后一个CDS的phase应等于由前面累计的编码长度推算出的期望phase，一致时按上述方式拼接密码子；不一致则记为一个移码，此时移码位置处无法拼成完整密码子的碱基（上一个CDS末尾的残余碱基和下一个CDS开头phase个碱基）才会被丢弃，并按注释的phase重建阅读框，避免移码下游产生大量伪终止密码子而重复扣分。若一个转录本所有CDS的phase都不是1或2（例如某些工具把phase全部写成0或"."），则phase没有信息量，不做移码检测。没有CDS行的转录本，或基因组序列中没有对应染色体的转录本，不做起始/终止密码子扣分和内部终止密码子扣分。
+    (7) 使用--output_Supported_times时，intron行的Supported_times标签依赖输入GFF3中已有的intron行（第3列为intron，Parent为转录本）；程序不会为没有intron行的转录本生成intron行。
 
-    (4) 没有CDS的基因模型（例如只有exon的非编码基因，或没有任何转录本的基因）在默认模式下，CDS长度和得分均记为0，不参与CDS重叠检测，也不会被去冗余步骤删除，会原样保留在输出结果中。在--use_exon模式下，同理适用于没有exon的基因模型。
+参数说明：
+    [一、去冗余判定参数]
+    --overlap_coverage <float>
+    默认值: 0.30。设置一个覆盖度阈值。当两个基因模型的区间（CDS，--use_exon模式下为exon）重叠碱基数 / 较小基因模型的区间碱基数 > 该覆盖度阈值时，则需要去除得分较低的基因模型。
 
-    --use_exon    default: 无（不设置时按CDS重叠去冗余）
-    这是一个开关参数，不需要给值。设置后，程序改为根据exon（而非CDS）的重叠比例进行去冗余，适用于只有exon而没有CDS信息的GFF3文件（例如lncRNA、转录组组装结果等）。该模式下：(a) 转录本的长度、重叠比例均基于exon计算；(b) intron数量由exon数量推算（intron数 = exon数 - 1），intron加分规则与默认模式一致；(c) 完整性（5'端、3'端）以及内部终止密码子仍然基于CDS+基因组序列判断，仅当转录本同时带有CDS行时才会判断，没有CDS行的转录本视为"internal"，不获得完整性加分，也不做内部终止密码子扣分，内部终止密码子的扣分比例相对于exon总长度计算；(d) 没有exon行的转录本，得分为0，不参与重叠检测，也不会被删除；(e) --overlap_coverage阈值此时表示exon重叠碱基数占较小基因模型exon去冗余碱基数的比例。注意：不建议把带有CDS的GFF3文件和只有exon的GFF3文件混在默认（CDS）模式下比较；如需混合比较，请使用--use_exon模式，此时所有文件均以exon为基准。
+    --use_exon
+    默认值: 无（不设置时按CDS重叠去冗余）。这是一个开关参数，不需要给值。设置后，程序改为根据exon（而非CDS）计算长度、intron、重叠和支持得分，适用于只有exon而没有CDS信息的GFF3文件（例如lncRNA、转录组组装结果等）。该模式下：(a) 转录本的长度、重叠比例均基于exon计算；(b) intron由相邻exon之间的间隔得到；(c) 起始/终止密码子、移码和内部终止密码子仍然基于CDS+基因组序列判断，仅当转录本同时带有CDS行时才会判断，没有CDS行的转录本不做这些扣分，扣分比例相对于S计算；(d) 没有exon行的转录本，得分为0，不参与重叠检测，也不会被删除；(e) --overlap_coverage阈值此时表示exon重叠碱基数占较小基因模型exon碱基数的比例。注意：不建议把带有CDS的GFF3文件和只有exon的GFF3文件混在默认（CDS）模式下比较；如需混合比较，请使用--use_exon模式。
 
-    --intron_score <float>    default: 0.3
-    设置intron让基因模型得分提升比例。基因模型的一个intron让得分增加比例 = 该参数值；第二个及其它intron让得分增加比例 = (1 - 该参数值) ** (intron序号 - 1)。即多个intron让得分提升的比例呈一个无限等比数列，其首项 = 该参数值，公比 = (1 - 该参数值)，无限等比数列的和 = 1。默认设置下，首项 = 0.3，公比 = 0.7，即第一个intron让得分增加30%，第二个intron让得分增加21%，第三个intron让得分增加14.7%，第四个10.29%，以此类推，最终所有intron让得分增加比例不会超过100%。
+    --both_strands
+    默认值: 无（不设置时只有同一条链上的基因才会互相判定为冗余）。这是一个开关参数，不需要给值。设置后，程序仅按染色体划分分区，位于不同链上但区间重叠超过阈值的基因模型也会被判定为冗余（也会互相提供重叠得分，但不同链上的intron不会被视为一致）。适用于同源蛋白预测结果中存在大量链方向错误的预测的情况。若基因组中存在真实的反义重叠基因，请不要使用该参数。
 
-    --complete5p_score <float>    default: 0.5
-    设置基因模型在5'端完整时得分增加比例。
+    --stable_tie
+    默认值: 无（不设置时，得分相同的基因模型随机选择其一保留）。这是一个开关参数，不需要给值。设置后，得分相同的基因模型依次按输入GFF3文件的顺序（靠前优先）、扣分前的S得分（高者优先）、基因ID字典序来决定先后，使结果完全确定、可复现。
 
-    --complete3p_score <float>    default: 0.5
-    设置基因模型在3'端完整时得分增加比例。
+    [二、打分参数]
+    --intron_bonus <float>
+    默认值: 0.3（旧名称 --intron_score 仍可使用）。设置intron让得分提升的比例p。第k个intron让得分增加的比例 = p * (1 - p) ** (k - 1)，n个intron的总增加比例 = 1 - (1 - p) ** n，始终不超过100%。默认设置下，第一个intron增加30%，第二个增加21%，第三个增加14.7%，以此类推。该参数同时用于计算S2（基因自身的intron加分）、S4（与其它基因共有intron的加分）以及gene行的Supported_times标签。
 
-    --first_file_score <float>    default: 0.5
-    设置第一个输入文件额外增加的得分比例。有利于优先选择第一个输入GFF3文件中的基因模型。注意：若将该参数设为0.0（或使多个文件的基因模型在CDS长度、intron数量、完整性上完全一致），不同文件的同类基因模型可能会得到完全相同的分数；此时程序在去冗余时会按输入文件的先后顺序决定取舍，优先保留较早输入文件中的基因模型（详见上文"程序运行原理"第(3)条）。
+    --file_decay <float>
+    默认值: 0.8。设置按输入文件顺序降低得分的比例r（0到1之间）。第一个输入文件的基因模型得分不降低，第i个输入文件的基因模型得分乘以 r^(i-1)。设为1则不按文件顺序降权。
 
-    --internal_stop_penalty <float>    default: 0.5
-    设置基因模型内部含有终止密码子时的扣分比例。程序按CDS的阅读框（从CDS第一个碱基开始，每3个碱基为一个密码子，负链基因先取反向互补）检查终止密码子，CDS末尾的最后一个密码子若是终止密码子，则视为正常的终止密码子，不计入内部终止密码子。基因模型每含有一个内部终止密码子，就扣除 该参数值 * CDS总长度 的得分（即相对于初始得分S的比例，默认扣除50%）；若含有多个内部终止密码子，则扣分累加；扣分后得分允许为负数，不设下限（这样即使多个基因模型都含有很多内部终止密码子，也能根据得分高低区分优劣）。设为0则不扣分。终止密码子由--genetic_code参数决定。
+    [三、遗传密码与完整性扣分参数]
+    --genetic_code <int>
+    默认值: 1。设置遗传密码，程序据此自动确定起始密码子和终止密码子。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi 。支持的遗传密码编号为：1、2、3、4、5、6、9、10、11、12、13、14、15、16、21、22、23、24、25、26、27、28、29、30、31、32、33。
 
-    --overlap_coverage <float>    default: 0.30
-    设置一个覆盖度阈值。当两个基因模型对应转录本的CDS（--use_exon模式下为exon）重叠区碱基数 / 较小基因模型CDS（或exon）去冗余碱基数 > 该覆盖度阈值时，则需要去除冗余的基因模型。
+    --missing_start_penalty <float>
+    默认值: 0.2。基因模型缺少正确的起始密码子时，扣除 该参数值 * S（文件顺序降权后的S）的得分。
 
-    --genetic_code <int>    default: 1
-    设置遗传密码，程序据此自动确定起始密码子和终止密码子，用于判断基因模型的完整性以及检测内部终止密码子。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi 。支持的遗传密码编号为：1、2、3、4、5、6、9、10、11、12、13、14、15、16、21、22、23、24、25、26、27、28、29、30、31、32、33。例如：1为标准遗传密码（起始密码子为ATG，终止密码子为TAA、TAG、TGA），11为细菌/古菌/植物质体遗传密码，2为脊椎动物线粒体遗传密码。
+    --missing_stop_penalty <float>
+    默认值: 0.2。基因模型缺少正确的终止密码子时，扣除 该参数值 * S 的得分。
 
-    --cpu <int>    default: 8
-    设置并行worker数量。设为1则完全串行运行，不fork子进程。
+    --internal_stop_penalty <float>
+    默认值: 0.1。基因模型每含有一个内部终止密码子（CDS阅读框内，不含末尾正常的终止密码子，包括跨内含子拼接而成的终止密码子），扣除 该参数值 * S 的得分，多个则累加。设为0则不扣分。终止密码子由--genetic_code决定。
 
-    --tmp_dir <string>    default: tmp_\$date\$pid
-    并行worker之间交换计算结果所用的临时目录（仅在--cpu > 1且分区数 > 1时使用）。默认值为在当前目录下创建的 tmp_\$date\$pid，其中\$date是运行日期（格式YYYYMMDD），\$pid是程序的进程号，例如 tmp_2026092812345。若该目录由程序自己创建，则程序结束后自动删除；若使用的是用户已经存在的目录，则不会删除该目录本身。
+    --frameshift_penalty <float>
+    默认值: 0.1。基因模型每含有一个移码，扣除 该参数值 * S 的得分，多个则累加。设为0则不扣分。
 
-    --output_delete_info <string>    default: 无（不设置时删除基因信息输出到标准错误）
-    设置一个文件路径，程序会将最终合并去冗余步骤中删除的基因的描述信息，输出到该文件中，而不是输出到标准错误。（各输入文件单独去冗余的统计结果，始终输出到标准错误，不受该参数影响）。
+    [四、运行与输出参数]
+    --output_Supported_times
+    默认值: 无（不设置时不输出Supported_times标签）。这是一个开关参数，不需要给值。设置后：(a) 在输出的gene行（第9列）增加（或修改已有的）Supported_times=数值标签，数值的含义见上文"打分规则(11)a"（以降权和扣分之前的得分S计算，不会为负数）；(b) 在输出的intron行（第3列为intron）增加（或修改已有的）Supported_times=整数标签，该整数为这条intron在所有输入基因模型中出现的次数，见上文"打分规则(11)b"。不设置该参数时，gene行不输出该标签，不统计intron出现次数，也不更改intron行的attribute信息。注意：该标签名称为Supported_times（首字母大写）；输入文件中已有的Supported_times或Support_times标签都会被替换。
 
-    --compare_2gff3_stats <string>    default: 无
-    仅当输入了恰好两个GFF3文件时生效。设置一个文件路径，程序会将两个GFF3文件的基因模型比较和选择结果输出到该文件中。内容包括：两个文件各自去除文件内部冗余后的基因数量；两个文件之间CDS（或exon）重叠比例超过--overlap_coverage阈值的基因数量，及这些基因中双方得分高低的统计；以及每一对冲突基因的详细删除描述信息。若两个基因得分一致，则视为第一个文件（setA）得分较高处理，即优先保留第一个文件的基因模型。
+    --cpu <int>
+    默认值: 8。设置并行worker数量，用于GFF3文件读取与打分、去冗余两个阶段。每个阶段每个worker只fork一次，任务按大小预先均衡分配。设为1则完全串行运行，不fork子进程。
 
-    --help    default: None
-    显示英文用法说明并退出。
+    --tmp_dir <string>
+    默认值: tmp_$date$pid。并行worker之间交换计算结果所用的临时目录（仅在--cpu > 1且并行任务数 > 1时使用）。默认值为在当前目录下创建的 tmp_$date$pid，其中$date是运行日期（格式YYYYMMDD），$pid是程序的进程号。若该目录由程序自己创建，则程序结束后自动删除；若使用的是用户已经存在的目录，则不会删除该目录本身。
 
-    --chinese_help    default: None
+    --output_delete_info <string>
+    默认值: 无（不设置时不输出被删除基因的信息）。设置一个文件路径，程序会将去冗余步骤中删除的基因的描述信息输出到该文件中。不设置该参数时，不输出这些信息（避免在标准错误中刷屏）。
+
+    [五、已废弃参数]
+    --complete5p_score、--complete3p_score、--first_file_score、--support_score、--compare_2gff3_stats
+    这些参数在新版本中不再使用，若给出会被忽略并输出警告。
+
+    [六、帮助参数]
+    --help
+    Display the English usage and exit.
+
+    --chinese_help
     显示中文用法说明并退出。
 
 USAGE
-my $usage_english = &get_usage_english();
-if (@ARGV==0){die $usage_english}
 
-my ($intron_score, $complete5p_score, $complete3p_score, $first_file_score, $internal_stop_penalty, $overlap_coverage, $genetic_code, $start_codon_opt, $stop_codon_opt, $cpu, $tmp_dir, $output_delete_info, $compare_2gff3_stats, $use_exon, $help, $chinese_help);
+my $prog = $0;
+my $usage_english = do { local $/; <DATA> };
+$usage_english = "" unless defined $usage_english;
+my $usage_chinese = $usage_cn;
+s/__PROG__/$prog/g for ( $usage_english, $usage_chinese );
+
+# 直接运行（不带任何参数）时，给出英文用法说明
+if ( @ARGV == 0 ) { die $usage_english }
+
+my ($intron_score, $file_decay, $missing_start_penalty, $missing_stop_penalty, $internal_stop_penalty, $frameshift_penalty, $overlap_coverage, $genetic_code, $start_codon_opt, $stop_codon_opt, $cpu, $tmp_dir, $output_delete_info, $use_exon, $both_strands, $stable_tie, $output_Supported_times, $help, $chinese_help);
+my ($dep_c5, $dep_c3, $dep_first, $dep_support, $dep_compare);
 GetOptions(
-    "intron_score:f" => \$intron_score,
-    "complete5p_score:f" => \$complete5p_score,
-    "complete3p_score:f" => \$complete3p_score,
-    "first_file_score:f" => \$first_file_score,
+    # --intron_bonus 为新名称，--intron_score 为旧名称（保留以兼容旧命令行）
+    "intron_bonus|intron_score:f" => \$intron_score,
+    "file_decay:f" => \$file_decay,
+    "missing_start_penalty:f" => \$missing_start_penalty,
+    "missing_stop_penalty:f" => \$missing_stop_penalty,
     "internal_stop_penalty:f" => \$internal_stop_penalty,
+    "frameshift_penalty:f" => \$frameshift_penalty,
     "overlap_coverage:f" => \$overlap_coverage,
     "genetic_code:i" => \$genetic_code,
+    # 旧版本参数，新打分规则中已不再使用，仅为兼容旧命令行而接受（会被忽略）
+    "complete5p_score:f" => \$dep_c5,
+    "complete3p_score:f" => \$dep_c3,
+    "first_file_score:f" => \$dep_first,
+    "support_score:f" => \$dep_support,
+    "compare_2gff3_stats:s" => \$dep_compare,
     # 为兼容旧版本而保留，不在用法说明中给出：若设置，则优先于 --genetic_code 所确定的起始密码子和终止密码子。
     "start_codon:s" => \$start_codon_opt,
     "stop_codon:s" => \$stop_codon_opt,
     "cpu:i" => \$cpu,
     "tmp_dir:s" => \$tmp_dir,
     "output_delete_info:s" => \$output_delete_info,
-    "compare_2gff3_stats:s" => \$compare_2gff3_stats,
     "use_exon!" => \$use_exon,
+    "both_strands!" => \$both_strands,
+    "stable_tie!" => \$stable_tie,
+    "output_Supported_times!" => \$output_Supported_times,
     "help" => \$help,
     "chinese_help" => \$chinese_help,
 ) or die $usage_english;
@@ -102,31 +170,39 @@ if ( $chinese_help ) { die $usage_chinese }
 if ( $help ) { die $usage_english }
 die "Error: genome.fasta and at least one GFF3 file are required.\n\n$usage_english" unless @ARGV >= 2;
 
+foreach my $pair ( ["complete5p_score", $dep_c5], ["complete3p_score", $dep_c3], ["first_file_score", $dep_first], ["support_score", $dep_support], ["compare_2gff3_stats", $dep_compare] ) {
+    warn "Warning: --$pair->[0] is no longer used and is ignored.\n" if defined $pair->[1];
+}
+
 ########### 解析参数 #################
 # 使用绝对路径
 my $input_genome = abs_path(shift @ARGV);
-# 保留用户输入时的原始文件名（未转换为绝对路径），仅用于统计信息展示
-my @input_GFF3_display = @ARGV;
 my @input_GFF3;
 foreach ( @ARGV ) {
     push @input_GFF3, abs_path($_);
 }
-die "Error: 需要至少输入一个GFF3文件\n" unless @input_GFF3;
+die "Error: at least one GFF3 file is required\n" unless @input_GFF3;
 
 # 设置参数的默认值
 $intron_score = 0.3 unless defined $intron_score;
-$complete5p_score = 0.5 unless defined $complete5p_score;
-$complete3p_score = 0.5 unless defined $complete3p_score;
-$first_file_score = 0.5 unless defined $first_file_score;
-$internal_stop_penalty = 0.5 unless defined $internal_stop_penalty;
-die "Error: --internal_stop_penalty 不能为负数\n" if $internal_stop_penalty < 0;
+die "Error: --intron_bonus must be between 0 and 1\n" if $intron_score < 0 || $intron_score > 1;
+$file_decay = 0.8 unless defined $file_decay;
+die "Error: --file_decay must be between 0 and 1\n" if $file_decay < 0 || $file_decay > 1;
+$missing_start_penalty = 0.2 unless defined $missing_start_penalty;
+$missing_stop_penalty = 0.2 unless defined $missing_stop_penalty;
+$internal_stop_penalty = 0.1 unless defined $internal_stop_penalty;
+$frameshift_penalty = 0.1 unless defined $frameshift_penalty;
+foreach my $pair ( ["missing_start_penalty", $missing_start_penalty], ["missing_stop_penalty", $missing_stop_penalty], ["internal_stop_penalty", $internal_stop_penalty], ["frameshift_penalty", $frameshift_penalty] ) {
+    die "Error: --$pair->[0] must not be negative\n" if $pair->[1] < 0;
+}
 $overlap_coverage = 0.3 unless defined $overlap_coverage;
 $genetic_code = 1 unless ( defined $genetic_code && $genetic_code > 0 );
 $cpu = 8 unless defined $cpu;
 $cpu = 1 if $cpu < 1;
+$output_Supported_times = 0 unless defined $output_Supported_times;
 
-# 用于计算长度、intron数量和重叠比例的特征类型：默认为CDS；设置--use_exon后为exon
-# 注意：完整性分析和内部终止密码子检测始终基于CDS行（若有）和基因组序列，与该设置无关
+# 用于计算长度、intron和重叠比例的特征类型：默认为CDS；设置--use_exon后为exon
+# 注意：起始/终止密码子、移码和内部终止密码子检测始终基于CDS行（若有）和基因组序列，与该设置无关
 my $region_type = $use_exon ? "exon" : "CDS";
 
 # --tmp_dir 的默认值：tmp_$date$pid，$date为运行日期(YYYYMMDD)，$pid为当前进程号
@@ -160,143 +236,115 @@ else {
 die "Error: no start codon is available.\n" unless %start_codon;
 die "Error: no stop codon is available.\n" unless %stop_codon;
 
-# --compare_2gff3_stats 仅在恰好输入两个GFF3文件时才有意义
-if ( $compare_2gff3_stats && @input_GFF3 != 2 ) {
-    warn "Warning: --compare_2gff3_stats requires exactly 2 input GFF3 files (got " . scalar(@input_GFF3) . "). This option will be ignored.\n";
-    $compare_2gff3_stats = undef;
+# 用于统计内部终止密码子的正则（只编译一次，在C层逐个密码子扫描）：
+# 从当前位置开始，按3个碱基一组跳过非终止密码子，直到遇到在阅读框内的终止密码子；每匹配一次计数一次。
+my $COUNT_STOP_RE;
+{
+    my $alt = join "|", grep { length($_) == 3 } sort keys %stop_codon;
+    $alt = "(?!)" if $alt eq "";
+    $COUNT_STOP_RE = qr/\G(?:(?!(?:$alt)).{3})*(?:$alt)/s;
 }
 
-# 删除基因描述信息的输出目标：若设置了--output_delete_info，则输出到该文件，否则输出到标准错误
+# 删除基因描述信息：仅当设置了--output_delete_info时才输出到该文件，否则不输出
 my $delete_info_fh;
 if ( $output_delete_info ) {
     open ($delete_info_fh, '>', $output_delete_info) or die "Error: Can not create file $output_delete_info, $!";
 }
-else {
-    $delete_info_fh = \*STDERR;
-}
+my $want_log = $delete_info_fh ? 1 : 0;
 ###############################
 
 # 读取基因组序列
-open IN, $input_genome or die "Error: Can not open file $input_genome, $!";
 my (%seq, $seq_id);
+open IN, $input_genome or die "Error: Can not open file $input_genome, $!";
 while (<IN>) {
-    chomp;
+    chomp; s/\r$//;
     if ( m/^>(\S+)/ ) { $seq_id = $1; }
-    else { tr/atcgn/ATCGN/; $seq{$seq_id} .= $_; }
+    elsif ( defined $seq_id ) { tr/atcgn/ATCGN/; $seq{$seq_id} .= $_; }
 }
 close IN;
 
-# 依次分析输入的GFF3文件，得到基因信息
-# 注意：以下变量名中的"CDS"，在默认模式下就是CDS区间；在--use_exon模式下存放的是exon区间（即 $region_type 对应的区间）。
-# %gene_CDS，存放所有基因的区间信息，键是基因ID，值是\n分隔的区间信息(起始结束正负链用\t分隔)。若基因有多个可变剪接，选择其得分最高转录本的区间信息。没有对应区间的基因，值为空字符串。
-# %gene_score，存放基因ID的得分（保留两位小数）。没有对应区间的基因得分为0.00。
-# %chr 和 %strand 存放基因ID对应的染色体和正负链。优先取自转录本，若基因没有任何转录本，则取自基因自身的行。
-# %gene_CDS_length 存放基因ID对应的区间总长度。若基因有多个可变剪接，选择其得分最高转录本的长度。没有对应区间的基因，长度为0。
-# %gene_file_num，存放基因ID对应的输入文件序号（从1开始）。当多个基因模型得分完全一致时，用于按输入文件先后顺序决定取舍：文件序号越小（即越早输入的文件），优先级越高。
-# @file_gene_ids，索引为输入文件序号（从1开始），值为该文件中所有基因ID组成的数组引用，用于后续对每个文件单独去冗余统计，以及两文件比较。
-my (%gene_CDS, %gene_score, %chr, %strand, %gene_CDS_length, %gene_file_num, %sort1, %sort2, %sort3, %sort4, %gene_info);
-my @file_gene_ids;
-my $input_file_num = 0;
-foreach ( @input_GFF3 ) {
-    $input_file_num ++;
+# 全局数据结构说明（为节省内存，所有基因用整数编号 0..N-1 表示，各项信息存放在并行数组中）：
+# 以下"区间"在默认模式下就是CDS区间；在--use_exon模式下是exon区间（即 $region_type 对应的区间）。
+# @g_id        基因ID                         @g_file     输入文件序号（从1开始）
+# @g_gchr      gene行的染色体编号（输出排序） @g_gstart / @g_gend / @g_gstrand  gene行的起止坐标和正负链（输出排序）
+# @g_hoff/@g_hlen  gene行在原文件中的偏移量和长度
+# @g_runs      该基因其余输出行（转录本行及其子特征行）在原文件中的连续片段，pack("J*", 偏移量, 长度, ...)
+# @g_chr / @g_strand  代表转录本所在染色体编号和正负链（用于分区）
+# @g_len       区间总长度(S1)，没有区间的基因为0
+# @g_B         S1+S2   @g_ratio  扣分比例总和（缺起始/终止密码子、移码、内部终止密码子）
+# @g_reg       代表转录本排序合并后的区间，pack("J*", 起始, 终止, ...)；没有区间的基因为空字符串
+# @g_intr      代表转录本的intron，pack("J*", 起始, 终止, ...)，按起始坐标排序；@g_istr 为intron所属正负链
+# @g_score     得分（保留两位小数）。读入时存内在得分，去冗余后被替换为最终得分
+# @g_S0        降权和扣分之前的得分 S = S1 + S2 + Σ(S3 + S4)（仅--output_Supported_times时使用，用于计算gene行的Supported_times；恒为非负数）
+# @g_smin/@g_smax  区间的最小起始/最大终止坐标，用于把分区切分成互不相关的块
+# @g_del       1表示该基因被去冗余步骤删除    @g_support  gene行Supported_times标签值（仅--output_Supported_times时使用）
+# %intron_count  intron出现次数：键为"染色体\t正负链\t起始\t终止"（取自GFF3中intron行自身的坐标），值为包含该intron的基因模型数
+#                （同一基因的多个转录本共有的同一intron只计一次，包含之后被去冗余删除的基因；仅--output_Supported_times时使用）
+my (@g_id, @g_file, @g_gchr, @g_gstart, @g_gend, @g_gstrand, @g_hoff, @g_hlen, @g_runs);
+my (@g_chr, @g_strand, @g_len, @g_B, @g_ratio, @g_reg, @g_intr, @g_istr, @g_score, @g_S0, @g_smin, @g_smax, @g_del, @g_support);
+my (@chr_name, %chr_idx);   # 染色体名 <-> 整数编号
+my %intron_count;
 
-    my %GFF3_info = &get_geneModels_from_GFF3($_);
-    foreach my $gene_ID ( sort keys %GFF3_info ) {
-        my @gene_header = split /\t/, $GFF3_info{$gene_ID}{"header"};
-        $sort1{$gene_ID} = $gene_header[0];
-        $sort2{$gene_ID} = $gene_header[3];
-        $sort3{$gene_ID} = $gene_header[4];
-        $sort4{$gene_ID} = $gene_header[6];
-        $gene_info{$gene_ID} = $GFF3_info{$gene_ID};
-        $gene_file_num{$gene_ID} = $input_file_num;
-        push @{$file_gene_ids[$input_file_num]}, $gene_ID;
+# 并行任务所用临时目录的状态（见 ensure_tmp_dir）
+my ($tmp_dir_ready, $tmp_dir_created) = (0, 0);
 
-        # 先用基因自身行的染色体和正负链作为默认值，保证即使基因没有任何转录本，分区时也不会出现undef
-        $chr{$gene_ID} = $gene_header[0];
-        $strand{$gene_ID} = $gene_header[6];
-        # 默认视为没有区间：区间信息为空，长度为0，得分为0
-        $gene_CDS{$gene_ID} = "";
-        $gene_CDS_length{$gene_ID} = 0;
-        $gene_score{$gene_ID} = "0.00";
+##########################################################################################
+# 阶段1：读取所有输入GFF3文件并立即打分（每个文件只扫描一遍）
+# 每个任务 = (文件, 分片)：文件按基因序号分成若干片，--cpu > 1时各任务并行；
+# worker只回传每个基因的紧凑结果，原始转录本数据在worker内即用即弃。
+##########################################################################################
+{
+    my $nfile = scalar @input_GFF3;
+    my $nshard = $cpu > 1 ? int( ($cpu + $nfile - 1) / $nfile ) : 1;
+    $nshard = 1 if $nshard < 1;
+    my (@load_tasks, @load_weights);
+    foreach my $fi ( 0 .. $#input_GFF3 ) {
+        my $size = ( -s $input_GFF3[$fi] ) || 1;
+        foreach my $sh ( 0 .. $nshard - 1 ) {
+            push @load_tasks, [ $fi, $sh, $nshard ];
+            push @load_weights, $size / $nshard;
+        }
+    }
 
-        my @mRNA_ID = @{ $GFF3_info{$gene_ID}{"mRNA_ID"} || [] };
-        next unless @mRNA_ID;
+    my $load_res = &run_parallel( \@load_tasks, sub { return &load_and_score_file( @{ $_[0] } ); }, $cpu, \@load_weights );
 
-        my (%mRNA_score, %mRNA_CDS, %mRNA_CDS_length);
-        foreach my $mRNA_ID ( sort @mRNA_ID ) {
-            my $mRNA_info = $GFF3_info{$gene_ID}{"mRNA_info"}{$mRNA_ID};
-            $mRNA_info = "" unless defined $mRNA_info;
-            my $mRNA_header = $GFF3_info{$gene_ID}{"mRNA_header"}{$mRNA_ID};
-            my @mRNA_header = split /\t/, $mRNA_header;
-            my ($this_chr, $this_strand) = ($mRNA_header[0], $mRNA_header[6]);
-            $chr{$gene_ID} = $this_chr; $strand{$gene_ID} = $this_strand;
+    my %idx;
+    foreach my $t ( 0 .. $#$load_res ) {
+        my $c = $load_res->[$t];
+        $load_res->[$t] = undef;
 
-            # @region: 用于计算长度/intron数/重叠的区间（默认为CDS，--use_exon模式下为exon）
-            # @CDS_all: 该转录本的所有CDS行，仅用于完整性分析和内部终止密码子检测
-            my (@region, @CDS_all);
-            my $region_length = 0;
-            foreach ( split /\n/, $mRNA_info ) {
-                my @field = split /\t/;
-                next unless defined $field[2];
-                if ( $field[2] eq $region_type ) {
-                    push @region, "$field[3]\t$field[4]\t$field[6]";
-                    $region_length += (abs($field[4] - $field[3]) + 1);
-                }
-                if ( $field[2] eq "CDS" ) {
-                    push @CDS_all, "$field[3]\t$field[4]\t$field[6]";
-                }
-            }
-            $mRNA_CDS{$mRNA_ID} = join "\n", @region;
-            $mRNA_CDS_length{$mRNA_ID} = $region_length;
-
-            # 没有对应区间的转录本：得分为0，不做完整性分析，也不参与后续的重叠检测
-            my $score = 0;
-            if ( @region ) {
-                # 完整性分析和内部终止密码子检测始终基于CDS；若转录本没有CDS行（例如只有exon的GFF3），
-                # 则视为internal，不获得完整性加分，也不做内部终止密码子扣分
-                my ($integrity, $internal_stop_num) = ("internal", 0);
-                if ( @CDS_all ) {
-                    ($integrity, $internal_stop_num) = &analysis_geneModels_integrity(\@CDS_all, $this_chr, $this_strand);
-                }
-
-                $score = $region_length;
-                if ( @region == 1 ) {
-                    $score = $region_length;
-                }
-                elsif ( @region == 2 ) {
-                    $score += $region_length * $intron_score;
-                }
-                elsif ( @region > 2 ) {
-                    my $add_score = $region_length * $intron_score;
-                    $score += $add_score;
-                    foreach ( 1 .. (@region - 2) ) {
-                        $add_score = $add_score * ( 1 - $intron_score );
-                        $score += $add_score;
-                    }
-                }
-                if ( $integrity eq "5prime_partial" ) {
-                    $score += $region_length * $complete3p_score;
-                }
-                elsif ( $integrity eq "3prime_partial" ) {
-                    $score += $region_length * $complete5p_score;
-                }
-                elsif ( $integrity eq "complete" ) {
-                    $score += $region_length * ($complete3p_score + $complete5p_score);
-                }
-                $score += $region_length * $first_file_score if $input_file_num == 1;
-
-                # 内部终止密码子扣分：每个内部终止密码子扣除 参数值 * 区间总长度 的得分；扣分后得分允许为负数，不设下限
-                $score -= $region_length * $internal_stop_penalty * $internal_stop_num;
-            }
-
-            # 得分保留两位小数；此后排序、比较均使用保留两位小数后的得分，保证结果一致
-            $mRNA_score{$mRNA_ID} = sprintf("%.2f", $score);
+        # 合并各worker统计的intron出现次数（每个基因只属于一个分片，所以不会重复统计）
+        if ( $output_Supported_times && $c->{icnt} ) {
+            $intron_count{$_} += $c->{icnt}{$_} foreach keys %{ $c->{icnt} };
         }
 
-        @mRNA_ID = sort {$mRNA_score{$b} <=> $mRNA_score{$a} or $a cmp $b} @mRNA_ID;
-        $gene_CDS{$gene_ID} = $mRNA_CDS{$mRNA_ID[0]};
-        $gene_score{$gene_ID} = $mRNA_score{$mRNA_ID[0]};
-        $gene_CDS_length{$gene_ID} = $mRNA_CDS_length{$mRNA_ID[0]};
+        my $n = scalar @{ $c->{id} };
+        foreach my $k ( 0 .. $n - 1 ) {
+            my $id = $c->{id}[$k];
+            my $i = $idx{$id};
+            unless ( defined $i ) { $i = scalar @g_id; $idx{$id} = $i; }   # 不同文件中ID相同的基因，后面的覆盖前面的（与旧版本一致）
+            $g_id[$i] = $id;
+            $g_file[$i] = $c->{file}[$k];
+            $g_gchr[$i] = &chr_code( $c->{gchr}[$k] );
+            $g_gstart[$i] = $c->{gstart}[$k];
+            $g_gend[$i] = $c->{gend}[$k];
+            $g_gstrand[$i] = $c->{gstrand}[$k];
+            $g_hoff[$i] = $c->{hoff}[$k];
+            $g_hlen[$i] = $c->{hlen}[$k];
+            $g_runs[$i] = $c->{runs}[$k];
+            $g_chr[$i] = &chr_code( $c->{chr}[$k] );
+            $g_strand[$i] = $c->{strand}[$k];
+            $g_len[$i] = $c->{len}[$k];
+            $g_B[$i] = $c->{B}[$k];
+            $g_ratio[$i] = $c->{ratio}[$k];
+            $g_reg[$i] = $c->{reg}[$k];
+            $g_intr[$i] = $c->{intr}[$k];
+            $g_istr[$i] = $c->{istr}[$k];
+            $g_score[$i] = $c->{score}[$k];
+            $g_smin[$i] = $c->{smin}[$k];
+            $g_smax[$i] = $c->{smax}[$k];
+            $g_del[$i] = 0;
+        }
     }
 }
 
@@ -304,486 +352,620 @@ foreach ( @input_GFF3 ) {
 %seq = ();
 
 ##########################################################################################
-# 若输入了多个GFF3文件，先对每个文件单独进行去冗余处理（仅在文件内部检测重叠冲突），
-# 并在标准错误中输出统计信息：每个文件包含的基因数量、去冗余后剩余的基因数量。
-# 此步骤只用于统计展示（以及供--compare_2gff3_stats使用），不会影响最终合并去冗余的结果。
+# 阶段2：去冗余
+# 先把基因划分为互不影响的分区：默认按 染色体+正负链 划分；设置--both_strands后仅按染色体划分。
+# 再把每个分区按基因区间的范围 [smin, smax] 排序扫描：只要下一个基因的起点大于此前所有基因的最大终点，
+# 它与此前的基因就不可能有任何区间重叠，可以在此切开。切开后各块互不影响，结果与不切分完全相同。
+# 相邻的小块被合并成每批约数百至数千个基因，作为并行任务的基本单位。
 ##########################################################################################
-my @file_survivor_ids; # 索引为输入文件序号（从1开始），值为该文件去除内部冗余后剩余的基因ID数组引用
-if ( @input_GFF3 > 1 ) {
-    print STDERR "# Statistics of redundancy removal within each individual input GFF3 file (based on $region_type overlap):\n";
-    for ( my $i = 1; $i <= @input_GFF3; $i ++ ) {
-        my @ids = @{ $file_gene_ids[$i] || [] };
-        my $total = scalar @ids;
-
-        # 按染色体+正负链，将该文件内的基因划分为互不重叠的分区
-        my %file_partition;
-        foreach my $gene_ID ( @ids ) {
-            my $key = "$chr{$gene_ID}\t$strand{$gene_ID}";
-            push @{$file_partition{$key}}, $gene_ID;
-        }
-
-        my %deleted_here;
-        foreach my $key ( keys %file_partition ) {
-            my ($deleted, $log) = &find_redundant_in_partition($file_partition{$key});
-            foreach ( @$deleted ) { $deleted_here{$_} = 1; }
-        }
-
-        my @survivors = grep { ! $deleted_here{$_} } @ids;
-        $file_survivor_ids[$i] = \@survivors;
-
-        my $after = scalar @survivors;
-        print STDERR "File $input_GFF3_display[$i-1]: $total genes in total, $after genes remaining after removing redundancy within this file\n";
-    }
-    print STDERR "\n";
-}
-
-##########################################################################################
-# 当恰好输入两个GFF3文件，且设置了--compare_2gff3_stats参数时，输出两个文件基因模型的比较和选择结果
-##########################################################################################
-if ( $compare_2gff3_stats ) {
-    my @setA = @{ $file_survivor_ids[1] };
-    my @setB = @{ $file_survivor_ids[2] };
-
-    my @pairs = &compare_two_gene_sets_overlap(\@setA, \@setB);
-
-    my (%involvedA, %involvedB);
-    my ($win1, $win2, $tie) = (0, 0, 0);
-    my @compare_log;
-    foreach my $pair ( @pairs ) {
-        my ($geneA, $geneB, $ratio) = @$pair;
-        $involvedA{$geneA} = 1;
-        $involvedB{$geneB} = 1;
-        my $scoreA = $gene_score{$geneA};
-        my $scoreB = $gene_score{$geneB};
-
-        if ( $scoreA > $scoreB ) {
-            $win1 ++;
-            push @compare_log, "Delete gene $geneB (Score: $scoreB), for its $region_type coverage ratio with gene $geneA (Score: $scoreA) is: $ratio > $overlap_coverage";
-        }
-        elsif ( $scoreB > $scoreA ) {
-            $win2 ++;
-            push @compare_log, "Delete gene $geneA (Score: $scoreA), for its $region_type coverage ratio with gene $geneB (Score: $scoreB) is: $ratio > $overlap_coverage";
-        }
-        else {
-            # 得分一致时，按输入文件先后顺序决定取舍：geneA恒定来自第一个输入文件(setA)，geneB恒定来自第二个输入文件(setB)，
-            # 因此固定优先保留geneA（第一个文件的基因模型），删除geneB。不再按基因ID字典序随意决定。
-            $tie ++;
-            push @compare_log, "Delete gene $geneB (Score: $scoreB), for its $region_type coverage ratio with gene $geneA (Score: $scoreA) is: $ratio > $overlap_coverage (tie score, kept gene from earlier input file)";
-        }
-    }
-
-    my $countA = scalar @setA;
-    my $countB = scalar @setB;
-    my $involvedA_num = scalar keys %involvedA;
-    my $involvedB_num = scalar keys %involvedB;
-
-    open (my $CMP, '>', $compare_2gff3_stats) or die "Error: Can not create file $compare_2gff3_stats, $!";
-    print $CMP "$input_GFF3_display[0] 和 $input_GFF3_display[1] 这两个GFF3文件各包含 $countA / $countB 个非冗余基因，前者的 $involvedA_num 个基因和后者的 $involvedB_num 个基因的重叠比例（基于$region_type）超过 $overlap_coverage，这些冗余基因中，前者得分较高的基因有 $win1 个，后者得分较高的基因有 $win2 个，得分一致的基因有 $tie 个（得分一致时固定优先保留前者，即第一个输入文件的基因模型）\n";
-    foreach my $line ( @compare_log ) {
-        print $CMP "$line\n";
-    }
-    close $CMP;
-}
-
-# 按染色体+正负链将基因划分为互不重叠的分区：区间重叠只可能发生在同一条染色体、同一条链的基因之间，
-# 因此分区之间互不影响，天然适合并行处理，且并行结果与串行结果完全一致。
 my %partition;
-foreach my $gene_ID ( keys %gene_CDS ) {
-    my $key = "$chr{$gene_ID}\t$strand{$gene_ID}";
-    push @{$partition{$key}}, $gene_ID;
+foreach my $i ( 0 .. $#g_id ) {
+    next unless length $g_reg[$i];   # 没有区间的基因不参与去冗余
+    push @{ $partition{ &partition_key($i) } }, $i;
 }
-# 优先处理基因数量较多的分区，有利于负载均衡（数量相同时按分区名排序，保证顺序可复现）
-my @partition_keys = sort { scalar(@{$partition{$b}}) <=> scalar(@{$partition{$a}}) or $a cmp $b } keys %partition;
 
-my %all_results;
-
-if ( $cpu <= 1 || @partition_keys <= 1 ) {
-    # 分区数很少或cpu=1时，直接串行处理，省去fork开销，运行更稳定、便于调试
-    foreach my $key ( @partition_keys ) {
-        my ($deleted, $log) = &find_redundant_in_partition($partition{$key});
-        $all_results{$key} = { deleted => $deleted, log => $log };
+my @tasks;   # 每个任务：[分区名, [基因编号, ...]]
+{
+    my $n_with_region = 0;
+    $n_with_region += scalar(@{$partition{$_}}) foreach keys %partition;
+    # cpu=1时不切批（每个分区一个任务）；否则每批至少200个基因，且任务数约为cpu的8倍以上，便于均衡负载
+    my $target = 0;
+    if ( $cpu > 1 ) {
+        $target = int( $n_with_region / ($cpu * 8) ) + 1;
+        $target = 200 if $target < 200;
     }
-}
-else {
-    # 创建临时目录（默认为 tmp_$date$pid）。若目录由程序自己创建，则运行结束后自动删除。
-    my $tmp_dir_created = 0;
-    unless ( -d $tmp_dir ) {
-        mkdir $tmp_dir or die "Error: Can not create temporary directory $tmp_dir, $!";
-        $tmp_dir_created = 1;
-    }
-    $tmp_dir = abs_path($tmp_dir);
 
-    my @queue = @partition_keys;
-    my %running; # pid => [partition_key, tmpfile]
-
-    while ( @queue || %running ) {
-        while ( @queue && scalar(keys %running) < $cpu ) {
-            my $key = shift @queue;
-            my ($fh, $tmpfile) = tempfile( DIR => $tmp_dir, SUFFIX => ".dat", UNLINK => 0 );
-            close $fh;
-
-            my $pid = fork();
-            die "Error: fork failed: $!" unless defined $pid;
-
-            if ( $pid == 0 ) {
-                # 子进程：只计算，不直接修改父进程数据结构，也不直接打印，结果统一通过临时文件回传
-                my ($deleted, $log) = &find_redundant_in_partition($partition{$key});
-                eval { nstore( { deleted => $deleted, log => $log }, $tmpfile ); };
-                if ($@) {
-                    warn "Warning: worker for partition [$key] failed to write result to $tmpfile: $@";
-                    exit 1;
-                }
-                exit 0;
+    foreach my $key ( sort keys %partition ) {
+        my @ids = sort { $g_smin[$a] <=> $g_smin[$b] or $g_smax[$a] <=> $g_smax[$b] or $g_id[$a] cmp $g_id[$b] } @{$partition{$key}};
+        my (@batch, $max_end);
+        foreach my $i ( @ids ) {
+            if ( $target && @batch >= $target && $g_smin[$i] > $max_end ) {
+                push @tasks, [ $key, [@batch] ];
+                @batch = ();
+                undef $max_end;
             }
-            else {
-                $running{$pid} = [$key, $tmpfile];
-            }
+            push @batch, $i;
+            $max_end = $g_smax[$i] if ( !defined $max_end || $g_smax[$i] > $max_end );
         }
-
-        last unless %running;
-        my $finished_pid = waitpid(-1, 0);
-        next if $finished_pid <= 0;
-
-        my $exit_code = $? >> 8;
-        my $info = delete $running{$finished_pid};
-        next unless $info;
-        my ($key, $tmpfile) = @$info;
-
-        if ( $exit_code != 0 ) {
-            warn "Warning: worker process for partition [$key] exited with code $exit_code; its results may be incomplete\n";
-        }
-
-        if ( -e $tmpfile ) {
-            my $data = eval { retrieve($tmpfile) };
-            $all_results{$key} = $data if $data;
-            unlink $tmpfile;
-        }
-    }
-
-    rmdir $tmp_dir if $tmp_dir_created && -d $tmp_dir;
-}
-
-# 汇总所有分区的去冗余结果：删除被判定为冗余的基因，并按分区顺序输出日志，保证结果可复现
-foreach my $key ( sort keys %all_results ) {
-    my $deleted = $all_results{$key}{"deleted"} || [];
-    my $log = $all_results{$key}{"log"} || [];
-    foreach my $gene_ID ( @$deleted ) {
-        delete $gene_CDS{$gene_ID};
-    }
-    foreach my $line ( @$log ) {
-        print $delete_info_fh "$line\n";
+        push @tasks, [ $key, [@batch] ] if @batch;
     }
 }
-close $delete_info_fh if $output_delete_info;
+%partition = ();
 
-# 按坐标排序输出GFF3结果（没有对应区间的基因不会被去冗余步骤删除，会原样输出）
-my @gene_ID = sort { $sort1{$a} cmp $sort1{$b} or $sort2{$a} <=> $sort2{$b} or $sort3{$a} <=> $sort3{$b} or $sort4{$a} cmp $sort4{$b} or $a cmp $b } keys %gene_info;
-foreach my $gene_ID ( @gene_ID ) {
-    next unless exists $gene_CDS{$gene_ID};
-    print $gene_info{$gene_ID}{"header"};
-    my @mRNA_ID = @{ $gene_info{$gene_ID}{"mRNA_ID"} || [] };
-    foreach my $mRNA_ID ( sort @mRNA_ID ) {
-        print $gene_info{$gene_ID}{"mRNA_header"}{$mRNA_ID};
-        my $mRNA_info = $gene_info{$gene_ID}{"mRNA_info"}{$mRNA_ID};
-        print $mRNA_info if defined $mRNA_info;
+# 任务权重：基因数量。run_parallel 用贪心法（最大任务优先、分给当前负载最小的worker）预先分配任务
+my @task_weights = map { scalar @{ $_->[1] } } @tasks;
+
+my $dedup_res = &run_parallel( \@tasks, sub { return &find_redundant_in_partition( $_[0][1] ); }, $cpu, \@task_weights );
+
+&cleanup_tmp_dir();
+
+# 用去冗余时计算出的最终得分（包含支持得分、文件顺序降权和扣分）替换读入时的内在得分；
+# 设置--output_Supported_times时，同时记录降权和扣分之前的得分S（用于计算gene行的Supported_times）
+foreach my $r ( @$dedup_res ) {
+    my ($si, $sv) = ( $r->{si}, $r->{sv} );
+    foreach my $k ( 0 .. $#$si ) {
+        $g_score[ $si->[$k] ] = $sv->[$k];
+    }
+    if ( $output_Supported_times && $r->{s0} ) {
+        my $s0 = $r->{s0};
+        foreach my $k ( 0 .. $#$si ) {
+            $g_S0[ $si->[$k] ] = $s0->[$k];
+        }
+    }
+}
+
+# 汇总所有任务的去冗余结果：标记被判定为冗余的基因，并按任务顺序输出日志（仅当设置了--output_delete_info）
+foreach my $r ( @$dedup_res ) {
+    $g_del[$_] = 1 foreach @{ $r->{del} };
+    if ( $delete_info_fh ) {
+        print $delete_info_fh "$_\n" foreach @{ $r->{log} };
+    }
+}
+@$dedup_res = ();
+close $delete_info_fh if $delete_info_fh;
+
+# 仅当设置了--output_Supported_times时，才计算保留基因的 Supported_times = S / 区间长度 / (1 + Σ p*(1-p)^(k-1))，
+# 其中 S = S1 + S2 + Σ(S3 + S4) 为降权和扣分之前的得分（恒为非负数，不受输入文件顺序和各种扣分影响）；
+# Σ对n个intron求和，即分母为 1 + (1 - (1-p)^n)，用于消除基因自身intron较多带来的得分增加。
+if ( $output_Supported_times ) {
+    foreach my $i ( 0 .. $#g_id ) {
+        next if $g_del[$i];
+        my $len = $g_len[$i] || 0;
+        next unless $len > 0;
+        next unless defined $g_S0[$i];
+        my $n_intron = length( $g_intr[$i] ) / 16;
+        my $denominator = 1 + ( 1 - (1 - $intron_score) ** $n_intron );
+        $g_support[$i] = sprintf("%.3f", $g_S0[$i] / $len / $denominator);
+    }
+}
+
+##########################################################################################
+# 阶段3：按坐标排序输出GFF3结果（没有对应区间的基因不会被去冗余步骤删除，会原样输出）
+# 原始行不再常驻内存，而是根据记录的偏移量从输入文件中读回；连续的行合并为一段，一次读取。
+# 设置--output_Supported_times时，gene行和intron行的Supported_times标签在输出时写入。
+##########################################################################################
+my (@gff_fh, @gff_pos);
+foreach my $i ( 0 .. $#input_GFF3 ) {
+    open my $h, '<', $input_GFF3[$i] or die "Error: Can not open file $input_GFF3[$i], $!";
+    $gff_fh[$i + 1] = $h;
+    $gff_pos[$i + 1] = 0;
+}
+
+my @out_order = sort {
+        $chr_name[$g_gchr[$a]] cmp $chr_name[$g_gchr[$b]]
+        or $g_gstart[$a] <=> $g_gstart[$b]
+        or $g_gend[$a] <=> $g_gend[$b]
+        or $g_gstrand[$a] cmp $g_gstrand[$b]
+        or $g_id[$a] cmp $g_id[$b]
+    } grep { !$g_del[$_] } 0 .. $#g_id;
+
+foreach my $i ( @out_order ) {
+    my $fi = $g_file[$i];
+    my $header = &read_block( $fi, $g_hoff[$i], $g_hlen[$i] );
+    if ( $output_Supported_times && defined $g_support[$i] ) {
+        $header = &set_Supported_times( $header, $g_support[$i] );
+    }
+    print $header;
+    my @runs = unpack("J*", $g_runs[$i]);
+    for ( my $k = 0; $k < @runs; $k += 2 ) {
+        my $block = &read_block( $fi, $runs[$k], $runs[$k + 1] );
+        $block = &annotate_introns( $block ) if $output_Supported_times;
+        print $block;
     }
     print "\n";
 }
 
 
-# 对单个分区（同一条染色体、同一条链上的所有基因）做重叠检测与去冗余。
-# 纯函数：只读取全局的 %gene_CDS / %gene_score / %gene_CDS_length / %gene_file_num / $region_type / $overlap_coverage，不做任何修改、不直接打印，
-# 而是把"应删除的基因ID列表"和"日志文本"作为返回值交给调用者处理。
-# 这样无论是在串行模式下直接调用，还是在子进程中调用后通过Storable回传结果，逻辑完全一致，避免了两套代码。
-# 该函数也被用于对单个输入文件内部做去冗余统计（只传入该文件自身的基因ID即可）。
-# 没有对应区间（默认为CDS，--use_exon模式下为exon）的基因不会进入区间索引，因此不会与任何基因产生重叠，也就不会被删除。
+# 从第$fi个输入文件的偏移量$off处读取$len字节（连续读取时不需要seek）。
+sub read_block {
+    my ($fi, $off, $len) = @_;
+    my $h = $gff_fh[$fi];
+    if ( $gff_pos[$fi] != $off ) {
+        seek($h, $off, 0) or die "Error: seek failed in $input_GFF3[$fi-1], $!";
+    }
+    my $buf = "";
+    my $got = read($h, $buf, $len);
+    die "Error: read failed in $input_GFF3[$fi-1], $!" unless defined $got;
+    $gff_pos[$fi] = $off + $got;
+    return $buf;
+}
+
+# 染色体名 -> 整数编号
+sub chr_code {
+    my $name = defined $_[0] ? $_[0] : "";
+    my $c = $chr_idx{$name};
+    unless ( defined $c ) {
+        $c = scalar @chr_name;
+        push @chr_name, $name;
+        $chr_idx{$name} = $c;
+    }
+    return $c;
+}
+
+# intron的唯一标识：染色体、正负链、起始、终止（参数为GFF3一行split后的字段数组引用）。
+# 统计出现次数（worker中）和输出时查询次数（主进程中）都使用该函数，保证两处的键一致。
+sub intron_key {
+    my $f = $_[0];
+    return join( "\t", $f->[0], $f->[6], $f->[3] + 0, $f->[4] + 0 );
+}
+
+# 在一行GFF3的第9列中设置Supported_times标签：若已有Supported_times / Support_times标签则原位修改（多个重复标签只保留第一个），否则追加到末尾。
+# 其余列和行尾换行符保持不变。
+sub set_Supported_times {
+    my ($line, $value) = @_;
+    my @f = split /\t/, $line, 10;
+    return $line if @f < 9;
+    my $nl = "";
+    if ( @f == 9 ) { $nl = $1 if $f[8] =~ s/(\r?\n)\z//; }
+    my (@attr, $found);
+    foreach my $a ( grep { $_ ne "" } split /;/, $f[8] ) {
+        # 同时匹配Support_times和Supported_times，使输入中已有的标签被原位替换，而不是再追加一个。
+        if ( $a =~ m/^\s*[Ss]upport(?:ed)?_times=/ ) {
+            push @attr, "Supported_times=$value" unless $found;
+            $found = 1;
+        }
+        else {
+            push @attr, $a;
+        }
+    }
+    push @attr, "Supported_times=$value" unless $found;
+    $f[8] = join( ";", @attr ) . $nl;
+    return join( "\t", @f );
+}
+
+# 对一段输出文本（若干行GFF3）中的intron行（第3列为intron）设置Supported_times标签，值为该intron在所有输入基因模型中出现的次数。
+# 其它行原样返回。仅在设置了--output_Supported_times时调用。
+sub annotate_introns {
+    my $block = $_[0];
+    return $block unless $block =~ m/^[^\t\n]*\t[^\t\n]*\tintron\t/m;
+    my $out = "";
+    foreach my $line ( split /^/, $block ) {
+        if ( $line =~ m/^[^\t]*\t[^\t]*\tintron\t/ ) {
+            my @f = split /\t/, $line, 10;
+            if ( @f >= 9 ) {
+                my $cnt = $intron_count{ &intron_key( \@f ) };
+                $line = &set_Supported_times( $line, $cnt ) if defined $cnt;
+            }
+        }
+        $out .= $line;
+    }
+    return $out;
+}
+
+# 创建并行任务所用的临时目录（只创建一次）。若目录由程序自己创建，则cleanup_tmp_dir()会在结束时删除它。
+sub ensure_tmp_dir {
+    return $tmp_dir if $tmp_dir_ready;
+    unless ( -d $tmp_dir ) {
+        mkdir $tmp_dir or die "Error: Can not create temporary directory $tmp_dir, $!";
+        $tmp_dir_created = 1;
+    }
+    $tmp_dir = abs_path($tmp_dir);
+    $tmp_dir_ready = 1;
+    return $tmp_dir;
+}
+
+sub cleanup_tmp_dir {
+    rmdir $tmp_dir if $tmp_dir_ready && $tmp_dir_created && -d $tmp_dir;
+    $tmp_dir_ready = 0;
+}
+
+# 通用的并行任务执行器（常驻worker模式）。
+#   $tasks    任务数组引用，每个元素作为参数传给 $worker
+#   $worker   代码引用，接收一个任务，返回一个数据结构引用
+#   $nproc    最大worker数；<=1或只有一个任务时在当前进程内直接串行执行，不fork
+#   $weights  （可选）各任务的权重（数组引用，与任务一一对应），用于均衡负载
+# 做法：先按权重从大到小，把每个任务分给当前总权重最小的worker（LPT贪心）；然后每个worker只fork一次，
+# 依次处理分到的全部任务，最后把所有结果一次性写入一个临时文件（Storable）回传。
+# 返回值：数组引用，第i个元素是第i个任务的结果。任何worker失败都会终止程序，避免静默丢失结果。
+sub run_parallel {
+    my ($tasks, $worker, $nproc, $weights) = @_;
+    my @results;
+    my $n = scalar @$tasks;
+
+    if ( $nproc <= 1 || $n <= 1 ) {
+        foreach my $idx ( 0 .. $n - 1 ) {
+            $results[$idx] = $worker->( $tasks->[$idx] );
+        }
+        return \@results;
+    }
+
+    my $nw = $nproc < $n ? $nproc : $n;
+    my @order = sort { ( $weights ? $weights->[$b] <=> $weights->[$a] : 0 ) or $a <=> $b } 0 .. $n - 1;
+    my @load = (0) x $nw;
+    my @assign = map { [] } 1 .. $nw;
+    foreach my $idx ( @order ) {
+        my $best = 0;
+        foreach my $j ( 1 .. $nw - 1 ) { $best = $j if $load[$j] < $load[$best]; }
+        push @{ $assign[$best] }, $idx;
+        $load[$best] += $weights ? $weights->[$idx] : 1;
+    }
+
+    my $dir = &ensure_tmp_dir();
+    my %running;   # pid => [worker序号, 临时文件]
+    foreach my $w ( 0 .. $nw - 1 ) {
+        my ($fh, $tmpfile) = tempfile( DIR => $dir, SUFFIX => ".dat", UNLINK => 0 );
+        close $fh;
+
+        my $pid = fork();
+        unless ( defined $pid ) {
+            kill 'TERM', keys %running;
+            die "Error: fork failed: $!";
+        }
+
+        if ( $pid == 0 ) {
+            # 子进程：只计算，结果通过临时文件回传；用_exit退出，避免重复刷新继承来的输出缓冲区
+            srand();   # 各子进程使用独立的随机数种子
+            my %out;
+            my $ok = eval {
+                foreach my $idx ( @{ $assign[$w] } ) { $out{$idx} = $worker->( $tasks->[$idx] ); }
+                1;
+            };
+            unless ( $ok ) {
+                warn "Error: worker $w failed: $@";
+                POSIX::_exit(2);
+            }
+            eval { store( \%out, $tmpfile ); 1 } or do {
+                warn "Error: worker $w failed to write result to $tmpfile: $@";
+                POSIX::_exit(1);
+            };
+            POSIX::_exit(0);
+        }
+        $running{$pid} = [ $w, $tmpfile ];
+    }
+
+    while ( %running ) {
+        my $finished_pid = waitpid(-1, 0);
+        last if $finished_pid <= 0;
+        my $status = $?;
+        my $info = delete $running{$finished_pid};
+        next unless $info;
+        my ($w, $tmpfile) = @$info;
+        if ( $status != 0 ) {
+            kill 'TERM', keys %running;
+            die "Error: worker process $w exited abnormally (status $status)\n";
+        }
+        my $data = eval { retrieve($tmpfile) };
+        die "Error: can not read result of worker $w from $tmpfile: $@\n" unless defined $data;
+        unlink $tmpfile;
+        $results[$_] = $data->{$_} foreach keys %$data;
+    }
+    return \@results;
+}
+
+# 返回基因所在的分区名：默认为 染色体+正负链；设置--both_strands后仅为染色体。
+sub partition_key {
+    my $i = $_[0];
+    my $name = $chr_name[ $g_chr[$i] ];
+    return $both_strands ? $name : "$name\t$g_strand[$i]";
+}
+
+# 对一组基因（同一分区内、坐标上互不相关的若干块）做重叠检测、打分与去冗余（核心去冗余算法）。
+# 传入的基因编号必须属于同一个分区（同一条染色体、同一条链；--both_strands时同一条染色体），且都有区间。
+# 只读取全局的 @g_* 数组及 $overlap_coverage / $intron_score / $file_decay / $stable_tie / $want_log / $region_type / $output_Supported_times，
+# 不做任何修改、不直接打印，而是把"应删除的基因编号"、"日志文本"、"这些基因的最终得分"
+# （以及设置--output_Supported_times时，这些基因降权和扣分之前的得分S）作为返回值交给调用者处理。
 #
-# 排序/取舍规则（从高到低优先级）：
-#   1) 得分（$gene_score，保留两位小数）越高越优先保留；
-#   2) 若得分相同，则来自越早输入的文件（$gene_file_num 越小）越优先保留；
-#   3) 若前两者都相同（理论上仅可能发生在同一文件内出现两个基因得分完全一致的情况），
-#      再按基因ID的字典序（$a cmp $b）决定，以保证结果完全确定、可复现。
+# 内部把基因按ID字典序重新编号为局部编号 0..n-1（局部编号的大小顺序 = 基因ID字典序），
+# 重叠关系用整数数组存放：$nb[k] 的每个元素 = (邻居局部编号 << 32) | 重叠碱基数，排序后即按邻居ID顺序。
+#
+# 算法步骤：
+#   (A) 把所有区间按起始坐标排序后做扫描线，找出所有区间至少有1bp重叠的基因对，每对只计算一次重叠碱基数；
+#   (B) 打分：S = S1+S2+Σ(S3+S4)（此S即用于Supported_times的"降权和扣分前的得分"），再按输入文件顺序乘以 $file_decay**(文件序号-1)，最后按缺起始/终止密码子、移码、内部终止密码子扣分；
+#   (C) 对重叠关系求连通分量，得到"类"（只聚类一次）；
+#   (D) 类内按得分从高到低排序；
+#   (E) 贪心：依次取出每个仍被保留的基因G，只遍历G的直接重叠邻居，删除排在其后、仍被保留且重叠比例（重叠碱基数/较小基因区间长度）超过阈值的基因；
+#   (F) 每类排序第一的基因一定保留。
+#
+# 排序/取舍规则：
+#   1) 得分（保留两位小数）越高越优先保留；
+#   2) 得分相同时：默认随机；设置--stable_tie时，依次为 输入文件越靠前越优先、扣分前的S越高越优先、基因ID字典序。
 sub find_redundant_in_partition {
-    my @gene_ids = @{$_[0]};
-    my (%cds2gene, %overlap);
+    my @gi = sort { $g_id[$a] cmp $g_id[$b] } @{$_[0]};
+    my $n = scalar @gi;
+    my (@reg, @ni, @nb, @score, @score_num, @raw, @s0);
 
-    # 建立分区内局部区间索引（同一分区内染色体和正负链相同，索引无需再区分chr/strand）
-    foreach my $gene_ID ( @gene_ids ) {
-        next unless defined $gene_CDS{$gene_ID} && length $gene_CDS{$gene_ID};
-        foreach my $CDS ( split /\n/, $gene_CDS{$gene_ID} ) {
-            my ($start, $end) = (split /\t/, $CDS)[0,1];
-            my $index1 = int($start / 1000);
-            my $index2 = int($end / 1000);
-            foreach my $index ( $index1 .. $index2 ) {
-                $cds2gene{$index}{"$start\t$end"}{$gene_ID} = 1;
-            }
-        }
+    # 解析每个基因的区间（已排序且互不重叠的 起始,终止 平铺数组）和intron（起始,终止 平铺数组）
+    foreach my $k ( 0 .. $n - 1 ) {
+        my $i = $gi[$k];
+        $reg[$k] = [ unpack("J*", $g_reg[$i]) ];
+        $ni[$k] = [ unpack("J*", $g_intr[$i]) ] if length $g_intr[$i];
     }
 
-    # 找到两两有重叠的基因
-    foreach my $gene_ID ( @gene_ids ) {
-        next unless defined $gene_CDS{$gene_ID} && length $gene_CDS{$gene_ID};
-        foreach my $CDS ( split /\n/, $gene_CDS{$gene_ID} ) {
-            my ($start, $end) = (split /\t/, $CDS)[0,1];
-            my $index1 = int($start / 1000);
-            my $index2 = int($end / 1000);
-            foreach my $index ( $index1 .. $index2 ) {
-                foreach my $region ( keys %{$cds2gene{$index}} ) {
-                    my ($r_start, $r_end) = split /\t/, $region;
-                    next unless ( $r_end >= $start && $r_start <= $end );
-                    foreach my $other_gene ( keys %{$cds2gene{$index}{$region}} ) {
-                        next if $other_gene eq $gene_ID;
-                        $overlap{$gene_ID}{$other_gene} = 1;
-                        $overlap{$other_gene}{$gene_ID} = 1;
-                    }
+    # 扫描线找到两两有重叠的基因：
+    # 把所有基因的所有区间按起始坐标排序，依次处理每个区间；
+    # active 中只保留终止坐标 >= 当前起始坐标的区间，它们与当前区间必有至少1bp重叠。
+    # 每一对基因只处理一次（%seen），重叠碱基数只算一次，同时写入两个方向。
+    {
+        my @iv;
+        foreach my $k ( 0 .. $n - 1 ) {
+            my $r = $reg[$k];
+            for ( my $x = 0; $x < @$r; $x += 2 ) {
+                push @iv, [ $r->[$x], $r->[$x + 1], $k ];
+            }
+        }
+        @iv = sort { $a->[0] <=> $b->[0] or $a->[2] <=> $b->[2] } @iv;
+        my (@active, %seen);
+        foreach my $cur ( @iv ) {
+            my ($s, $e, $k) = @$cur;
+            @active = grep { $_->[1] >= $s } @active;
+            foreach my $p ( @active ) {
+                my $pk = $p->[2];
+                next if $pk == $k;
+                my $key = $pk < $k ? $pk * $n + $k : $k * $n + $pk;
+                next if $seen{$key}++;
+                my $m = &get_match_length( $reg[$pk], $reg[$k] );
+                push @{ $nb[$k] }, ( $pk << 32 ) | $m;
+                push @{ $nb[$pk] }, ( $k << 32 ) | $m;
+            }
+            push @active, $cur;
+        }
+    }
+    foreach my $k ( 0 .. $n - 1 ) {
+        @{ $nb[$k] } = sort { $a <=> $b } @{ $nb[$k] } if $nb[$k];
+    }
+
+    # 打分：S = S1 + S2 + Σ(S3 + S4)；再按输入文件顺序降权；最后按扣分比例扣分，最终得分允许为负数
+    # 邻居按基因ID顺序累加，保证浮点数求和顺序固定，结果与运行次数无关（--stable_tie可复现）
+    foreach my $k ( 0 .. $n - 1 ) {
+        my $i = $gi[$k];
+        my $S = $g_B[$i];
+        if ( $nb[$k] ) {
+            my $mi = $ni[$k];
+            foreach my $v ( @{ $nb[$k] } ) {
+                my $o = $v >> 32;
+                my $s3 = $v & 0xFFFFFFFF;
+                my $s4 = 0;
+                if ( $mi && $ni[$o] && $g_istr[$i] eq $g_istr[ $gi[$o] ] ) {
+                    my $shared = &shared_introns( $mi, $ni[$o] );
+                    $s4 = $s3 * ( 1 - (1 - $intron_score) ** $shared ) if $shared;
                 }
+                $S += $s3 + $s4;
             }
         }
+        # 降权和扣分之前的S（= S1+S2+Σ(S3+S4)，恒为非负数），用于计算gene行的Supported_times
+        $s0[$k] = $S if $output_Supported_times;
+        # 按输入文件顺序降权：第1个文件不降，第i个文件乘以 $file_decay ** (i-1)
+        $S = $S * ( $file_decay ** ( ($g_file[$i] || 1) - 1 ) );
+        $raw[$k] = $S;   # 扣分前（降权后）的S，--stable_tie时用于并列时的排序
+        $S = $S * ( 1 - $g_ratio[$i] );
+        $score[$k] = sprintf("%.2f", $S);
+        $score_num[$k] = $score[$k] + 0;   # 排序时直接用数值
     }
 
-    # 将相互有重叠的基因聚成一类
-    my %cluster;
-    while (%overlap) {
-        my %cluster_one;
-        my @stack = ( (sort keys %overlap)[0] );
+    # 将相互有重叠的基因聚成一类（连通分量；种子按局部编号升序，所以各类已按首个成员排序）
+    my (@visited, @clusters);
+    foreach my $seed ( 0 .. $n - 1 ) {
+        next if $visited[$seed] || !$nb[$seed];
+        my @stack = ($seed);
+        my @members;
         while (@stack) {
-            my $one = shift @stack;
-            next if $cluster_one{$one};
-            $cluster_one{$one} = 1;
-            if ( exists $overlap{$one} ) {
-                push @stack, keys %{$overlap{$one}};
-                delete $overlap{$one};
-            }
+            my $one = pop @stack;
+            next if $visited[$one];
+            $visited[$one] = 1;
+            push @members, $one;
+            push @stack, grep { !$visited[$_] } map { $_ >> 32 } @{ $nb[$one] };
         }
-        $cluster{ join("\t", sort keys %cluster_one) } = 1;
+        push @clusters, [ sort { $a <=> $b } @members ];
     }
 
-    my (@deleted, @log);
+    my (@deleted, @log, @rank);
 
-    # 对每类基因按得分从大到小排序（得分相同则按输入文件先后顺序，再相同则按基因ID字典序），对有重叠的基因进行过滤
-    foreach my $cluster ( sort keys %cluster ) {
-        my @genes = split /\t/, $cluster;
-        @genes = sort {
-            $gene_score{$b} <=> $gene_score{$a}
-                or $gene_file_num{$a} <=> $gene_file_num{$b}
-                or $a cmp $b
-        } @genes;
-        my %genes = map { $_ => 1 } @genes;
+    # 对每类基因按得分从大到小排序，对有重叠的基因进行过滤。
+    foreach my $c ( @clusters ) {
+        my @genes;
+        if ( $stable_tie ) {
+            @genes = sort {
+                $score_num[$b] <=> $score_num[$a]
+                    or $g_file[$gi[$a]] <=> $g_file[$gi[$b]]
+                    or $raw[$b] <=> $raw[$a]
+                    or $a <=> $b
+            } @$c;
+        }
+        else {
+            my %rnd;
+            $rnd{$_} = rand() foreach @$c;
+            @genes = sort { $score_num[$b] <=> $score_num[$a] or $rnd{$a} <=> $rnd{$b} } @$c;
+        }
 
-        while (@genes) {
-            my $gene = shift @genes;
-            next unless $genes{$gene};
-            my @gene_CDS_arr = split /\n/, $gene_CDS{$gene};
-            my $gene_len = $gene_CDS_length{$gene} || 0;
-            delete $genes{$gene};
+        # 记录每个基因在类内的排名，贪心时只需遍历直接邻居并判断其排名是否在当前基因之后
+        @rank[@genes] = 0 .. $#genes;
 
-            foreach my $target_gene (
-                sort {
-                    $gene_score{$b} <=> $gene_score{$a}
-                        or $gene_file_num{$a} <=> $gene_file_num{$b}
-                        or $a cmp $b
-                } keys %genes
-            ) {
-                my @target_CDS_arr = split /\n/, $gene_CDS{$target_gene};
-                my $target_len = $gene_CDS_length{$target_gene} || 0;
+        my %removed;
+        foreach my $r ( 0 .. $#genes ) {
+            my $gene = $genes[$r];
+            next if $removed{$gene};
+            my $gene_len = $g_len[ $gi[$gene] ] || 0;
+            # 区间长度为0的基因不可能与其它基因重叠，同时避免除以0
+            next unless $gene_len > 0;
 
-                # 区间长度为0的基因不可能与其它基因重叠，同时避免除以0
-                next unless $gene_len > 0 && $target_len > 0;
+            # 只遍历与当前基因直接重叠、排名在其后的邻居（按排名排序，保证日志顺序固定）
+            my @neighbors = sort { $rank[$a->[0]] <=> $rank[$b->[0]] }
+                            grep { $rank[$_->[0]] > $r }
+                            map { [ $_ >> 32, $_ & 0xFFFFFFFF ] } @{ $nb[$gene] };
 
-                my $match_length = &get_match_length(\@gene_CDS_arr, \@target_CDS_arr);
+            foreach my $nbr ( @neighbors ) {
+                my ($target, $match_length) = @$nbr;
+                next if $removed{$target};
+                my $target_len = $g_len[ $gi[$target] ] || 0;
+                next unless $target_len > 0;
+
                 my $ratio1 = $match_length / $gene_len;
                 my $ratio2 = $match_length / $target_len;
                 my $ratio = $ratio1 > $ratio2 ? $ratio1 : $ratio2;
 
                 if ( $ratio > $overlap_coverage ) {
-                    push @log, "Delete gene $target_gene (Score: $gene_score{$target_gene}), for its $region_type coverage ratio with gene $gene (Score: $gene_score{$gene}) is: $ratio > $overlap_coverage";
-                    push @deleted, $target_gene;
-                    delete $genes{$target_gene};
-                }
-            }
-            @genes = sort {
-                $gene_score{$b} <=> $gene_score{$a}
-                    or $gene_file_num{$a} <=> $gene_file_num{$b}
-                    or $a cmp $b
-            } keys %genes;
-        }
-    }
-
-    return (\@deleted, \@log);
-}
-
-# 比较两个基因集合（通常分别来自两个不同的输入文件，且各自内部已经去除过冗余）之间的区间（CDS或exon）重叠情况。
-# 只寻找"跨集合"的重叠基因对（setA中的基因 vs setB中的基因），不检测同一集合内部的重叠。
-# 返回值为数组，每个元素是 [setA中的基因ID, setB中的基因ID, 重叠比例]，重叠比例已经超过 $overlap_coverage 阈值。
-# 该函数只做重叠关系的检测和报告，不会修改任何全局基因数据，也不代表最终去冗余的真实结果（真实结果以两文件合并后统一去冗余为准）。
-# 没有对应区间的基因不参与比较。
-sub compare_two_gene_sets_overlap {
-    my ($setA_ref, $setB_ref) = @_;
-    my @setA = @$setA_ref;
-    my @setB = @$setB_ref;
-
-    # 对setB按 染色体+正负链 以及 分箱 建立索引，便于快速查找与setA中基因可能重叠的setB基因
-    my %indexB;
-    foreach my $gene_ID ( @setB ) {
-        next unless defined $gene_CDS{$gene_ID} && length $gene_CDS{$gene_ID};
-        my $key = "$chr{$gene_ID}\t$strand{$gene_ID}";
-        foreach my $CDS ( split /\n/, $gene_CDS{$gene_ID} ) {
-            my ($start, $end) = (split /\t/, $CDS)[0,1];
-            my $index1 = int($start / 1000);
-            my $index2 = int($end / 1000);
-            foreach my $index ( $index1 .. $index2 ) {
-                $indexB{$key}{$index}{"$start\t$end"}{$gene_ID} = 1;
-            }
-        }
-    }
-
-    my (@pairs, %seen_pair);
-    foreach my $gene_ID ( @setA ) {
-        next unless defined $gene_CDS{$gene_ID} && length $gene_CDS{$gene_ID};
-        my $key = "$chr{$gene_ID}\t$strand{$gene_ID}";
-        next unless exists $indexB{$key};
-
-        my %candidate;
-        foreach my $CDS ( split /\n/, $gene_CDS{$gene_ID} ) {
-            my ($start, $end) = (split /\t/, $CDS)[0,1];
-            my $index1 = int($start / 1000);
-            my $index2 = int($end / 1000);
-            foreach my $index ( $index1 .. $index2 ) {
-                next unless exists $indexB{$key}{$index};
-                foreach my $region ( keys %{$indexB{$key}{$index}} ) {
-                    my ($r_start, $r_end) = split /\t/, $region;
-                    next unless ( $r_end >= $start && $r_start <= $end );
-                    foreach my $other_gene ( keys %{$indexB{$key}{$index}{$region}} ) {
-                        $candidate{$other_gene} = 1;
-                    }
+                    push @log, "Delete gene $g_id[$gi[$target]] (Score: $score[$target]), for its $region_type coverage ratio with gene $g_id[$gi[$gene]] (Score: $score[$gene]) is: $ratio > $overlap_coverage" if $want_log;
+                    push @deleted, $gi[$target];
+                    $removed{$target} = 1;
                 }
             }
         }
-
-        foreach my $other_gene ( sort keys %candidate ) {
-            next if $seen_pair{"$gene_ID\t$other_gene"};
-            $seen_pair{"$gene_ID\t$other_gene"} = 1;
-
-            my $len_A = $gene_CDS_length{$gene_ID} || 0;
-            my $len_B = $gene_CDS_length{$other_gene} || 0;
-            next unless $len_A > 0 && $len_B > 0;
-
-            my @CDS_A = split /\n/, $gene_CDS{$gene_ID};
-            my @CDS_B = split /\n/, $gene_CDS{$other_gene};
-            my $match_length = &get_match_length(\@CDS_A, \@CDS_B);
-            my $ratio1 = $match_length / $len_A;
-            my $ratio2 = $match_length / $len_B;
-            my $ratio = $ratio1 > $ratio2 ? $ratio1 : $ratio2;
-
-            if ( $ratio > $overlap_coverage ) {
-                push @pairs, [$gene_ID, $other_gene, $ratio];
-            }
-        }
     }
 
-    return @pairs;
+    my %ret = ( del => \@deleted, log => \@log, si => \@gi, sv => \@score );
+    $ret{s0} = \@s0 if $output_Supported_times;
+    return \%ret;
 }
 
+# 计算两组区间（平铺数组 [起始,终止,起始,终止,...]）的重叠碱基数。
+# 前提：每组区间都已按起始坐标排序且互不重叠，
+# 因此两组区间的各个交集也互不重叠，总重叠碱基数等于所有交集长度之和，用双指针线性扫描即可。
 sub get_match_length {
-    my @region1 = @{$_[0]};
-    my @region2 = @{$_[1]};
-
-    my $out_length = 0;
-    my @region_match;
-    foreach my $region1 (@region1) {
-        my ($start1, $end1) = split /\t/, $region1;
-        foreach my $region2 (@region2) {
-            my ($start2, $end2) = split /\t/, $region2;
-            if ($start1 <= $end2 && $start2 <= $end1) {
-                my ($start, $end) = ($start1, $end1);
-                $start = $start2 if $start2 > $start1;
-                $end = $end2 if $end2 < $end1;
-                push @region_match, "$start\t$end";
-            }
-        }
+    my ($A, $B) = @_;
+    my ($i, $j, $sum) = (0, 0, 0);
+    my ($na, $nb) = (scalar @$A, scalar @$B);
+    while ( $i < $na && $j < $nb ) {
+        my ($as, $ae, $bs, $be) = ( $A->[$i], $A->[$i + 1], $B->[$j], $B->[$j + 1] );
+        my $s = $as > $bs ? $as : $bs;
+        my $e = $ae < $be ? $ae : $be;
+        $sum += $e - $s + 1 if $e >= $s;
+        if ( $ae < $be ) { $i += 2 } else { $j += 2 }
     }
-
-    $out_length = &get_gene_CDS_length(\@region_match);
-    return $out_length;
+    return $sum;
 }
 
-sub get_gene_CDS_length {
-    my @region = @{$_[0]};
-    return 0 unless @region;
-    @region = sort { (split /\t/, $a)[0] <=> (split /\t/, $b)[0] } @region;
-
-    my $out_length = 0;
-    my $last_region = shift @region;
-    my @last = split /\t/, $last_region;
-    $out_length += ($last[1] - $last[0] + 1);
-    foreach ( @region ) {
-        my @last_region = split /\t/, $last_region;
-        my @region = split /\t/;
-
-        if ($region[0] > $last_region[1]) {
-            $out_length += ($region[1] - $region[0] + 1);
-            $last_region = $_;
-        }
-        elsif ($region[1] > $last_region[1]) {
-            $out_length += ($region[1] - $last_region[1]);
-            $last_region = $_;
-        }
+# 计算两个基因共有的intron数（起止坐标都相同）。两组intron均为平铺数组 [起始,终止,...]，已按起始坐标排序，
+# 每组内intron的起始坐标互不相同，用双指针线性扫描。调用前已确认两个基因的intron所在正负链相同。
+sub shared_introns {
+    my ($A, $B) = @_;
+    my ($i, $j, $c) = (0, 0, 0);
+    my ($na, $nb) = (scalar @$A, scalar @$B);
+    while ( $i < $na && $j < $nb ) {
+        my $d = $A->[$i] <=> $B->[$j];
+        if    ( $d < 0 ) { $i += 2 }
+        elsif ( $d > 0 ) { $j += 2 }
         else {
-            next;
+            $c++ if $A->[$i + 1] == $B->[$j + 1];
+            $i += 2; $j += 2;
         }
     }
-
-    return $out_length;
+    return $c;
 }
 
 
-# 分析基因模型的完整性，并统计内部终止密码子数量。
-# 返回值为列表：(完整性类型, 内部终止密码子数量)
-#   完整性类型：complete / 5prime_partial / 3prime_partial / internal
-#   内部终止密码子：按CDS阅读框（从CDS第一个碱基开始，负链为反向互补后的序列）逐个密码子检查，
-#   若最后一个完整密码子是终止密码子，则视为正常的终止密码子，不计入内部终止密码子。
-# 起始密码子、终止密码子由--genetic_code决定（或由兼容保留的--start_codon、--stop_codon决定）。
+# 分析基因模型的起始/终止密码子、移码和内部终止密码子。
+# 参数：CDS数组引用（"起始\t结束\t正负链\tphase"）、stop_codon数组引用（"起始\t结束"）、染色体、正负链
+# 返回值为哈希引用：
+#   have_seq      基因组中是否有该染色体（没有则无法判断起始/终止密码子和内部终止密码子）
+#   has_start     是否有正确的起始密码子
+#   has_stop      是否有正确的终止密码子
+#   internal_stop 内部终止密码子数量
+#   frameshift    移码数量
+# 阅读框：以5'端第一个CDS的phase为准，phase不为0时视为缺少起始密码子（开头phase个碱基属于上游缺失的密码子，无法拼接，予以丢弃）。
+# 跨CDS的密码子：各CDS序列沿转录方向依次拼接到同一个$coding字符串，最后再按3个碱基切分密码子，
+#   因此被内含子隔开的密码子（上一个CDS末尾的1~2个碱基 + 下一个CDS开头的碱基）会自然拼成完整的三联体密码子，
+#   跨内含子的终止密码子（如 TA|A、T|AG、T|GA）同样会被识别并计入内部终止密码子。
+# 移码：沿转录方向，若后一个CDS的phase与由前面累计编码长度推算的期望phase一致，则按上述方式直接拼接；
+#   若不一致则记一个移码，此时移码位置处无法拼成完整密码子的碱基（上一个CDS末尾的残余碱基和下一个CDS开头phase个碱基）才被丢弃，
+#   并按注释的phase重建阅读框，避免移码下游产生大量伪终止密码子而重复扣分。
+#   若该转录本没有任何CDS的phase为1或2，则phase没有信息量，不做移码检测。
+# 若GFF3中有不与任何CDS重叠的stop_codon行（例如miniprot），则按转录方向并入序列末尾。
+# 内部终止密码子：按阅读框逐个密码子检查（用预编译的正则在C层扫描），若3'端完整，则最后一个终止密码子视为正常的终止密码子，不计入。
 sub analysis_geneModels_integrity {
     my @CDS = @{$_[0]};
-    my ($chr, $strand) = ($_[1], $_[2]);
-    my $out;
+    my @stop = @{$_[1]};
+    my ($chr, $strand) = ($_[2], $_[3]);
 
-    # 没有CDS，或者GFF3中的染色体在基因组序列中不存在时，无法判断完整性，按"internal"处理
-    return ("internal", 0) unless @CDS;
-    return ("internal", 0) unless defined $seq{$chr};
+    my %res = ( have_seq => 0, has_start => 0, has_stop => 0, internal_stop => 0, frameshift => 0 );
+    return \%res unless @CDS;
+    my $have_seq = defined $seq{$chr} ? 1 : 0;
+    $res{have_seq} = $have_seq;
 
-    @CDS = sort { (split /\t/, $a)[0] <=> (split /\t/, $b)[0] } @CDS;
-    my $seq = "";
-    foreach ( @CDS ) {
-        my @field = split /\t/;
-        $seq .= substr($seq{$chr}, $field[0] - 1, $field[1] - $field[0] + 1);
+    # 每个片段：[起始, 结束, phase, 是否CDS]
+    my @cds_seg = map { my @f = split /\t/; [ $f[0], $f[1], $f[3], 1 ] } @CDS;
+    my @seg = @cds_seg;
+    foreach ( @stop ) {
+        my ($s, $e) = split /\t/;
+        my $overlap = grep { $s <= $_->[1] && $e >= $_->[0] } @cds_seg;
+        push @seg, [ $s, $e, undef, 0 ] unless $overlap;
     }
-    if ( $strand eq "-" ) {
-        $seq = reverse $seq;
-        $seq =~ tr/ATCGatcgn/TAGCTAGCN/;
-    }
 
-    if ( $seq =~ m/^(\w{3})/ && exists $start_codon{$1} ) {
-        if ( $seq =~ m/(\w{3})$/ && exists $stop_codon{$1} ) {
-            $out = "complete";
+    # 按转录方向排序：正链起始坐标从小到大，负链从大到小
+    my $minus = ( $strand eq "-" ) ? 1 : 0;
+    @seg = sort { $minus ? ( $b->[0] <=> $a->[0] ) : ( $a->[0] <=> $b->[0] ) } @seg;
+
+    # phase是否有信息量：至少有一个CDS的phase为1或2
+    my $phase_informative = scalar grep { defined $_->[2] && $_->[2] =~ m/^[12]$/ } @cds_seg;
+
+    my $coding = "";
+    my $start_ok = 1;
+    my $first = 1;
+    foreach my $s ( @seg ) {
+        my $len = $s->[1] - $s->[0] + 1;
+        my $piece = $have_seq ? substr($seq{$chr}, $s->[0] - 1, $len) : ( "N" x $len );
+        $piece = "" unless defined $piece;
+        if ( $minus ) {
+            $piece = reverse $piece;
+            $piece =~ tr/ATCGatcgn/TAGCTAGCN/;
+        }
+        my $phase = $s->[2];
+        my $has_phase = ( defined $phase && $phase =~ m/^[012]$/ ) ? 1 : 0;
+
+        if ( $first ) {
+            $phase = 0 unless $has_phase;
+            if ( $phase > 0 ) {
+                # 5'端第一个CDS：开头phase个碱基属于上游缺失的密码子，没有可拼接的对象，只能丢弃
+                $piece = $phase < length($piece) ? substr($piece, $phase) : "";
+                $start_ok = 0;
+            }
+            $coding = $piece;
+            $first = 0;
         }
         else {
-            $out = "3prime_partial";
+            if ( $s->[3] && $has_phase && $phase_informative ) {
+                my $frame_pos = length($coding) % 3;
+                my $expected = ( 3 - $frame_pos ) % 3;
+                if ( $phase != $expected ) {
+                    # 检测到移码：上一个CDS末尾的残余碱基与本CDS开头phase个碱基无法拼成合法密码子，才丢弃并按注释phase重建阅读框
+                    $res{frameshift} ++;
+                    $coding = substr($coding, 0, length($coding) - $frame_pos);
+                    $piece = $phase < length($piece) ? substr($piece, $phase) : "";
+                }
+                # phase一致（无移码）时不做任何截断：上一个CDS末尾的不完整密码子
+                # 会与本CDS开头的碱基直接拼接成完整密码子，参与后续的终止密码子判断
+            }
+            $coding .= $piece;
         }
     }
-    elsif ( $seq =~ m/(\w{3})$/ && exists $stop_codon{$1} ) {
-        $out = "5prime_partial";
-    }
-    else {
-        $out = "internal";
-    }
 
-    # 统计内部终止密码子
-    my @codon = ( $seq =~ m/(\w{3})/g );
-    pop @codon if @codon && exists $stop_codon{$codon[-1]};
-    my $internal_stop_num = scalar( grep { exists $stop_codon{$_} } @codon );
+    # 基因组中没有该染色体时，无法判断起始/终止密码子和内部终止密码子（移码只依赖phase，已经统计）
+    return \%res unless $have_seq;
 
-    return ($out, $internal_stop_num);
+    my $n_codon = int( length($coding) / 3 );
+    $res{has_start} = ( $start_ok && $n_codon && exists $start_codon{ substr($coding, 0, 3) } ) ? 1 : 0;
+    $res{has_stop} = ( length($coding) % 3 == 0 && $n_codon && exists $stop_codon{ substr($coding, ($n_codon - 1) * 3, 3) } ) ? 1 : 0;
+
+    # 统计内部终止密码子（若3'端完整，最后一个终止密码子是正常的，不计入）
+    my $last_i = $res{has_stop} ? $n_codon - 2 : $n_codon - 1;
+    my $limit = ( $last_i + 1 ) * 3;
+    my $n_internal = 0;
+    if ( $limit > 0 ) {
+        my $sub = substr($coding, 0, $limit);
+        $n_internal ++ while $sub =~ m/$COUNT_STOP_RE/g;
+    }
+    $res{internal_stop} = $n_internal;
+
+    return \%res;
 }
 
 
@@ -935,7 +1117,7 @@ sub codon_table {
         $start_table{$_} = 1 foreach qw/GTG CTG TTG/;
     }
     else {
-        print STDERR "Warning: 不支持的遗传密码 $genetic_code ，起始和终止密码子按标准遗传密码设置。\n";
+        print STDERR "Warning: unsupported genetic code $genetic_code, start and stop codons are set according to the standard genetic code.\n";
     }
 
     my %stop_table;
@@ -947,117 +1129,356 @@ sub codon_table {
 }
 
 
-sub get_geneModels_from_GFF3 {
-    my %gene_info;
-    my $input_file = $_[0];
-    # 第一轮，找gene信息
-    open IN, $input_file or die "Error: Can not open file $input_file, $!";
-    while (<IN>) {
-        if ( m/\tgene\t.*ID=([^;\s]+)/ ) {
-            $gene_info{$1}{"header"} = $_;
+# worker：读取一个GFF3文件的一个分片并立即打分。
+# 返回"列式"哈希引用：每个键对应一个数组，第k个元素属于第k个基因（比每个基因一个小哈希省内存，Storable回传也更快）。
+# 设置--output_Supported_times时，另外返回键 icnt（哈希引用）：本分片内各intron在基因模型中出现的次数。
+# 同一个基因的多个转录本共有的同一个intron只计一次；基因的原始数据在计数后才丢弃。
+sub load_and_score_file {
+    my ($fi, $shard, $nshard) = @_;
+    my $gh = &parse_gff3_file( $input_GFF3[$fi], $shard, $nshard );
+    my @names = qw/id file gchr gstart gend gstrand hoff hlen runs chr strand len B ratio reg intr istr score smin smax/;
+    my %col = map { $_ => [] } @names;
+    my %icnt;
+    foreach my $id ( sort keys %$gh ) {
+        if ( $output_Supported_times ) {
+            my %uniq;
+            foreach my $t ( values %{ $gh->{$id}{tx} } ) {
+                $uniq{$_} = 1 foreach @{ $t->{intron} };
+            }
+            $icnt{$_}++ foreach keys %uniq;
         }
+        my @rec = &compute_gene_record( $id, $fi + 1, $gh->{$id} );
+        push @{ $col{ $names[$_] } }, $rec[$_] foreach 0 .. $#names;
+        delete $gh->{$id};   # 该基因的原始转录本数据即用即弃
     }
-    close IN;
-    # 第二轮，找Parent值是geneID的信息，包含但不限于 mRNA 信息
-    my %mRNA_ID2gene_ID;
-    open IN, $input_file or die "Error: Can not open file $input_file, $!";
-    while (<IN>) {
-        if ( m/Parent=([^;\s]+)/ ) {
-            my $parent = $1;
-            if ( exists $gene_info{$parent} ) {
-                if ( m/ID=([^;\s]+)/ ) {
-                    push @{$gene_info{$parent}{"mRNA_ID"}}, $1;
-                    $gene_info{$parent}{"mRNA_header"}{$1} = $_;
-                    $mRNA_ID2gene_ID{$1} = $parent;
-                }
+    $col{icnt} = \%icnt if $output_Supported_times;
+    return \%col;
+}
+
+# 单遍扫描读取一个GFF3文件，返回 {基因ID => 基因信息} 的哈希引用。
+# 基因信息：{hoff, hlen, chr, start, end, strand, tx => {转录本ID => {...}}}，其中 hoff/hlen 是该行在文件中的字节偏移量和长度。
+# 只保留打分所需的坐标和输出所需的偏移量，不在内存中保存GFF3原文。
+# $nshard > 1 时，只保留序号 % $nshard == $shard 的基因（序号按gene行在文件中出现的顺序）及其转录本和子特征，其余基因整体跳过。
+# 识别规则：gene行：第3列为gene且带ID；转录本行：Parent是某个gene且带ID（mRNA等）；子特征行：Parent是某个转录本。
+# 不要求父级行出现在子级行之前：父级尚未出现的行先放入 %pending，等父级出现时再挂接；子特征行在文件中的相对顺序保持不变。
+sub parse_gff3_file {
+    my ($file, $shard, $nshard) = @_;
+    $shard = 0 unless defined $shard;
+    $nshard = 1 unless $nshard;
+    my (%gene, %tx, %pending, %skip_gene, %skip_tx);
+    my $ord = 0;
+    my $process;
+    $process = sub {
+        my ($parent, $f, $p, $l) = @_;
+        if ( exists $gene{$parent} ) {
+            # Parent是基因：这是一条转录本行（没有ID的行与旧版本一样被忽略）
+            return unless $f->[8] =~ m/(?:^|;)\s*ID=([^;\s]+)/;
+            my $tid = $1;
+            my $t = { hoff => $p, hlen => $l, chr => $f->[0], strand => $f->[6], offs => "", region => [], len => 0, cds => [], stop => [], intron => [] };
+            $gene{$parent}{tx}{$tid} = $t;
+            $tx{$tid} = $t;
+            if ( my $pl = delete $pending{$tid} ) {
+                &add_tx_child( $t, $_->[1], $_->[0], $_->[2] ) foreach @$pl;
             }
         }
-    }
-    close IN;
-    # 第三轮，找Parent值不是geneID的信息
-    open IN, $input_file or die "Error: Can not open file $input_file, $!";
-    while (<IN>) {
-        if ( m/Parent=([^;\s]+)/ && exists $mRNA_ID2gene_ID{$1} ) {
+        elsif ( exists $tx{$parent} ) {
+            &add_tx_child( $tx{$parent}, $f, $p, $l );
+        }
+        elsif ( $skip_gene{$parent} ) {
+            # Parent是被其它分片负责的基因：这是它的转录本，记下ID并丢弃已经等待的子特征
+            if ( $f->[8] =~ m/(?:^|;)\s*ID=([^;\s]+)/ ) {
+                my $tid = $1;
+                $skip_tx{$tid} = 1;
+                delete $pending{$tid};
+            }
+        }
+        elsif ( $skip_tx{$parent} ) {
+            # 被其它分片负责的转录本的子特征，丢弃
+        }
+        else {
+            push @{ $pending{$parent} }, [ $p, $f, $l ];
+        }
+    };
+
+    open my $fh, '<', $file or die "Error: Can not open file $file, $!";
+    my $pos = 0;
+    while ( my $line = <$fh> ) {
+        my $this_pos = $pos;
+        my $this_len = length($line);
+        $pos += $this_len;
+        next if substr($line, 0, 1) eq '#';
+        my @f = split /\t/, $line, 10;
+        next if @f < 9;
+
+        if ( $f[2] eq 'gene' && $f[8] =~ m/(?:^|;)\s*ID=([^;\s]+)/ ) {
+            my $id = $1;
+            if ( $nshard > 1 && ( $ord++ % $nshard ) != $shard ) {
+                $skip_gene{$id} = 1;
+            }
+            else {
+                $gene{$id} = { hoff => $this_pos, hlen => $this_len, chr => $f[0], start => $f[3], end => $f[4], strand => $f[6], tx => {} };
+            }
+            if ( my $pl = delete $pending{$id} ) {
+                $process->( $id, $_->[1], $_->[0], $_->[2] ) foreach @$pl;
+            }
+        }
+        if ( $f[8] =~ m/(?:^|;)\s*Parent=([^;\s]+)/ ) {
             my $parent = $1;
-            $gene_info{$mRNA_ID2gene_ID{$1}}{"mRNA_info"}{$parent} .= $_;
+            $process->( $parent, \@f, $this_pos, $this_len );
         }
     }
-    close IN;
+    close $fh;
+    return \%gene;
+}
 
-    return %gene_info;
+# 把一条子特征行（Parent是转录本）记录到转录本中：偏移量和长度、区间、CDS（含phase）和stop_codon。
+# 设置--output_Supported_times时，还记录intron行的标识（染色体、正负链、起始、终止），用于统计intron出现次数。
+sub add_tx_child {
+    my ($t, $f, $p, $l) = @_;
+    $t->{offs} .= pack("JJ", $p, $l);
+    my $type = $f->[2];
+    if ( $type eq $region_type ) {
+        push @{ $t->{region} }, "$f->[3]\t$f->[4]\t$f->[6]";
+        $t->{len} += ( abs($f->[4] - $f->[3]) + 1 );
+    }
+    if ( $type eq "CDS" ) {
+        my $phase = defined $f->[7] ? $f->[7] : ".";
+        $phase =~ s/\s+$//;
+        push @{ $t->{cds} }, "$f->[3]\t$f->[4]\t$f->[6]\t$phase";
+    }
+    elsif ( $type eq "stop_codon" ) {
+        push @{ $t->{stop} }, "$f->[3]\t$f->[4]";
+    }
+    if ( $output_Supported_times && $type eq "intron" ) {
+        push @{ $t->{intron} }, &intron_key($f);
+    }
+}
+
+# 计算一个基因所有转录本的S1、S2、扣分比例和内在得分，选出代表转录本，并整理输出所需的偏移量片段。
+# 返回列表（顺序与 load_and_score_file 中的 @names 一致）：
+#   id, file, gene行染色体, gene行起始, gene行终止, gene行正负链, gene行偏移量, gene行长度, 其余输出行的片段(pack "J*"),
+#   代表转录本染色体, 正负链, 区间长度, B=S1+S2, 扣分比例, 合并后的区间(pack "J*"), intron(pack "J*"), intron所属正负链, 内在得分, smin, smax
+# 基因没有任何转录本、或代表转录本没有区间时，区间为空字符串，长度和得分为0。
+sub compute_gene_record {
+    my ($id, $file, $g) = @_;
+    my @tid = sort keys %{ $g->{tx} };
+
+    # 输出用的行片段：转录本行及其子特征行，按转录本ID顺序；相邻的行合并为一段
+    my @pairs;
+    foreach my $tid ( @tid ) {
+        my $t = $g->{tx}{$tid};
+        push @pairs, $t->{hoff}, $t->{hlen}, unpack("J*", $t->{offs});
+    }
+    my @runs;
+    for ( my $k = 0; $k < @pairs; $k += 2 ) {
+        my ($o, $l) = ( $pairs[$k], $pairs[$k + 1] );
+        if ( @runs && $runs[-2] + $runs[-1] == $o ) { $runs[-1] += $l }
+        else { push @runs, $o, $l }
+    }
+
+    # 基因的染色体和正负链取自（按ID排序后）最后一个转录本，与旧版本一致；没有转录本时取gene行
+    my ($chr, $strand) = ( $g->{chr}, $g->{strand} );
+    my ($len, $B, $ratio, $reg, $intr, $istr, $score, $smin, $smax) = ( 0, 0, 0, "", "", "", "0.00", 0, 0 );
+
+    if ( @tid ) {
+        my %t;
+        foreach my $tid ( @tid ) {
+            my $tx = $g->{tx}{$tid};
+            my ($this_chr, $this_strand) = ( $tx->{chr}, $tx->{strand} );
+            ($chr, $strand) = ($this_chr, $this_strand);
+
+            # @region: 用于计算长度/intron/重叠的区间（默认为CDS，--use_exon模式下为exon）
+            # @CDS_all: 该转录本的所有CDS行（含phase），用于起始/终止密码子、移码和内部终止密码子检测
+            # @stop_all: 该转录本的stop_codon行（如miniprot的输出）
+            my @region = @{ $tx->{region} };
+            my $region_length = $tx->{len};
+            my @CDS_all = @{ $tx->{cds} };
+            my @stop_all = @{ $tx->{stop} };
+
+            my ($tB, $tratio, $intr_score) = (0, 0, "0.00");
+            my (@sorted_r, @intron_flat);
+            if ( @region ) {
+                @sorted_r = sort { $a->[0] <=> $b->[0] or $a->[1] <=> $b->[1] }
+                            map { my ($s, $e) = (split /\t/)[0,1]; ($s, $e) = ($e, $s) if $s > $e; [ $s, $e ] } @region;
+                # intron：相邻区间之间有间隔（起始<=终止）才算一个intron
+                for my $x ( 1 .. $#sorted_r ) {
+                    my ($s, $e) = ( $sorted_r[$x-1][1] + 1, $sorted_r[$x][0] - 1 );
+                    push @intron_flat, $s, $e if $s <= $e;
+                }
+                # (1) S1 = 区间长度；(2) S2 = S1 * (1 - (1-p)^n)，n为intron数
+                my $n_intron = scalar(@intron_flat) / 2;
+                my $S1 = $region_length;
+                my $S2 = $S1 * ( 1 - (1 - $intron_score) ** $n_intron );
+                $tB = $S1 + $S2;
+
+                # 扣分比例：缺起始/终止密码子、移码、内部终止密码子
+                if ( @CDS_all ) {
+                    my $r = &analysis_geneModels_integrity(\@CDS_all, \@stop_all, $this_chr, $this_strand);
+                    if ( $r->{have_seq} ) {
+                        $tratio += $missing_start_penalty unless $r->{has_start};
+                        $tratio += $missing_stop_penalty unless $r->{has_stop};
+                        $tratio += $internal_stop_penalty * $r->{internal_stop};
+                    }
+                    $tratio += $frameshift_penalty * $r->{frameshift};
+                }
+                $intr_score = sprintf("%.2f", $tB * (1 - $tratio));
+            }
+
+            $t{$tid} = {
+                has_region => scalar(@region), len => $region_length, B => $tB, ratio => $tratio,
+                sorted => \@sorted_r, introns => \@intron_flat, score => $intr_score, strand => $this_strand,
+            };
+        }
+
+        # 选择代表转录本：优先在有区间的转录本中，按内在得分从高到低（相同时按转录本ID字典序）选择
+        my @cand = grep { $t{$_}{has_region} } keys %t;
+        @cand = keys %t unless @cand;
+        my @sorted = sort { $t{$b}{score} <=> $t{$a}{score} or $a cmp $b } @cand;
+        my $rep = $t{$sorted[0]};
+        if ( $rep->{has_region} ) {
+            my $sr = $rep->{sorted};
+            # 合并相互重叠的区间，得到互不重叠、按起始坐标排序的区间（get_match_length 需要）
+            my @merged;
+            foreach my $x ( @$sr ) {
+                if ( @merged && $x->[0] <= $merged[-1] ) {
+                    $merged[-1] = $x->[1] if $x->[1] > $merged[-1];
+                }
+                else {
+                    push @merged, $x->[0], $x->[1];
+                }
+            }
+            $reg = pack("J*", @merged);
+            $intr = pack("J*", @{ $rep->{introns} });
+            $istr = $rep->{strand};
+            $len = $rep->{len};
+            $B = $rep->{B};
+            $ratio = $rep->{ratio};
+            $score = $rep->{score};
+            $smin = $sr->[0][0];
+            $smax = $sr->[0][1];
+            foreach my $x ( @$sr ) { $smax = $x->[1] if $x->[1] > $smax; }
+        }
+    }
+
+    return ( $id, $file, $g->{chr}, $g->{start} + 0, $g->{end} + 0, $g->{strand},
+             $g->{hoff}, $g->{hlen}, pack("J*", @runs),
+             $chr, $strand, $len, $B, $ratio, $reg, $intr, $istr, $score, $smin, $smax );
 }
 
 
-# 英文用法说明
-sub get_usage_english {
-
-my $usage = <<USAGE;
+########################################################################
+# 英文用法说明（放在文件最末尾，运行时通过DATA文件句柄读取）
+########################################################################
+__DATA__
 Usage:
-    $0 [options] genome.fasta in1.gff3 in2.gff3 in3.gff3 ... > out.gff3
+    __PROG__ [options] genome.fasta in1.gff3 in2.gff3 in3.gff3 ... > out.gff3
+    This program merges the gene models of one or more input GFF3 files, removes redundancy among all of them together, scores the gene models, and selects the more reliable ones.
 
-    This program removes redundancy among the gene models in one or more input GFF3 files, scores the gene models, and selects the more reliable ones.
+I. Scoring rules of gene models:
+    The score of a gene model consists of its own score, the score gained by being supported by other gene models, a weight reduction by input file order, and penalties. In the default mode "interval" means CDS; with --use_exon it means exon.
+    (1) First, the model is scored by interval length, 1 point per bp, giving S1.
+    (2) Then it is scored by intron number: each additional intron adds a proportion (relative to S1) of score; the first intron adds the most, the following ones add proportionally less, and the sum over all introns never exceeds S1. With p = --intron_bonus, the k-th intron adds S1 * p * (1-p)^(k-1), so n introns give S2 = S1 * (1 - (1-p)^n). At this point the score of the target gene model is S1 + S2.
+    (3) Then the target gene model is compared with every gene model of the same cluster that directly overlaps it (from any input file, including other models of the same file). The number of overlapping interval bases is counted, 1 point per bp, giving S3. The introns of the two models are compared as well: each intron shared with exactly identical boundaries (chromosome, strand, start, end) adds a proportion (relative to S3) of score; the first shared intron adds the most, the following ones add proportionally less, and the sum never exceeds S3. With m shared introns, S4 = S3 * (1 - (1-p)^m). After each comparison with an overlapping gene model, S3 + S4 is added to the score of the target. Therefore, the more other gene models support the target (more overlap, more identical introns), the higher its score.
+    (4) By these rules the score of the target gene model is S = S1 + S2 + sum(S3 + S4).
+    (5) After S is obtained it is reduced according to the order of the input GFF3 file the gene model belongs to: gene models of the 1st file are not reduced; those of the 2nd file get S * r; those of the 3rd file get S * r^2, and so on (the i-th file is multiplied by r^(i-1)). r is set by --file_decay (default 0.8).
+    (6) After this reduction the penalties are deducted (S below is the reduced S): if the model has no correct start codon, --missing_start_penalty * S is deducted; if it has no correct stop codon, --missing_stop_penalty * S is deducted; each frameshift deducts --frameshift_penalty * S and each internal stop codon deducts --internal_stop_penalty * S. The deductions add up, and the final score is allowed to be negative (no lower bound), so that several poor gene models can still be told apart. All scores are rounded to two decimal places.
+    (7) For a gene with several transcripts (alternative splicing), the transcript with the highest intrinsic score (S1 + S2 minus the integrity / frameshift / internal-stop penalties; ties broken by lexical order of the transcript ID, transcripts with intervals preferred) is chosen as the representative of the gene; its intervals and introns are then used to compute the support score and the final score.
+    (8) Because the support score depends on the other gene models of the same cluster, all gene models of all input files are merged and scored and de-redundified together in one pass.
+    (9) If two gene models overlap in intervals and the overlap ratio of either exceeds the threshold, the gene model with the lower final score is removed. By default genes are partitioned by chromosome + strand (by chromosome only with --both_strands); within each partition, clusters of overlapping gene models are processed from the highest score to the lowest; partitions never affect one another, so they can be processed safely in parallel.
+    (10) If two gene models have exactly the same final score, one of them is kept at random by default (results may differ between runs). With --stable_tie the order is decided by input file order (earlier first), then by the S score before penalties (after the file-order reduction, higher first), then by the lexical order of the gene IDs, so that the result is fully deterministic and reproducible.
+    (11) The Supported_times tag (printed only with --output_Supported_times; off by default):
+        a. Gene lines: for every kept gene, a tag Supported_times=value is added to column 9 of its gene line (if the input gene line already carries this tag, it is modified), where value = S / interval length / (1 + sum(p*(1-p)^(k-1))). Here S is the score BEFORE the file-order reduction and before any penalty, i.e. S = S1 + S2 + sum(S3 + S4) of rule (4) (so it is independent of the input file order and of the penalties, and can never be negative). The sum in the denominator runs over the n introns (k=1..n) of the representative transcript (the denominator is 1 if there is no intron; with --use_exon the interval length is the exon length); it cancels the score increase caused by the gene's own introns. The value therefore roughly shows how many times the gene model is supported by other gene models (the gene itself counts as 1). Genes without intervals (score 0) get no such tag.
+        b. Intron lines: every intron line (feature type "intron" in column 3) below the transcripts of a kept gene also gets a tag Supported_times=integer (if the input intron line already carries this tag, it is modified). The integer is the number of times this intron (identical chromosome, strand, start and end) occurs among all gene models of all input GFF3 files, including gene models that are later removed as redundant; an intron shared by several transcripts of the same gene is counted only once, i.e. the value is the number of gene models that own the intron. Occurrences are counted from the coordinates of the intron lines in the input GFF3 files, independently of --use_exon; no new intron lines are created if the input has none.
+        c. Without --output_Supported_times, no Supported_times tag is written to gene lines, intron occurrences are not counted, and the attributes (column 9) of intron lines are not changed.
 
-    How the program works:
+II. Detailed workflow of the program:
+    Step 1  Parse the options and determine the start and stop codons from --genetic_code.
+    Step 2  Read the genome sequence (used for start/stop codon, frameshift and internal stop codon checks).
+    Step 3  Read each input GFF3 file and score it immediately (with --cpu > 1 each file is split into shards by gene order and the shards are processed by parallel workers, each worker keeping only the genes of its own shard). Each file is scanned only once, recognising gene lines, transcript lines (mRNA etc.) whose Parent is a gene, and sub-feature lines (exon, CDS, stop_codon, ...) whose Parent is a transcript, in any order of parent and child lines. For each transcript record its intervals, CDS lines (with phase) and stop_codon lines. The GFF3 text is not kept in memory; only the byte offsets of the lines are recorded (adjacent lines are merged into one segment) and the original lines are read back when printing. With --output_Supported_times, the occurrences of every intron line (chromosome, strand, start, end) among the gene models are counted in the same scan.
+    Step 4  (done in the same worker as Step 3; the raw transcript data are discarded right away) Compute S1 and S2 of every transcript, check start/stop codons, frameshifts and internal stop codons, and obtain its intrinsic score; the highest-scoring transcript represents the gene. A worker returns only a compact result per gene (merged intervals and introns of the representative transcript, length, score and the offsets needed for output). A gene without intervals has length 0 and score 0, takes no part in overlap detection and is kept unchanged.
+    Step 5  Merge all genes of all input files (gene data are stored under integer indices in parallel arrays to save memory) and partition them by chromosome + strand (by chromosome only with --both_strands); each partition is then cut by the coordinate ranges of its gene intervals into blocks that share no overlap at all (cutting does not change the result), and adjacent small blocks are grouped into batches. The batches are pre-assigned to the --cpu workers by a greedy rule according to their gene counts, and every worker is forked only once.
+    Step 6  Run the "core redundancy removal algorithm" (including computation of support score, file-order reduction, penalties and final score) on every partition to get the genes to delete, the log and the final score of each gene (with --output_Supported_times also the score S of each gene before file-order reduction and penalties, used for the Supported_times of gene lines).
+    Step 7  Collect the results, delete the redundant genes, and print the remaining genes to STDOUT in GFF3 format sorted by chromosome, start and end (all transcripts of a kept gene are printed). With --output_Supported_times the Supported_times tags are written to the gene lines and the intron lines at the same time. If --output_delete_info is set, the descriptions of deleted genes are written to that file.
 
-    (1) The program scores all input gene models. First, it scores by CDS length, 1 point per bp, giving an initial score S. Then it scores by intron number: each additional intron adds a certain proportion (relative to S) of score; the first intron adds the most, the following introns add proportionally less, and the sum of the scores added by all introns never exceeds S. Then it scores by gene integrity: a complete 5' end adds a certain proportion (relative to S) of score, and a complete 3' end adds a certain proportion (relative to S) of score. Then, by input file order, the first input file receives an additional proportion (relative to S) of score, while the score of the second input file is unchanged. Finally, if the gene model contains in-frame internal stop codons (the terminal stop codon at the very end of the CDS is not counted), a certain proportion (relative to S) of score is deducted for each internal stop codon; the score after deduction is allowed to become negative (it is not truncated at 0, so that several poor gene models can still be told apart). All scores are rounded to two decimal places. If --use_exon is set, "CDS" in the description above is replaced by "exon": the score is based on the total exon length and the intron number is inferred from the exon number, see the --use_exon option below.
+III. Core redundancy removal algorithm (within one partition):
+    (A) Build the overlap relation: sort all intervals by start coordinate and run a sweep line to find all gene pairs whose intervals overlap by at least 1 bp. Genes without intervals are ignored.
+    (B) Scoring: for each gene compute S3 and S4 against all directly overlapping genes, then apply the file-order reduction and penalties to obtain its final score.
+    (C) Clustering: connected components of the overlap graph are the "clusters". Clustering is done once. A gene that overlaps no other gene is kept.
+    (D) Sort the genes of each cluster by score from high to low; ties are ordered randomly by default, or with --stable_tie by input file order, then S before penalties, then lexical order of the gene ID.
+    (E) Greedy removal: starting from the best gene, take each gene G that is still kept and compare it with every gene T that is ranked after G, still kept and directly overlapping G (only the direct overlap neighbours of G are visited): overlap ratio = overlapping bases / min(interval length of G, interval length of T). If the ratio > --overlap_coverage, T (the lower-ranked one) is removed. A removed gene takes no further part in comparisons.
+    (F) The first-ranked gene of every cluster is always kept.
+    Remarks:
+    (a) The clustering criterion is "any 1-bp overlap", whereas the removal criterion is "overlap ratio above --overlap_coverage"; therefore several slightly overlapping genes may remain in a cluster.
+    (b) The algorithm keeps the higher-scoring gene first and removes the lower-scoring genes that conflict with it. For example, with scores A>B>C, A conflicting with B, B conflicting with C, but A not with C: A is kept, B is removed, C is kept.
+    (c) Support scores are calculated before removal, from all directly overlapping genes (including those that will later be removed), and stay fixed during the whole removal process.
 
-    (2) When more than one GFF3 file is given, the program first performs redundancy removal independently within each input file (only checking for overlap conflicts inside that single file), and prints statistics to STDERR (the number of genes in each file, and the number of genes remaining after this within-file redundancy removal). This step is only for reporting purposes and does not affect the final output.
+Usage instructions:
+    (1) The genome sequence is required to check start/stop codons, frameshifts and internal stop codons (this needs CDS features; transcripts without CDS lines get none of these penalties).
+    (2) GFF3 files with alternative splicing are accepted; the representative transcript of each gene is used for overlap analysis and score comparison.
+    (3) The input GFF3 files must not contain genes with identical IDs, otherwise the results will be inaccurate.
+    (4) Gene models without any interval (for example non-coding genes with only exon features in the default mode, or genes without any transcript) get length 0 and score 0, take no part in overlap detection, are never removed and are kept unchanged.
+    (5) Start codon, stop codon and internal stop codons are judged in the CDS reading frame: the phase (column 8) of the first CDS at the 5' end determines the frame, and a non-zero phase means the start codon is missing (the first "phase" bases belong to a codon lost upstream and cannot be joined with anything, so they are discarded); a total CDS length that is not a multiple of 3, or a last codon that is not a stop codon, means the stop codon is missing; separate stop_codon lines (e.g. miniprot output) that do not overlap any CDS are appended to the sequence. The sequences of all CDS are concatenated in transcription direction before being cut into codons, so a codon interrupted by an intron (1-2 bases at the end of one CDS plus the bases at the beginning of the next CDS) is joined into a complete triplet, including a stop codon split across an intron, and it is counted in the internal stop codon statistics as well.
+    (6) Frameshifts are judged from the continuity of CDS phases: in transcription direction the phase of each CDS should equal the phase expected from the coding length accumulated so far; when it does, the codons are joined as described above; a mismatch counts as one frameshift, and only then are the bases at the frameshift position that cannot form a complete codon (the leftover bases at the end of the previous CDS and the first "phase" bases of the next CDS) discarded and the reading frame rebuilt from the annotated phase, so that spurious stop codons downstream of a frameshift are not penalised again. If no CDS of a transcript has phase 1 or 2 (e.g. some tools write all phases as 0 or "."), the phase carries no information and frameshift detection is skipped. Transcripts without CDS lines, or whose chromosome is absent from the genome, get no start/stop codon or internal stop codon penalty.
+    (7) With --output_Supported_times, the Supported_times tag of intron lines relies on the intron lines already present in the input GFF3 (column 3 is "intron" and Parent is a transcript); the program never creates intron lines for transcripts that have none.
 
-    (3) The program then merges the gene models of all input files. If two gene models overlap in CDS (default mode) or in exon (--use_exon mode) and the overlap ratio of either gene model exceeds the threshold, the gene model with the lower score is removed. The program partitions genes by chromosome + strand, then within each partition finds clusters of mutually overlapping gene models and removes redundant ones from the highest score to the lowest; partitions never affect one another, so they can be processed safely in parallel. This is the redundancy removal step that determines the final output. If two gene models have exactly the same score (which can easily happen, for example, when --first_file_score is set to 0.0), the gene model from the earlier input file is kept (i.e. 1st input file > 2nd input file > ... and so on); if both genes come from the same file and still tie in score (extremely unlikely in practice), the lexical order of the gene IDs is used as the final tiebreaker, so that the result of the program is fully deterministic and reproducible.
+Options:
+    [1. Redundancy judgement options]
+    --overlap_coverage <float>
+    Default: 0.30. Coverage threshold. When overlapping interval (CDS, or exon in --use_exon mode) base pairs divided by the interval base pairs of the smaller gene model is greater than this threshold, the lower-scoring gene model is removed.
 
-    Usage instructions:
+    --use_exon
+    Default: off (redundancy is judged by CDS overlap). A switch that takes no value. When set, length, introns, overlap and support scores are based on exons instead of CDS, which suits GFF3 files with only exon features (lncRNAs, transcriptome assemblies, ...). In this mode: (a) transcript length and overlap ratios are calculated from exons; (b) introns are the gaps between adjacent exons; (c) start/stop codons, frameshifts and internal stop codons are still judged from CDS lines plus the genome sequence, and only if the transcript has CDS lines; a transcript without CDS lines gets no such penalty; (d) a transcript without exon lines gets a score of 0, takes no part in overlap detection and is never removed; (e) the --overlap_coverage threshold then means overlapping exon bases divided by the exon bases of the smaller gene model. Mixing GFF3 files with CDS and files with only exons in the default mode is not recommended; use --use_exon for such comparisons.
 
-    (1) The program needs the genome sequence as input to check the integrity of gene models and to detect internal stop codons (this requires CDS features; transcripts without CDS lines get no integrity score and no internal-stop-codon penalty).
+    --both_strands
+    Default: off (only genes on the same strand can be judged redundant with each other). A switch that takes no value. When set, genes are partitioned by chromosome only, so gene models on different strands whose overlap exceeds the threshold are also judged redundant (they also contribute overlap support to each other, but introns on different strands are never regarded as identical). This suits homology-based predictions with many wrong-strand predictions. Do not use it if the genome contains genuine overlapping antisense genes.
 
-    (2) The program accepts GFF3 files with alternative splicing: after scoring the multiple transcripts of a gene, the CDS (or exon, in --use_exon mode) information of the highest-scoring transcript is used as the information of the gene for overlap analysis and score comparison with other gene models.
+    --stable_tie
+    Default: off (gene models with identical scores: one is chosen at random). A switch that takes no value. When set, gene models with identical scores are ordered by input GFF3 file order (earlier first), then by the S score before penalties (higher first), then by the lexical order of the gene ID, so that the result is fully deterministic and reproducible.
 
-    (3) The multiple input GFF3 files must not contain genes with identical IDs, otherwise the results will be inaccurate.
+    [2. Scoring options]
+    --intron_bonus <float>
+    Default: 0.3 (the old name --intron_score is still accepted). Proportion p by which introns increase the score. The k-th intron adds p * (1 - p) ** (k - 1) (relative), n introns add 1 - (1 - p) ** n in total, never more than 100%. By default the first intron adds 30%, the second 21%, the third 14.7%, and so on. It is used for S2 (own introns), S4 (introns shared with other gene models) and the Supported_times tag of gene lines.
 
-    (4) In the default mode, gene models without any CDS (for example, non-coding genes that only have exon features, or genes that have no transcript at all) get a CDS length of 0 and a score of 0; they do not take part in the CDS overlap detection, are never removed by the redundancy removal step, and are kept unchanged in the output. In --use_exon mode the same applies to gene models without any exon.
+    --file_decay <float>
+    Default: 0.8. Ratio r (between 0 and 1) by which scores are reduced according to input file order. Gene models of the 1st input file are not reduced; those of the i-th file are multiplied by r^(i-1). Set to 1 to disable the reduction.
 
-    --use_exon    default: off (redundancy is judged by CDS overlap)
-    A switch that takes no value. When set, redundancy removal is based on the overlap of exons instead of CDS, which suits GFF3 files that only contain exon features and no CDS (for example lncRNAs or transcriptome assemblies). In this mode: (a) transcript length and overlap ratios are calculated from exons; (b) the intron number is inferred from the exon number (introns = exons - 1) and the intron bonus rule is the same as in the default mode; (c) integrity (5' and 3' completeness) and internal stop codons are still judged from CDS lines plus the genome sequence, and only if the transcript has CDS lines; a transcript without CDS lines is treated as "internal", gets no integrity bonus and no internal-stop-codon penalty, and the internal-stop-codon penalty is calculated relative to the total exon length; (d) a transcript without any exon line gets a score of 0, takes no part in overlap detection and is never removed; (e) the --overlap_coverage threshold then means the number of overlapping exon bases divided by the (redundancy-removed) exon bases of the smaller gene model. Note: mixing GFF3 files that have CDS with files that only have exons in the default (CDS) mode is not recommended; to compare such files, use --use_exon so that every file is judged on the same basis (exons).
+    [3. Genetic code and integrity penalty options]
+    --genetic_code <int>
+    Default: 1. Genetic code, from which start and stop codons are determined automatically. See NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi . Supported numbers: 1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33.
 
-    --intron_score <float>    default: 0.3
-    Set the proportion by which introns increase the score of a gene model. The score increase due to the first intron = the parameter value; the score increase due to the second and later introns = (1 - the parameter value) ** (intron index - 1). That is, the score increases due to multiple introns form an infinite geometric series whose first term = the parameter value and common ratio = (1 - the parameter value), and the sum of the infinite series = 1. By default, the first term = 0.3 and the common ratio = 0.7, so the first intron increases the score by 30%, the second by 21%, the third by 14.7%, the fourth by 10.29%, and so on; the total increase due to all introns never exceeds 100%.
+    --missing_start_penalty <float>
+    Default: 0.2. Deduct (parameter value * S, S being the score after the file-order reduction) when the gene model has no correct start codon.
 
-    --complete5p_score <float>    default: 0.5
-    Set the proportion by which the score of a gene model increases when its 5' end is complete.
+    --missing_stop_penalty <float>
+    Default: 0.2. Deduct (parameter value * S) when the gene model has no correct stop codon.
 
-    --complete3p_score <float>    default: 0.5
-    Set the proportion by which the score of a gene model increases when its 3' end is complete.
+    --internal_stop_penalty <float>
+    Default: 0.1. For each internal in-frame stop codon (the normal terminal stop codon is not counted; a stop codon formed across an intron is counted) deduct (parameter value * S); penalties add up. Set to 0 to disable. Stop codons are determined by --genetic_code.
 
-    --first_file_score <float>    default: 0.5
-    Set the additional score proportion given to the first input file, which helps to prefer the gene models in the first input GFF3 file. Note: if this parameter is set to 0.0 (or gene models from different files otherwise end up identical in CDS length, intron number and integrity), gene models of the same kind from different files may get exactly the same score; in that case the program breaks the tie by input file order and keeps the gene model from the earlier input file (see item (3) of "How the program works" above).
+    --frameshift_penalty <float>
+    Default: 0.1. For each frameshift deduct (parameter value * S); penalties add up. Set to 0 to disable.
 
-    --internal_stop_penalty <float>    default: 0.5
-    Set the score penalty for internal stop codons in a gene model. The program checks stop codons in the CDS reading frame (codons are counted from the first base of the CDS; for genes on the minus strand the reverse complement is used). If the last codon of the CDS is a stop codon it is regarded as the normal terminal stop codon and is not counted as an internal one. For each internal stop codon, (parameter value * total CDS length) is deducted from the score (i.e. a proportion of the initial score S; 50% by default). Penalties of multiple internal stop codons add up, and the score is allowed to become negative with no lower bound (so that gene models with many internal stop codons can still be ranked against each other). Set it to 0 to disable the penalty. Stop codons are determined by --genetic_code.
+    [4. Running and output options]
+    --output_Supported_times
+    Default: off (no Supported_times tag is written). A switch that takes no value. When set: (a) a Supported_times=value tag is added to (or an existing one is modified in) the column 9 of every output gene line; see "Scoring rules (11) a" for the meaning of the value (computed from the score S before file-order reduction and penalties, so it is never negative); (b) a Supported_times=integer tag is added to (or an existing one is modified in) every output intron line (column 3 = intron); the integer is the number of times the intron occurs among all input gene models, see "Scoring rules (11) b". When not set, gene lines get no such tag, intron occurrences are not counted and the attributes of intron lines are not changed. Note that the tag name is Supported_times (capitalised); existing Supported_times or Support_times tags in the input are replaced.
 
-    --overlap_coverage <float>    default: 0.30
-    Set a coverage threshold. When the number of overlapping CDS (exon in --use_exon mode) base pairs between two gene models divided by the (redundancy-removed) CDS (or exon) base pairs of the smaller gene model is greater than this threshold, the redundant gene model is removed.
+    --cpu <int>
+    Default: 8. Number of parallel worker processes, used for reading and scoring GFF3 files and for redundancy removal. In each stage every worker is forked only once and the tasks are balanced across workers in advance. Set to 1 to run fully serially with no forking.
 
-    --genetic_code <int>    default: 1
-    Set the genetic code, from which the start codons and stop codons are determined automatically; they are used to judge gene integrity and to detect internal stop codons. For the corresponding values, please refer to NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi . The supported genetic code numbers are: 1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33. For example: 1 is the standard code (start codon ATG; stop codons TAA, TAG, TGA), 11 is the bacterial/archaeal/plant plastid code, and 2 is the vertebrate mitochondrial code.
+    --tmp_dir <string>
+    Default: tmp_$date$pid. Scratch directory used by worker processes to exchange results (only used when --cpu > 1 and there is more than one parallel task). By default it is created in the current working directory and named tmp_$date$pid ($date = YYYYMMDD, $pid = process ID). If the directory was created by the program it is removed on exit; an already existing directory given by the user is left in place.
 
-    --cpu <int>    default: 8
-    Set the number of parallel worker processes. Set to 1 to run fully serially with no forking.
+    --output_delete_info <string>
+    Default: none (descriptions of deleted genes are not printed). File path to which the descriptions of the deleted genes are written. Without this option these descriptions are not printed anywhere (to avoid flooding STDERR).
 
-    --tmp_dir <string>    default: tmp_\$date\$pid
-    Scratch directory used by worker processes to exchange results (only used when --cpu > 1 and there is more than one partition). By default it is created in the current working directory and named tmp_\$date\$pid, where \$date is the run date (YYYYMMDD) and \$pid is the process ID of the program, for example tmp_2026092812345. If the directory was created by the program itself it is removed automatically on exit; an already existing directory given by the user is left in place.
+    [5. Deprecated options]
+    --complete5p_score, --complete3p_score, --first_file_score, --support_score, --compare_2gff3_stats
+    These options are no longer used; they are accepted but ignored with a warning.
 
-    --output_delete_info <string>    default: none (descriptions of deleted genes go to STDERR)
-    Set a file path. The descriptions of the genes deleted in the final merged redundancy-removal step will be written to this file instead of STDERR. (The per-file individual redundancy-removal statistics are always printed to STDERR, regardless of this option.)
+    [6. Help options]
+    --help
+    Display the English usage and exit.
 
-    --compare_2gff3_stats <string>    default: none
-    Only takes effect when exactly two GFF3 files are given as input. Set a file path; the program writes a comparison report of the gene models of the two GFF3 files to this file, including: the number of non-redundant genes in each file after removing its own internal redundancy; the number of genes whose CDS (or exon) overlap ratio between the two files exceeds the --overlap_coverage threshold, and statistics on which file's gene scored higher among these genes; and, line by line, the detailed deletion description of each pair of conflicting genes. If two genes have the same score, the first file (setA) is treated as the winner, i.e. the gene model of the first file is kept.
+    --chinese_help
+    显示中文用法说明并退出。
 
-    --help    default: None
-    Display this English usage and exit.
-
-    --chinese_help    default: None
-    Display the Chinese usage and exit.
-
-USAGE
-
-return $usage;
-}

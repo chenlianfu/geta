@@ -10,63 +10,93 @@ use POSIX ();
 
 my $script_path = abs_path($0);
 
-my $usage = <<USAGE;
-Usage:
+########################################################################
+# 中文用法说明（放在代码最前面；英文用法说明放在文件最末尾的__DATA__部分）
+########################################################################
+my $usage_cn = <<'USAGE';
+用法:
     $0 [options] homolog_proteins.fasta genome.fasta out.filteredHits.tab > out.geneModels.tab
 
-    程序根据MMseqs2的结果文件out.filteredHits.tab，对各个基因区域调用exonerate/genewise/gth等软件进行基因预测。程序内置进程池进行并行化运算（不再依赖ParaFly）：将任务按批次(chunk)分组，每个worker进程顺序处理一个chunk内的所有任务，直接调用预测软件（不经过shell）并在内存中解析其输出，从而避免海量小文件和调度开销。然后，对各个基因预测软件的结果进行过滤和排序，在标准输出中给出表格格式的基因模型信息。
-    本程序对输入文件out.filteredHits.tab的格式要求，相比于常规的BLAST表格12列输出结果：（1）第3列表示多个HSPs累积的Identity值；额外多出的最后一列是两个使用中划线连接的坐标数据，表示同源蛋白所在的基因区域。若最后一列不满足"数字-数字"格式，则使用第9和10列（基因组上的匹配起止位点）作为基因区域。
-    对各个基因预测软件的结果进行过滤：过滤CDS总长不是3的倍数的基因模型；过滤protein长度过低，对同源蛋白覆盖过低的基因模型；过滤终止密码子过多的基因模型。
-    对各个基因预测软件的结果进行排序：(1) 按对同源蛋白的匹配长度从大到小; (2) 按CDS内部的终止密码子数量从小到大；(3) 按得到的基因模型CDS总长从大到小；(4) 按对同源蛋白比对的Evalue值从小到大；(5) 按对同源蛋白比对的Score值从大到小；(6) 按对同源蛋白比对的Identity值从大到小；(7) 按基因预测软件gth/exonerate/genewise的顺序；(8) 按输出信息的ASCII字符顺序。
-    程序运行过程中的的一些关键点：（1）将基因组序列的所有小写碱基字符变为大写后，再进行后续分析；（2）对同源蛋白序列的尾部添加终止密码子后，再计算其序列长度，并调用exonerate/genewise/gth等软件进行基因预测；（3）由于genewise命令给出的CDS不包含终止密码子，而exonerate和gth给出的CDS包含终止密码子，于是对genewise的结果进行修正，使其尾部的CDS能包含终止密码子；（4）同一个基因区域和同源蛋白存在多行比对结果时，只进行一次基因预测，并使用Score最高的比对结果的Evalue/Score/Identity进行排序；（5）其它关键点请见相关参数的描述。
+功能简介:
+    本程序根据MMseqs2的结果文件out.filteredHits.tab，对各个基因区域调用exonerate/genewise/gth等软件进行基因预测，对预测结果过滤、排序后，在标准输出中以表格形式给出基因模型信息。程序内置进程池进行并行化运算（不再依赖ParaFly）：将所有的基因预测命令（"基因区域-同源蛋白-正负链"预测任务 × 预测方法）随机打乱后，按批次(chunk)分组，每个worker进程顺序处理一个chunk内的所有命令，直接调用预测软件（不经过shell）并在内存中解析其输出，从而避免海量小文件和调度开销。随机打乱使得复杂基因区域的多个命令分散在不同的chunk中，各个命令能更好地并行化，避免个别chunk因集中了复杂区域的命令而运行时间过长。
+
+程序运行流程:
+    (1) 读取输入：读取同源蛋白序列并在其尾部添加终止密码子（*）；读取基因组序列并将小写碱基全部变为大写；读取MMseqs2比对结果out.filteredHits.tab，确定各个"基因区域-同源蛋白-正负链"预测任务（同一基因区域和同源蛋白存在多行比对结果时，只保留一个任务，并使用Score最高的比对结果的Evalue/Score/Identity）。
+    (2) 设置运行参数：确定侧翼序列长度（--flanking_length，未设置时自动计算）；确定最大intron长度（--max_intron_length，未设置时根据输入的第二个文件genome.fasta的基因组序列总长度自动计算，而非同源蛋白的大小）；根据--genetic_code输出genewise使用的codon.table文件。
+    (3) 打乱并切分命令：对--method指定的每种方法，将所有预测任务按固定的随机种子随机打乱（相同输入和参数下打乱结果完全一致，因此可以断点续跑），再按每个chunk包含--chunk_num个命令切分，将基因区域序列（含两侧翼序列）、同源蛋白序列和命令列表写入--tmp_dir/<方法名>_chunk*/目录。
+    (4) 并行预测：将所有"方法 × chunk"单元再次随机打乱后，启动--cpu个worker进程，每个worker顺序处理一个chunk，调用对应的预测软件并解析其输出；超时的命令按--retry自动延长超时时间后重试。已完成的"方法 × chunk"会被跳过（断点续跑）。
+    (5) 成功率检查：汇总各方法的命令数和失败数，只有每一种方法的成功率都不低于90%，程序才会继续运行，否则报错退出。
+    (6) 过滤：过滤CDS总长不是3的倍数的基因模型；过滤对同源蛋白匹配长度过低、覆盖度过低的基因模型；过滤CDS内部终止密码子过多的基因模型。
+    (7) 排序与输出：对各基因区域内的基因模型排序，在标准输出中给出表格；进度和统计信息输出到标准错误。
+
+输入文件格式:
+    out.filteredHits.tab相比于常规的BLAST表格12列输出结果：（1）第3列表示多个HSPs累积的Identity值；（2）额外多出的最后一列是两个使用中划线连接的坐标数据，表示同源蛋白所在的基因区域。若最后一列不满足"数字-数字"格式，则使用第9和10列（基因组上的匹配起止位点）作为基因区域。
+
+输出文件格式:
     程序输出表格有15列：(1) 目标基因组序列名称；(2) 预测软件名称；(3) 基因起始位点；(4) 基因结束位点；(5) introns信息，多个introns之间使用分号分割，每个intron前后坐标使用中划线分割；(6) 基因所在的正负链；(7) 同源蛋白名称；(8) 同源蛋白包含终止密码子后的长度；(9) 同源蛋白匹配的起始位点；(10) 同源蛋白匹配的结束位点；(11) CDS总长度；(12) CDS内部的终止密码子数量；(13) MMseqs2比对的Evalue值；(14) MMseqs2比对的Score值；(15) MMseqs2比对的Identity。
 
-    断点续跑（--tmp_dir）说明：
-    程序以"chunk × 预测方法"为最小完成单元进行缓存。指定已有的--tmp_dir重新运行时：
-      (1) 若--flanking_length、--chunk_num等影响任务切分的参数未变，chunk切分阶段（regions.fa/proteins.fa/tasks.tab）会直接复用，不会重新读取基因组/蛋白序列切分任务；
-      (2) 对--method中列出的每一种方法，程序会分别检查每个chunk是否已经用相同的--genetic_code/--min_intron_length/--max_intron_length跑过该方法；已完成的方法会直接复用其结果，不会重新调用对应的预测软件；
-      (3) 因此，若第二次运行相比第一次只是在--method中新增了方法（例如第一次--method exonerate，第二次--method exonerate,genewise），则exonerate的结果会被直接复用，只需重新计算新增的genewise部分；
-      (4) 若--genetic_code、--min_intron_length、--max_intron_length等参数发生变化，则对应方法的已有结果会被视为过期，自动重新计算。
+排序规则:
+    各基因区域内的基因模型依次按以下规则排序：(1) 对同源蛋白的匹配长度从大到小；(2) CDS内部的终止密码子数量从小到大；(3) 基因模型CDS总长从大到小；(4) 对同源蛋白比对的Evalue值从小到大；(5) 对同源蛋白比对的Score值从大到小；(6) 对同源蛋白比对的Identity值从大到小；(7) 按基因预测软件gth/exonerate/genewise的顺序；(8) 按输出信息的ASCII字符顺序。
 
-    --threshold_protein_length <int>    default: 25
-    --threshold_homolog_coverage <float>    default: 0.2
-    --threshold_inter_stop_codon_num <int>    default: 3
+关键点说明:
+    (1) 将基因组序列的所有小写碱基字符变为大写后，再进行后续分析；(2) 对同源蛋白序列的尾部添加终止密码子后，再计算其序列长度，并调用exonerate/genewise/gth等软件进行基因预测；(3) 由于genewise命令给出的CDS不包含终止密码子，而exonerate和gth给出的CDS包含终止密码子，于是对genewise的结果进行修正，使其尾部的CDS能包含终止密码子；(4) 同一个基因区域和同源蛋白存在多行比对结果时，只进行一次基因预测；(5) 其它关键点请见相关参数的描述。
+
+命令失败与成功率要求:
+    基因预测命令若运行超时（--timeout）、异常退出或无法启动，则视为失败；其中超时的命令会按--retry参数自动延长超时时间后重试，重试后仍然失败的命令才计入失败数。所有chunk运行结束后，程序对--method中的每一种预测方法分别统计命令成功率（成功命令数/命令总数），只有每一种方法的成功率都不低于90%时，程序才会继续运行并输出基因模型结果；任何一种方法的成功率低于90%（或该方法没有任何命令）时，程序报错退出。成功率不低于90%时，失败的命令所对应的"基因区域-同源蛋白"组合在该方法下没有预测结果，具体信息见<方法名>_chunk*/worker.log。若因成功率不足而退出，请适当增大--timeout（或--retry），并使用新的--tmp_dir重新运行。
+
+断点续跑（--tmp_dir）说明:
+    程序以"方法 × chunk"为最小完成单元进行缓存。指定已有的--tmp_dir重新运行时：
+    (1) 若--flanking_length、--chunk_num等影响命令切分的参数未变，则每种方法的chunk切分阶段（regions.fa/proteins.fa/tasks.tab）会直接复用，不会重新读取基因组/蛋白序列切分命令；
+    (2) 对--method中列出的每一种方法，程序会分别检查每个chunk是否已经用相同的--genetic_code/--min_intron_length/--max_intron_length跑过该方法；已完成的"方法 × chunk"会直接复用其结果，不会重新调用对应的预测软件；
+    (3) 因此，若第二次运行相比第一次只是在--method中新增了方法（例如第一次--method exonerate，第二次--method exonerate,genewise），则exonerate的结果会被直接复用，只需切分并重新计算新增的genewise部分；
+    (4) 若--genetic_code、--min_intron_length、--max_intron_length等参数发生变化，则对应方法的已有结果会被视为过期，自动重新计算；
+    (5) --timeout和--retry不参与上述有效性判断：已完成的chunk即使调大--timeout也不会被重算，如需重算请使用新的--tmp_dir。
+
+参数说明:
+    --threshold_protein_length <int>    默认值: 25
+    --threshold_homolog_coverage <float>    默认值: 0.2
+    --threshold_inter_stop_codon_num <int>    默认值: 3
     设置使用同源蛋白进行基因预测后，对基因模型结果进行过滤的阈值。要求基因模型对同源蛋白的匹配长度不小于指定阈值，对同源蛋白的覆盖率不低于指定阈值，内部的终止密码子数量不高于指定阈值。这些参数可以设置为0。
 
-    --flanking_length <int>    default: None
+    --flanking_length <int>    默认值: 无
     设置侧翼序列长度。程序根据MMseqs2比对结果，选取基因组序列匹配区域及其两侧翼--flanking_length参数指定长度的序列，作为核酸序列，输入给基因预测软件。若不设置此参数，程序会根据MMseqs2的结果自动进行计算，侧翼长度刚好超过90%以上的基因区域长度。若使用本参数直接指定侧翼长度，推荐设置为5000。
 
-    --cpu <int>    default: 8
+    --cpu <int>    默认值: 8
     设置并行运行的worker进程数。
 
-    --method <string>    default: exonerate
-    设置进行基因预测的方法，其值可以设定为exonerate、genewise、gth或all。若需要同时使用多种方法，则输入使用逗号分割的多个值；设置为all则使用所有三种方法，但最消耗计算时间。gth和exonerate支持尾部终止密码子的比对，而genewise不支持，其基因预测结果中，前两者基因模型的尾部CDS可能包含终止密码子，genewise却不会。使用相同的--tmp_dir重新运行且只是新增了方法时，已完成方法的结果会被复用（见上文"断点续跑"说明）。
+    --method <string>    默认值: exonerate
+    设置进行基因预测的方法，其值可以设定为exonerate、genewise、gth或all。若需要同时使用多种方法，则输入使用逗号分割的多个值；设置为all则使用所有三种方法，但最消耗计算时间。gth和exonerate支持尾部终止密码子的比对，而genewise不支持，其基因预测结果中，前两者基因模型的尾部CDS可能包含终止密码子，genewise却不会。使用相同的--tmp_dir重新运行且只是新增了方法时，已完成方法的结果会被复用（见上文"断点续跑"说明）。每一种方法的命令成功率不低于90%，程序才会继续运行（见上文"命令失败与成功率要求"）。
 
-    --genetic_code <int>    default: 1
-    设置遗传密码。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi。genewise使用程序生成的codon.table文件；exonerate和gth分别使用--geneticcode和-translationtable参数。
+    --genetic_code <int>    默认值: 1
+    设置遗传密码，程序据此自动确定终止密码子。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi 。支持的遗传密码编号为：1、2、3、4、5、6、9、10、11、12、13、14、15、16、21、22、23、24、25、26、27、28、29、30、31、32、33，其它编号会报错退出（遗传密码28的终止密码子不明确，程序将TAA、TAG、TGA都视为终止密码子）。genewise使用程序根据该遗传密码生成的codon.table文件；exonerate和gth分别使用--geneticcode和-translationtable参数，能否使用某个编号还取决于所调用的软件是否支持该编号。
 
-    --min_intron_length <int>    default: 20
-    --max_intron_length <int>    default: 3.6 * sqrt(genomeSize)
-    设置最小和最大intron长度。这两个参数仅在使用exonerate软件进行基因预测时生效。
+    --min_intron_length <int>    默认值: 20
+    --max_intron_length <int>    默认值: 3.6 * sqrt(genomeSize)
+    设置最小和最大intron长度。这两个参数仅在使用exonerate软件进行基因预测时生效。其中--max_intron_length的默认值中，genomeSize是输入的第二个文件genome.fasta中所有序列的碱基总长度（而非同源蛋白的大小）。
 
-    --tmp_dir <string>    default: tmp_\$date\$pid
-    程序运行时临时文件夹名称。指定已有的临时文件夹时，程序会跳过已经完成的chunk（按"chunk × 方法"为单元，见上文说明），实现断点续跑。
+    --tmp_dir <string>    默认值: tmp_$date$pid
+    程序运行时临时文件夹名称。指定已有的临时文件夹时，程序会跳过已经完成的chunk（按"方法 × chunk"为单元，见上文说明），实现断点续跑。
 
-    --chunk_num <int>    default: 200
-    每个chunk包含的基因预测任务数量。每个chunk由一个worker进程顺序处理，每个chunk仅生成少量文件。该值过大会导致末尾负载不均衡，过小会增加进程启动开销，一般设置为100~1000即可。
+    --chunk_num <int>    默认值: 20
+    每个chunk包含的基因预测命令数量（命令已随机打乱，一个chunk只包含一种方法的命令）。每个chunk由一个worker进程顺序处理，每个chunk仅生成少量文件。该值过大会导致末尾负载不均衡，过小会增加进程启动开销和chunk目录数量。默认值20适用于需要较好负载均衡的情况；当命令总数非常大时，可适当增大到100~1000。
 
-    --timeout <int>    default: 3600
-    单个基因预测命令的最长运行时间（秒）。超时的命令被终止并计为失败。设置为0表示不限制。
+    --timeout <int>    默认值: 120
+    单个基因预测命令的最长运行时间（秒）。超时的命令被终止；若--retry大于0，则在该chunk的首轮运行结束后自动重试（见--retry），否则计为失败。设置为0表示不限制（此时也不会有重试）。注意：每一种预测方法的命令成功率不低于90%，程序才会继续运行。
 
-    --help    default: None
-    display this help and exit.
+    --retry <int>    默认值: 1
+    对超时的基因预测命令的自动重试轮数。每个worker处理完chunk内所有命令后，将超时的命令单独提取出来重新运行，第r轮重试的超时时间为 --timeout × 2^r（默认1轮即2倍--timeout，默认值下为240秒；设置为2则依次使用2倍、4倍）。仅对超时的命令重试；非超时原因（如软件异常退出）的失败不会重试。重试仍然失败的命令计为失败，记录在<方法名>_chunk*/worker.log中。设置为0表示不重试。
 
+    --help    默认值: 无
+    Display the usage in English and exit.
+
+    --chinese_help    默认值: 无
+    显示中文用法说明并退出。
 USAGE
+$usage_cn =~ s/\$0/$0/g;
 
-my ($method, $genetic_code, $flanking_length, $cpu, $tmp_dir, $chunk_num, $help_flag,
+my ($method, $genetic_code, $flanking_length, $cpu, $tmp_dir, $chunk_num, $help_flag, $chinese_help_flag,
     $threshold_protein_length, $threshold_homolog_coverage, $threshold_inter_stop_codon_num,
-    $min_intron_length, $max_intron_length, $timeout, $worker_dir, $codon_table_file,
-    $run_methods_arg);
+    $min_intron_length, $max_intron_length, $timeout, $retry, $worker_dir, $codon_table_file);
 GetOptions(
     "method=s"                         => \$method,
     "genetic_code=i"                   => \$genetic_code,
@@ -75,19 +105,21 @@ GetOptions(
     "tmp_dir=s"                        => \$tmp_dir,
     "chunk_num=i"                      => \$chunk_num,
     "help"                             => \$help_flag,
+    "chinese_help"                     => \$chinese_help_flag,
     "threshold_protein_length=i"       => \$threshold_protein_length,
     "threshold_homolog_coverage=f"     => \$threshold_homolog_coverage,
     "threshold_inter_stop_codon_num=i" => \$threshold_inter_stop_codon_num,
     "min_intron_length=i"              => \$min_intron_length,
     "max_intron_length=i"              => \$max_intron_length,
     "timeout=i"                        => \$timeout,
+    "retry=i"                          => \$retry,
     # 内部参数：worker模式
     "worker=s"                         => \$worker_dir,
     "codon_table=s"                    => \$codon_table_file,
-    "run_methods=s"                    => \$run_methods_arg,
-) or die $usage;
+) or die "Error: invalid option. Use --help for the English usage, or --chinese_help for the Chinese usage.\n";
 
-if ($help_flag) { print $usage; exit 0; }
+if ($help_flag)         { print &usage_en(); exit 0; }
+if ($chinese_help_flag) { print $usage_cn;   exit 0; }
 
 $min_intron_length              //= 20;
 $threshold_protein_length       //= 25;
@@ -95,13 +127,16 @@ $threshold_homolog_coverage     //= 0.2;
 $threshold_inter_stop_codon_num //= 3;
 $cpu                            //= 8;
 $genetic_code                   //= 1;
-$chunk_num                      //= 200;
-$timeout                        //= 3600;
+$chunk_num                      //= 20;
+$timeout                        //= 120;
+$retry                          //= 1;
 $method                         //= "exonerate";
 
-$method = "gth,exonerate,genewise" if $method eq "all";
+# 修正：方法名不区分大小写，允许逗号两侧有空格，且all可以出现在逗号分隔的列表中（例如 exonerate,all）。
+$method = lc($method);
+$method = "gth,exonerate,genewise" if grep { $_ eq "all" } split /[\s,]+/, $method;
 my %method;
-foreach (split /,/, $method) {
+foreach (grep { $_ ne "" } split /[\s,]+/, $method) {
     die "Error: The method '$_' is not correct, it should be exonerate, genewise, gth or all.\n"
         unless $_ eq "exonerate" or $_ eq "genewise" or $_ eq "gth";
     $method{$_} = 1;
@@ -111,10 +146,17 @@ my $method_sig = join(",", @methods);
 die "Error: no method specified.\n" unless @methods;
 die "Error: --cpu must be >= 1.\n" if $cpu < 1;
 die "Error: --chunk_num must be >= 1.\n" if $chunk_num < 1;
+die "Error: --retry must be >= 0.\n" if $retry < 0;
+die "Error: --timeout must be >= 0.\n" if $timeout < 0;
+die "Error: --genetic_code must be a positive integer.\n" if $genetic_code < 1;
+&codon_table($genetic_code);    # 检查遗传密码是否受支持，不支持时报错退出
 
+# 命令打乱使用的固定随机种子（保证相同输入和参数下打乱结果一致，从而支持断点续跑）
+my $SHUFFLE_SEED = 20260101;
+my %method_ord = (gth => 1, exonerate => 2, genewise => 3);
 
 ##############################################################################
-# worker模式：处理单个chunk（仅运行其中缺失的方法）后退出
+# worker模式：处理单个chunk（只运行一种方法）后退出
 ##############################################################################
 if (defined $worker_dir) {
     &worker_main($worker_dir);
@@ -124,15 +166,20 @@ if (defined $worker_dir) {
 ##############################################################################
 # 主进程
 ##############################################################################
-die $usage unless @ARGV == 3;
+unless (@ARGV == 3) {
+    # 程序直接运行（未给出正确的输入文件）时，输出英文用法说明
+    print STDERR &usage_en();
+    exit 1;
+}
 my ($input_file1, $input_file2, $input_file3) = @ARGV;
 foreach ($input_file1, $input_file2, $input_file3) {
     die "Error: file $_ does not exist.\n" unless -e $_;
 }
 ($input_file1, $input_file2, $input_file3) = map { abs_path($_) } ($input_file1, $input_file2, $input_file3);
 
-# 计算基因组总长度，用于设置--max_intron_length的默认值：3.6 * sqrt(genomeSize)。
-my $genomeSize = &get_fasta_total_length($input_file1);
+# 计算基因组总长度（即输入的第二个文件genome.fasta中所有序列的碱基总长度，而非同源蛋白的大小），
+# 用于设置--max_intron_length的默认值：3.6 * sqrt(genomeSize)。
+my $genomeSize = &get_fasta_total_length($input_file2);
 unless ( $max_intron_length ) {
     $max_intron_length = int( 3.6 * sqrt($genomeSize) + 0.5 );
 }
@@ -184,9 +231,9 @@ while (my $line = <$hit_fh>) {
 close $hit_fh;
 undef %task_seen;
 
-# 判断是否需要生成chunk输入文件；若已生成（断点续跑），则无需读入基因组序列
-my $stage1_ok = "$tmp_dir/1.create_chunks.ok";
-my $need_stage1 = ! -e $stage1_ok;
+# 判断是否需要生成chunk输入文件（任一方法缺少切分结果即需要）；若全部已生成（断点续跑），则无需读入基因组序列
+my @stage_todo  = grep { ! -e "$tmp_dir/1.create_chunks.$_.ok" } @methods;
+my $need_stage1 = @stage_todo ? 1 : 0;
 print STDERR (localtime) . ": Reading genome file $input_file2 " . ($need_stage1 ? "(sequences)" : "(sequence names only)") . "\n";
 my ($seq_order, $genome_seq) = &read_genome($input_file2, \%need_genome_seq, $need_stage1);
 
@@ -228,61 +275,66 @@ foreach my $rkey (keys %region) {
 # $region{$rkey} = [subject, rs, re, offset(0-based start), length, region_id]
 
 my $chunk_total = int((@tasks + $chunk_num - 1) / $chunk_num);
-my $stage1_sig  = join("\t", scalar(@tasks), $chunk_num, $flanking_length, $chunk_total);
+my $stage1_sig  = join("\t", scalar(@tasks), $chunk_num, $flanking_length, $chunk_total, $SHUFFLE_SEED);
 
 # 输出genewise的codon.table文件
 my $codon_table = "$tmp_dir/codon.table";
-&genetic_code_table($genetic_code, $codon_table);
+&write_codon_table($genetic_code, $codon_table);
 
-if ($need_stage1) {
-    print STDERR (localtime) . ": Creating $chunk_total chunks for " . scalar(@tasks) . " tasks in $tmp_dir\n";
-    foreach my $c (0 .. $chunk_total - 1) {
-        my $dir = "$tmp_dir/chunk$c";
-        mkdir $dir unless -e $dir;
-        my $last = min(($c + 1) * $chunk_num, scalar(@tasks)) - 1;
-        open my $tfh, '>', "$dir/tasks.tab"   or die "Can not create file $dir/tasks.tab, $!";
-        open my $rfh, '>', "$dir/regions.fa"  or die "Can not create file $dir/regions.fa, $!";
-        open my $pfh, '>', "$dir/proteins.fa" or die "Can not create file $dir/proteins.fa, $!";
-        my (%r_done, %p_done);
-        foreach my $i ($c * $chunk_num .. $last) {
-            my ($rkey, $query, $strand) = @{$tasks[$i]};
-            my ($subject, undef, undef, $offset, $length, $region_id) = @{$region{$rkey}};
-            print $tfh "$region_id\t$subject\t$offset\t$strand\t$query\n";
-            unless ($r_done{$region_id}++) {
-                print $rfh ">$region_id\n" . substr($genome_seq->{$subject}, $offset, $length) . "\n";
+# 对每种方法分别打乱全部预测任务并切分chunk（命令 = 任务 × 方法）
+my %stage_todo = map { $_ => 1 } @stage_todo;
+foreach my $m (@methods) {
+    my $stage1_ok = "$tmp_dir/1.create_chunks.$m.ok";
+    if ($stage_todo{$m}) {
+        print STDERR (localtime) . ": Shuffling and creating $chunk_total chunks for " . scalar(@tasks) . " $m commands in $tmp_dir\n";
+        my @order = &shuffle_indices(scalar(@tasks), $SHUFFLE_SEED + $method_ord{$m});
+        foreach my $c (0 .. $chunk_total - 1) {
+            my $dir = "$tmp_dir/${m}_chunk$c";
+            mkdir $dir unless -e $dir;
+            my $first = $c * $chunk_num;
+            my $last  = min(($c + 1) * $chunk_num, scalar(@tasks)) - 1;
+            open my $tfh, '>', "$dir/tasks.tab"   or die "Can not create file $dir/tasks.tab, $!";
+            open my $rfh, '>', "$dir/regions.fa"  or die "Can not create file $dir/regions.fa, $!";
+            open my $pfh, '>', "$dir/proteins.fa" or die "Can not create file $dir/proteins.fa, $!";
+            my (%r_done, %p_done);
+            foreach my $k ($first .. $last) {
+                my ($rkey, $query, $strand) = @{$tasks[$order[$k]]};
+                my ($subject, undef, undef, $offset, $length, $region_id) = @{$region{$rkey}};
+                print $tfh "$region_id\t$subject\t$offset\t$strand\t$query\n";
+                unless ($r_done{$region_id}++) {
+                    print $rfh ">$region_id\n" . substr($genome_seq->{$subject}, $offset, $length) . "\n";
+                }
+                unless ($p_done{$query}++) {
+                    print $pfh ">$query\n$homolog_seq{$query}\n";
+                }
             }
-            unless ($p_done{$query}++) {
-                print $pfh ">$query\n$homolog_seq{$query}\n";
-            }
+            close $tfh; close $rfh; close $pfh;
         }
-        close $tfh; close $rfh; close $pfh;
+        open my $ok, '>', $stage1_ok or die "Can not create file $stage1_ok, $!";
+        print $ok "$stage1_sig\n";
+        close $ok;
     }
-    open my $ok, '>', $stage1_ok or die "Can not create file $stage1_ok, $!";
-    print $ok "$stage1_sig\n";
-    close $ok;
-}
-else {
-    open my $ok, '<', $stage1_ok or die "Can not open file $stage1_ok, $!";
-    my $sig = <$ok>; close $ok;
-    chomp($sig) if defined $sig;
-    die "Error: $stage1_ok exists but its parameters ($sig) do not match the current run ($stage1_sig). Please use a new --tmp_dir.\n"
-        unless defined $sig and $sig eq $stage1_sig;
-    print STDERR (localtime) . ": Chunk files already exist in $tmp_dir, skip creating.\n";
+    else {
+        open my $ok, '<', $stage1_ok or die "Can not open file $stage1_ok, $!";
+        my $sig = <$ok>; close $ok;
+        chomp($sig) if defined $sig;
+        die "Error: $stage1_ok exists but its parameters ($sig) do not match the current run ($stage1_sig). Please use a new --tmp_dir.\n"
+            unless defined $sig and $sig eq $stage1_sig;
+        print STDERR (localtime) . ": Chunk files of method $m already exist in $tmp_dir, skip creating.\n";
+    }
 }
 undef $genome_seq;
 undef %homolog_seq;
 
 ##############################################################################
-# 进程池并行运行各chunk（按chunk×方法为单元，跳过已完成的方法）
+# 进程池并行运行各chunk（按方法×chunk为单元，跳过已完成的单元）
 ##############################################################################
 my $current_run_sig = &method_run_sig();
-my @pending;    # 元素: [chunk_index, \@missing_methods]
-my ($chunk_fully_done, $chunk_partial) = (0, 0);
-foreach my $c (0 .. $chunk_total - 1) {
-    my $dir = "$tmp_dir/chunk$c";
-    my @missing;
-    foreach my $m (@methods) {
-        my $okfile = "$dir/2.$m.ok";
+my @pending;    # 元素: [方法名, chunk_index]
+my $unit_total = scalar(@methods) * $chunk_total;
+foreach my $m (@methods) {
+    foreach my $c (0 .. $chunk_total - 1) {
+        my $okfile = "$tmp_dir/${m}_chunk$c/2.ok";
         my $done = 0;
         if (-e $okfile) {
             open my $fh, '<', $okfile;
@@ -291,19 +343,17 @@ foreach my $c (0 .. $chunk_total - 1) {
             chomp($sig) if defined $sig;
             $done = 1 if defined $sig and $sig eq $current_run_sig;
         }
-        push @missing, $m unless $done;
-    }
-    if (@missing) {
-        push @pending, [$c, \@missing];
-        $chunk_partial ++;
-    }
-    else {
-        $chunk_fully_done ++;
+        push @pending, [$m, $c] unless $done;
     }
 }
+# 将各方法的chunk再次随机打乱，使不同方法的命令交错运行
+{
+    my @po = &shuffle_indices(scalar(@pending), $SHUFFLE_SEED);
+    @pending = @pending[@po];
+}
 my $todo = scalar(@pending);
-print STDERR (localtime) . ": $chunk_fully_done/$chunk_total chunks already finished for all requested methods ($method_sig); "
-    . "$todo chunks need (re)computation of one or more methods, using $cpu workers.\n";
+print STDERR (localtime) . ": " . ($unit_total - $todo) . "/$unit_total chunks already finished for all requested methods ($method_sig); "
+    . "$todo chunks need (re)computation, using $cpu workers.\n";
 
 my (%running, @failed_chunks);
 my $finished = 0;
@@ -314,52 +364,52 @@ local $SIG{INT} = local $SIG{TERM} = sub {
 while (@pending or %running) {
     while (@pending and keys(%running) < $cpu) {
         my $item = shift @pending;
-        my ($c, $missing_ref) = @$item;
-        my $dir = "$tmp_dir/chunk$c";
-        my $run_methods_str = join(",", @$missing_ref);
+        my ($m, $c) = @$item;
+        my $dir = "$tmp_dir/${m}_chunk$c";
         my $pid = fork();
         die "Can not fork: $!" unless defined $pid;
         if ($pid == 0) {
-            exec($^X, $script_path, "--worker", $dir, "--method", $method_sig,
-                 "--run_methods", $run_methods_str,
+            exec($^X, $script_path, "--worker", $dir, "--method", $m,
                  "--genetic_code", $genetic_code, "--min_intron_length", $min_intron_length,
                  "--max_intron_length", $max_intron_length, "--timeout", $timeout,
+                 "--retry", $retry,
                  "--codon_table", $codon_table)
                 or do { print STDERR "Can not exec worker: $!\n"; POSIX::_exit(127); };
         }
-        $running{$pid} = $c;
+        $running{$pid} = "${m}_chunk$c";
     }
     my $pid = waitpid(-1, 0);
     last if $pid == -1;
     next unless exists $running{$pid};
-    my $c = delete $running{$pid};
+    my $name = delete $running{$pid};
     if ($? != 0) {
-        push @failed_chunks, $c;
-        warn "Warning: worker for chunk$c exited abnormally (status $?), see $tmp_dir/chunk$c/worker.log\n";
+        push @failed_chunks, $name;
+        warn "Warning: worker for $name exited abnormally (status $?), see $tmp_dir/$name/worker.log\n";
     }
     $finished ++;
     if ($finished == $todo or $finished % max(1, int($todo / 100)) == 0) {
         printf STDERR "%s: %d/%d chunks finished (%.1f%%)\n", scalar(localtime), $finished, $todo, 100 * $finished / $todo;
     }
 }
-die "Error: " . scalar(@failed_chunks) . " chunks failed (chunk" . join(",chunk", @failed_chunks) . "). Re-run with --tmp_dir $tmp_dir to resume.\n" if @failed_chunks;
+die "Error: " . scalar(@failed_chunks) . " chunks failed (" . join(",", @failed_chunks) . "). Re-run with --tmp_dir $tmp_dir to resume.\n" if @failed_chunks;
 
 ##############################################################################
-# 汇总结果（按--method中的每个方法分别读取其结果文件，无论是本次还是上次运行完成的）
+# 汇总结果（按--method中的每个方法分别读取其各chunk的结果文件，无论是本次还是上次运行完成的）
 ##############################################################################
 my (%models, %stat);
-foreach my $c (0 .. $chunk_total - 1) {
-    my $dir = "$tmp_dir/chunk$c";
-    foreach my $m (@methods) {
-        open my $sfh, '<', "$dir/stats.$m.tab" or die "Can not open file $dir/stats.$m.tab, $!";
+foreach my $m (@methods) {
+    foreach my $c (0 .. $chunk_total - 1) {
+        my $dir = "$tmp_dir/${m}_chunk$c";
+        open my $sfh, '<', "$dir/stats.tab" or die "Can not open file $dir/stats.tab, $!";
         my $line = <$sfh>;
         close $sfh;
         chomp($line) if defined $line;
-        my (undef, $total, $failed) = split /\t/, ($line // '');
-        $stat{$m}[0] += ($total  // 0);
-        $stat{$m}[1] += ($failed // 0);
+        my (undef, $total, $failed, $rescued) = split /\t/, ($line // '');
+        $stat{$m}[0] += ($total   // 0);
+        $stat{$m}[1] += ($failed  // 0);
+        $stat{$m}[2] += ($rescued // 0);
 
-        open my $rfh, '<', "$dir/result.$m.tab" or die "Can not open file $dir/result.$m.tab, $!";
+        open my $rfh, '<', "$dir/result.tab" or die "Can not open file $dir/result.tab, $!";
         while (<$rfh>) {
             chomp;
             my ($region_id, $info) = split /\t/, $_, 2;
@@ -368,11 +418,11 @@ foreach my $c (0 .. $chunk_total - 1) {
         close $rfh;
     }
 }
-# 检测各方法运行成功的命令超过90%，则让程序继续运行
+# 检测各方法运行成功的命令不低于90%，才让程序继续运行
 foreach my $m (@methods) {
-    my ($total, $failed) = @{ $stat{$m} || [0, 0] };
-    printf STDERR "%s: %d commands, %d failed.\n", $m, $total, $failed;
-    die "Error: too many $m commands failed ($failed/$total), see $tmp_dir/chunk*/worker.log\n"
+    my ($total, $failed, $rescued) = @{ $stat{$m} || [0, 0, 0] };
+    printf STDERR "%s: %d commands, %d failed (%d timed-out commands were rescued by retry).\n", $m, $total, $failed, $rescued // 0;
+    die "Error: too many $m commands failed ($failed/$total), the success rate must be >= 90%, see $tmp_dir/${m}_chunk*/worker.log\n"
         if $total == 0 or ($total - $failed) / $total < 0.9;
 }
 
@@ -428,8 +478,25 @@ sub out_homolog_prediction_tab {
 }
 
 ##############################################################################
-# worker：顺序处理一个chunk中的所有任务，但只运行调用方指定的--run_methods
-# （即该chunk中尚未完成、或参数已变化需要重跑的方法），已完成方法的结果文件保持不变。
+# 使用固定种子的线性同余发生器对0..n-1做Fisher-Yates洗牌，返回打乱后的下标列表。
+# 不依赖perl内置的rand，保证相同种子下不同次运行的结果完全一致（断点续跑所必需）。
+##############################################################################
+sub shuffle_indices {
+    my ($n, $seed) = @_;
+    my @idx = (0 .. $n - 1);
+    my $state = $seed % 2147483648;
+    for (my $i = $n - 1; $i > 0; $i --) {
+        $state = ($state * 1103515245 + 12345) % 2147483648;
+        my $j = ($state >> 8) % ($i + 1);
+        @idx[$i, $j] = @idx[$j, $i];
+    }
+    return @idx;
+}
+
+##############################################################################
+# worker：顺序处理一个chunk中的所有命令（一个chunk只对应--method指定的一种方法）。
+# 首轮运行中超时的命令会被单独收集，在首轮结束后按--retry轮数依次重试，
+# 第r轮的超时时间为 --timeout * 2^r。
 ##############################################################################
 my $current_child_pid;
 
@@ -441,12 +508,10 @@ sub worker_main {
         POSIX::_exit(1);
     };
 
-    # 本次worker实际需要运行的方法列表：若--run_methods未指定（例如手动调用worker模式），
-    # 退化为运行--method中的全部方法，行为与旧版本一致。
-    my @run_methods = $run_methods_arg ? split(/,/, $run_methods_arg) : @methods;
-    die "Error: no method to run in worker.\n" unless @run_methods;
+    die "Error: worker mode requires exactly one method.\n" unless @methods == 1;
+    my $m = $methods[0];
 
-    my (undef, $stop_codon) = &genetic_code_table($genetic_code);
+    my (undef, undef, $stop_codon) = &codon_table($genetic_code);
     my %region_seq  = %{ &read_fasta("$dir/regions.fa") };
     my %protein_seq = %{ &read_fasta("$dir/proteins.fa") };
 
@@ -456,81 +521,126 @@ sub worker_main {
     my $gfile = "$work/genome.fa";
 
     open my $tfh, '<', "$dir/tasks.tab" or die "Can not open file $dir/tasks.tab, $!";
+    open my $out_fh, '>', "$dir/result.tab.tmp" or die "Can not create file $dir/result.tab.tmp, $!";
 
-    # 为本次要运行的每个方法分别打开一个独立的结果输出文件（.tmp，处理完成后再rename），
-    # 不影响其它已完成方法已有的result.<method>.tab文件。
-    my (%out_fh, %stat);
-    foreach my $m (@run_methods) {
-        open $out_fh{$m}, '>', "$dir/result.$m.tab.tmp" or die "Can not create file $dir/result.$m.tab.tmp, $!";
-        $stat{$m} = [0, 0];
-    }
+    # @stat = [命令总数, 最终失败数, 重试后成功数]
+    my @stat = (0, 0, 0);
+    my @retry_list;    # 首轮超时、等待重试的任务
+    my $can_retry = ($retry > 0 and $timeout > 0) ? 1 : 0;
 
     while (my $line = <$tfh>) {
         chomp $line;
         my ($region_id, $seq_id, $offset, $strand, $protein_id) = split /\t/, $line;
+        my $task = { region_id => $region_id, seq_id => $seq_id, offset => $offset,
+                     strand => $strand, protein_id => $protein_id };
         &write_file($pfile, ">$protein_id\n$protein_seq{$protein_id}\n");
         &write_file($gfile, ">$region_id\n$region_seq{$region_id}\n");
-        my %ctx = (
-            seq_id      => $seq_id,
-            offset      => $offset,
-            seq         => $region_seq{$region_id},
-            protein_id  => $protein_id,
-            protein_len => length($protein_seq{$protein_id}),
-            stop        => $stop_codon,
-        );
+        my $ctx = &task_ctx($task, \%region_seq, \%protein_seq, $stop_codon);
 
-        foreach my $m (@run_methods) {
-            my @cmd;
-            if ($m eq "genewise") {
-                @cmd = ("genewise", $pfile, $gfile, "-codon", $codon_table_file,
-                        ($strand eq "plus" ? "-tfor" : "-trev"), "-gff", "-quiet", "-silent", "-genesf");
-            }
-            elsif ($m eq "gth") {
-                @cmd = ("gth", "-protein", $pfile, "-genomic", $gfile, "-translationtable", $genetic_code,
-                        ($strand eq "plus" ? "-f" : "-r"), "-gff3out", "-intermediate");
-            }
-            else {
-                @cmd = ("exonerate", "--model", "protein2genome", "--geneticcode", $genetic_code,
-                        "--forcegtag", "true", "--minintron", $min_intron_length, "--maxintron", $max_intron_length,
-                        "--showtargetgff", "true", "--showsugar", "true", "--showalignment", "false",
-                        "--showvulgar", "false", $pfile, $gfile);
-            }
-            $stat{$m}[0] ++;
-            my ($text, $msg) = &run_command($timeout, @cmd);
-            unless (defined $text) {
-                $stat{$m}[1] ++;
-                print STDERR "[$m failed: $msg] region=$region_id protein=$protein_id\n";
-                next;
-            }
-            my @models = $m eq "genewise" ? &parse_genewise(\%ctx, $text)
-                       : $m eq "gth"      ? &parse_gth(\%ctx, $text)
-                       :                    &parse_exonerate(\%ctx, $text);
-            print { $out_fh{$m} } "$region_id\t$_\n" foreach @models;
+        my @cmd = &build_cmd($m, $strand, $pfile, $gfile);
+        $stat[0] ++;
+        my ($text, $msg, $timed_out) = &run_command($timeout, @cmd);
+        if (defined $text) {
+            print {$out_fh} "$region_id\t$_\n" foreach &parse_model($m, $ctx, $text);
+        }
+        elsif ($timed_out and $can_retry) {
+            push @retry_list, $task;
+            print STDERR "[$m $msg, will retry] region=$region_id protein=$protein_id\n";
+        }
+        else {
+            $stat[1] ++;
+            print STDERR "[$m failed: $msg] region=$region_id protein=$protein_id\n";
         }
         # 清空工作目录（包括gth生成的索引文件）
         &clean_dir($work);
     }
     close $tfh;
+
+    # 对超时的命令进行重试：每一轮使用上一轮两倍的超时时间
+    foreach my $round (1 .. $retry) {
+        last unless @retry_list and $can_retry;
+        my $round_timeout = $timeout * (2 ** $round);
+        print STDERR "[retry round $round/$retry] re-running " . scalar(@retry_list) . " timed-out $m commands with timeout ${round_timeout}s\n";
+        my @next_list;
+        foreach my $task (@retry_list) {
+            my ($region_id, $protein_id, $strand) = @{$task}{qw/region_id protein_id strand/};
+            &write_file($pfile, ">$protein_id\n$protein_seq{$protein_id}\n");
+            &write_file($gfile, ">$region_id\n$region_seq{$region_id}\n");
+            my $ctx = &task_ctx($task, \%region_seq, \%protein_seq, $stop_codon);
+            my @cmd = &build_cmd($m, $strand, $pfile, $gfile);
+            my ($text, $msg, $timed_out) = &run_command($round_timeout, @cmd);
+            if (defined $text) {
+                $stat[2] ++;
+                print {$out_fh} "$region_id\t$_\n" foreach &parse_model($m, $ctx, $text);
+                print STDERR "[$m rescued in retry round $round] region=$region_id protein=$protein_id\n";
+            }
+            elsif ($timed_out and $round < $retry) {
+                push @next_list, $task;
+            }
+            else {
+                $stat[1] ++;
+                print STDERR "[$m failed finally in retry round $round: $msg] region=$region_id protein=$protein_id\n";
+            }
+            &clean_dir($work);
+        }
+        @retry_list = @next_list;
+    }
     rmdir $work;
 
-    # 每个方法独立、原子性地落盘：先rename结果文件，再写统计文件，最后写.ok标记
+    # 原子性落盘：先rename结果文件，再写统计文件，最后写.ok标记
     # （标记内容为参数签名，用于下次运行时判断该方法在此chunk中是否仍然有效）。
-    my $sig = &method_run_sig();
-    foreach my $m (@run_methods) {
-        close $out_fh{$m};
-        rename "$dir/result.$m.tab.tmp", "$dir/result.$m.tab" or die "Can not rename $dir/result.$m.tab.tmp, $!";
-        open my $sfh, '>', "$dir/stats.$m.tab" or die "Can not create file $dir/stats.$m.tab, $!";
-        print $sfh "$m\t$stat{$m}[0]\t$stat{$m}[1]\n";
-        close $sfh;
-        &write_file("$dir/2.$m.ok", "$sig\n");
+    close $out_fh;
+    rename "$dir/result.tab.tmp", "$dir/result.tab" or die "Can not rename $dir/result.tab.tmp, $!";
+    &write_file("$dir/stats.tab", "$m\t$stat[0]\t$stat[1]\t$stat[2]\n");
+    &write_file("$dir/2.ok", &method_run_sig() . "\n");
+}
+
+# 构造任务上下文（供结果解析使用）
+sub task_ctx {
+    my ($task, $region_seq, $protein_seq, $stop_codon) = @_;
+    return {
+        seq_id      => $task->{seq_id},
+        offset      => $task->{offset},
+        seq         => $region_seq->{$task->{region_id}},
+        protein_id  => $task->{protein_id},
+        protein_len => length($protein_seq->{$task->{protein_id}}),
+        stop        => $stop_codon,
+    };
+}
+
+# 构造各预测软件的命令行
+sub build_cmd {
+    my ($m, $strand, $pfile, $gfile) = @_;
+    if ($m eq "genewise") {
+        return ("genewise", $pfile, $gfile, "-codon", $codon_table_file,
+                ($strand eq "plus" ? "-tfor" : "-trev"), "-gff", "-quiet", "-silent", "-genesf");
+    }
+    elsif ($m eq "gth") {
+        return ("gth", "-protein", $pfile, "-genomic", $gfile, "-translationtable", $genetic_code,
+                ($strand eq "plus" ? "-f" : "-r"), "-gff3out", "-intermediate");
+    }
+    else {
+        return ("exonerate", "--model", "protein2genome", "--geneticcode", $genetic_code,
+                "--forcegtag", "true", "--minintron", $min_intron_length, "--maxintron", $max_intron_length,
+                "--showtargetgff", "true", "--showsugar", "true", "--showalignment", "false",
+                "--showvulgar", "false", $pfile, $gfile);
     }
 }
 
-# 不经过shell直接运行命令，捕获标准输出。返回(输出内容, 状态信息)，失败时输出内容为undef。
+# 根据方法选择对应的解析函数
+sub parse_model {
+    my ($m, $ctx, $text) = @_;
+    return $m eq "genewise" ? &parse_genewise($ctx, $text)
+         : $m eq "gth"      ? &parse_gth($ctx, $text)
+         :                    &parse_exonerate($ctx, $text);
+}
+
+# 不经过shell直接运行命令，捕获标准输出。
+# 返回(输出内容, 状态信息, 是否超时)，失败时输出内容为undef。
 sub run_command {
     my ($timeout, @cmd) = @_;
     my $pid = open(my $fh, '-|', @cmd);
-    return (undef, "can not run $cmd[0]: $!") unless $pid;
+    return (undef, "can not run $cmd[0]: $!", 0) unless $pid;
     $current_child_pid = $pid;
     my ($text, $timed_out) = ('', 0);
     my $ok = eval {
@@ -550,9 +660,9 @@ sub run_command {
     close $fh;
     my $status = $?;
     $current_child_pid = undef;
-    return (undef, "timeout after ${timeout}s") if $timed_out;
-    return (undef, "exit code " . ($status >> 8) . ", signal " . ($status & 127)) if $status != 0;
-    return (defined $text ? $text : '', "ok");
+    return (undef, "timeout after ${timeout}s", 1) if $timed_out;
+    return (undef, "exit code " . ($status >> 8) . ", signal " . ($status & 127), 0) if $status != 0;
+    return (defined $text ? $text : '', "ok", 0);
 }
 
 ##############################################################################
@@ -798,9 +908,20 @@ sub method_run_sig {
     return "$genetic_code\t$min_intron_length\t$max_intron_length";
 }
 
-# 根据遗传密码返回(\%code, \%stop_codon)；若给定文件名，则同时输出genewise的codon.table文件
-sub genetic_code_table {
+# 输出genewise使用的codon.table文件（密码子表由codon_table子程序根据遗传密码给出，终止密码子记为X）
+sub write_codon_table {
     my ($gc, $out_file) = @_;
+    warn "Warning: stop codons of genetic code 28 are ambiguous, TAA/TAG/TGA are treated as stop codons.\n" if $gc == 28;
+    my ($code) = &codon_table($gc);
+    my @order = qw/TTT TTC TTA TTG TCT TCC TCA TCG TAT TAC TAA TAG TGT TGC TGA TGG CTT CTC CTA CTG CCT CCC CCA CCG CAT CAC CAA CAG CGT CGC CGA CGG ATT ATC ATA ATG ACT ACC ACA ACG AAT AAC AAA AAG AGT AGC AGA AGG GTT GTC GTA GTG GCT GCC GCA GCG GAT GAC GAA GAG GGT GGC GGA GGG/;
+    &write_file($out_file, join('', map { "$_ $code->{$_}\n" } @order));
+}
+
+# 子程序，根据遗传密码编号返回（密码子表、起始密码子表、终止密码子表）的哈希引用。
+# 遗传密码的设置参考NCBI Genetic Codes，代码来自 GFF3_merging_and_removing_redundancy（fillingEndsOfGeneModels）。
+# 不支持的遗传密码编号会报错退出。
+sub codon_table {
+    my ($genetic_code) = @_;
     my %code = (
         "TTT" => "F", "TTC" => "F", "TTA" => "L", "TTG" => "L",
         "TCT" => "S", "TCC" => "S", "TCA" => "S", "TCG" => "S",
@@ -819,44 +940,139 @@ sub genetic_code_table {
         "GAT" => "D", "GAC" => "D", "GAA" => "E", "GAG" => "E",
         "GGT" => "G", "GGC" => "G", "GGA" => "G", "GGG" => "G",
     );
-    my %change = (
-        1  => {},                                                          # The Standard Code
-        2  => { AGA => "X", AGG => "X", ATA => "M", TGA => "W" },          # Vertebrate Mitochondrial
-        3  => { ATA => "M", CTT => "T", CTC => "T", CTA => "T", CTG => "T", TGA => "W" }, # Yeast Mitochondrial
-        4  => { TGA => "W" },                                              # Mold/Protozoan/Coelenterate Mito; Mycoplasma
-        5  => { AGA => "S", AGG => "S", ATA => "M", TGA => "W" },          # Invertebrate Mitochondrial
-        6  => { TAA => "Q", TAG => "Q" },                                  # Ciliate, Dasycladacean and Hexamita Nuclear
-        9  => { AAA => "N", AGA => "S", AGG => "S", TGA => "W" },          # Echinoderm and Flatworm Mitochondrial
-        10 => { TGA => "C" },                                              # Euplotid Nuclear
-        11 => {},                                                          # Bacterial, Archaeal and Plant Plastid
-        12 => { CTG => "S" },                                              # Alternative Yeast Nuclear
-        13 => { AGA => "G", AGG => "G", ATA => "M", TGA => "W" },          # Ascidian Mitochondrial
-        14 => { AAA => "N", AGA => "S", AGG => "S", TAA => "Y", TGA => "W" }, # Alternative Flatworm Mitochondrial
-        16 => { TAG => "L" },                                              # Chlorophycean Mitochondrial
-        21 => { TGA => "W", ATA => "M", AGA => "S", AGG => "S", AAA => "N" }, # Trematode Mitochondrial
-        22 => { TCA => "X", TAG => "L" },                                  # Scenedesmus obliquus Mitochondrial
-        23 => { TTA => "X" },                                              # Thraustochytrium Mitochondrial
-        24 => { AGA => "S", AGG => "K", TGA => "W" },                      # Rhabdopleuridae Mitochondrial
-        25 => { TGA => "G" },                                              # Candidate Division SR1 and Gracilibacteria
-        26 => { CTG => "A" },                                              # Pachysolen tannophilus Nuclear
-        27 => { TAG => "Q", TAA => "Q" },                                  # Karyorelict Nuclear
-        28 => {},                                                          # Condylostoma Nuclear (stop codons ambiguous)
-        29 => { TAA => "Y", TAG => "Y" },                                  # Mesodinium Nuclear
-        30 => { TAA => "E", TAG => "E" },                                  # Peritrich Nuclear
-        31 => { TGA => "W" },                                              # Blastocrithidia Nuclear
-        32 => { TAG => "W" },                                              # Balanophoraceae Plastid
-        33 => { TAA => "Y", TGA => "Y", AGA => "S", AGG => "K" },          # Cephalodiscidae Mitochondrial UAA-Tyr
-    );
-    die "Error: genetic code $gc is not supported.\n" unless exists $change{$gc};
-    warn "Warning: stop codons of genetic code 28 are ambiguous, TAA/TAG/TGA are treated as stop codons.\n" if $gc == 28 and $out_file;
-    $code{$_} = $change{$gc}{$_} foreach keys %{$change{$gc}};
-
-    if ($out_file) {
-        my @order = qw/TTT TTC TTA TTG TCT TCC TCA TCG TAT TAC TAA TAG TGT TGC TGA TGG CTT CTC CTA CTG CCT CCC CCA CCG CAT CAC CAA CAG CGT CGC CGA CGG ATT ATC ATA ATG ACT ACC ACA ACG AAT AAC AAA AAG AGT AGC AGA AGG GTT GTC GTA GTG GCT GCC GCA GCG GAT GAC GAA GAG GGT GGC GGA GGG/;
-        &write_file($out_file, join('', map { "$_ $code{$_}\n" } @order));
+    my %start_table;
+    $start_table{"ATG"} = 1;
+    if ( $genetic_code == 1 ) {
+        # The Standard Code
     }
-    my %stop_codon = map { $_ => 1 } grep { $code{$_} eq "X" } keys %code;
-    return (\%code, \%stop_codon);
+    elsif ( $genetic_code == 2 ) {
+        # The Vertebrate Mitochondrial Code
+        $code{"AGA"} = "X"; $code{"AGG"} = "X"; $code{"ATA"} = "M"; $code{"TGA"} = "W";
+        $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG/;
+    }
+    elsif ( $genetic_code == 3 ) {
+        # The Yeast Mitochondrial Code
+        $code{"ATA"} = "M"; $code{"CTT"} = "T"; $code{"CTC"} = "T"; $code{"CTA"} = "T"; $code{"CTG"} = "T"; $code{"TGA"} = "W";
+        $start_table{$_} = 1 foreach qw/ATA GTG/;
+    }
+    elsif ( $genetic_code == 4 ) {
+        # The Mold, Protozoan, and Coelenterate Mitochondrial Code and the Mycoplasma/Spiroplasma Code
+        $code{"TGA"} = "W";
+        $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG CTG TTA TTG/;
+    }
+    elsif ( $genetic_code == 5 ) {
+        # The Invertebrate Mitochondrial Code
+        $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"ATA"} = "M"; $code{"TGA"} = "W";
+        $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG TTG/;
+    }
+    elsif ( $genetic_code == 6 ) {
+        # The Ciliate, Dasycladacean and Hexamita Nuclear Code
+        $code{"TAA"} = "Q"; $code{"TAG"} = "Q";
+    }
+    elsif ( $genetic_code == 9 ) {
+        # The Echinoderm and Flatworm Mitochondrial Code
+        $code{"AAA"} = "N"; $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"TGA"} = "W";
+        $start_table{"GTG"} = 1;
+    }
+    elsif ( $genetic_code == 10 ) {
+        # The Euplotid Nuclear Code
+        $code{"TGA"} = "C";
+    }
+    elsif ( $genetic_code == 11 ) {
+        # The Bacterial, Archaeal and Plant Plastid Code
+        $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG CTG TTG/;
+    }
+    elsif ( $genetic_code == 12 ) {
+        # The Alternative Yeast Nuclear Code
+        $code{"CTG"} = "S";
+        $start_table{"CTG"} = 1;
+    }
+    elsif ( $genetic_code == 13 ) {
+        # The Ascidian Mitochondrial Code
+        $code{"AGA"} = "G"; $code{"AGG"} = "G"; $code{"ATA"} = "M"; $code{"TGA"} = "W";
+        $start_table{$_} = 1 foreach qw/ATA GTG TTG/;
+    }
+    elsif ( $genetic_code == 14 ) {
+        # The Alternative Flatworm Mitochondrial Code
+        $code{"AAA"} = "N"; $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"TAA"} = "Y"; $code{"TGA"} = "W";
+    }
+    elsif ( $genetic_code == 15 ) {
+        # Blepharisma Nuclear Code
+        $code{"TAG"} = "Q";
+    }
+    elsif ( $genetic_code == 16 ) {
+        # Chlorophycean Mitochondrial Code
+        $code{"TAG"} = "L";
+    }
+    elsif ( $genetic_code == 21 ) {
+        # Trematode Mitochondrial Code
+        $code{"TGA"} = "W"; $code{"ATA"} = "M"; $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"AAA"} = "N";
+        $start_table{"GTG"} = 1;
+    }
+    elsif ( $genetic_code == 22 ) {
+        # Scenedesmus obliquus Mitochondrial Code
+        $code{"TCA"} = "X"; $code{"TAG"} = "L";
+    }
+    elsif ( $genetic_code == 23 ) {
+        # Thraustochytrium Mitochondrial Code
+        $code{"TTA"} = "X";
+        $start_table{$_} = 1 foreach qw/ATT GTG/;
+    }
+    elsif ( $genetic_code == 24 ) {
+        # Rhabdopleuridae Mitochondrial Code
+        $code{"AGA"} = "S"; $code{"AGG"} = "K"; $code{"TGA"} = "W";
+        $start_table{$_} = 1 foreach qw/GTG CTG TTG/;
+    }
+    elsif ( $genetic_code == 25 ) {
+        # Candidate Division SR1 and Gracilibacteria Code
+        $code{"TGA"} = "G";
+        $start_table{$_} = 1 foreach qw/GTG TTG/;
+    }
+    elsif ( $genetic_code == 26 ) {
+        # Pachysolen tannophilus Nuclear Code
+        $code{"CTG"} = "A";
+        $start_table{"CTG"} = 1;
+    }
+    elsif ( $genetic_code == 27 ) {
+        # Karyorelict Nuclear Code
+        # TAA和TAG编码Gln；TGA既可编码Trp也可作为终止密码子，这里仍将TGA视为终止密码子。
+        $code{"TAG"} = "Q"; $code{"TAA"} = "Q";
+    }
+    elsif ( $genetic_code == 28 ) {
+        # Condylostoma Nuclear Code
+        # TAA、TAG编码Gln，TGA编码Trp，但三者均可根据上下文作为终止密码子，因此这里仍将TAA、TAG、TGA都视为终止密码子。
+    }
+    elsif ( $genetic_code == 29 ) {
+        # Mesodinium Nuclear Code
+        $code{"TAA"} = "Y"; $code{"TAG"} = "Y";
+    }
+    elsif ( $genetic_code == 30 ) {
+        # Peritrich Nuclear Code
+        $code{"TAA"} = "E"; $code{"TAG"} = "E";
+    }
+    elsif ( $genetic_code == 31 ) {
+        # Blastocrithidia Nuclear Code
+    }
+    elsif ( $genetic_code == 32 ) {
+        # Balanophoraceae Plastid Code
+        $code{"TAG"} = "W";
+        $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG CTG TTG/;
+    }
+    elsif ( $genetic_code == 33 ) {
+        # Cephalodiscidae Mitochondrial UAA-Tyr Code
+        $code{"TAA"} = "Y"; $code{"TGA"} = "W"; $code{"AGA"} = "S"; $code{"AGG"} = "K";
+        $start_table{$_} = 1 foreach qw/GTG CTG TTG/;
+    }
+    else {
+        die "Error: genetic code $genetic_code is not supported. Supported codes: 1-6, 9-16, 21-33.\n";
+    }
+
+    my %stop_table;
+    foreach ( keys %code ) {
+        $stop_table{$_} = 1 if $code{$_} eq "X";
+    }
+
+    return (\%code, \%start_table, \%stop_table);
 }
 
 sub get_fasta_total_length {
@@ -871,3 +1087,95 @@ sub get_fasta_total_length {
     close $fh;
     return $total_length;
 }
+
+# 读取文件末尾__DATA__部分的英文用法说明（将其中的$0替换为程序名）
+sub usage_en {
+    local $/;
+    my $text = <DATA>;
+    $text = '' unless defined $text;
+    $text =~ s/\$0/$0/g;
+    return $text;
+}
+
+########################################################################
+# 英文用法说明（放在文件最末尾，运行时通过DATA文件句柄读取）
+########################################################################
+__DATA__
+Usage:
+    $0 [options] homolog_proteins.fasta genome.fasta out.filteredHits.tab > out.geneModels.tab
+
+Overview:
+    Based on the MMseqs2 result file out.filteredHits.tab, the program calls exonerate/genewise/gth to predict genes in each gene region, filters and sorts the predictions, and writes the gene models to standard output in table format. A built-in process pool is used for parallel computing (ParaFly is no longer required): all gene prediction commands (the "gene region - homologous protein - strand" prediction tasks x the prediction methods) are randomly shuffled and then grouped into batches (chunks), each worker process sequentially handles all commands in one chunk, calls the prediction software directly (without going through the shell) and parses its output in memory, which avoids a huge number of small files and scheduling overhead. The random shuffling spreads the commands of complex gene regions over different chunks, so that the commands are parallelized better and no chunk runs for a very long time just because the commands of complex regions are concentrated in it.
+
+Workflow:
+    (1) Read the inputs: read the homologous protein sequences and append a stop codon (*) to each of them; read the genome sequences and convert all lowercase bases to uppercase; read the MMseqs2 alignments in out.filteredHits.tab and determine the "gene region - homologous protein - strand" prediction tasks (when a gene region and a homologous protein have multiple alignment lines, only one task is kept, and the Evalue/Score/Identity of the alignment with the highest Score are used).
+    (2) Set the run parameters: determine the flanking length (--flanking_length, calculated automatically if not set); determine the maximum intron length (--max_intron_length, if not set it is calculated from the total length of the genome sequences in the second input file genome.fasta, not from the size of the homologous proteins); write the codon.table file used by genewise according to --genetic_code.
+    (3) Shuffle and split the commands: for each method specified by --method, all prediction tasks are randomly shuffled with a fixed random seed (the shuffled order is identical for the same input and parameters, so a run can be resumed), and then split with --chunk_num commands per chunk; the gene region sequences (including the flanking sequences), the homologous protein sequences and the command list are written to the --tmp_dir/<method>_chunk*/ directories.
+    (4) Predict in parallel: all "method x chunk" units are shuffled once more, then --cpu worker processes are started; each worker sequentially handles one chunk, calls the corresponding prediction software and parses its output; timed-out commands are retried automatically with a longer timeout according to --retry. Finished "method x chunk" units are skipped (resume from a breakpoint).
+    (5) Check the success rate: the numbers of commands and failed commands of each method are summarized, and the program continues only if the success rate of every method is not lower than 90%, otherwise it exits with an error.
+    (6) Filter: gene models whose total CDS length is not a multiple of 3 are removed; gene models with a too short matched length or a too low coverage of the homologous protein are removed; gene models with too many internal stop codons are removed.
+    (7) Sort and output: the gene models in each gene region are sorted and written to standard output as a table; progress and statistics are written to standard error.
+
+Input format:
+    Compared with the conventional 12-column BLAST tabular output, out.filteredHits.tab has the following requirements: (1) the 3rd column is the Identity accumulated over multiple HSPs; (2) the extra last column contains two coordinates joined by a hyphen, indicating the gene region where the homologous protein is located. If the last column is not in the "number-number" format, columns 9 and 10 (the start and end positions of the match on the genome) are used as the gene region.
+
+Output format:
+    The output table has 15 columns: (1) name of the target genome sequence; (2) name of the prediction software; (3) start position of the gene; (4) end position of the gene; (5) introns, multiple introns are separated by semicolons and the start and end coordinates of each intron are separated by a hyphen; (6) strand of the gene; (7) name of the homologous protein; (8) length of the homologous protein including the stop codon; (9) start position of the match on the homologous protein; (10) end position of the match on the homologous protein; (11) total CDS length; (12) number of internal stop codons in the CDS; (13) Evalue of the MMseqs2 alignment; (14) Score of the MMseqs2 alignment; (15) Identity of the MMseqs2 alignment.
+
+Sorting rules:
+    The gene models in each gene region are sorted by: (1) the matched length to the homologous protein, from large to small; (2) the number of internal stop codons in the CDS, from small to large; (3) the total CDS length of the gene model, from large to small; (4) the Evalue of the alignment to the homologous protein, from small to large; (5) the Score of the alignment to the homologous protein, from large to small; (6) the Identity of the alignment to the homologous protein, from large to small; (7) the order of the prediction software gth/exonerate/genewise; (8) the ASCII order of the output line.
+
+Key points:
+    (1) All lowercase bases of the genome sequences are converted to uppercase before the subsequent analysis; (2) a stop codon is appended to the end of each homologous protein sequence before its length is calculated and before exonerate/genewise/gth are called for gene prediction; (3) since the CDS given by genewise does not include the stop codon while the CDS given by exonerate and gth does, the genewise results are corrected so that the terminal CDS includes the stop codon; (4) when a gene region and a homologous protein have multiple alignment lines, gene prediction is run only once; (5) see the descriptions of the parameters for other key points.
+
+Command failures and the success-rate requirement:
+    A gene prediction command is regarded as failed if it times out (--timeout), exits abnormally or cannot be started; timed-out commands are automatically retried with a longer timeout according to --retry, and only commands that still fail after the retries are counted as failed. After all chunks are finished, the program calculates the command success rate (number of successful commands / total number of commands) separately for each prediction method listed in --method, and the program continues and outputs the gene models only if the success rate of every method is not lower than 90%; if the success rate of any method is lower than 90% (or a method has no commands at all), the program exits with an error. When the success rate is not lower than 90%, the "gene region - homologous protein" combinations of the failed commands have no prediction result for that method, see <method>_chunk*/worker.log for details. If the program exits because of an insufficient success rate, please increase --timeout (or --retry) appropriately and re-run with a new --tmp_dir.
+
+Resuming from a breakpoint (--tmp_dir):
+    The program caches results by the smallest unit of "method x chunk". When re-running with an existing --tmp_dir:
+    (1) if the parameters that affect command splitting, such as --flanking_length and --chunk_num, are unchanged, the chunk splitting stage (regions.fa/proteins.fa/tasks.tab) of each method is reused directly, and the genome/protein sequences are not read again to split the commands;
+    (2) for each method listed in --method, the program checks separately whether each chunk has already been run with the same --genetic_code/--min_intron_length/--max_intron_length; the results of finished "method x chunk" units are reused directly and the corresponding prediction software is not called again;
+    (3) therefore, if the second run only adds methods to --method compared with the first run (for example --method exonerate in the first run and --method exonerate,genewise in the second run), the exonerate results are reused directly and only the newly added genewise part needs to be split and calculated;
+    (4) if parameters such as --genetic_code, --min_intron_length or --max_intron_length are changed, the existing results of the corresponding methods are regarded as outdated and are recalculated automatically;
+    (5) --timeout and --retry are not part of the above validity check: finished chunks are not recalculated even if --timeout is increased, so please use a new --tmp_dir if recalculation is needed.
+
+Parameters:
+    --threshold_protein_length <int>    default: 25
+    --threshold_homolog_coverage <float>    default: 0.2
+    --threshold_inter_stop_codon_num <int>    default: 3
+    Set the thresholds used to filter the gene models after gene prediction with homologous proteins. A gene model is required to have a matched length to the homologous protein not less than the specified threshold, a coverage of the homologous protein not lower than the specified threshold, and a number of internal stop codons not higher than the specified threshold. These parameters can be set to 0.
+
+    --flanking_length <int>    default: None
+    Set the length of the flanking sequences. According to the MMseqs2 alignments, the program selects the matched genomic region plus flanking sequences of the length given by --flanking_length on both sides as the nucleotide sequence that is fed to the gene prediction software. If this parameter is not set, the program calculates it automatically from the MMseqs2 results, so that the flanking length just exceeds the lengths of 90% of the gene regions. If the flanking length is specified directly with this parameter, 5000 is recommended.
+
+    --cpu <int>    default: 8
+    Set the number of worker processes running in parallel.
+
+    --method <string>    default: exonerate
+    Set the gene prediction methods; the value can be exonerate, genewise, gth or all. To use multiple methods at the same time, provide multiple values separated by commas; setting it to all uses all three methods, but is the most time-consuming. gth and exonerate support alignment of the terminal stop codon while genewise does not, so in the predicted gene models the terminal CDS of the former two may include the stop codon, whereas that of genewise does not. When re-running with the same --tmp_dir and only adding methods, the results of the finished methods are reused (see "Resuming from a breakpoint" above). The program continues only if the command success rate of every method is not lower than 90% (see "Command failures and the success-rate requirement" above).
+
+    --genetic_code <int>    default: 1
+    Set the genetic code, from which the stop codons are determined automatically. For the corresponding values, please refer to NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi . The supported genetic code numbers are: 1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33; any other number makes the program exit with an error (the stop codons of genetic code 28 are ambiguous, so TAA, TAG and TGA are all treated as stop codons). genewise uses the codon.table file generated by the program from this genetic code; exonerate and gth use the --geneticcode and -translationtable parameters, respectively, and whether a number can be used also depends on whether the called software supports it.
+
+    --min_intron_length <int>    default: 20
+    --max_intron_length <int>    default: 3.6 * sqrt(genomeSize)
+    Set the minimum and maximum intron lengths. These two parameters only take effect when exonerate is used for gene prediction. In the default value of --max_intron_length, genomeSize is the total length of all sequences in the second input file genome.fasta (not the size of the homologous proteins).
+
+    --tmp_dir <string>    default: tmp_$date$pid
+    Name of the temporary directory used while the program is running. When an existing temporary directory is specified, the program skips the chunks that have already been finished (by the unit of "method x chunk", see the description above) so that the run can be resumed from a breakpoint.
+
+    --chunk_num <int>    default: 20
+    The number of gene prediction commands contained in each chunk (the commands have been randomly shuffled, and a chunk only contains the commands of one method). Each chunk is processed sequentially by one worker process and generates only a few files. A too large value leads to unbalanced load at the end of the run, while a too small value increases the process start-up overhead and the number of chunk directories. The default of 20 suits cases that need good load balancing; when the total number of commands is very large, it can be increased appropriately to 100~1000.
+
+    --timeout <int>    default: 120
+    The maximum running time (in seconds) of a single gene prediction command. A command that times out is terminated; if --retry is greater than 0, it is automatically retried after the first pass of its chunk (see --retry), otherwise it is counted as failed. Setting it to 0 means no limit (and no retry in this case). Note: the program continues only if the command success rate of every prediction method is not lower than 90%.
+
+    --retry <int>    default: 1
+    The number of automatic retry rounds for timed-out gene prediction commands. After a worker has processed all commands of a chunk, the timed-out commands are extracted and re-run; the timeout of retry round r is --timeout * 2^r (by default 1 round, i.e. 2 times --timeout, which is 240 seconds with the default values; setting it to 2 uses 2 times and then 4 times). Only timed-out commands are retried; failures for other reasons (such as abnormal exit of the software) are not retried. Commands that still fail after the retries are counted as failed and recorded in <method>_chunk*/worker.log. Setting it to 0 means no retry.
+
+    --help    default: None
+    Display the usage in English and exit.
+
+    --chinese_help    default: None
+    显示中文用法说明并退出。
+

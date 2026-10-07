@@ -1,0 +1,1249 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use Getopt::Long qw(GetOptions);
+use File::Basename qw(basename);
+use File::Path qw(make_path remove_tree);
+use POSIX qw(strftime ceil);
+
+my $prog = basename($0);
+
+# ----------------------------------------------------------------------------
+# 中文用法说明
+# ----------------------------------------------------------------------------
+my $usage_cn = <<'USAGE_CN';
+程序功能:
+    输入GFF3格式的基因模型信息（尽可能包含最多的准确的基因模型，可以包含5'或3'不完整的基因模型）和基因组序列；程序首先根据GFF3第8列的phase信息把基因模型翻译为蛋白序列（遗传密码由--genetic_code指定），并去除含有内部终止密码子的、存在移码的、CDS总长度过长（默认>15000 bp）的基因模型（5'或3'端缺失的不完整基因模型予以保留）；然后调用DIAMOND（blastp模式）分析剩余基因模型蛋白水平的相似性，进行去冗余处理，得到的基因模型可用于下一步Augustus etraining；程序再对去冗余后的基因模型进行筛选，选取完整、CDS个数较多、CDS总长度较长的基因模型，用于下一步Augustus training optimizing过程。CDS个数和CDS总长度的筛选阈值可以手动指定，也可以由程序根据去冗余且去除不完整基因后的全部完整基因模型的分位数自动计算。
+
+用法:
+    __PROG__ [选项] geneModels.gff3 genome.fasta
+
+预处理（去除不合格基因模型）:
+    以下基因模型在去冗余之前就被排除（不进入DIAMOND比对，也不会出现在filter1和filter2中）：
+        a. 含有内部终止密码子的基因模型；
+        b. 存在移码的基因模型（CDS的phase与前面累计编码长度推算的期望phase不一致）；
+        c. CDS总长度（该基因所有CDS行的长度之和）大于--max_cds_length（默认15000 bp）的基因模型（--max_cds_length设为0表示不进行该过滤）。
+    5'或3'端缺失的不完整基因模型（例如第一个CDS的phase不为0、不以起始密码子起始、没有终止密码子、编码序列总长度不是3的倍数）不会被排除，它们参与去冗余并可出现在filter1中，但不会进入filter2。
+    被排除的基因数量（按CDS过长、移码、内部终止密码子分类；同时含多种问题的，依次按CDS过长、移码、内部终止密码子的顺序归入第一个满足的类别）会输出到日志中。
+
+去冗余处理过程（对通过预处理的基因模型进行）:
+    （1）包含关系：对蛋白序列进行两两比对，若一个蛋白序列基本全长（匹配区覆盖率>=--contained_coverage）被另外一个蛋白（其匹配区覆盖率<--container_coverage）包含，且identity不低于--min_identity，则去除被包含的基因。
+    （2）重复关系：两两比对中，若两个蛋白序列的匹配区覆盖率同时不低于--min_coverage_ratio，且identity不低于--min_identity，则认为这两个基因之间有重复。
+    （3）对有重复关系的基因反复执行“聚类、去除一个基因”，直到不再有基因与两个及以上的基因重复：
+        a. 聚类：将有重复关系的基因聚成一类，所有基因聚成多类；
+        b. 去除：对每一类，计算每个基因的节点数（和n个其它基因重复，则节点数是n），去除节点数最大的一个基因；
+        c. 平局：节点数相同时，依次按以下顺序决定先去除哪个基因：先去除同源蛋白预测的基因（基因ID以homolog开头），保留NGSReads预测的基因（基因ID以Sam2Transfrag或stringtie开头）；再先去除incomplete类型的基因；最后先去除蛋白序列较短的基因；
+        d. 循环：去除基因后，将剩余基因根据重复关系重新聚类，再对每个新类各去除一个基因，如此循环，直到每一类中所有基因的节点数都不超过1。
+    （4）收尾：若剩下1对1的重复基因，按照同样的原则（先去同源蛋白预测的基因，再去incomplete，再去蛋白较短者）去除其中一个。
+    （5）补回：以上去冗余全部完成后，检查因重复关系被去除的基因（不含因包含关系去除的基因）；若某个被去除的基因的所有重复伙伴都已被去除，即保留下来的基因中没有它的相似代表，则将其补回。按保留优先级从高到低依次检查（NGSReads预测且complete、NGSReads预测且incomplete、同源蛋白预测且complete、同源蛋白预测且incomplete，同一级别中蛋白较长者优先），每补回一个基因，立即影响后续基因的判断，因此补回后任意两个保留的基因之间仍然没有重复关系。
+    （6）实现说明：去除一个基因只会改变与其直接相邻的基因的节点数，不同类之间互不影响，因此程序在每一类内部连续迭代去除，不必显式重新聚类，结果与逐轮重新聚类完全等价。
+    （7）基因ID不以homolog开头的基因，统一视为NGSReads预测的基因；只要GFF3文件中该基因的gene行或mRNA行（第9列）有一行含有Integrity=complete信息，该基因就被认为是complete的，否则认为是incomplete的。
+
+注意事项:
+    1. 输入的GFF3文件不能包含可变剪接（一个gene下只能有一个mRNA），程序检测到时会给出警告；
+    2. 程序调用 diamond（需在PATH中）对蛋白序列进行比对；
+    3. 输出文件out.filter1.gff3是去除了含内部终止密码子、存在移码、CDS总长度过长的基因模型，并去除了相似性较高冗余基因模型的结果（保留5'或3'缺失的不完整基因，用于etraining），out.filter2.gff3是进一步挑选的最优完整基因模型（用于optimizing）；
+    4. 蛋白序列的翻译方法：程序根据GFF3中每一个CDS行第8列的phase信息拼接CDS并翻译蛋白，密码子表、起始密码子和终止密码子由--genetic_code决定。沿转录方向，第一个CDS的phase不为0时，去除开头对应的碱基，从第一个完整codon的第一个碱基开始翻译；对于后续的CDS，程序根据前面累计的编码长度推算其期望phase，若与GFF3标注一致则直接拼接（跨外显子的codon，包括被内含子隔开的终止密码子，都拼成完整的三联体密码子），若不一致则判定为移码（frameshift），输出警告信息并排除该基因（移码仅根据各CDS的长度和phase判断，不再取序列翻译）；若一个转录本所有CDS的phase都不是1或2（例如某些工具把phase全部写成0或“.”），则phase没有信息量，不做移码检测；后续CDS的phase不是0/1/2（例如“.”）时，不对该CDS做移码判断；第一个CDS的phase不是0/1/2时按0处理；GFF3中单独的stop_codon行（例如miniprot的输出），若不与任何CDS重叠，则沿转录方向并入编码序列的末尾（仅用于完整性判断和翻译，不计入CDS个数和CDS总长度）；末尾正常的终止密码子不出现在蛋白序列中，内部终止密码子在蛋白中记为X（该基因随后会被排除）；基因组中的非ACGT碱基（含简并碱基）读入时统一转为N，含N的密码子翻译为X；
+    5. “完整基因”的判断方法（根据基因组序列判断，与GFF3中的Integrity信息无关）：第一个CDS的phase为0、以起始密码子（由--genetic_code决定，标准密码表为ATG）起始、以终止密码子（由--genetic_code决定，标准密码表为TAA/TAG/TGA）结束、编码序列总长度为3的倍数、内部没有终止密码子、且没有移码。该判断既用于out.filter2.gff3的选择，也用于确定--cds_quantile自动计算阈值时所使用的基因模型范围（见--cds_quantile）；
+    6. 基因组序列中的小写（软屏蔽）碱基会被自动转为大写后再处理；
+    7. 中间文件（蛋白序列、*.dmnd、*.diamond_out.tsv、日志、*.ok 等）都放在临时文件夹中，程序正常结束后自动删除；出错时保留临时文件夹，指定 --tmp_dir 重新运行可通过 *.ok 文件断点续跑，输入文件或命令发生变化时，会自动重新运行相应步骤；
+    8. 不带任何参数直接运行程序时，默认输出英文用法说明；
+    9. 使用分位数自动计算CDS个数和CDS总长度阈值时，实际使用的阈值以及参与计算的基因模型数会输出到日志中；
+    10. 日志中会输出预处理中被排除的基因数（按CDS过长、移码、内部终止密码子分类），补回步骤的统计（补回前因重复关系被去除且没有保留邻居的基因数、实际补回的基因数），以及因包含关系被去除但所有包含者也都被去除的基因数（仅供参考，不会补回）。
+
+输出文件:
+    <out_prefix>.filter1.gff3      去冗余后的基因模型（无内部终止密码子、无移码、CDS总长度不超过--max_cds_length，可含5'或3'缺失的不完整基因；Augustus etraining用）
+    <out_prefix>.filter2.gff3      最优完整基因模型（Augustus training optimizing用）
+
+[主要参数]
+    --out_prefix <string>    默认值: out
+    设置程序输出文件前缀。
+
+    --tmp_dir <string>    默认值: tmp_$date$pid
+    设置存放中间文件（蛋白序列、DIAMOND数据库及比对结果、日志、断点文件等）的临时文件夹，默认值为 tmp_ 加日期（YYYYMMDD）再加进程号；程序正常运行完毕后自动删除该临时文件夹（若指定的是已存在的文件夹，则只删除程序生成的中间文件，并在文件夹为空时删除该文件夹）；若程序中途出错，临时文件夹会被保留，便于排查问题，也可以用 --tmp_dir 指定该文件夹重新运行，利用其中的断点文件续跑。
+
+[预处理参数]
+    --max_cds_length <int>    默认值: 15000
+    预处理时，CDS总长度（该基因所有CDS行的长度之和，单位bp）大于该值的基因模型会被排除（不进入DIAMOND比对，也不会出现在filter1和filter2中）。设为0表示不进行该过滤。
+
+[遗传密码参数]
+    --genetic_code <int>    默认值: 1
+    设置遗传密码，程序据此自动确定密码子表、起始密码子和终止密码子，用于蛋白翻译、内部终止密码子检测和完整基因的判断。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi 。支持的遗传密码编号为：1、2、3、4、5、6、9、10、11、12、13、14、15、16、21、22、23、24、25、26、27、28、29、30、31、32、33。
+
+[BLAST分析参数]
+    --cpu <int>    默认值: 8
+    设置进行DIAMOND比对时使用的线程数。
+
+    --min_evalue <float>    默认值: 1e-9
+    设置蛋白序列比对时使用的evalue阈值（同时用于DIAMOND比对和结果分析）。
+
+    --min_identity <float>    默认值: 0.8
+    对比对结果进行分析时，若identity（同一对蛋白所有比对片段合并计算）< 该值，则忽略该比对结果。也可以输入百分数（例如80，程序会自动换算为0.8）。
+
+    --min_coverage_ratio <float>    默认值: 0.8
+    对比对结果进行分析，两个基因的蛋白序列的匹配区域各自计算出一个覆盖度比例；若两个基因同时不低于该比例，则认为这两个基因之间有重复。根据log信息，若out.filter2.gff3文件中基因模型过少，则推荐提高该值。
+
+    --contained_coverage <float>    默认值: 0.95
+    包含关系去冗余：被包含蛋白的匹配区覆盖率不低于该值（即基本全长被包含）。
+
+    --container_coverage <float>    默认值: 0.80
+    包含关系去冗余：包含者蛋白的匹配区覆盖率低于该值（即包含者明显更长），且identity不低于--min_identity时，去除被包含的基因。
+
+    --no_contain_filter
+    不进行“包含关系”去冗余（只进行两两重复的聚类去冗余）。
+
+    --diamond_mode <string>    默认值: fast
+    DIAMOND的灵敏度模式，可选 fast、sensitive、more-sensitive、very-sensitive。去冗余只关心高identity（默认>=80%）的近缘比对，fast模式通常已足够，速度比sensitive快数倍；若把 --min_identity 调到较低（例如50%以下），建议改用 sensitive。
+
+    --max_target_seqs <int>    默认值: 200
+    DIAMOND对每条查询序列最多保留的比对目标数。基因家族很大时可适当调大（0表示不限制，速度较慢）。
+
+    --diamond_min_id <int>    默认值: 10
+    传给DIAMOND的--id参数（百分数），比对片段identity低于该值直接丢弃；调大可加快速度。注意：此值应明显低于 --min_identity*100，否则可能丢失合并后才达到阈值的比对。
+
+    --diamond_block_size <int>    默认值: 5
+    传给DIAMOND的--block-size参数，内存充足时调大可加快速度。
+
+    --force
+    忽略临时文件夹中已存在的 *.ok 断点文件，强制重新运行DIAMOND等步骤（仅在用 --tmp_dir 指定了已有的临时文件夹时有意义）。
+
+[最优基因模型选择参数]
+    --min_cds_num <int>    默认值: 不设置
+    最优基因模型的CDS数量不小于该值。若不设置该参数，则由 --cds_quantile 对去冗余且去除不完整基因后的全部完整基因模型计算得到阈值。
+
+    --min_cds_length <int>    默认值: 不设置
+    最优基因模型的CDS总长度不能小于该值。若不设置该参数，则由 --cds_quantile 对去冗余且去除不完整基因后的全部完整基因模型计算得到阈值。
+
+    --cds_quantile <float>    默认值: 0.8
+    仅在未设置 --min_cds_num 或 --min_cds_length 时起作用。将去冗余且去除不完整基因后的全部基因模型（即out.filter1.gff3中经序列判断为完整的基因模型，判断方法见注意事项5，与GFF3中的Integrity信息无关），分别按CDS个数、CDS总长度从大到小排列，取该分位数位置上的值作为对应的阈值，例如0.5表示保留排在前50%的基因模型（阈值为排序后第50%位置的值，即中位数），0.2表示保留排在前20%的基因模型，1表示取最小值（不过滤）。取值范围为(0,1]，也可以输入百分数（例如20，程序会自动换算为0.2）。若只设置了其中一个阈值参数，则另一个阈值仍由该分位数计算。
+
+    --min_cds_exon_ratio <float>    默认值: 0.50
+    最优基因模型的CDS总长度/exon总长度不能小于该值。根据log信息，若out.filter2.gff3文件中基因模型过少，则推荐降低该值。
+
+    --keep_ratio_for_excluding_too_long_gene <float>    默认值: 0.95
+    最后，将基因模型按蛋白序列长度进行排序，按照该比例保留较短的基因模型（设为1表示不去除）。有些大基因组物种（例如：人类、小鼠等）的基因长度和蛋白序列极其长（>30k aa），若含有此类基因模型，不利于后续augustus optimizing的准确性检测评估，并且时间消耗极大，此时，推荐按比例去除掉过长的基因模型。
+
+[帮助参数]
+    --help
+    Show the English help message and exit.
+
+    --chinese_help
+    显示中文帮助信息并退出。
+USAGE_CN
+
+# ----------------------------------------------------------------------------
+# 参数默认值与解析
+# （min_cds_num 和 min_cds_length 默认不设置，未设置时由 cds_quantile 计算阈值）
+# ----------------------------------------------------------------------------
+my %opt = (
+    out_prefix                             => 'out',
+    tmp_dir                                => undef,
+    max_cds_length                         => 15000,
+    genetic_code                           => 1,
+    cpu                                    => 8,
+    min_evalue                             => 1e-9,
+    min_identity                           => 0.8,
+    min_coverage_ratio                     => 0.8,
+    contained_coverage                     => 0.95,
+    container_coverage                     => 0.80,
+    max_target_seqs                        => 200,
+    diamond_mode                           => 'fast',
+    diamond_min_id                         => 10,
+    diamond_block_size                     => 5,
+    min_cds_num                            => undef,
+    min_cds_length                         => undef,
+    cds_quantile                           => 0.8,
+    min_cds_exon_ratio                     => 0.50,
+    keep_ratio_for_excluding_too_long_gene => 0.95,
+    no_contain_filter                      => 0,
+    force                                  => 0,
+    help                                   => 0,
+    chinese_help                           => 0,
+);
+
+$usage_cn =~ s/__PROG__/$prog/g;
+if (@ARGV == 0) { print_english_help(\*STDERR); exit 1; }
+
+GetOptions(\%opt,
+    'help', 'chinese_help',
+    'out_prefix=s', 'tmp_dir=s', 'max_cds_length=i', 'genetic_code=i',
+    'cpu=i', 'min_evalue=f', 'min_identity=f', 'min_coverage_ratio=f',
+    'contained_coverage=f', 'container_coverage=f', 'no_contain_filter',
+    'max_target_seqs=i', 'diamond_mode=s', 'diamond_min_id=i', 'diamond_block_size=i',
+    'force',
+    'min_cds_num=i', 'min_cds_length=i', 'cds_quantile=f', 'min_cds_exon_ratio=f',
+    'keep_ratio_for_excluding_too_long_gene=f',
+) or die "参数错误 / Invalid option. 请使用 --chinese_help 查看中文帮助，或 --help 查看英文帮助。\n";
+
+if ($opt{help})         { print_english_help(\*STDOUT); exit 0; }
+if ($opt{chinese_help}) { print $usage_cn; exit 0; }
+
+die "错误：需要2个位置参数 geneModels.gff3 genome.fasta（--chinese_help 查看帮助）\n" unless @ARGV == 2;
+my ($gff_file, $fasta_file) = @ARGV;
+foreach my $f ($gff_file, $fasta_file) {
+    die "错误：无法读取文件 $f\n" unless -f $f && -r $f;
+}
+
+# 参数检查（百分数自动换算为小数）
+foreach my $name (qw(min_identity min_coverage_ratio contained_coverage container_coverage cds_quantile)) {
+    my $v = $opt{$name};
+    if ($v > 1 && $v <= 100) { $opt{$name} = $v / 100; print STDERR "提示：--$name=$v 被视为百分数，已换算为 $opt{$name}\n"; }
+    die "错误：--$name 必须在 (0,1] 范围内\n" unless $opt{$name} > 0 && $opt{$name} <= 1;
+}
+{
+    my %supported_gc = map { $_ => 1 } (1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33);
+    die "错误：--genetic_code $opt{genetic_code} 不受支持，支持的编号为：" . join(', ', sort { $a <=> $b } keys %supported_gc) . "\n"
+        unless $supported_gc{$opt{genetic_code}};
+}
+die "错误：--cpu 必须 >= 1\n"                       unless $opt{cpu} >= 1;
+die "错误：--max_cds_length 必须 >= 0（0表示不过滤）\n" unless $opt{max_cds_length} >= 0;
+die "错误：--min_evalue 必须 > 0\n"                 unless $opt{min_evalue} > 0;
+die "错误：--min_cds_num 必须 >= 1\n"               if defined $opt{min_cds_num} && $opt{min_cds_num} < 1;
+die "错误：--min_cds_length 必须 >= 0\n"            if defined $opt{min_cds_length} && $opt{min_cds_length} < 0;
+die "错误：--min_cds_exon_ratio 必须在 [0,1] 范围内\n" unless $opt{min_cds_exon_ratio} >= 0 && $opt{min_cds_exon_ratio} <= 1;
+die "错误：--keep_ratio_for_excluding_too_long_gene 必须在 (0,1] 范围内\n"
+    unless $opt{keep_ratio_for_excluding_too_long_gene} > 0 && $opt{keep_ratio_for_excluding_too_long_gene} <= 1;
+die "错误：--max_target_seqs 必须 >= 0\n"           unless $opt{max_target_seqs} >= 0;
+die "错误：--diamond_mode 只能是 fast/sensitive/more-sensitive/very-sensitive\n"
+    unless $opt{diamond_mode} =~ /^(?:fast|sensitive|more-sensitive|very-sensitive)$/;
+die "错误：--diamond_min_id 必须在 [0,100] 范围内\n" unless $opt{diamond_min_id} >= 0 && $opt{diamond_min_id} <= 100;
+die "错误：--diamond_block_size 必须 >= 1\n"        unless $opt{diamond_block_size} >= 1;
+
+my $P = $opt{out_prefix};
+
+# 临时文件夹：默认 tmp_日期(YYYYMMDD)进程号
+my $tmp_dir = defined $opt{tmp_dir} && $opt{tmp_dir} ne ''
+            ? $opt{tmp_dir}
+            : 'tmp_' . strftime('%Y%m%d', localtime) . $$;
+$tmp_dir =~ s{/+$}{} if length($tmp_dir) > 1;
+my $tmp_created = 0;
+if (-e $tmp_dir && !-d $tmp_dir) {
+    die "错误：--tmp_dir 指定的路径 $tmp_dir 已存在且不是文件夹\n";
+}
+if (!-d $tmp_dir) {
+    make_path($tmp_dir);
+    die "错误：无法创建临时文件夹 $tmp_dir\n" unless -d $tmp_dir;
+    $tmp_created = 1;
+}
+die "错误：临时文件夹 $tmp_dir 不可写\n" unless -w $tmp_dir;
+my $TB = 'work';               # 临时文件夹中中间文件的统一前缀
+my $T  = "$tmp_dir/$TB";
+
+# 遗传密码：根据 --genetic_code 得到 密码子表、起始密码子表、终止密码子表（代码来自 GFF3_merging_and_removing_redundancy）
+#   %CODON       密码子 -> 氨基酸；终止密码子翻译为 '*'；含N的密码子一律翻译为X
+#                （基因组中非ACGT碱基在读入时已统一转为N）
+#   %START_CODON 起始密码子集合
+#   %STOP_CODON  终止密码子集合
+my (%CODON, %START_CODON, %STOP_CODON);
+{
+    my ($code_ref, $start_ref, $stop_ref) = codon_table($opt{genetic_code});
+    %START_CODON = %$start_ref;
+    %STOP_CODON  = %$stop_ref;
+    foreach my $c (keys %$code_ref) {
+        $CODON{$c} = $STOP_CODON{$c} ? '*' : $code_ref->{$c};
+    }
+    my @n = qw(A C G T N);
+    for my $x (@n) { for my $y (@n) { for my $z (@n) { $CODON{"$x$y$z"} //= 'X'; } } }
+    die "错误：所选遗传密码没有可用的起始密码子\n" unless %START_CODON;
+    die "错误：所选遗传密码没有可用的终止密码子\n" unless %STOP_CODON;
+}
+
+# 完整性标记：gene行或mRNA行（第9列）含 Integrity=complete
+my $RE_COMPLETE = qr/(?:^|;)Integrity=complete(?:;|\s|$)/i;
+
+# ----------------------------------------------------------------------------
+# 依赖检查
+# ----------------------------------------------------------------------------
+my $diamond = find_in_path('diamond') or die "错误：在PATH中找不到 diamond，请先安装或加入PATH。\n";
+
+# ----------------------------------------------------------------------------
+# 第1步：读取GFF3
+# ----------------------------------------------------------------------------
+logmsg("Reading GFF3: $gff_file");
+logmsg("Temporary directory: $tmp_dir");
+logmsg("Genetic code: $opt{genetic_code} (start codons: " . join(',', sort keys %START_CODON) . "; stop codons: " . join(',', sort keys %STOP_CODON) . ")");
+logmsg($opt{max_cds_length} > 0
+       ? "Gene models with total CDS length > $opt{max_cds_length} bp will be excluded (--max_cds_length)"
+       : "Filtering by total CDS length is disabled (--max_cds_length 0)");
+# %G: gene_id => { chr, strand, source(homolog|reads), integrity, text, cds=>[[s,e,phase]...], stop=>[[s,e]...], cds_num, cds_len, exon_len, mrna, rank }
+my (%G, @genes);
+{
+    open(my $in, '<', $gff_file) or die "Can not open file $gff_file, $!\n";
+    my ($cur, $n_bad, $n_orphan, $n_dup) = (undef, 0, 0, 0);
+    while (my $line = <$in>) {
+        $line =~ s/[\r\n]+$//;
+        next if $line =~ /^#/ || $line =~ /^\s*$/;
+        my @f = split /\t/, $line, 9;
+        if (@f < 9) { $n_bad++; warn "警告：GFF3行列数不足，已忽略: $line\n" if $n_bad <= 5; next; }
+        if ($f[2] eq 'gene') {
+            my ($id) = $f[8] =~ /(?:^|;)ID=([^;]+)/;
+            if (!defined $id) { $n_bad++; $cur = undef; warn "警告：gene行缺少ID属性，已忽略: $line\n" if $n_bad <= 5; next; }
+            if (exists $G{$id}) { $n_dup++; $cur = undef; warn "警告：重复的gene ID '$id'，后出现的记录已忽略\n" if $n_dup <= 5; next; }
+            $cur = $id;
+            push @genes, $id;
+            $G{$id} = {
+                chr => $f[0], strand => $f[6],
+                # 基因ID以homolog开头：同源蛋白预测的基因；其它（Sam2Transfrag、stringtie等）：NGSReads预测的基因
+                source    => ($id =~ /^homolog/) ? 'homolog' : 'reads',
+                # gene行含Integrity=complete则为complete（mRNA行也含该信息时同样为complete，见下），否则为incomplete
+                integrity => ($f[8] =~ $RE_COMPLETE) ? 'complete' : 'incomplete',
+                text => "$line\n", cds => [], stop => [], cds_num => 0, cds_len => 0, exon_len => 0, mrna => 0,
+            };
+            next;
+        }
+        if (!defined $cur) { $n_orphan++; next; }
+        my $g = $G{$cur};
+        $g->{text} .= "$line\n";
+        if ($f[2] eq 'CDS' || $f[2] eq 'exon' || $f[2] eq 'stop_codon') {
+            if ($f[3] !~ /^\d+$/ || $f[4] !~ /^\d+$/ || $f[4] < $f[3]) { $n_bad++; warn "警告：坐标异常，已忽略该特征行: $line\n" if $n_bad <= 5; next; }
+            if ($f[2] eq 'CDS') {
+                # 第8列phase：0/1/2 记为数值；其它（例如"."）记为undef（第一个CDS按0处理，后续CDS不做移码判断）
+                my $phase = ($f[7] =~ /^[012]$/) ? $f[7] + 0 : undef;
+                push @{$g->{cds}}, [$f[3] + 0, $f[4] + 0, $phase];
+                $g->{cds_num}++;
+                $g->{cds_len} += $f[4] - $f[3] + 1;
+            }
+            elsif ($f[2] eq 'exon') { $g->{exon_len} += $f[4] - $f[3] + 1; }
+            else { push @{$g->{stop}}, [$f[3] + 0, $f[4] + 0]; }     # 单独的stop_codon行（例如miniprot的输出）
+        }
+        elsif ($f[2] eq 'mRNA' || $f[2] eq 'transcript') {
+            $g->{mrna}++;
+            $g->{integrity} = 'complete' if $f[8] =~ $RE_COMPLETE;    # gene或mRNA行任意一行含Integrity=complete即为complete
+        }
+    }
+    close $in;
+    warn "警告：共有 $n_orphan 行不属于任何gene（出现在第一个gene行之前或属于被忽略的gene），已忽略\n" if $n_orphan;
+    warn "警告：共有 $n_dup 个重复gene ID被忽略\n" if $n_dup;
+}
+die "错误：GFF3中没有读取到任何gene记录\n" unless @genes;
+{
+    my $n_as = grep { $G{$_}{mrna} > 1 } @genes;
+    warn "警告：有 $n_as 个基因含有多个mRNA（可变剪接），这会导致蛋白序列拼接错误，请先只保留每个基因的一个转录本！\n" if $n_as;
+    my $n_hom = grep { $G{$_}{source} eq 'homolog' } @genes;
+    logmsg("Gene models from homolog prediction: $n_hom; from NGSReads prediction (or others): " . (scalar(@genes) - $n_hom));
+    my $n_cpl = grep { $G{$_}{integrity} eq 'complete' } @genes;
+    logmsg("Gene models marked Integrity=complete (gene or mRNA line): $n_cpl; others treated as incomplete: " . (scalar(@genes) - $n_cpl));
+}
+# 预计算保留等级（来源与完整性在读完GFF3后已确定），去冗余时直接使用
+$G{$_}{rank} = keep_rank($_) for @genes;
+
+# ----------------------------------------------------------------------------
+# 第2步：读取基因组序列（只保留基因用到的序列；统一转为大写，非ACGT碱基统一为N）
+#        按FASTA记录整块读取，避免逐行拼接字符串
+# ----------------------------------------------------------------------------
+logmsg("Reading genome: $fasta_file");
+my %seq;
+{
+    my %need = map { $G{$_}{chr} => 1 } @genes;
+    open(my $in, '<', $fasta_file) or die "Can not open file $fasta_file, $!\n";
+    local $/ = ">";                       # 以'>'作为记录分隔符
+    <$in>;                                # 跳过第一个'>'之前的内容
+    while (my $rec = <$in>) {
+        chomp $rec;                       # 去掉末尾的'>'
+        my $nl   = index($rec, "\n");
+        my $head = $nl < 0 ? $rec : substr($rec, 0, $nl);
+        my ($sid) = $head =~ /^\s*(\S+)/ or next;
+        next unless $need{$sid};
+        my $s = $nl < 0 ? '' : substr($rec, $nl + 1);
+        $s =~ tr/ \t\r\n//d;              # 去空白
+        $s =~ tr/a-z/A-Z/;                # 软屏蔽转大写
+        $s =~ tr/ACGT/N/c;                # 非ACGT统一为N
+        $seq{$sid} = $s;
+    }
+    close $in;
+}
+
+# ----------------------------------------------------------------------------
+# 第3步：根据GFF3第8列phase信息拼接CDS并翻译蛋白序列（analyze_gene_model），
+#        同时根据序列判断基因模型是否完整（%complete，用于filter2和--cds_quantile阈值的计算）；
+#        CDS总长度过长的（> --max_cds_length）、含内部终止密码子的、存在移码的基因模型在此被排除，
+#        不进入后续的DIAMOND比对、去冗余，也不会出现在filter1/filter2中；
+#        5'或3'端缺失的不完整基因模型予以保留
+#        移码只根据各CDS的长度和phase判断（不取序列）；通过后整体拼接、整体翻译
+# ----------------------------------------------------------------------------
+logmsg("Translating gene models to proteins (according to the phase column of GFF3)");
+my $prot_fa = "$T.proteins.fasta";
+my (%invalid, @valid, %complete, %excluded);
+my %excl_count = (too_long => 0, frameshift => 0, internal_stop => 0);
+my ($max_len_seen, $max_len_seen_id) = (0, '');       # 被排除的过长基因中最长的CDS总长度（仅用于日志）
+{
+    open(my $out, '>', $prot_fa) or die "Cannot create file $prot_fa, $!\n";
+    my ($n_internal, $n_missing_seq, $n_range, $n_phase_inconsistent, $n_too_long) = (0, 0, 0, 0, 0);
+    foreach my $id (@genes) {
+        my $g = $G{$id};
+        my $cds   = delete $g->{cds};
+        my $stops = delete $g->{stop};
+        if (!@$cds)                                         { $invalid{$id} = 'no CDS';        next; }
+        if ($g->{strand} ne '+' && $g->{strand} ne '-')     { $invalid{$id} = 'unknown strand'; next; }
+        my $chr_seq = $seq{$g->{chr}};
+        if (!defined $chr_seq)                              { $invalid{$id} = 'no sequence'; $n_missing_seq++; next; }
+
+        my @c = sort { $a->[0] <=> $b->[0] or $a->[1] <=> $b->[1] } @$cds;
+        my $clen = length $chr_seq;
+        my $bad  = 0;
+        foreach my $x (@c) { if ($x->[1] > $clen) { $bad = 1; last; } }
+        if ($bad) { $invalid{$id} = 'CDS out of range'; $n_range++; next; }
+
+        # CDS总长度过长（所有CDS行长度之和 > --max_cds_length）：排除，不再翻译
+        # （同时存在多种问题的基因，依次按 CDS过长、移码、内部终止密码子 归类）
+        if ($opt{max_cds_length} > 0 && $g->{cds_len} > $opt{max_cds_length}) {
+            $n_too_long++;
+            warn "警告：基因 $id 的CDS总长度为 $g->{cds_len} bp，大于 --max_cds_length $opt{max_cds_length}，该基因将被排除\n" if $n_too_long <= 5;
+            if ($g->{cds_len} > $max_len_seen) { $max_len_seen = $g->{cds_len}; $max_len_seen_id = $id; }
+            $excluded{$id} = 'too_long'; $excl_count{too_long}++;
+            next;
+        }
+
+        my $r = analyze_gene_model(\@c, $stops, $chr_seq, $g->{strand});
+
+        # 移码（同时含移码和内部终止密码子的基因计为移码）
+        if ($r->{frameshift}) {
+            $n_phase_inconsistent++;
+            warn "警告：基因 $id 的CDS phase与累计编码长度不一致（可能存在移码），该基因将被排除\n" if $n_phase_inconsistent <= 5;
+            $excluded{$id} = 'frameshift'; $excl_count{frameshift}++;
+            next;
+        }
+        if (!$r->{ncod}) { $invalid{$id} = 'CDS too short'; next; }
+        if ($r->{protein} eq '') { $invalid{$id} = 'empty protein'; next; }
+        if ($r->{internal_stop}) {
+            $n_internal++;
+            $excluded{$id} = 'internal_stop'; $excl_count{internal_stop}++;
+            next;
+        }
+
+        # 完整基因（用于filter2和--cds_quantile阈值计算）：第一个CDS的phase为0、以起始密码子起始、
+        # 以终止密码子结束、编码序列总长度为3的倍数、无内部终止密码子、无移码
+        # （has_start 已包含“第一个CDS的phase为0”，has_stop 已包含“编码序列总长度为3的倍数”）
+        $complete{$id} = ($r->{has_start} && $r->{has_stop}) ? 1 : 0;
+        $g->{length} = length $r->{protein};
+        push @valid, $id;
+        print $out ">$id\n$r->{protein}\n";
+    }
+    close $out;
+    undef %seq;      # 释放基因组内存（后面不再使用）
+    warn "警告：$n_missing_seq 个基因所在的序列在基因组FASTA中不存在，已忽略\n" if $n_missing_seq;
+    warn "警告：$n_range 个基因的CDS坐标超出序列范围，已忽略\n" if $n_range;
+    warn "警告：$n_too_long 个基因模型的CDS总长度大于 $opt{max_cds_length} bp（已排除）\n" if $n_too_long;
+    warn "警告：$n_internal 个基因模型含有内部终止密码子（已排除）\n" if $n_internal;
+    warn "警告：共 $n_phase_inconsistent 个基因模型的CDS phase与累计编码长度不一致（可能存在移码，已排除）\n" if $n_phase_inconsistent;
+}
+{
+    my $n_excl = scalar keys %excluded;
+    my $n_cpl_seq = grep { $complete{$_} } @valid;
+    if ($opt{max_cds_length} > 0) {
+        logmsg("Excluded gene models with total CDS length > $opt{max_cds_length} bp: $excl_count{too_long}"
+             . ($excl_count{too_long} ? " (longest: $max_len_seen bp, $max_len_seen_id)" : ""));
+    }
+    logmsg("Excluded before redundancy removal (too long CDS / frameshift / internal stop codon): $n_excl"
+         . " [too long CDS: $excl_count{too_long}, frameshift: $excl_count{frameshift}, internal stop codon: $excl_count{internal_stop}]");
+    logmsg("Gene models kept for redundancy removal: " . scalar(@valid) . " (complete: $n_cpl_seq, 5'/3' incomplete: " . (scalar(@valid) - $n_cpl_seq) . ")");
+}
+die "错误：没有可用的基因模型（请检查GFF3与基因组序列的序列ID是否一致，或GFF3中的基因是否都含移码/内部终止密码子/CDS过长）\n" unless @valid;
+
+# ----------------------------------------------------------------------------
+# 第4步：DIAMOND比对（中间文件都放在临时文件夹中）
+# ----------------------------------------------------------------------------
+run_step('diamond_makedb',
+    join(' ', shq($diamond), 'makedb', '--db', shq($T), '--in', shq($prot_fa), '>', shq("$T.diamond_makedb.log"), '2>&1'),
+    [$prot_fa], ["$T.dmnd"]);
+
+my $ev_str = sprintf("%g", $opt{min_evalue});
+my @common;
+if ($opt{diamond_mode} eq "fast") {
+    @common = ($diamond, 'blastp', '--max-target-seqs', $opt{max_target_seqs}, '--evalue', $ev_str,
+              '--id', $opt{diamond_min_id}, '--index-chunks', 1, '--block-size', $opt{diamond_block_size},
+              '--tmpdir', $tmp_dir);
+}
+else {
+    @common = ($diamond, 'blastp', "--$opt{diamond_mode}", '--max-target-seqs', $opt{max_target_seqs}, '--evalue', $ev_str,
+              '--id', $opt{diamond_min_id}, '--index-chunks', 1, '--block-size', $opt{diamond_block_size},
+              '--tmpdir', $tmp_dir);
+}
+my $aln_file = "$T.diamond_out.tsv";
+run_step('blastp',
+    join(' ', (map { shq($_) } @common), '--outfmt', 6,
+         qw(qseqid sseqid pident length qlen slen qstart qend sstart send evalue),
+         '--db', shq($T), '--query', shq($prot_fa),
+         '--out', shq($aln_file), '--threads', $opt{cpu}, '>', shq("$T.diamond_blastp.log"), '2>&1'),
+    [$prot_fa], [$aln_file]);
+
+# ----------------------------------------------------------------------------
+# 第5步：分析比对结果，得到 包含关系(%removed) 与 重复关系(%adj)
+#   %adj{A}{B} = 1 表示基因A与基因B有重复关系（对称）
+#   %removed   记录已被去除的基因；%contained 记录其中因“被包含”而去除的基因
+#   %container_of{A}{B} = 1 表示基因A被基因B包含（仅用于日志统计）
+#   %cluster_removed 记录因重复关系（聚类去冗余）而被去除的基因（补回步骤只针对这些基因）
+# ----------------------------------------------------------------------------
+logmsg("Analysing alignments");
+my (%adj, %removed, %contained, %container_of, %cluster_removed);
+{
+    open(my $in, '<', $aln_file) or die "Can not open file $aln_file, $!\n";
+    my ($cur_q, %hits);
+    while (my $line = <$in>) {
+        chomp $line;
+        my @f = split /\t/, $line;
+        next if @f < 11;
+        if (defined $cur_q && $f[0] ne $cur_q) { process_query($cur_q, \%hits); %hits = (); }
+        $cur_q = $f[0];
+        push @{$hits{$f[1]}}, [@f[2 .. 10]];    # pident length qlen slen qstart qend sstart send evalue
+    }
+    process_query($cur_q, \%hits) if defined $cur_q;
+    close $in;
+}
+
+# ----------------------------------------------------------------------------
+# 第6步：对重复基因去冗余，并补回没有保留邻居的基因
+#   先把有重复关系的基因聚成多个类，再对每个类分别去冗余；
+#   全部完成后，把“所有重复伙伴都已被去除”的基因补回
+# ----------------------------------------------------------------------------
+logmsg("Removing redundant gene models");
+foreach my $cluster (find_clusters()) {
+    dedup_cluster($cluster);
+}
+my ($n_cluster_removed, $n_no_rep, $n_restored) = add_back_removed();
+logmsg("Add-back: $n_no_rep of $n_cluster_removed gene models removed by duplication had no retained duplicate neighbour; $n_restored restored");
+
+# ----------------------------------------------------------------------------
+# 第7步：输出 filter1，并进一步筛选得到 filter2
+#   filter1中的基因都不含内部终止密码子、不含移码、CDS总长度不超过--max_cds_length（可含5'或3'缺失的不完整基因）
+#   CDS个数与CDS总长度阈值：手动设置则直接使用；
+#   未设置则对“去冗余且去除不完整基因后”的全部完整基因模型，从大到小排列后按 --cds_quantile 取分位数位置的值
+#   filter2只选择序列完整的基因模型
+# ----------------------------------------------------------------------------
+my @nonredundant = grep { !$removed{$_} } @valid;
+my @nr_complete  = grep { $complete{$_} } @nonredundant;     # 去冗余且去除不完整基因后的基因模型，用于分位数阈值计算
+
+my $cds_num_cut = $opt{min_cds_num};
+my $cds_len_cut = $opt{min_cds_length};
+if ((!defined $cds_num_cut || !defined $cds_len_cut) && !@nr_complete) {
+    warn "警告：去冗余后没有完整的基因模型，无法用 --cds_quantile 计算阈值（阈值记为0），out.filter2.gff3 将为空\n";
+}
+if (!defined $cds_num_cut) {
+    $cds_num_cut = quantile_cutoff([map { $G{$_}{cds_num} } @nr_complete], $opt{cds_quantile});
+    logmsg("--min_cds_num not set; using quantile $opt{cds_quantile} of " . scalar(@nr_complete) . " non-redundant complete gene models: min CDS number = $cds_num_cut");
+}
+else { logmsg("Using user-defined --min_cds_num = $cds_num_cut"); }
+if (!defined $cds_len_cut) {
+    $cds_len_cut = quantile_cutoff([map { $G{$_}{cds_len} } @nr_complete], $opt{cds_quantile});
+    logmsg("--min_cds_length not set; using quantile $opt{cds_quantile} of " . scalar(@nr_complete) . " non-redundant complete gene models: min CDS length = $cds_len_cut");
+}
+else { logmsg("Using user-defined --min_cds_length = $cds_len_cut"); }
+
+my ($redundant_num, $not_complete_num, $few_cds_num, $short_cds_num, $little_ratio_num, $long_cds_num, $keep_num) = (0) x 7;
+my %keep;
+{
+    open(my $out1, '>', "$P.filter1.gff3") or die "Cannot create file $P.filter1.gff3, $!\n";
+    foreach my $id (@valid) {
+        if ($removed{$id}) { $redundant_num++; next; }
+        print $out1 $G{$id}{text}, "\n";
+
+        my $g = $G{$id};
+        if (!$complete{$id})                         { $not_complete_num++; next; }
+        if ($g->{cds_num} < $cds_num_cut)            { $few_cds_num++;      next; }
+        if ($g->{cds_len} < $cds_len_cut)            { $short_cds_num++;    next; }
+        if ($g->{exon_len} && $g->{cds_len} / $g->{exon_len} < $opt{min_cds_exon_ratio}) { $little_ratio_num++; next; }
+        $keep{$id} = 1;
+    }
+    close $out1;
+}
+
+my @keep_gene = sort { $G{$a}{length} <=> $G{$b}{length} or $a cmp $b } keys %keep;
+my ($longest_length, $the_longest_length) = (0, 0);
+if (@keep_gene) {
+    my $idx = int($opt{keep_ratio_for_excluding_too_long_gene} * @keep_gene);
+    $idx = $#keep_gene if $idx > $#keep_gene;
+    $longest_length     = $G{$keep_gene[$idx]}{length};
+    $the_longest_length = $G{$keep_gene[-1]}{length};
+}
+{
+    open(my $out2, '>', "$P.filter2.gff3") or die "Cannot create file $P.filter2.gff3, $!\n";
+    foreach my $id (@valid) {
+        next unless $keep{$id};
+        if ($G{$id}{length} <= $longest_length) { print $out2 $G{$id}{text}, "\n"; $keep_num++; }
+        else                                    { $long_cds_num++; }
+    }
+    close $out2;
+}
+
+my $contained_num = grep { $contained{$_} && $removed{$_} } @valid;
+my $invalid_num   = scalar keys %invalid;
+my $excluded_num  = scalar keys %excluded;
+
+# 诊断统计（不影响任何筛选结果）：因包含关系被去除、但所有包含者也都被去除的基因数
+my $contained_no_rep = 0;
+foreach my $q (grep { $contained{$_} && $removed{$_} } @valid) {
+    my $has_kept_container = 0;
+    foreach my $s (keys %{$container_of{$q}}) {
+        if (!$removed{$s}) { $has_kept_container = 1; last; }
+    }
+    $contained_no_rep++ unless $has_kept_container;
+}
+
+print STDERR "
+Total gene models number: ", scalar(@genes), "
+Invalid gene models:      $invalid_num        # no CDS / unknown strand / sequence missing / CDS out of range
+Excluded gene models:     $excluded_num        # too long CDS (> $opt{max_cds_length} bp): $excl_count{too_long}, frameshift: $excl_count{frameshift}, internal stop codon: $excl_count{internal_stop}
+Redundant gene number:    $redundant_num        # contained: $contained_num, clustered: ", $redundant_num - $contained_num, "
+Add-back restored number: $n_restored        # removed by duplication with no retained duplicate neighbour: $n_no_rep of $n_cluster_removed (before add-back)
+Contained, no kept container: $contained_no_rep        # diagnostic only, not restored
+Non-redundant (filter1):  ", scalar(@nonredundant), "
+Non-redundant complete:   ", scalar(@nr_complete), "        # gene models used for the --cds_quantile thresholds
+Not complete gene number: $not_complete_num        # 5'/3' incomplete, kept in filter1 but not in filter2
+Few CDSs gene number:     $few_cds_num        # CDS number < $cds_num_cut
+Short CDS length:         $short_cds_num        # CDS length < $cds_len_cut
+Low CDS/exon ratio:       $little_ratio_num
+Too long CDS gene number: $long_cds_num        # Longest protein length was set to $longest_length/$the_longest_length
+Best gene Models number:  $keep_num\n";
+warn "警告：out.filter2.gff3 中没有基因模型，请参考上述统计放宽筛选参数（如 --cds_quantile、--min_cds_exon_ratio、--min_coverage_ratio）。\n" unless $keep_num;
+
+# ----------------------------------------------------------------------------
+# 第8步：删除临时文件夹（仅在程序正常运行完毕时）
+# ----------------------------------------------------------------------------
+cleanup_tmp();
+logmsg("Done. Output: $P.filter1.gff3 $P.filter2.gff3");
+exit 0;
+
+# ============================================================================
+# 子程序：通用
+# ============================================================================
+sub logmsg { my $t = localtime; print STDERR "[$t] $_[0]\n"; return; }
+
+sub shq { my $s = shift; $s =~ s/'/'\\''/g; return "'$s'"; }
+
+sub find_in_path {
+    my $cmd = shift;
+    return $cmd if $cmd =~ m{/} && -x $cmd;
+    foreach my $d (split /:/, ($ENV{PATH} // '')) {
+        next if $d eq '';
+        my $p = "$d/$cmd";
+        return $p if -f $p && -x $p;
+    }
+    return;
+}
+
+# 分位数阈值：把数值从大到小排列，保留排在前 $q 比例的元素，返回其中最小的值（即该分位数位置的值）
+# 例如 $q=0.5 返回中位数附近的值，$q=1 返回最小值
+sub quantile_cutoff {
+    my ($vals, $q) = @_;
+    return 0 unless @$vals;
+    my @s = sort { $b <=> $a } @$vals;
+    my $k = ceil($q * @s - 1e-9);
+    $k = 1      if $k < 1;
+    $k = @s     if $k > @s;
+    return $s[$k - 1];
+}
+
+# 删除临时文件夹：若文件夹由本程序创建，则整体删除；
+# 若是用户已有的文件夹，则只删除本程序生成的中间文件，文件夹为空时才删除文件夹
+sub cleanup_tmp {
+    if ($tmp_created) {
+        remove_tree($tmp_dir);
+    }
+    else {
+        if (opendir(my $dh, $tmp_dir)) {
+            my @mine = grep { /^\Q$TB\E\./ } readdir $dh;
+            closedir $dh;
+            unlink "$tmp_dir/$_" for @mine;
+        }
+        rmdir $tmp_dir;    # 非空时会失败，属于正常情况，直接忽略
+    }
+    if (-d $tmp_dir) { warn "提示：临时文件夹 $tmp_dir 未能完全删除（可能包含其它文件），请手动检查\n"; }
+    else             { logmsg("Temporary directory removed: $tmp_dir"); }
+    return;
+}
+
+# 执行外部命令；用 *.ok 文件（内容为命令+输入文件大小）实现断点续跑，输入或命令变化时自动重跑
+sub run_step {
+    my ($tag, $cmd, $inputs, $outputs) = @_;
+    my $ok  = "$T.$tag.ok";
+    my $sig = join("\t", $cmd, map { my @s = stat($_); @s ? $s[7] : 'NA' } @$inputs);
+    if (!$opt{force} && -e $ok) {
+        my $old = '';
+        if (open(my $fh, '<', $ok)) { local $/; $old = <$fh> // ''; close $fh; }
+        if ($old eq $sig && !grep { !-e $_ } @$outputs) {
+            print STDERR "Skip CMD: $cmd, for file $ok exists\n\n";
+            return;
+        }
+    }
+    unlink $ok;
+    logmsg("CMD: $cmd");
+    my $rc = system($cmd);
+    die "Failed to execute: $cmd $!\n" if $rc == -1;
+    die sprintf("Failed to execute (exit code %d): %s\n(临时文件夹 %s 已保留，便于排查问题)\n", $rc >> 8, $cmd, $tmp_dir) if $rc != 0;
+    open(my $fh, '>', $ok) or die "Cannot create file $ok, $!\n";
+    print $fh $sig;
+    close $fh;
+    return;
+}
+
+# ============================================================================
+# 子程序：遗传密码（代码来自 GFF3_merging_and_removing_redundancy）
+# ============================================================================
+
+# 根据遗传密码编号返回（密码子表、起始密码子表、终止密码子表）的哈希引用。
+# 遗传密码的设置参考NCBI Genetic Codes。密码子表中终止密码子记为"X"（调用者再根据终止密码子表换成'*'）。
+sub codon_table {
+    my ($genetic_code) = @_;
+    my %code = (
+        "TTT" => "F", "TTC" => "F", "TTA" => "L", "TTG" => "L",
+        "TCT" => "S", "TCC" => "S", "TCA" => "S", "TCG" => "S",
+        "TAT" => "Y", "TAC" => "Y", "TAA" => "X", "TAG" => "X",
+        "TGT" => "C", "TGC" => "C", "TGA" => "X", "TGG" => "W",
+        "CTT" => "L", "CTC" => "L", "CTA" => "L", "CTG" => "L",
+        "CCT" => "P", "CCC" => "P", "CCA" => "P", "CCG" => "P",
+        "CAT" => "H", "CAC" => "H", "CAA" => "Q", "CAG" => "Q",
+        "CGT" => "R", "CGC" => "R", "CGA" => "R", "CGG" => "R",
+        "ATT" => "I", "ATC" => "I", "ATA" => "I", "ATG" => "M",
+        "ACT" => "T", "ACC" => "T", "ACA" => "T", "ACG" => "T",
+        "AAT" => "N", "AAC" => "N", "AAA" => "K", "AAG" => "K",
+        "AGT" => "S", "AGC" => "S", "AGA" => "R", "AGG" => "R",
+        "GTT" => "V", "GTC" => "V", "GTA" => "V", "GTG" => "V",
+        "GCT" => "A", "GCC" => "A", "GCA" => "A", "GCG" => "A",
+        "GAT" => "D", "GAC" => "D", "GAA" => "E", "GAG" => "E",
+        "GGT" => "G", "GGC" => "G", "GGA" => "G", "GGG" => "G",
+    );
+    my %start_table;
+    $start_table{"ATG"} = 1;
+    if ( $genetic_code == 1 ) {
+        # The Standard Code
+        #$start_table{"TTG"} = 1;
+        #$start_table{"CTG"} = 1;
+    }
+    elsif ( $genetic_code == 2 ) {
+        # The Vertebrate Mitochondrial Code
+        $code{"AGA"} = "X"; $code{"AGG"} = "X"; $code{"ATA"} = "M"; $code{"TGA"} = "W";
+        $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG/;
+    }
+    elsif ( $genetic_code == 3 ) {
+        # The Yeast Mitochondrial Code
+        $code{"ATA"} = "M"; $code{"CTT"} = "T"; $code{"CTC"} = "T"; $code{"CTA"} = "T"; $code{"CTG"} = "T"; $code{"TGA"} = "W";
+        $start_table{$_} = 1 foreach qw/ATA GTG/;
+    }
+    elsif ( $genetic_code == 4 ) {
+        # The Mold, Protozoan, and Coelenterate Mitochondrial Code and the Mycoplasma/Spiroplasma Code
+        $code{"TGA"} = "W";
+        $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG CTG TTA TTG/;
+    }
+    elsif ( $genetic_code == 5 ) {
+        # The Invertebrate Mitochondrial Code
+        $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"ATA"} = "M"; $code{"TGA"} = "W";
+        $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG TTG/;
+    }
+    elsif ( $genetic_code == 6 ) {
+        # The Ciliate, Dasycladacean and Hexamita Nuclear Code
+        $code{"TAA"} = "Q"; $code{"TAG"} = "Q";
+    }
+    elsif ( $genetic_code == 9 ) {
+        # The Echinoderm and Flatworm Mitochondrial Code
+        $code{"AAA"} = "N"; $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"TGA"} = "W";
+        $start_table{"GTG"} = 1;
+    }
+    elsif ( $genetic_code == 10 ) {
+        # The Euplotid Nuclear Code
+        $code{"TGA"} = "C";
+    }
+    elsif ( $genetic_code == 11 ) {
+        # The Bacterial, Archaeal and Plant Plastid Code
+        $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG CTG TTG/;
+    }
+    elsif ( $genetic_code == 12 ) {
+        # The Alternative Yeast Nuclear Code
+        $code{"CTG"} = "S";
+        $start_table{"CTG"} = 1;
+    }
+    elsif ( $genetic_code == 13 ) {
+        # The Ascidian Mitochondrial Code
+        $code{"AGA"} = "G"; $code{"AGG"} = "G"; $code{"ATA"} = "M"; $code{"TGA"} = "W";
+        $start_table{$_} = 1 foreach qw/ATA GTG TTG/;
+    }
+    elsif ( $genetic_code == 14 ) {
+        # The Alternative Flatworm Mitochondrial Code
+        $code{"AAA"} = "N"; $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"TAA"} = "Y"; $code{"TGA"} = "W";
+    }
+    elsif ( $genetic_code == 15 ) {
+        # Blepharisma Nuclear Code
+        $code{"TAG"} = "Q";
+    }
+    elsif ( $genetic_code == 16 ) {
+        # Chlorophycean Mitochondrial Code
+        $code{"TAG"} = "L";
+    }
+    elsif ( $genetic_code == 21 ) {
+        # Trematode Mitochondrial Code
+        $code{"TGA"} = "W"; $code{"ATA"} = "M"; $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"AAA"} = "N";
+        $start_table{"GTG"} = 1;
+    }
+    elsif ( $genetic_code == 22 ) {
+        # Scenedesmus obliquus Mitochondrial Code
+        $code{"TCA"} = "X"; $code{"TAG"} = "L";
+    }
+    elsif ( $genetic_code == 23 ) {
+        # Thraustochytrium Mitochondrial Code
+        $code{"TTA"} = "X";
+        $start_table{$_} = 1 foreach qw/ATT GTG/;
+    }
+    elsif ( $genetic_code == 24 ) {
+        # Rhabdopleuridae Mitochondrial Code
+        $code{"AGA"} = "S"; $code{"AGG"} = "K"; $code{"TGA"} = "W";
+        $start_table{$_} = 1 foreach qw/GTG CTG TTG/;
+    }
+    elsif ( $genetic_code == 25 ) {
+        # Candidate Division SR1 and Gracilibacteria Code
+        $code{"TGA"} = "G";
+        $start_table{$_} = 1 foreach qw/GTG TTG/;
+    }
+    elsif ( $genetic_code == 26 ) {
+        # Pachysolen tannophilus Nuclear Code
+        $code{"CTG"} = "A";
+        $start_table{"CTG"} = 1;
+    }
+    elsif ( $genetic_code == 27 ) {
+        # Karyorelict Nuclear Code
+        # TAA和TAG编码Gln；TGA既可编码Trp也可作为终止密码子，这里仍将TGA视为终止密码子。
+        $code{"TAG"} = "Q"; $code{"TAA"} = "Q";
+    }
+    elsif ( $genetic_code == 28 ) {
+        # Condylostoma Nuclear Code
+        # TAA、TAG编码Gln，TGA编码Trp，但三者均可根据上下文作为终止密码子，因此这里仍将TAA、TAG、TGA都视为终止密码子。
+    }
+    elsif ( $genetic_code == 29 ) {
+        # Mesodinium Nuclear Code
+        $code{"TAA"} = "Y"; $code{"TAG"} = "Y";
+    }
+    elsif ( $genetic_code == 30 ) {
+        # Peritrich Nuclear Code
+        $code{"TAA"} = "E"; $code{"TAG"} = "E";
+    }
+    elsif ( $genetic_code == 31 ) {
+        # Blastocrithidia Nuclear Code
+    }
+    elsif ( $genetic_code == 32 ) {
+        # Balanophoraceae Plastid Code
+        $code{"TAG"} = "W";
+        $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG CTG TTG/;
+    }
+    elsif ( $genetic_code == 33 ) {
+        # Cephalodiscidae Mitochondrial UAA-Tyr Code
+        $code{"TAA"} = "Y"; $code{"TGA"} = "W"; $code{"AGA"} = "S"; $code{"AGG"} = "K";
+        $start_table{$_} = 1 foreach qw/GTG CTG TTG/;
+    }
+    else {
+        print STDERR "Warning: unsupported genetic code $genetic_code, start and stop codons are set according to the standard genetic code.\n";
+    }
+
+    my %stop_table;
+    foreach ( keys %code ) {
+        $stop_table{$_} = 1 if $code{$_} eq "X";
+    }
+
+    return (\%code, \%start_table, \%stop_table);
+}
+
+# ============================================================================
+# 子程序：基因模型的完整性、移码和内部终止密码子分析，并翻译蛋白
+#         （逻辑来自 GFF3_merging_and_removing_redundancy 的 analysis_geneModels_integrity，
+#           针对本程序“存在移码即排除”的需求做了调整）
+# ============================================================================
+# 参数：已按起始坐标升序排序的CDS列表（元素为[start,end,phase]，phase为0/1/2或undef）、
+#       stop_codon列表（元素为[start,end]）、染色体序列（大写、非ACGT已转为N）、链方向
+# 返回哈希引用：
+#   frameshift     是否存在移码（1/0）；存在移码时立即返回，不再取序列
+#   ncod           完整密码子个数（0表示编码序列不足一个密码子）
+#   has_start      第一个CDS的phase为0，且以起始密码子（由--genetic_code决定）起始
+#   has_stop       编码序列总长度为3的倍数，且以终止密码子（由--genetic_code决定）结束
+#   internal_stop  内部终止密码子数量（末尾正常的终止密码子不计入）
+#   protein        翻译得到的蛋白序列（末尾正常的终止密码子已去除，内部终止密码子记为X）
+# 阅读框：以转录方向第一个CDS的phase为准，phase不为0时视为缺少起始密码子（开头phase个碱基属于上游缺失的密码子，予以丢弃），
+#         第一个CDS的phase不是0/1/2时按0处理。
+# 移码：沿转录方向，后一个CDS的phase应等于由前面累计编码长度推算出的期望phase，不一致则判定为移码。
+#         若该基因所有CDS的phase都不是1或2（例如某些工具把phase全部写成0或"."），则phase没有信息量，不做移码检测；
+#         后续CDS的phase不是0/1/2时，不对该CDS做移码判断。
+# 跨CDS的密码子：无移码时，所有片段沿转录方向直接拼接后再按3个碱基切分密码子，
+#         因此被内含子隔开的密码子（包括被内含子隔开的终止密码子）会拼成完整的三联体密码子。
+# stop_codon行：若GFF3中有不与任何CDS重叠的stop_codon行（例如miniprot的输出），则按转录方向并入编码序列末尾。
+sub analyze_gene_model {
+    my ($cds, $stops, $chr_seq, $strand) = @_;
+    my %res = (frameshift => 0, ncod => 0, has_start => 0, has_stop => 0, internal_stop => 0, protein => '');
+    my $clen = length $chr_seq;
+
+    # 每个片段：[起始, 结束, phase, 是否CDS]
+    my @cds_seg = map { [ $_->[0], $_->[1], $_->[2], 1 ] } @$cds;
+    my @seg = @cds_seg;
+    foreach my $s (@{ $stops || [] }) {
+        my ($ss, $se) = @$s;
+        next if $se > $clen;
+        next if grep { $ss <= $_->[1] && $se >= $_->[0] } @cds_seg;
+        push @seg, [ $ss, $se, undef, 0 ];
+    }
+
+    my $minus = ($strand eq '-') ? 1 : 0;
+    # 转录方向：正链起始坐标从小到大，负链从大到小
+    my @tseg = sort { $minus ? ($b->[0] <=> $a->[0] or $b->[1] <=> $a->[1])
+                             : ($a->[0] <=> $b->[0] or $a->[1] <=> $b->[1]) } @seg;
+
+    # phase是否有信息量：至少有一个CDS的phase为1或2
+    my $phase_informative = grep { defined $_->[2] && $_->[2] =~ /^[12]$/ } @cds_seg;
+
+    # 第一遍：只用长度和phase判断移码，并确定第一个CDS开头要丢弃的碱基数
+    my ($coding_len, $first, $start_ok, $first_drop) = (0, 1, 1, 0);
+    foreach my $s (@tseg) {
+        my $len   = $s->[1] - $s->[0] + 1;
+        my $phase = $s->[2];
+        if ($first) {
+            $phase = 0 unless defined $phase;
+            $start_ok   = 0 if $phase > 0;
+            $first_drop = $phase < $len ? $phase : $len;
+            $coding_len = $len - $first_drop;
+            $first = 0;
+        }
+        else {
+            if ($s->[3] && defined $phase && $phase_informative) {
+                my $expected = (3 - $coding_len % 3) % 3;
+                if ($phase != $expected) { $res{frameshift} = 1; return \%res; }
+            }
+            $coding_len += $len;
+        }
+    }
+
+    # 第二遍：无移码时，按基因组顺序把所有片段直接拼接，负链时整体只反向互补一次，再去掉起始处first_drop个碱基
+    my $coding = '';
+    $coding .= substr($chr_seq, $_->[0] - 1, $_->[1] - $_->[0] + 1) for sort { $a->[0] <=> $b->[0] } @seg;
+    if ($minus) { $coding = reverse $coding; $coding =~ tr/ACGT/TGCA/; }
+    substr($coding, 0, $first_drop, '') if $first_drop;
+
+    my $ncod = int(length($coding) / 3);
+    return \%res unless $ncod;
+    $res{ncod} = $ncod;
+    my $tail = length($coding) - 3 * $ncod;           # 末尾不足一个密码子的碱基数
+
+    $res{has_start} = ($start_ok && exists $START_CODON{ substr($coding, 0, 3) }) ? 1 : 0;
+    $res{has_stop}  = ($tail == 0 && exists $STOP_CODON{ substr($coding, ($ncod - 1) * 3, 3) }) ? 1 : 0;
+
+    my $pep = join '', @CODON{ unpack("(a3)$ncod", $coding) };
+    $pep =~ s/\*$// if $res{has_stop};                # 3'端完整时，最后一个终止密码子是正常的，不计入
+    $res{internal_stop} = ($pep =~ tr/*/X/);          # 内部终止密码子用X代替并计数
+    $res{protein} = $pep;
+    return \%res;
+}
+
+# ============================================================================
+# 子程序：比对结果分析
+# ============================================================================
+
+# 区间并集长度（闭区间）
+sub union_length {
+    my ($iv) = @_;
+    my @s = sort { $a->[0] <=> $b->[0] or $a->[1] <=> $b->[1] } @$iv;
+    my ($total, $cs, $ce) = (0, undef, undef);
+    foreach my $x (@s) {
+        if (!defined $cs) { ($cs, $ce) = @$x; next; }
+        if ($x->[0] <= $ce + 1) { $ce = $x->[1] if $x->[1] > $ce; }
+        else { $total += $ce - $cs + 1; ($cs, $ce) = @$x; }
+    }
+    $total += $ce - $cs + 1 if defined $cs;
+    return $total;
+}
+
+# 处理同一条query的所有比对：同一对蛋白的多个HSP合并计算identity与覆盖度，
+# 并据此判断两个基因之间是“包含关系”还是“重复关系”
+sub process_query {
+    my ($q, $hits) = @_;
+    foreach my $s (keys %$hits) {
+        next if $s eq $q;
+        my ($alen, $idsum, $minev, $qlen, $slen) = (0, 0, undef, 0, 0);
+        my (@qi, @si);
+        foreach my $x (@{$hits->{$s}}) {
+            my ($pid, $len, $ql, $sl, $qs, $qe, $ss, $se, $ev) = @$x;
+            $alen  += $len;
+            $idsum += $pid * $len / 100;
+            $minev = $ev if !defined $minev || $ev < $minev;
+            ($qlen, $slen) = ($ql, $sl);
+            push @qi, ($qs <= $qe ? [$qs, $qe] : [$qe, $qs]);
+            push @si, ($ss <= $se ? [$ss, $se] : [$se, $ss]);
+        }
+        next if $alen <= 0 || $qlen <= 0 || $slen <= 0;
+        next if $minev > $opt{min_evalue};
+        next if $idsum / $alen < $opt{min_identity};
+        my $qcov = union_length(\@qi) / $qlen;
+        my $scov = union_length(\@si) / $slen;
+
+        # 包含关系：query基本全长被明显更长的subject包含，直接去除query
+        if (!$opt{no_contain_filter} && $qcov >= $opt{contained_coverage} && $scov < $opt{container_coverage}) {
+            $removed{$q}   = 1;
+            $contained{$q} = 1;
+            $container_of{$q}{$s} = 1;    # 记录包含者，仅用于日志统计
+            next;
+        }
+        # 重复关系：两个蛋白的覆盖度都足够高，记录为一条无向边
+        if ($qcov >= $opt{min_coverage_ratio} && $scov >= $opt{min_coverage_ratio}) {
+            $adj{$q}{$s} = 1;
+            $adj{$s}{$q} = 1;
+        }
+    }
+    return;
+}
+
+# ============================================================================
+# 子程序：重复基因去冗余
+# ============================================================================
+
+# 保留等级：数值越小，越优先被去除（数值越大，越优先被保留）
+#   0: 同源蛋白预测(homolog) 且 incomplete
+#   1: 同源蛋白预测(homolog) 且 complete
+#   2: NGSReads预测 且 incomplete
+#   3: NGSReads预测 且 complete
+# （complete指gene行或mRNA行含Integrity=complete，否则为incomplete）
+# 读完GFF3后一次性算好存入 $G{id}{rank}，之后直接使用
+sub keep_rank {
+    my ($id) = @_;
+    my $g = $G{$id};
+    return ($g->{source} eq 'reads' ? 2 : 0) + ($g->{integrity} eq 'complete' ? 1 : 0);
+}
+
+# 比较两个基因谁应先被去除（用于节点数相同时的平局判断）
+# 返回负数：$x 先被去除；返回正数：$y 先被去除
+# 判断顺序：保留等级低者先去除；等级相同则蛋白序列较短者先去除；仍相同则按基因ID排序，保证结果可重复
+sub removal_order {
+    my ($x, $y) = @_;
+    return $G{$x}{rank} <=> $G{$y}{rank}
+        || $G{$x}{length} <=> $G{$y}{length}
+        || $x cmp $y;
+}
+
+# 把有重复关系的基因聚成多个类（即求无向图的连通分量，已被去除的基因不参与）
+# 返回值：由“基因ID数组的引用”组成的列表，只包含成员数不少于2的类
+sub find_clusters {
+    my (%seen, @clusters);
+    foreach my $start (sort keys %adj) {
+        next if $seen{$start} || $removed{$start};
+        my @members;
+        my @stack = ($start);
+        $seen{$start} = 1;
+        while (@stack) {
+            my $node = pop @stack;
+            push @members, $node;
+            foreach my $nb (keys %{$adj{$node}}) {
+                next if $seen{$nb} || $removed{$nb};
+                $seen{$nb} = 1;
+                push @stack, $nb;
+            }
+        }
+        push @clusters, \@members if @members > 1;
+    }
+    return @clusters;
+}
+
+# 对一个重复基因类去冗余，分两个阶段（节点数：与该基因有重复关系、且尚未被去除的基因数量）：
+#   阶段A：每次去除节点数最大的一个基因（节点数相同时，由 removal_order 决定先去除谁），
+#          直到所有基因的节点数都不超过1。
+#   阶段B：此时剩下的都是1对1的重复基因对，每对再按 removal_order 去除其中一个。
+# 说明：去除一个基因只会改变与其直接相邻的基因的节点数，不同的类之间互不影响，
+#       因此在类内连续迭代去除，与“每去除一个基因后重新聚类，再对每个新类各去除一个基因”的结果完全等价。
+#       节点数只会减少，所以阶段A只需维护“节点数>1”的候选列表，并让它不断缩小。
+# 被去除的基因同时记入 %cluster_removed，供补回步骤使用。
+sub dedup_cluster {
+    my ($members) = @_;
+    my @m = sort @$members;    # 排序保证平局时结果可重复
+    my (%alive, %degree);
+
+    $alive{$_} = 1 for @m;
+    foreach my $g (@m) {
+        $degree{$g} = scalar grep { $alive{$_} } keys %{$adj{$g}};
+    }
+
+    # ---- 阶段A：反复去除节点数最大的基因 ----
+    my @cand = grep { $degree{$_} > 1 } @m;     # 节点数只会减少，候选集只会缩小
+    while (1) {
+        @cand = grep { $alive{$_} && $degree{$_} > 1 } @cand;
+        last unless @cand;
+        my $victim;
+        foreach my $g (@cand) {
+            if (   !defined $victim
+                || $degree{$g} > $degree{$victim}
+                || ($degree{$g} == $degree{$victim} && removal_order($g, $victim) < 0)) {
+                $victim = $g;
+            }
+        }
+        delete $alive{$victim};
+        $removed{$victim} = 1;
+        $cluster_removed{$victim} = 1;
+        foreach my $nb (keys %{$adj{$victim}}) {
+            $degree{$nb}-- if $alive{$nb};    # 只有相邻基因的节点数会变化
+        }
+    }
+
+    # ---- 阶段B：处理剩下的1对1重复基因对 ----
+    foreach my $g (@m) {
+        next unless $alive{$g};
+        my ($partner) = grep { $alive{$_} } sort keys %{$adj{$g}};
+        if (!defined $partner) { delete $alive{$g}; next; }    # 没有重复伙伴，保留
+
+        my $loser = removal_order($g, $partner) < 0 ? $g : $partner;
+        $removed{$loser} = 1;
+        $cluster_removed{$loser} = 1;
+        delete $alive{$g};
+        delete $alive{$partner};
+    }
+    return;
+}
+
+# 判断基因是否还有未被去除的重复伙伴
+sub has_retained_neighbor {
+    my ($id) = @_;
+    foreach my $nb (keys %{$adj{$id}}) {
+        return 1 unless $removed{$nb};
+    }
+    return 0;
+}
+
+# 补回步骤：把因重复关系被去除、且所有重复伙伴都已被去除的基因补回（因包含关系去除的基因不补回）
+# 按保留优先级从高到低依次检查（NGSReads且complete > NGSReads且incomplete > homolog且complete > homolog且incomplete，
+# 同级时蛋白较长者优先），每补回一个基因，立即影响后续基因的判断，
+# 所以补回后任意两个保留的基因之间仍然没有重复关系
+# 返回值：(因重复关系被去除的基因总数, 补回前没有保留邻居的基因数, 实际补回的基因数)
+sub add_back_removed {
+    my @cand = grep { $removed{$_} } sort keys %cluster_removed;
+    my $n_no_rep = grep { !has_retained_neighbor($_) } @cand;
+
+    my @order = sort { removal_order($b, $a) } @cand;    # removal_order 小者先被去除，这里降序即保留优先级从高到低
+    my $n_restored = 0;
+    foreach my $g (@order) {
+        next if has_retained_neighbor($g);
+        delete $removed{$g};
+        $n_restored++;
+    }
+    return (scalar(@cand), $n_no_rep, $n_restored);
+}
+
+sub print_english_help {
+    my ($fh) = @_;
+    $fh = \*STDOUT unless defined $fh;
+    local $/;
+    my $t = <DATA>;
+    $t =~ s/__PROG__/$prog/g;
+    print $fh $t;
+    return;
+}
+
+# ----------------------------------------------------------------------------
+# English usage (kept at the very end of the program)
+# ----------------------------------------------------------------------------
+__END__
+Description:
+    Input gene models in GFF3 format (as many accurate gene models as possible; gene models with missing 5' or 3' ends are allowed) and the genome sequence. The program first translates the gene models into proteins according to the phase column (column 8) of the GFF3 (using the genetic code given by --genetic_code), and removes gene models with internal stop codons, gene models with frameshifts, and gene models with an excessively long total CDS length (> 15000 bp by default) (gene models with missing 5' or 3' ends are kept). It then runs DIAMOND (blastp mode) to measure protein-level similarity among the remaining gene models and removes redundant ones; the resulting set can be used for Augustus etraining. It then selects complete gene models with many CDSs and long total CDS length from the non-redundant set, which can be used for the Augustus training optimizing step. The thresholds of CDS number and total CDS length can be set manually, or calculated automatically from quantiles over all non-redundant complete gene models (i.e. after redundancy removal and after removing incomplete gene models).
+
+Usage:
+    __PROG__ [options] geneModels.gff3 genome.fasta
+
+Preprocessing (removal of unqualified gene models):
+    The following gene models are excluded before redundancy removal (they are not aligned by DIAMOND and do not appear in filter1 or filter2):
+        a. gene models with internal stop codons;
+        b. gene models with frameshifts (the CDS phase disagrees with the phase expected from the accumulated coding length of the preceding CDS);
+        c. gene models whose total CDS length (sum of the lengths of all CDS lines of the gene) is larger than --max_cds_length (15000 bp by default; set --max_cds_length to 0 to disable this filter).
+    Gene models with a missing 5' or 3' end (e.g. the phase of the first CDS is not 0, no start codon, no stop codon, or the total coding length is not a multiple of 3) are NOT excluded: they take part in redundancy removal and may appear in filter1, but they never enter filter2.
+    The numbers of excluded gene models (by reason: too long CDS, frameshift, internal stop codon; a gene with several problems is counted in the first matching category in this order) are written to the log.
+
+Redundancy removal procedure (applied to the gene models that pass the preprocessing):
+    (1) Containment: proteins are aligned all-vs-all. If a protein is (nearly) fully contained in another one (aligned coverage >= --contained_coverage, while the container's aligned coverage is < --container_coverage) and identity >= --min_identity, the contained gene is removed.
+    (2) Duplication: if the aligned coverage of both proteins is >= --min_coverage_ratio and identity is >= --min_identity, the two genes are regarded as duplicates.
+    (3) Genes with duplication relationships go through repeated rounds of "cluster, then remove one gene" until no gene is duplicated with two or more other genes:
+        a. Clustering: gene pairs with a duplication relationship are grouped into clusters, so that all genes fall into multiple clusters.
+        b. Removal: in each cluster, the node number of every gene is calculated (a gene duplicated with n other genes has node number n), and the one gene with the largest node number is removed.
+        c. Tie-breaking: when node numbers are equal, the gene to remove first is decided in this order: genes predicted by homology-based protein alignment (gene ID starting with "homolog") are removed first, keeping genes predicted from NGSReads (gene ID starting with "Sam2Transfrag" or "stringtie"); then incomplete genes are removed first; finally the gene with the shorter protein is removed first.
+        d. Iteration: after a gene is removed, the remaining genes are re-clustered according to the duplication relationships, and one more gene is removed from each new cluster, and so on, until the node number of every gene in every cluster is <= 1.
+    (4) Finishing: for the remaining one-to-one duplicate pairs, one gene of each pair is removed by the same rules (homolog-derived first, then incomplete, then the shorter protein).
+    (5) Add-back: after all the removals above, the gene models removed because of duplication relationships (not those removed by containment) are checked. If all the duplicate partners of a removed gene have also been removed, that is, no similar representative remains among the retained genes, the gene is put back. The checks are made in descending order of retention priority (NGSReads-derived and complete, NGSReads-derived and incomplete, homolog-derived and complete, homolog-derived and incomplete; the longer protein first within the same level), and each restored gene immediately affects the checks of the following genes, so any two retained genes still have no duplication relationship after the add-back.
+    (6) Implementation note: removing a gene only changes the node numbers of its direct neighbours, and different clusters do not affect each other, so the program simply iterates within each cluster without explicit re-clustering; the result is exactly equivalent to re-clustering after every removal.
+    (7) Genes whose ID does not start with "homolog" are all treated as NGSReads-derived genes. A gene is regarded as complete if either its gene line or its mRNA line (column 9 of the GFF3) contains the attribute Integrity=complete; otherwise it is regarded as incomplete.
+
+Notes:
+    1. The input GFF3 must not contain alternative splicing (one mRNA per gene); a warning is printed otherwise.
+    2. Protein sequences are aligned with diamond (must be in PATH).
+    3. out.filter1.gff3 contains the non-redundant gene models without internal stop codons, frameshifts or excessively long total CDS length (gene models with missing 5' or 3' ends are kept; for etraining); out.filter2.gff3 contains the selected best complete gene models (for optimizing).
+    4. Protein translation: the program joins the CDS and translates the protein according to the phase in column 8 of every CDS line in the GFF3; the codon table, start codons and stop codons are determined by --genetic_code. Along the transcription direction, if the phase of the first CDS is not 0, the corresponding bases at the beginning are removed and translation starts from the first base of the first complete codon; for each following CDS, the program derives the expected phase from the accumulated coding length of the preceding CDS: if it agrees with the GFF3 annotation, the sequences are joined directly (codons spanning exons, including a stop codon interrupted by an intron, are joined into complete triplets); if it does not agree, a frameshift is reported, a warning is output to STDERR and the gene is excluded (frameshifts are detected from the CDS lengths and phases only, without extracting sequences). If no CDS of a gene has phase 1 or 2 (e.g. some tools write all phases as 0 or "."), the phases carry no information and frameshift detection is skipped; a following CDS whose phase is not 0/1/2 (e.g. ".") is not checked for frameshift either; if the phase of the first CDS is not 0/1/2 it is treated as 0. Separate stop_codon lines in the GFF3 (e.g. miniprot output) that do not overlap any CDS are appended to the end of the coding sequence in transcription direction (used only for translation and the completeness check; they are not counted in the CDS number or total CDS length). The normal terminal stop codon does not appear in the protein; internal stop codons are written as X in the protein (the gene is then excluded). Non-ACGT bases in the genome (including ambiguity codes) are converted to N when the genome is read, and codons containing N are translated as X.
+    5. A gene model is regarded as complete (judged from the genome sequence, independent of the Integrity attribute in the GFF3) if the phase of its first CDS is 0, it starts with a start codon (determined by --genetic_code; ATG for the standard code), ends with a stop codon (determined by --genetic_code; TAA/TAG/TGA for the standard code), its total coding length is a multiple of 3, it has no internal stop codon, and it has no frameshift. This judgement is used both to select the models for out.filter2.gff3 and to define the set of gene models over which the --cds_quantile thresholds are calculated (see --cds_quantile).
+    6. Lower-case (soft-masked) bases in the genome are converted to upper case before processing.
+    7. Intermediate files (protein sequences, *.dmnd, *.diamond_out.tsv, logs, *.ok, etc.) are all kept in the temporary directory, which is removed automatically after a successful run. On failure the directory is kept; re-running with --tmp_dir pointing to it resumes from the *.ok checkpoint files, and steps are re-run automatically when inputs or commands change.
+    8. When the program is run without any argument, this English help message is printed by default.
+    9. When the CDS number and total CDS length thresholds are calculated from quantiles, the thresholds actually used and the number of gene models they were calculated from are written to the log.
+    10. The log reports the number of gene models excluded in the preprocessing (by reason: too long CDS, frameshift, internal stop codon), the add-back statistics (the number of gene models removed by duplication that had no retained duplicate neighbour before the add-back, and the number actually restored), and the number of gene models removed by containment whose containers were all removed as well (for reference only; they are not restored).
+
+Output files:
+    <out_prefix>.filter1.gff3      non-redundant gene models without internal stop codons, frameshifts or excessively long total CDS length, may contain 5'/3' incomplete genes (for Augustus etraining)
+    <out_prefix>.filter2.gff3      best complete gene models (for Augustus training optimizing)
+
+[Main Options]
+    --out_prefix <string>    default: out
+    Prefix of the output files.
+
+    --tmp_dir <string>    default: tmp_$date$pid
+    Temporary directory for intermediate files (protein sequences, DIAMOND database and alignment results, logs, checkpoint files, etc.). The default is "tmp_" followed by the date (YYYYMMDD) and the process ID. The directory is removed automatically when the program finishes successfully (if an existing directory is given, only the intermediate files generated by this program are removed, and the directory itself is removed only if it becomes empty). If the program fails, the directory is kept for troubleshooting, and re-running with --tmp_dir pointing to it resumes from the checkpoint (*.ok) files.
+
+[Preprocessing Options]
+    --max_cds_length <int>    default: 15000
+    In the preprocessing, gene models whose total CDS length (sum of the lengths of all CDS lines of the gene, in bp) is larger than this value are excluded (they are not aligned by DIAMOND and do not appear in filter1 or filter2). Set to 0 to disable this filter.
+
+[Genetic Code Options]
+    --genetic_code <int>    default: 1
+    Genetic code, from which the codon table, start codons and stop codons are determined automatically; used for protein translation, internal stop codon detection and the completeness judgement. See NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi . Supported numbers: 1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33.
+
+[Alignment (DIAMOND) Options]
+    --cpu <int>    default: 8
+    Number of threads used by DIAMOND.
+
+    --min_evalue <float>    default: 1e-9
+    E-value threshold for protein alignments (used both by DIAMOND and by the result analysis).
+
+    --min_identity <float>    default: 0.8
+    Alignments of a protein pair (all HSPs combined) with identity below this value are ignored. A percentage (e.g. 80) is also accepted and converted to 0.8 automatically.
+
+    --min_coverage_ratio <float>    default: 0.8
+    For each protein pair, the fraction of each protein covered by the aligned region is calculated; if both fractions are not lower than this value, the two genes are regarded as duplicates. If out.filter2.gff3 contains too few gene models (see the log), increasing this value is recommended.
+
+    --contained_coverage <float>    default: 0.95
+    Containment filter: minimum aligned coverage of the contained protein (i.e. nearly full length is contained).
+
+    --container_coverage <float>    default: 0.80
+    Containment filter: the containing protein must have aligned coverage below this value (i.e. it is clearly longer). If identity >= --min_identity as well, the contained gene is removed.
+
+    --no_contain_filter
+    Disable the containment filter (only the pairwise-duplicate clustering is used).
+
+    --diamond_mode <string>    default: fast
+    DIAMOND sensitivity mode: fast, sensitive, more-sensitive or very-sensitive. Redundancy removal only concerns closely related alignments with high identity (>= 80% by default), so fast is normally sufficient and several times quicker than sensitive. If --min_identity is lowered a lot (e.g. below 50%), use sensitive instead.
+
+    --max_target_seqs <int>    default: 200
+    Maximum number of target sequences kept by DIAMOND per query. Increase it for very large gene families (0 = unlimited, slower).
+
+    --diamond_min_id <int>    default: 10
+    DIAMOND --id (percent). HSPs below this identity are discarded early; raising it speeds up the search. Keep it well below --min_identity*100, otherwise pairs that only reach the threshold after HSP merging may be lost.
+
+    --diamond_block_size <int>    default: 5
+    DIAMOND --block-size. Increase it for speed if memory allows.
+
+    --force
+    Ignore existing *.ok checkpoint files in the temporary directory and re-run DIAMOND and the other steps (only meaningful when an existing directory is given by --tmp_dir).
+
+[Best Gene Model Selection Options]
+    --min_cds_num <int>    default: not set
+    The number of CDSs of a best gene model must not be smaller than this value. If not set, the threshold is calculated by --cds_quantile over all non-redundant complete gene models.
+
+    --min_cds_length <int>    default: not set
+    The total CDS length of a best gene model must not be smaller than this value. If not set, the threshold is calculated by --cds_quantile over all non-redundant complete gene models.
+
+    --cds_quantile <float>    default: 0.8
+    Only used when --min_cds_num or --min_cds_length is not set. All gene models that remain after redundancy removal and after removing incomplete gene models (i.e. the gene models in out.filter1.gff3 that are judged complete from the genome sequence, see Note 5; the Integrity attribute in the GFF3 is not used) are sorted in descending order by CDS number and by total CDS length respectively, and the value at this quantile position is used as the corresponding threshold. For example, 0.5 keeps the top 50% of gene models (the threshold is the value at the 50% position, i.e. the median), 0.2 keeps the top 20%, and 1 takes the minimum value (no filtering). The range is (0,1]; a percentage (e.g. 20) is also accepted and converted to 0.2 automatically. If only one of the two threshold options is set, the other threshold is still calculated from this quantile.
+
+    --min_cds_exon_ratio <float>    default: 0.50
+    Total CDS length / total exon length of a best gene model must not be smaller than this value. If out.filter2.gff3 contains too few gene models (see the log), decreasing this value is recommended.
+
+    --keep_ratio_for_excluding_too_long_gene <float>    default: 0.95
+    Finally, gene models are sorted by protein length and only this fraction of the shorter ones is kept (1 = keep all). Some large-genome species (e.g. human, mouse) have extremely long genes/proteins (>30k aa), which hampers the accuracy evaluation of Augustus optimizing and costs a lot of time, so removing a fraction of the longest gene models is recommended.
+
+[Help Options]
+    --help
+    Show the English help message and exit.
+
+    --chinese_help
+    显示中文帮助信息并退出。
+ 

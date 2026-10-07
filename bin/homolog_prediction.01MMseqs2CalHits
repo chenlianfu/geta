@@ -8,63 +8,79 @@ use Fcntl qw(:flock);
 
 my $binPath = dirname($0);
 
-my $usage = <<USAGE;
-Usage:
+########################################################################
+# 中文用法说明（放在代码最前面；英文用法说明放在文件最末尾的__DATA__部分）
+########################################################################
+my $usage_cn = <<'USAGE';
+用法：
+
     $0 [options] homolog_proteins.fasta genome_seq.fasta > out.tab
 
     本程序用于将全基因组序列和多个临近物种的全基因组同源蛋白使用MMseqs2软件进行比对，得到类似BLAST outfmt 6格式，由制表符分割的比对结果。
+
     输出结果中，每一行代表同源蛋白匹配到基因组某一区域的比对结果。结果文件有16列：query同源蛋白ID、target参考基因组序列ID、CIP、Alignment Length、Query Length、Target Length、Query start、Query end、Target start、Target end、E-vaule、BitScore、Query coverage、Query HSPs、Target HSPs和Group_Region。其表头标识出了每一列的意义，其中：CIP，cumulative identity percentage，表示Hit累积的identity百分比；Query coverage，表示对query序列的累积覆盖率；Query HSPs，由逗号分隔在同源蛋白序列上的HSP（High-scoring Segment Pair）；Target HSPs，由逗号分隔在基因组序列上的HSPs；Group Region，多个同源蛋白在基因组序列上的匹配区域，表示对应同源基因的所在区域。
 
     程序分析流程：（1）首先，调用MMseq2软件（--search-type 2，蛋白query比对到核酸基因组target，即translated search）将多个物种的同源蛋白序列作为query，比对到全基因组序列上，得到比对结果。（2）对HSPs比对结果使用identity和evalue进行过滤。（3）由于一个基因可能在基因组中有多个拷贝，或基因中有introns，导致一个同源蛋白可能有多个HSPs比对结果。因此，再将多拷贝基因的HSPs分开，将可变剪接导致的多个HSPs合并为一个Hit——合并时要求参与合并的HSPs在query（同源蛋白）和subject（基因组）坐标上保持共线（collinear），避免把不符合基因结构、坐标顺序错乱的HSPs错误地合并为同一个Hit。（4）对Hits使用identity、evaule和query coverage进行过滤。（5）最后，对匹配到相同基因组位点的同源蛋白比对Hits进行过滤，仅保留一定数量(最高10个)的高得分Hits。
 
-    注意：第（3）(4)步（HSPs合并为Hits并过滤）和第（5）步（基因组位点上的Hits去冗余）均采用多进程动态任务队列（dynamic work queue）并行运算，并行数由--cpu参数控制：先将数据切分为数量明显多于--cpu的小数据块，再由多个worker子进程从队列中动态领取空闲数据块进行处理，空闲的进程会立即领取下一个任务，从而缓解不同数据块计算量不均衡导致的"长尾"等待问题。
-    第（3）(4)步按 query-target 组合进行数据分割，第（5）步按基因组序列ID进行数据分割，分割后的数据块之间相互独立，并行结果和单线程结果完全一致。
+    注意：第（3）(4)步（HSPs合并为Hits并过滤）和第（5）步（基因组位点上的Hits去冗余）均采用多进程动态任务队列（dynamic work queue）并行运算，并行数由--cpu参数控制：先将数据切分为数量明显多于--cpu的小数据块，再由多个worker子进程从队列中动态领取空闲数据块进行处理，空闲的进程会立即领取下一个任务，从而缓解不同数据块计算量不均衡导致的"长尾"等待问题。第（3）(4)步按 query-target 组合进行数据分割，第（5）步按基因组序列ID进行数据分割，分割后的数据块之间相互独立，并行结果和单线程结果完全一致。
 
-    程序在临时文件夹中生成了中间文件：
-    output.HSP.tab，MMseqs2程序的结果文件，包含所有HSPs信息；
-    output.Hit.tab，将HSPs过滤，合并为Hit，并对Hit进行了过滤。每行表示一个Hit信息，即同源蛋白和基因组上基因区域的比对结果。该文件有表头信息，第三列是整体的Identity百分比，第7-10行是整体比对的起始和结束位点，第11行是最优HSP的evalue值，第12行是多个HSPs的得分之和，最后两列是详细的HSPs信息；
-    output.filter.tab，最终过滤后的结果文件，内容和程序标准输出一致。
+    程序在临时文件夹中生成了中间文件：output.HSP.tab，MMseqs2程序的结果文件，包含所有HSPs信息；output.Hit.tab，将HSPs过滤，合并为Hit，并对Hit进行了过滤。每行表示一个Hit信息，即同源蛋白和基因组上基因区域的比对结果。该文件有表头信息，第三列是整体的Identity百分比，第7-10列是整体比对的起始和结束位点，第11列是最优HSP的evalue值，第12列是多个HSPs的得分之和，最后两列是详细的HSPs信息；output.filter.tab，最终过滤后的结果文件，内容和程序标准输出一致。
 
-    --cpu <int>    default: 8
+    --cpu <int>    默认值: 8
     设置CPU线程数。该参数值将传递给mmseqs命令的--threads参数，同时也是本程序进行HSP合并、Hit过滤时动态任务队列的并行worker进程数。
 
-    --HSP_identity <float>    default: 0.1
-    --HSP_evalue <float>    default: 1e-3
-    设置HSP (High-scoring Segment Pair) 阈值，对MMseqs2的比对结果进行过滤。MMseqs2程序分析完毕后，每行表示同源蛋白某一区域和基因组序列某一区域的比对结果，即一个HSP。通过设置identity和evalue阈值对所有HSPs结果统一进行过滤。
+    --HSP_identity <float>    默认值: 0.1
+    设置HSP (High-scoring Segment Pair) 的identity阈值，对MMseqs2的比对结果进行过滤。MMseqs2程序分析完毕后，每行表示同源蛋白某一区域和基因组序列某一区域的比对结果，即一个HSP。通过设置identity和evalue阈值对所有HSPs结果统一进行过滤。该参数为比例值（0~1），程序内部会换算为百分数后再与MMseqs2输出的pident比较。
 
-    --HSP_max_distance <int>    default: 3.6 * sqrt(genomeSize)，其中genomeSize为输入基因组序列的总长度（bp）。若用户显式指定该参数，则以用户指定值为准，不再使用该公式计算默认值。
-    --HSP_max_overlap_ratio <float>    default: 0.5
-    设置HSPs分隔或合并为Hits时的阈值参数。由于一个基因可能在基因组中有多个拷贝，或基因中有introns，导致一个同源蛋白可能有多个HSPs比对结果。程序需要将这些HSPs进行分隔和合并。将多拷贝基因的HSPs分开，将可变剪接导致的多个HSPs合并为一个Hit。操作算法：在多个HSPs中找最优HSP(按Evalue和Score排序)，将和最优HSP(组)方向一致、在基因组上距离较近（低于--HSP_max_distance参数设置值，单位bp）、在query蛋白序列上重叠较低（对待加入HSP重叠比例低于--HSP_max_overlap_ratio参数设置值）、且和当前HSP组在query与subject坐标上保持共线（即新HSP在基因组上的位置和其在同源蛋白上的位置相对已有HSP组的延伸方向一致，不会出现基因组坐标前移但蛋白坐标却后退等交叉错位的情况）的HSPs合并为一组；继续于剩下的HSPs继续找最优HSP及其分组；于是将多个HSPs分割成不同的组，每个HSPs组表示一个Hit，即对应一个拷贝的基因区域。
+    --HSP_evalue <float>    默认值: 1e-3
+    设置HSP的E-value阈值，E-value高于该值的HSP被过滤。
 
-    --identity <float>    default: 0.2
-    --evalue <float>    default: 1e-9
-    --homolog_coverage <float>    default: 0.3
-    设置Hit阈值。Hit的identity为多个HSPs累积的一致性氨基酸数量除以匹配长度的值；Hit的evalue值为其所有HSPs中的最低evalue值；Hit的homolog coverage即其所有HSPs的氨基酸占同源蛋白序列的比例。
+    --HSP_max_distance <int>    默认值: 3.6 * sqrt(genomeSize)
+    设置HSPs分隔或合并为Hits时，两个HSPs在基因组上允许的最大距离（单位bp）。默认值公式中的genomeSize为输入基因组序列的总长度（bp）；若用户显式指定该参数，则以用户指定值为准，不再使用该公式计算默认值。由于一个基因可能在基因组中有多个拷贝，或基因中有introns，导致一个同源蛋白可能有多个HSPs比对结果，程序需要将这些HSPs进行分隔和合并：将多拷贝基因的HSPs分开，将可变剪接导致的多个HSPs合并为一个Hit。操作算法：在多个HSPs中找最优HSP(按Evalue和Score排序)，将和最优HSP(组)方向一致、在基因组上距离较近（低于本参数设置值，单位bp）、在query蛋白序列上重叠较低（对待加入HSP重叠比例低于--HSP_max_overlap_ratio参数设置值）、且和当前HSP组在query与subject坐标上保持共线（即新HSP在基因组上的位置和其在同源蛋白上的位置相对已有HSP组的延伸方向一致，不会出现基因组坐标前移但蛋白坐标却后退等交叉错位的情况）的HSPs合并为一组；继续于剩下的HSPs继续找最优HSP及其分组；于是将多个HSPs分割成不同的组，每个HSPs组表示一个Hit，即对应一个拷贝的基因区域。
 
-    --threshold_Hit_cover_ratio <float>    default: 0.9
-    --threshold_Hit_score_ratio <foat>    default: 0.4
-    --threshold_species_num <int>    default: 2
-    --threshold_Hit_num <int>    default: 10
-    设置以上阈值，在基因组某一匹配区域上最优Hit包含多个其它Hits时，仅保留一定数量(最高10个)的高得分Hits。若Hit A和其它多个Hits之间重叠，且覆盖每个其它Hits区域的 >= 90% 时（此处认为Hit A包含了其它Hits），且Hit A的Evalue、Score得分都优于其它Hits，则对Hit A和其它Hits按Evalue和Score进行排序，挑选较好的Hits，采用以下三种方法过滤一部分Hits：（1）当其它Hit的Score得分低于Hit A Score的一定比例（默认40%）时， 对其Hit进去去除；（2）同一个物种最多保留指定数量（默认2个）的Hits；（3）最多保留指定数量（默认为10个）的较好Hits
+    --HSP_max_overlap_ratio <float>    默认值: 0.5
+    设置HSPs合并为Hits时，待加入的HSP和当前HSP组在同源蛋白（query）序列上允许的最大重叠比例。具体合并算法见--HSP_max_distance参数的说明。
 
-    对--threshold_Hit_cover_ratio参数更加详细描述：--threshold_Hit_cover_ratio，设置Hit A包含另外一个Hit B时，要求两个Hits重叠区域对Hit B匹配区域的覆盖比例阈值。当Hit A的Evalue和Score值都优于Hit B，且Hit B >=90%以上的区域和Hit A重叠时，则认为该Hit A包含Hit B，进而考虑对Hit B其进行去除。计算覆盖比例时 ，根据Hit A和Hit B的HSPs信息进行overlap比例计算，分子为Overlap部分的碱基数量，分母为Hit B的HSPs的总碱基数量。
+    --identity <float>    默认值: 0.2
+    设置Hit的identity阈值。Hit的identity为多个HSPs累积的一致性氨基酸数量除以匹配长度的值。
 
-    对--threshold_Hit_score_ratio参数更加详细描述：设置Score比例阈值。当两个BLAST Hits的匹配区域有包含关系时，Hit A包含Hit B，Hit A evalue优于Hit B evalue， 且B Hit Score / A Hit Score低于--threshold_Hit_score_ratio参数设置的阈值，则去除Hit B。
+    --evalue <float>    默认值: 1e-9
+    设置Hit的E-value阈值。Hit的evalue值为其所有HSPs中的最低evalue值。
 
-    对--threshold_species_num参数更加详细描述：设置物种数量阈值。若Hit A和包含了多个其它Hits，对这些Hits进行去冗余时，来自同一物种的Hits最多保留--threshold_species_num阈值指定的个数。该参数生效需要subject name中包含物种名称信息。程序识别query name中的关键词species（大小写均可以识别）及其后的字符[a-zA-Z0-9]作为物种名称。例如XP_002436309_2_SpeciesSorghumBicolor，程序识别其物种名称为SpeciesSorghumBicolor。若subject name中不包含关键词species及其后紧跟的物种名称，程序则以整个subject name为物 种名称，从而使本参数不生效。
+    --homolog_coverage <float>    默认值: 0.3
+    设置Hit的同源蛋白覆盖率阈值。Hit的homolog coverage即其所有HSPs的氨基酸占同源蛋白序列的比例。
 
-    对--threshold_Hit_num参数更加详细描述：设置数量阈值。若Hits之间有包含关系时，最多保留指定数量（默认为10个）的较好Hits。分析过程分多步：（1）在第一条基因组序列前3Kb窗口范围有重叠的所有Hits按Evalue从小到大、Score值从大到小、匹配范围从大到小进行排序，然后按顺序对Hits进行后 续分析；（2）根据排序对Evalue值最小的最优Hit进行分析，在所有Hits中检索Score值更低并被最优Hit包含（根据--threshold_Hit_cover_ratio参数分析结果）的Hits，对这些Hits按Evalue和Score进行排序，去除Score值过低的Hits，再同一物种保留最多--threshold_species_num个数的Hits，再最多保留较好的指定数量（--threshold_Hit_num参数设置值）的Hits，删除其余较差的Hits；（3）对剩下未保留也未删除的Hits，延用第二步 的策略，进一步的进行保留和删除操作，进行多轮直至分析完毕所有的Hit数据；（4）对整条基因组序列往后滑动，每次往后滑 动1Kb距离，分析3Kb窗口，鉴定需要删除的的Hits信息。
+    --threshold_Hit_cover_ratio <float>    默认值: 0.9
+    设置Hit A包含另外一个Hit B时，要求两个Hits重叠区域对Hit B匹配区域的覆盖比例阈值。在基因组某一匹配区域上最优Hit包含多个其它Hits时，程序仅保留一定数量(最高10个)的高得分Hits。当Hit A的Evalue和Score值都优于Hit B，且Hit B >=90%以上的区域和Hit A重叠时，则认为该Hit A包含Hit B，进而考虑对Hit B其进行去除。计算覆盖比例时，根据Hit A和Hit B的HSPs信息进行overlap比例计算，分子为Overlap部分的碱基数量，分母为Hit B的HSPs的总碱基数量。若Hit A和其它多个Hits之间重叠，且覆盖每个其它Hits区域的 >= 90% 时（此处认为Hit A包含了其它Hits），且Hit A的Evalue、Score得分都优于其它Hits，则对Hit A和其它Hits按Evalue和Score进行排序，挑选较好的Hits，采用--threshold_Hit_score_ratio、--threshold_species_num和--threshold_Hit_num所设置的三种方法过滤一部分Hits。
 
-    --tmp_dir <string>    default: tmp_\$date\$pid
+    --threshold_Hit_score_ratio <float>    默认值: 0.4
+    设置Score比例阈值。当两个Hits的匹配区域有包含关系时，Hit A包含Hit B，Hit A evalue优于Hit B evalue，且B Hit Score / A Hit Score低于本参数设置的阈值，则去除Hit B。
+
+    --threshold_species_num <int>    默认值: 2
+    设置物种数量阈值。若Hit A包含了多个其它Hits，对这些Hits进行去冗余时，来自同一物种的Hits最多保留本参数指定的个数。该参数生效需要query name（同源蛋白ID）中包含物种名称信息。程序识别query name中的关键词species（大小写均可以识别）及其后的字符[a-zA-Z0-9]作为物种名称。例如XP_002436309_2_SpeciesSorghumBicolor，程序识别其物种名称为SpeciesSorghumBicolor。若query name中不包含关键词species及其后紧跟的物种名称，程序则以整个query name为物种名称，从而使本参数不生效。
+
+    --threshold_Hit_num <int>    默认值: 10
+    设置数量阈值。若Hits之间有包含关系时，最多保留指定数量（默认为10个）的较好Hits。分析过程分多步：（1）在第一条基因组序列前3Kb窗口范围有重叠的所有Hits按Evalue从小到大、Score值从大到小、匹配范围从大到小进行排序，然后按顺序对Hits进行后续分析；（2）根据排序对Evalue值最小的最优Hit进行分析，在所有Hits中检索Score值更低并被最优Hit包含（根据--threshold_Hit_cover_ratio参数分析结果）的Hits，对这些Hits按Evalue和Score进行排序，去除Score值过低的Hits，再同一物种保留最多--threshold_species_num个数的Hits，再最多保留较好的指定数量（--threshold_Hit_num参数设置值）的Hits，删除其余较差的Hits；（3）对剩下未保留也未删除的Hits，延用第二步的策略，进一步的进行保留和删除操作，进行多轮直至分析完毕所有的Hit数据；（4）对整条基因组序列往后滑动，每次往后滑动1Kb距离，分析3Kb窗口，鉴定需要删除的的Hits信息。
+
+    --tmp_dir <string>    默认值: tmp_$date$pid
     程序运行时临时文件夹名称。
 
-    --help    default: None
+    --help    默认值: None
     display this help and exit.
 
+    --chinese_help    默认值: None
+    显示中文用法说明并退出。
 USAGE
+
+# 英文用法说明在文件最末尾的__DATA__部分，运行时通过DATA文件句柄读取。
+my $usage_en = do { local $/; <DATA> };
+$usage_cn =~ s/\$0/$0/g;
+$usage_en =~ s/\$0/$0/g;
+# 默认的用法说明为英文（程序直接运行、参数个数错误或使用--help时输出）。
+my $usage = $usage_en;
 if (@ARGV==0){die $usage}
 
-my ($cpu, $HSP_identity, $HSP_evalue, $HSP_max_distance, $HSP_max_overlap_ratio, $identity, $evalue, $homolog_coverage, $threshold_Hit_cover_ratio, $threshold_Hit_score_ratio, $threshold_species_num, $threshold_Hit_num, $tmp_dir, $help_flag);
+my ($cpu, $HSP_identity, $HSP_evalue, $HSP_max_distance, $HSP_max_overlap_ratio, $identity, $evalue, $homolog_coverage, $threshold_Hit_cover_ratio, $threshold_Hit_score_ratio, $threshold_species_num, $threshold_Hit_num, $tmp_dir, $help_flag, $chinese_help_flag);
 GetOptions(
     "cpu:i" => \$cpu,
     "HSP_identity:f" => \$HSP_identity,
@@ -80,9 +96,11 @@ GetOptions(
     "threshold_Hit_num:i" => \$threshold_Hit_num,
     "tmp_dir:s" => \$tmp_dir,
     "help" => \$help_flag,
+    "chinese_help" => \$chinese_help_flag,
 );
 
-if ( $help_flag ) { die $usage }
+if ( $chinese_help_flag ) { die $usage_cn }
+if ( $help_flag ) { die $usage_en }
 
 # 记录--HSP_max_distance是否由用户显式指定，以便后续决定是否使用基于基因组大小计算的默认值。
 my $HSP_max_distance_set_by_user = defined($HSP_max_distance) ? 1 : 0;
@@ -100,8 +118,14 @@ $threshold_species_num ||= 2;
 $threshold_Hit_num ||= 10;
 my $date = `date +%Y%m%d%H%M%S`; chomp($date);
 $tmp_dir ||= "tmp_$date$$";
-$tmp_dir = abs_path($tmp_dir);
+# 修正：先创建临时文件夹再取绝对路径（abs_path对不存在的路径可能返回undef）。
 mkdir $tmp_dir unless -e $tmp_dir;
+die "Error: can not create temporary directory $tmp_dir.\n" unless -d $tmp_dir;
+$tmp_dir = abs_path($tmp_dir);
+
+# 修正：检查输入文件个数和是否存在，避免后续abs_path得到undef、mmseqs报出难以理解的错误。
+die "Error: need exactly two input files: homolog_proteins.fasta and genome_seq.fasta.\n$usage" unless @ARGV == 2;
+foreach ( @ARGV ) { die "Error: input file $_ does not exist.\n" unless -e $_; }
 
 my $input_protein = abs_path($ARGV[0]);
 my $input_genome = abs_path($ARGV[1]);
@@ -115,7 +139,7 @@ print STDERR "Genome total size: $genomeSize bp.\n";
 print STDERR "HSP_max_distance " . ( $HSP_max_distance_set_by_user ? "(user-specified)" : "(auto-calculated as 3.6*sqrt(genomeSize))" ) . ": $HSP_max_distance bp.\n";
 
 my $pwd = `pwd`; print STDERR "##########\nPWD (Current Directory): $pwd";
-print STDERR (localtime) . "CMD (Main Program): $0 " . join(" ", @ARGV) . "\n##########\n";
+print STDERR scalar(localtime) . ": CMD (Main Program): $0 " . join(" ", @ARGV) . "\n##########\n";
 
 
 # 1 运行 mmseqs createdb 命令，将蛋白序列做成数据库。
@@ -179,7 +203,10 @@ else {
 #####################################################################
 unless ( -e "e.HSP2Hit.ok" ) {
     # 5.1 对 MMseqs2 的HSPs结果按identity和evalue阈值进行过滤。
-    print STDERR "\n5.1 filtering HSPs with threshold: identity >= $HSP_identity && E-value <= $HSP_evalue.\n";
+    # 修正：MMseqs2 convertalis输出的pident是百分数（0~100），而--HSP_identity是比例（0~1），
+    # 原代码直接比较，使HSP的identity过滤几乎不起作用。这里将阈值换算为百分数后再比较（与Hit的CIP过滤一致）。
+    my $HSP_identity_percent = $HSP_identity * 100;
+    print STDERR "\n5.1 filtering HSPs with threshold: identity >= $HSP_identity ($HSP_identity_percent%) && E-value <= $HSP_evalue.\n";
     print STDERR (localtime) . ": Start.\n";
 
     my ($line_num1, $line_num2) = (0, 0);
@@ -188,7 +215,7 @@ unless ( -e "e.HSP2Hit.ok" ) {
     while (<IN>) {
         $line_num1 ++;
         @_ = split /\t/;
-        next unless ( $_[2] >= $HSP_identity && $_[-2] <= $HSP_evalue );
+        next unless ( @_ >= 12 && $_[2] >= $HSP_identity_percent && $_[10] <= $HSP_evalue );
         $line_num2 ++;
         print $ffh $_;
     }
@@ -1004,3 +1031,67 @@ sub get_fasta_total_length {
     close $fh;
     return $total_length;
 }
+
+########################################################################
+# 英文用法说明（放在文件最末尾，运行时通过DATA文件句柄读取）
+########################################################################
+__DATA__
+Usage:
+
+    $0 [options] homolog_proteins.fasta genome_seq.fasta > out.tab
+
+    This program aligns the whole-genome sequence against the homologous proteins of several closely related species using MMseqs2, and produces a tab-delimited alignment result similar to the BLAST outfmt 6 format.
+
+    In the output, each line represents the alignment of one homologous protein to one region of the genome. The result file has 16 columns: query homolog protein ID, target reference genome sequence ID, CIP, Alignment Length, Query Length, Target Length, Query start, Query end, Target start, Target end, E-value, BitScore, Query coverage, Query HSPs, Target HSPs and Group_Region. The header line labels each column, where: CIP, cumulative identity percentage, is the cumulative identity percentage of a Hit; Query coverage is the cumulative coverage of the query sequence; Query HSPs are the HSPs (High-scoring Segment Pairs) on the homolog protein sequence, separated by commas; Target HSPs are the HSPs on the genome sequence, separated by commas; Group Region is the region on the genome sequence matched by multiple homologous proteins, i.e. the region where the corresponding homologous gene is located.
+
+    Workflow: (1) MMseqs2 (--search-type 2, protein query against nucleotide genome target, i.e. a translated search) is called to align the homologous proteins of multiple species (query) to the whole-genome sequence. (2) The HSPs are filtered by identity and E-value. (3) A gene may have multiple copies in the genome, or may contain introns, so one homologous protein may have multiple HSPs. Therefore the HSPs of multi-copy genes are separated, and the multiple HSPs caused by introns are merged into one Hit; HSPs are merged only if they stay collinear in both the query (homologous protein) and the subject (genome) coordinates, which prevents HSPs that violate the gene structure or have a disordered coordinate order from being wrongly merged into one Hit. (4) The Hits are filtered by identity, E-value and query coverage. (5) Finally, the Hits of homologous proteins aligned to the same genomic locus are filtered, and only a limited number (up to 10) of high-scoring Hits are retained.
+
+    Note: Steps (3)(4) (merging HSPs into Hits and filtering) and step (5) (removing redundant Hits at genomic loci) both run in parallel using a multi-process dynamic work queue, and the number of parallel workers is controlled by --cpu: the data are first split into small chunks, far more than --cpu, and then several worker processes dynamically fetch idle chunks from the queue, so an idle process immediately fetches the next task, which alleviates the "long tail" waiting caused by unbalanced chunk workloads. Steps (3)(4) split the data by query-target combination, and step (5) splits the data by genome sequence ID. The split chunks are independent of each other, so the parallel result is identical to the single-thread result.
+
+    The program generates the following intermediate files in the temporary directory: output.HSP.tab, the MMseqs2 result file containing all HSPs; output.Hit.tab, the file in which the HSPs have been filtered, merged into Hits, and the Hits have been filtered. Each line represents one Hit, i.e. the alignment of a homologous protein to a gene region of the genome. The file has a header line; column 3 is the overall identity percentage, columns 7-10 are the start and end positions of the overall alignment, column 11 is the E-value of the best HSP, column 12 is the sum of the scores of all HSPs, and the last two columns contain the detailed HSP information; output.filter.tab, the final filtered result file, whose content is the same as the standard output of the program.
+
+    --cpu <int>    default: 8
+    Set the number of CPU threads. This value is passed to the --threads parameter of the mmseqs commands, and is also the number of parallel worker processes of the dynamic work queue used for HSP merging and Hit filtering in this program.
+
+    --HSP_identity <float>    default: 0.1
+    Set the identity threshold of HSPs (High-scoring Segment Pairs) used to filter the MMseqs2 alignment result. After MMseqs2 finishes, each line represents the alignment of one region of a homologous protein to one region of the genome sequence, i.e. one HSP. All HSPs are filtered uniformly with the identity and E-value thresholds. This parameter is a fraction (0~1); it is converted to a percentage internally before being compared with the pident reported by MMseqs2.
+
+    --HSP_evalue <float>    default: 1e-3
+    Set the E-value threshold of HSPs; HSPs with an E-value higher than this value are filtered out.
+
+    --HSP_max_distance <int>    default: 3.6 * sqrt(genomeSize)
+    Set the maximum distance (in bp) on the genome allowed between HSPs when they are separated or merged into Hits. In the default formula, genomeSize is the total length (bp) of the input genome sequences; if the user specifies this parameter explicitly, the user-specified value is used and the formula is no longer applied. A gene may have multiple copies in the genome, or may contain introns, so one homologous protein may have multiple HSPs, which must be separated and merged: the HSPs of multi-copy genes are separated, and the multiple HSPs caused by introns are merged into one Hit. Algorithm: the best HSP is found among the HSPs (sorted by E-value and score), and the HSPs that have the same direction as the best HSP (group), are close to it on the genome (lower than the value of this parameter, in bp), overlap little on the query protein sequence (overlap ratio of the HSP to be added lower than --HSP_max_overlap_ratio), and stay collinear with the current HSP group in the query and subject coordinates (i.e. the position of the new HSP on the genome and its position on the homologous protein are consistent with the extension direction of the existing HSP group, without crossing, such as the genome coordinate moving forward while the protein coordinate moves backward) are merged into one group; the best HSP and its group are then searched for again among the remaining HSPs; thus the HSPs are split into different groups, and each HSP group represents one Hit, i.e. one copy of the gene region.
+
+    --HSP_max_overlap_ratio <float>    default: 0.5
+    Set the maximum overlap ratio on the homologous protein (query) sequence allowed between an HSP to be added and the current HSP group when merging HSPs into Hits. See the description of --HSP_max_distance for the detailed merging algorithm.
+
+    --identity <float>    default: 0.2
+    Set the identity threshold of Hits. The identity of a Hit is the cumulative number of identical amino acids of its HSPs divided by the alignment length.
+
+    --evalue <float>    default: 1e-9
+    Set the E-value threshold of Hits. The E-value of a Hit is the lowest E-value among all its HSPs.
+
+    --homolog_coverage <float>    default: 0.3
+    Set the homolog coverage threshold of Hits. The homolog coverage of a Hit is the proportion of the homologous protein sequence covered by the amino acids of all its HSPs.
+
+    --threshold_Hit_cover_ratio <float>    default: 0.9
+    Set the threshold of the coverage ratio of the overlapping region of two Hits over the matched region of Hit B when Hit A contains Hit B. When the best Hit at a matched genomic region contains multiple other Hits, only a limited number (up to 10) of high-scoring Hits are retained. When both the E-value and the score of Hit A are better than those of Hit B, and >= 90% of the region of Hit B overlaps with Hit A, Hit A is considered to contain Hit B, and Hit B is considered for removal. The overlap ratio is calculated from the HSP information of Hit A and Hit B: the numerator is the number of overlapping bases, and the denominator is the total number of bases of the HSPs of Hit B. If Hit A overlaps with several other Hits and covers >= 90% of the region of each of them (Hit A is then considered to contain these Hits), and the E-value and score of Hit A are both better than those of the other Hits, then Hit A and the other Hits are sorted by E-value and score, the better Hits are selected, and some Hits are filtered using the three methods set by --threshold_Hit_score_ratio, --threshold_species_num and --threshold_Hit_num.
+
+    --threshold_Hit_score_ratio <float>    default: 0.4
+    Set the score ratio threshold. When the matched regions of two Hits have a containment relationship, Hit A contains Hit B, the E-value of Hit A is better than that of Hit B, and the score of Hit B / the score of Hit A is lower than the threshold set by this parameter, Hit B is removed.
+
+    --threshold_species_num <int>    default: 2
+    Set the species number threshold. When Hit A contains multiple other Hits, at most the number of Hits specified by this parameter is retained for Hits from the same species during redundancy removal. This parameter only takes effect if the query name (homologous protein ID) contains species information. The program recognizes the keyword species (case-insensitive) in the query name together with the following characters [a-zA-Z0-9] as the species name. For example, for XP_002436309_2_SpeciesSorghumBicolor, the species name recognized is SpeciesSorghumBicolor. If the query name does not contain the keyword species followed by a species name, the whole query name is used as the species name, so this parameter has no effect.
+
+    --threshold_Hit_num <int>    default: 10
+    Set the number threshold. When Hits have containment relationships, at most the specified number (default 10) of better Hits are retained. The analysis has several steps: (1) all Hits overlapping within a 3Kb window starting at the beginning of the first genome sequence are sorted by E-value from small to large, by score from large to small, and by matched range from large to small, and then analyzed in this order; (2) the best Hit with the smallest E-value is analyzed first, and all Hits that have a lower score and are contained by the best Hit (according to --threshold_Hit_cover_ratio) are searched; these Hits are sorted by E-value and score, Hits with too low a score are removed, at most --threshold_species_num Hits are kept for each species, then at most the specified number of better Hits (the value of --threshold_Hit_num) are kept, and the remaining worse Hits are deleted; (3) the remaining Hits that were neither retained nor deleted are processed with the same strategy as in step 2, over multiple rounds, until all Hits have been analyzed; (4) the window slides along the whole genome sequence by 1Kb each time, analyzing a 3Kb window, to identify the Hits that need to be deleted.
+
+    --tmp_dir <string>    default: tmp_$date$pid
+    Name of the temporary directory used when the program runs.
+
+    --help    default: None
+    display this help and exit.
+
+    --chinese_help    default: None
+    显示中文用法说明并退出。
+

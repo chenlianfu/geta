@@ -5,14 +5,20 @@ use Getopt::Long;
 use Cwd qw/abs_path getcwd cwd/;
 use File::Basename;
 use File::Temp qw/tempdir/;
+use POSIX ();
 
-my $usage_chinese = <<USAGE;
-Usage:
-    $0 [options] genome.fasta GeneModelsInput.gff3 > GeneModelsOutput.gff3
+########################################################################
+# 中文用法说明（放在代码最前面；英文用法说明放在文件最末尾的__DATA__部分）
+########################################################################
+my $usage_cn = <<'USAGE';
+用法:
+    $0 [选项] genome.fasta GeneModelsInput.gff3 > GeneModelsOutput.gff3
 
-    本程序用于填补基因模型的首尾，使之完整。在GETA基因预测过程中，有一些基因模型未能被Augustus预测出来，此时仅根据transcripts或homolog预测的结果，往往首尾缺失。此时，使用本程序将首尾缺失的基因模型进行补齐。
+    本程序用于填补基因模型的首尾，使之完整。在GETA基因预测过程中，有一些基因模型未能被Augustus预测出来，此时仅根据转录本或同源蛋白预测的结果，往往首尾缺失。此时，使用本程序将首尾缺失的基因模型进行补齐。
 
-    本程序补齐基因模型首尾的原理：（1）对基因模型尾部直接进行延长，直至遇到终止密码子或到基因组序列最尾部；（2）对基因模型首部直接进行延长，直至遇到终止密码子，再吐出密码子碱基直至遇到起始密码子；（3）若遇到没有CDS信息的转录本，例如lnc_RNA，不会对其进行补齐，程序同时支持含有可变剪接的GFF3文件。
+    本程序补齐基因模型首尾的原理：（1）对基因模型尾部直接进行延长，直至遇到终止密码子或到基因组序列最尾部；（2）对基因模型首部直接进行延长，直至遇到终止密码子，再吐出密码子碱基直至遇到起始密码子；（3）若遇到没有CDS信息的转录本，例如长链非编码RNA（lnc_RNA），不会对其进行补齐，程序同时支持含有可变剪接的GFF3文件。
+
+    在延长基因模型首部或尾部的过程中，若遇到含有N（或其它非ATCG碱基）的密码子（例如基因组上的gap区域），程序将立即停止延长，并认为该转录本不能被填补完整；此时该转录本的CDS保持原样，不会因为穿越N区域而产生超长的exon/CDS。
 
     本程序根据 --genetic_code 参数设置的遗传密码，自动确定起始密码子和终止密码子。
 
@@ -22,27 +28,34 @@ Usage:
 
     程序对转录本进行强制填补后，会导致基因的范围发生改变，于是会对基因的范围信息和其它转录本的范围和exon边界进行修正。
 
-    --genetic_code <int>    default: 1
+    --genetic_code <int>    默认值: 1
     设置遗传密码，程序据此自动确定起始密码子和终止密码子。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi 。支持的遗传密码编号为：1、2、3、4、5、6、9、10、11、12、13、14、15、16、21、22、23、24、25、26、27、28、29、30、31、32、33。例如：1为标准遗传密码（起始密码子为ATG，终止密码子为TAA、TAG、TGA），11为细菌/古菌/植物质体遗传密码，2为脊椎动物线粒体遗传密码。
 
-    --nonCompletedGeneModels <string>    default: None
-    添加该参数后，程序将不能填补完整的基因模型输入到指定的文件中，在默认的标准输出中仅给完整基因模型。若不添加该参数，则将所有的基因模型都输出到标准输出。
+    --nonCompletedGeneModels <string>    默认值: 无
+    添加该参数后，程序将不能填补完整的基因模型输出到指定的文件中，在默认的标准输出中仅给出完整的基因模型。若不添加该参数，则将所有的基因模型都输出到标准输出。
 
-    --filling_need_transcriptID <string>    default: None
+    --filling_need_transcriptID <string>    默认值: 无
     添加该参数后，程序将需要进行填补的转录本ID输出到指定的文件中。
 
-    --cpu <int>    default: 1
-    设置并行计算使用的CPU线程（进程）数。由于各个基因模型（gene model）的首尾填补计算相互独立，程序会将所有基因模型按ID排序后尽量平均切分为--cpu指定的份数，分别fork多个子进程并行处理，处理完成后父进程再按照基因模型原有顺序合并各子进程结果并输出，因此最终输出结果与单线程运行完全一致，只是运行速度更快。
+    --cpu <int>    默认值: 1
+    设置并行计算使用的CPU线程（进程）数。由于各个基因模型的首尾填补计算相互独立，程序会将所有基因模型按ID排序后尽量平均切分为 --cpu 指定的份数，分别创建多个子进程并行处理，处理完成后父进程再按照基因模型原有顺序合并各子进程的结果并输出，因此最终输出结果与单线程运行完全一致，只是运行速度更快。
 
-    --help    default: None
-    显示英文用法说明并退出。
+    --help    默认值: 无
+    Display the English usage and exit.
 
-    --chinese_help    default: None
+    --chinese_help    默认值: 无
     显示中文用法说明并退出。
 
 USAGE
-my $usage_english = &get_usage_english();
-if (@ARGV==0){die $usage_english}
+
+my $prog_name = $0;
+$usage_cn =~ s/\$0/$prog_name/g;
+# 英文用法说明位于文件末尾的__DATA__部分，在此读取。
+my $usage_en = do { local $/; <DATA> };
+$usage_en =~ s/\$0/$prog_name/g;
+
+# 程序直接运行（不带任何参数）时，给出英文用法说明。
+if (@ARGV==0){die $usage_en}
 
 my ($help_flag, $chinese_help_flag, $genetic_code, $start_codon, $stop_codon, $nonCompletedGeneModels, $filling_need_transcriptID, $cpu_num);
 GetOptions(
@@ -55,11 +68,11 @@ GetOptions(
     "nonCompletedGeneModels:s" => \$nonCompletedGeneModels,
     "filling_need_transcriptID:s" => \$filling_need_transcriptID,
     "cpu:i" => \$cpu_num,
-) or die $usage_english;
+) or die $usage_en;
 
-if ( $chinese_help_flag ) { die $usage_chinese }
-if ( $help_flag ) { die $usage_english }
-die "Error: genome.fasta and GeneModelsInput.gff3 are required (exactly two input files).\n\n$usage_english" unless @ARGV == 2;
+if ( $chinese_help_flag ) { die $usage_cn }
+if ( $help_flag ) { die $usage_en }
+die "Error: genome.fasta and GeneModelsInput.gff3 are required (exactly two input files).\n\n$usage_en" unless @ARGV == 2;
 
 $genetic_code = 1 unless ( defined $genetic_code && $genetic_code > 0 );
 $cpu_num ||= 1;
@@ -108,6 +121,12 @@ my $gene_info = &get_geneModels_from_GFF3($ARGV[1]);
 my @gene_IDs = sort keys %$gene_info;
 my $total_gene_num = scalar @gene_IDs;
 
+# 检查所有基因模型所在的序列是否都存在于基因组fasta文件中，避免后续子进程中出现难以定位的错误。
+foreach my $gene_ID ( @gene_IDs ) {
+    my @header_fields = split /\t/, $gene_info->{$gene_ID}{"header"};
+    die "Error: sequence $header_fields[0] (of gene $gene_ID) is not found in genome file $ARGV[0].\n" unless exists $seq->{$header_fields[0]};
+}
+
 # 根据 --cpu 参数和基因模型总数，确定实际需要fork的子进程数量（不超过基因模型总数，不小于1）。
 my $worker_num = $cpu_num;
 $worker_num = $total_gene_num if $worker_num > $total_gene_num;
@@ -136,17 +155,26 @@ for (my $i = 0; $i < $worker_num; $i ++) {
 
     if ( $pid == 0 ) {
         # 子进程：处理完毕后写文件并退出，不再执行后面父进程的合并逻辑。
-        &worker_process($i, $chunk_start, $chunk_end, \@gene_IDs, $gene_info, $seq, $tmpdir);
-        exit(0);
+        # 修正：用POSIX::_exit退出，避免子进程重复刷新从父进程继承的输出缓冲区（OUT/OUT1/STDOUT）、重复执行END块；
+        # 子进程中的错误被捕获后以非0状态退出，父进程据此报错，而不是输出不完整的结果。
+        my $ok = eval { &worker_process($i, $chunk_start, $chunk_end, \@gene_IDs, $gene_info, $seq, $tmpdir); 1 };
+        unless ( $ok ) {
+            print STDERR "Error: child process $i failed: $@";
+            POSIX::_exit(1);
+        }
+        POSIX::_exit(0);
     }
     else {
         push @pids, $pid;
     }
 }
-# 父进程等待所有子进程运行结束
+# 父进程等待所有子进程运行结束，并检查子进程是否正常退出（若有子进程异常退出，则报错终止，避免输出不完整的结果）。
+my $child_failed_num = 0;
 foreach my $pid ( @pids ) {
     waitpid($pid, 0);
+    $child_failed_num ++ if $? != 0;
 }
+die "Error: $child_failed_num child process(es) exited abnormally, the output is incomplete.\n" if $child_failed_num > 0;
 
 # 父进程按照子进程编号（即基因模型原有排序顺序）依次读取并合并各个子进程的输出结果，保证最终输出顺序与单线程运行一致。
 my ($num_total, $num_complete, $num_partial, $num_filled, $num_not_filled) = (0, 0, 0, 0, 0);
@@ -372,6 +400,18 @@ sub sort_mRNA_info {
     my ($mRNA_content, %sort1, %sort2);
     # sort1：按照位置排序； sort2：按照five_prime_UTR、exon、CDS、intron、three_prime_UTR顺序进行排序。
 
+    # 修正：读取转录方向上第一个CDS的frame。输入的基因模型若5'端不完整且未能被填补，首个CDS的frame可能不为0，
+    # 原代码总是假设首个CDS的frame为0，会导致这类转录本输出的所有CDS的frame都发生错误。
+    my $first_frame = 0;
+    {
+        my @cds_lines = split /\n/, $mRNA_CDSs;
+        if ( @cds_lines ) {
+            my $first_cds_line = ( $strand eq "-" ) ? $cds_lines[-1] : $cds_lines[0];
+            my @tmp_fields = split /\t/, $first_cds_line;
+            $first_frame = $tmp_fields[2] if ( defined $tmp_fields[2] && $tmp_fields[2] =~ m/^[012]$/ );
+        }
+    }
+
     if ( $strand eq "+" ) {
         my $num = 0;
         foreach ( split /\n/, $mRNA_exons ) {
@@ -380,7 +420,7 @@ sub sort_mRNA_info {
             $sort1{$out_content} = $_[0];
             $sort2{$out_content} = 2;
         }
-        my ($num, $CDS_length, $frame) = (0, 0, 0);
+        my ($num, $CDS_length, $frame) = (0, -$first_frame, $first_frame);
         foreach ( split /\n/, $mRNA_CDSs ) {
             $num ++; @_ = split /\t/, $_; my $feature_type = "CDS"; my $feature_showname = $feature_type;
             $CDS_length += (abs($_[1] - $_[0]) + 1);
@@ -428,7 +468,7 @@ sub sort_mRNA_info {
             $sort1{$out_content} = $_[0];
             $sort2{$out_content} = 2;
         }
-        my ($num, $CDS_length, $frame) = (0, 0, 0);
+        my ($num, $CDS_length, $frame) = (0, -$first_frame, $first_frame);
         foreach ( reverse split /\n/, $mRNA_CDSs ) {
             $num ++; @_ = split /\t/, $_; my $feature_type = "CDS"; my $feature_showname = $feature_type;
             $CDS_length += (abs($_[1] - $_[0]) + 1);
@@ -445,7 +485,9 @@ sub sort_mRNA_info {
             $sort2{$out_content} = 4;
         }
         my ($num5, $num3, $num, $sort_num)= (0, 0, 0, 0);
-        foreach ( reverse split /\n/, $mRNA_UTR ) {
+        # 修正：get_UTR对负链返回的UTR已经是按坐标从大到小（即转录方向）排序的，这里不应再reverse，
+        # 否则utr5p/utr3p的编号方向与exon、CDS、intron（均按转录方向编号）相反。
+        foreach ( split /\n/, $mRNA_UTR ) {
             @_ = split /\t/, $_;
             my ( $feature_type, $feature_showname );
             if ( $_[0] eq "five_prime_UTR" ) {
@@ -472,12 +514,15 @@ sub sort_mRNA_info {
 }
 
 # 子程序，根据CDS和exon信息得到UTR
+# 修正：原代码仅在"exon与CDS共用一端边界"时才产生UTR，导致：（1）exon同时包含CDS两侧（例如单exon基因两端都有UTR）时UTR全部丢失；
+# （2）填补使CDS延伸超出原exon边界后，exon另一侧的UTR丢失。现改为只要exon超出CDS的某一侧，就在该侧产生UTR。
+# 另外，原代码用第2小的CDS坐标$cds_pos[1]判断3'端UTR，这里改为使用CDS的最小和最大坐标。
 sub get_UTR {
     my @cds = @{$_[0]};
     my @exon = @{$_[1]};
     my $strand = $_[2];
 
-    my (@utr, %cds_pos);
+    my (@utr, %utr_seen, %cds_pos);
     foreach (@cds) {
         @_ = split /\t/;
         $cds_pos{$_[0]} = 1;
@@ -491,31 +536,32 @@ sub get_UTR {
             @_ = split /\t/;
             if ($_[0] <= $end && $_[1] >= $start) {
                 $utr_keep = 0;
-                if ($start < $_[0] && $end == $_[1]) {
+                if ($start < $_[0]) {
                     my $utr_start = $start;
                     my $utr_end = $_[0] - 1;
-                    push @utr, "$utr_start\t$utr_end";
+                    push @utr, "$utr_start\t$utr_end" unless $utr_seen{"$utr_start\t$utr_end"} ++;
                 }
-                elsif ($start == $_[0] && $end > $_[1]) {
+                if ($end > $_[1]) {
                     my $utr_start = $_[1] + 1;
                     my $utr_end = $end;
-                    push @utr, "$utr_start\t$utr_end";
+                    push @utr, "$utr_start\t$utr_end" unless $utr_seen{"$utr_start\t$utr_end"} ++;
                 }
             }
         }
-        push @utr, $_ if $utr_keep == 1;
+        push @utr, "$start\t$end" if $utr_keep == 1;
     }
 
     my @out;
     my @cds_pos = sort {$a <=> $b} keys %cds_pos;
+    my ($cds_min, $cds_max) = ($cds_pos[0], $cds_pos[-1]);
     if ($strand eq "+") {
         @utr = sort {$a <=> $b} @utr;
         foreach (@utr) {
             @_ = split /\t/;
-            if ($_[1] <= $cds_pos[0]) {
+            if ($_[1] <= $cds_min) {
                 push @out, "five_prime_UTR\t$_";
             }
-            elsif ($_[0] >= $cds_pos[1]) {
+            elsif ($_[0] >= $cds_max) {
                 push @out, "three_prime_UTR\t$_";
             }
         }
@@ -524,10 +570,10 @@ sub get_UTR {
         @utr = sort {$b <=> $a} @utr;
         foreach (@utr) {
             @_ = split /\t/;
-            if ($_[0] >= $cds_pos[1]) {
+            if ($_[0] >= $cds_max) {
                 push @out, "five_prime_UTR\t$_";
             }
-            elsif ($_[1] <= $cds_pos[0]) {
+            elsif ($_[1] <= $cds_min) {
                 push @out, "three_prime_UTR\t$_";
             }
         }
@@ -592,7 +638,9 @@ sub modify_exon {
             }
             $intron{"$intron_start\t$intron_stop"} = 1 if ($keep_intron == 1 && $intron_stop >= $intron_start);
         }
-        ($last_start, $last_end) = ($start, $end);
+        # 修正：若当前exon被前一个exon完全包含（输入exon之间有重叠），不能让$last_end变小，否则会错误地鉴定出与已有exon重叠的intron。
+        $last_end = $end if $end > $last_end;
+        $last_start = $start;
     }
 
     # 根据mRNA边界和introns信息得到准确的exons信息
@@ -668,61 +716,91 @@ sub fillingEnd {
 }
 
 # 子程序，返回修复了终止密码子的CDS信息
+# 修正：在向下游延伸寻找终止密码子的过程中，若遇到含N（或其它非ATCG碱基）的密码子（如基因组gap区域），
+# 则立即停止延伸，视为未能填补，并保持该末端CDS的原始坐标不变，避免穿越N区域产生超长的exon/CDS。
 sub modify_stop {
     # 获取CDS、基因组序列和strand信息
     my ($CDS_ref, $genome_seq, $strand, $mRNA_ID) = @_;
     my @CDS = @$CDS_ref;
     @CDS = sort {$a <=> $b} @CDS;
     my $fill_ok = 0;
+    my $blocked_by_N = 0;
     my $genome_seq_length = length($genome_seq);
 
     if ( $strand eq "+" ) {
         my $CDS_terminal = pop @CDS;
+        my $CDS_terminal_orig = $CDS_terminal;
         my ($start, $end, $frame) = split /\t/, $CDS_terminal;
         #my $end_old = $end;
         # 根据Frame信息定位准确的CDS结束位点。
         $end = $end - (($end - ($start + $frame) + 1) % 3);
         #print "ERROR1: $mRNA_ID" if $end_old != $end;
-        # 得到最后一个CDS的结束位点，往后推导出终止密码子位置，或到序列结束。
+        # 得到最后一个CDS的结束位点，往后推导出终止密码子位置，或到序列结束；遇到含N的密码子则中止。
         if ( $genome_seq_length - $end >= 3 ) {
             my $codon = substr($genome_seq, $end, 3);
             $end += 3;
-            while ( ( ! exists $stop_codon{$codon} ) && $genome_seq_length - $end >= 3 ) {
+            while (1) {
+                last if exists $stop_codon{$codon};
+                if ( $codon =~ m/[^ATCG]/ ) { $blocked_by_N = 1; last; }
+                last unless $genome_seq_length - $end >= 3;
                 $codon = substr($genome_seq, $end, 3);
                 $end += 3;
             }
             $fill_ok = 1 if exists $stop_codon{$codon};
         }
-        push @CDS, "$start\t$end\t$frame";
+        if ( $blocked_by_N ) {
+            # 被N区域阻断，恢复原始的末端CDS。
+            push @CDS, $CDS_terminal_orig;
+        }
+        else {
+            push @CDS, "$start\t$end\t$frame";
+        }
     }
     elsif ( $strand eq "-" ) {
         my $CDS_terminal = shift @CDS;
+        my $CDS_terminal_orig = $CDS_terminal;
         my ($start, $end, $frame) = split /\t/, $CDS_terminal;
         #my $start_old = $start;
         # 根据Frame信息定位准确的CDS结束位点。
         $start = ($end - $frame - $start + 1) % 3 + $start;
         #print "ERROR2: $mRNA_ID" if $start != $start_old;
-        # 得到最后一个CDS的结束位点，往后推导出终止密码子位置，或到序列起始。
+        # 得到最后一个CDS的结束位点，往后推导出终止密码子位置，或到序列起始；遇到含N的密码子则中止。
         if ( $start >= 4 ) {
             my $codon = substr($genome_seq, $start - 4, 3);
             $codon = reverse($codon); $codon =~ tr/ATCGatcg/TAGCTAGC/;
             $start -= 3;
-            while ( ( ! exists $stop_codon{$codon} ) && $start >= 4 ) {
+            while (1) {
+                last if exists $stop_codon{$codon};
+                if ( $codon =~ m/[^ATCG]/ ) { $blocked_by_N = 1; last; }
+                last unless $start >= 4;
                 $codon = substr($genome_seq, $start - 4, 3);
                 $codon = reverse($codon); $codon =~ tr/ATCGatcg/TAGCTAGC/;
                 $start -= 3;
             }
             $fill_ok = 1 if exists $stop_codon{$codon};
         }
-        unshift @CDS, "$start\t$end\t$frame";
+        if ( $blocked_by_N ) {
+            # 被N区域阻断，恢复原始的末端CDS。
+            unshift @CDS, $CDS_terminal_orig;
+        }
+        else {
+            unshift @CDS, "$start\t$end\t$frame";
+        }
     }
-    print STDERR "Warning: 位于 $strand 链上的 $mRNA_ID 在下游未能找到终止密码子。\n" if $fill_ok == 0;
+    if ( $blocked_by_N ) {
+        print STDERR "Warning: 位于 $strand 链上的 $mRNA_ID 在下游延伸寻找终止密码子时遇到含N的区域，已停止延伸，保持原CDS末端不变。\n";
+    }
+    elsif ( $fill_ok == 0 ) {
+        print STDERR "Warning: 位于 $strand 链上的 $mRNA_ID 在下游未能找到终止密码子。\n";
+    }
 
     unshift @CDS, $fill_ok;
     return @CDS;
 }
 
 # 子程序，返回修复了起始密码子的CDS信息。
+# 修正：在向上游延伸寻找终止密码子的过程中，若遇到含N（或其它非ATCG碱基）的密码子（如基因组gap区域），
+# 则立即停止延伸，视为未能填补，并恢复为原始CDS，避免穿越N区域产生超长的exon/CDS。
 sub modify_start {
     # 获取CDS、基因组序列和strand信息（优化：同modify_stop，改为直接对参数命名）。
     my ($CDS_ref, $genome_seq, $strand, $mRNA_ID) = @_;
@@ -736,28 +814,38 @@ sub modify_start {
         my $CDS_first = shift @CDS;
         my ($start, $end, $frame) = split /\t/, $CDS_first;
         $start = $start + $frame;
-        # 得到第一个CDS起始，往前推导出终止密码子位置，或到序列起始。
+        # 得到第一个CDS起始，往前推导出终止密码子位置，或到序列起始；遇到含N的密码子则中止。
         if ( $start >= 4 ) {
             my $codon = substr($genome_seq, $start - 4, 3);
             $start -= 3;
-            while ( ( ! exists $stop_codon{$codon} ) && $start >= 4 ) {
+            my $blocked_by_N = 0;
+            while (1) {
+                last if exists $stop_codon{$codon};
+                if ( $codon =~ m/[^ATCG]/ ) { $blocked_by_N = 1; last; }
+                last unless $start >= 4;
                 $codon = substr($genome_seq, $start - 4, 3);
                 $start -= 3;
             }
-            unshift @CDS, "$start\t$end\t0";
-            # 若往前找到终止密码子，则往后找起始密码子
-            if ( exists $stop_codon{$codon} ) {
-                @CDS = &locating_start_codon(\@CDS, $genome_seq, $strand, $mRNA_ID);
-                if ( $CDS[0] == 1 ) {
-                    $fill_ok = 1;
-                    shift @CDS;
-                }
-                else {
-                    @CDS = @CDS_orig;
-                }
+            if ( $blocked_by_N ) {
+                @CDS = @CDS_orig;
+                print STDERR "Warning: 位于 $strand 链上的 $mRNA_ID 在上游延伸寻找终止密码子时遇到含N的区域，已停止延伸，保持原CDS不变。\n";
             }
             else {
-                print STDERR "Warning: 在位于 $strand 链上的 $mRNA_ID 在上游未能找到终止密码子。\n";
+                unshift @CDS, "$start\t$end\t0";
+                # 若往前找到终止密码子，则往后找起始密码子
+                if ( exists $stop_codon{$codon} ) {
+                    @CDS = &locating_start_codon(\@CDS, $genome_seq, $strand, $mRNA_ID);
+                    if ( $CDS[0] == 1 ) {
+                        $fill_ok = 1;
+                        shift @CDS;
+                    }
+                    else {
+                        @CDS = @CDS_orig;
+                    }
+                }
+                else {
+                    print STDERR "Warning: 在位于 $strand 链上的 $mRNA_ID 在上游未能找到终止密码子。\n";
+                }
             }
         }
         else {
@@ -769,30 +857,40 @@ sub modify_start {
         my $CDS_first = pop @CDS;
         my ($start, $end, $frame) = split /\t/, $CDS_first;
         $end = $end - $frame;
-        # 得到第一个CDS起始，往前推导出终止密码子位置，或到序列结束。
+        # 得到第一个CDS起始，往前推导出终止密码子位置，或到序列结束；遇到含N的密码子则中止。
         if ( $genome_seq_length - $end >= 3 ) {
             my $codon = substr($genome_seq, $end, 3);
             $codon = reverse($codon); $codon =~ tr/ATCGatcg/TAGCTAGC/;
             $end += 3;
-            while ( ( ! exists $stop_codon{$codon} ) && $genome_seq_length - $end >= 3 ) {
+            my $blocked_by_N = 0;
+            while (1) {
+                last if exists $stop_codon{$codon};
+                if ( $codon =~ m/[^ATCG]/ ) { $blocked_by_N = 1; last; }
+                last unless $genome_seq_length - $end >= 3;
                 $codon = substr($genome_seq, $end, 3);
                 $codon = reverse($codon); $codon =~ tr/ATCGatcg/TAGCTAGC/;
                 $end += 3;
             }
-            push @CDS, "$start\t$end\t0";
-            # 若往前找到终止密码子，则往后找起始密码子
-            if ( exists $stop_codon{$codon} ) {
-                @CDS = &locating_start_codon(\@CDS, $genome_seq, $strand, $mRNA_ID);
-                if ( $CDS[0] == 1 ) {
-                    $fill_ok = 1;
-                    shift @CDS;
-                }
-                else {
-                    @CDS = @CDS_orig;
-                }
+            if ( $blocked_by_N ) {
+                @CDS = @CDS_orig;
+                print STDERR "Warning: 位于 $strand 链上的 $mRNA_ID 在上游延伸寻找终止密码子时遇到含N的区域，已停止延伸，保持原CDS不变。\n";
             }
             else {
-                print STDERR "Warning: 位于 $strand 链上的 $mRNA_ID 的前端未能找到终止密码子。\n";
+                push @CDS, "$start\t$end\t0";
+                # 若往前找到终止密码子，则往后找起始密码子
+                if ( exists $stop_codon{$codon} ) {
+                    @CDS = &locating_start_codon(\@CDS, $genome_seq, $strand, $mRNA_ID);
+                    if ( $CDS[0] == 1 ) {
+                        $fill_ok = 1;
+                        shift @CDS;
+                    }
+                    else {
+                        @CDS = @CDS_orig;
+                    }
+                }
+                else {
+                    print STDERR "Warning: 位于 $strand 链上的 $mRNA_ID 的前端未能找到终止密码子。\n";
+                }
             }
         }
         else {
@@ -838,7 +936,10 @@ sub locating_start_codon {
 
     }
     else {
+        # 未能找到起始密码子：直接返回失败标志，调用方会恢复为原始CDS，无需再做后面的碱基去除操作。
         print STDERR "Warning：位于 $strand 链上的 $mRNA_ID 在上游终止密码子后未能找到起始密码子。\n";
+        unshift @CDS, $fill_ok;
+        return @CDS;
     }
 
     # 去除前 $codon_num 个密码子后，下一个密码子即是起始密码子
@@ -908,7 +1009,9 @@ sub get_start_and_stop_codon {
 
     my ($out_codon_start, $out_codon_end);
     $out_codon_start = $1 if $CDS_seq =~ m/^(\w\w\w)/;
-    $out_codon_end = $1 if $CDS_seq =~ m/(\w\w\w)$/;
+    # 修正：仅当消除读码框偏移后的CDS长度为3的整数倍时，末尾3个碱基才是一个完整的密码子；
+    # 否则末端是不完整的密码子（没有终止密码子），原代码直接取最后3个碱基，可能把错位的碱基误判为终止密码子。
+    $out_codon_end = $1 if ( length($CDS_seq) % 3 == 0 && $CDS_seq =~ m/(\w\w\w)$/ );
     return ($out_codon_start, $out_codon_end);
 }
 
@@ -917,6 +1020,8 @@ sub get_start_and_stop_codon {
 # gene_ID => "mRNA_ID" => 数组
 # gene_ID => "mRNA_header" => mRNA_ID => mRNA_header
 # gene_ID => "mRNA_info" => mRNA_ID => mRNA_Info
+# 修正：原代码用 m/ID=([^;\s]+)/ 和 m/Parent=([^;\s]+)/ 匹配，可能误匹配到 GeneID=、DBID= 等属性名中包含ID/Parent的属性；
+# 这里要求ID=和Parent=必须位于第九列开头或紧跟在分号之后。
 sub get_geneModels_from_GFF3 {
     my %gene_info;
 
@@ -926,17 +1031,17 @@ sub get_geneModels_from_GFF3 {
 
     # 第一轮，找gene信息
     foreach ( @lines ) {
-        if ( m/\tgene\t.*ID=([^;\s]+)/ ) {
+        if ( m/\tgene\t.*?(?:\t|;)ID=([^;\s]+)/ ) {
             $gene_info{$1}{"header"} = $_;
         }
     }
     # 第二轮，找Parent值是geneID的信息，包含但不限于 mRNA 信息
     my %mRNA_ID2gene_ID;
     foreach ( @lines ) {
-        if ( m/Parent=([^;\s]+)/ ) {
+        if ( m/(?:\t|;)Parent=([^;\s]+)/ ) {
             my $parent = $1;
             if ( exists $gene_info{$parent} ) {
-                if ( m/ID=([^;\s]+)/ ) {
+                if ( m/(?:\t|;)ID=([^;\s]+)/ ) {
                     push @{$gene_info{$parent}{"mRNA_ID"}}, $1;
                     $gene_info{$parent}{"mRNA_header"}{$1} = $_;
                     $mRNA_ID2gene_ID{$1} = $parent;
@@ -946,7 +1051,7 @@ sub get_geneModels_from_GFF3 {
     }
     # 第三轮，找Parent值不是geneID的信息
     foreach ( @lines ) {
-        if ( m/Parent=([^;\s]+)/ && exists $mRNA_ID2gene_ID{$1} ) {
+        if ( m/(?:\t|;)Parent=([^;\s]+)/ && exists $mRNA_ID2gene_ID{$1} ) {
             my $parent = $1;
             $gene_info{$mRNA_ID2gene_ID{$1}}{"mRNA_info"}{$parent} .= $_;
         }
@@ -966,6 +1071,8 @@ sub read_genome {
         }
         else {
             chomp;
+            # 修正：去除所有空白字符（包括Windows换行符\r），否则\r会被当作非ATCG碱基转成N，导致序列中每行末尾多出一个N。
+            s/\s+//g;
             s/[^ATCGatcg]/N/g;
             tr/atcgn/ATCGN/;
             $seq{$seq_id} .= $_;
@@ -976,6 +1083,8 @@ sub read_genome {
     return \%seq;
 }
 
+# 修正：原代码用 m/^ID/i 和 m/^Parent/i 过滤属性，会把所有以ID开头的属性（例如 Identity=0.95）一并丢掉；
+# 这里要求必须是 ID= 或 Parent= 才过滤。
 sub get_attr {
     my $attribute = $_[0];
     my @attribute = split /;/, $attribute;
@@ -984,8 +1093,8 @@ sub get_attr {
         next if m/^\s*$/;
         s/^\s*//;
         s/\s*$//;
-        next if m/^ID/i;
-        next if m/^Parent/i;
+        next if m/^ID\s*=/i;
+        next if m/^Parent\s*=/i;
         push @out, $_;
     }
     my $out = join ";", @out;
@@ -1031,8 +1140,8 @@ sub correct_ends_of_transcript_and_exon {
     my (%parent, %transcript_ID);
     foreach ( split /\n/, $transcript_info ) {
         my ($ID, $parent);
-        $ID = $1 if m/ID=([^;]+)/;
-        $parent = $1 if m/Parent=([^;]+)/;
+        $ID = $1 if m/(?:\t|;)ID=([^;]+)/;
+        $parent = $1 if m/(?:\t|;)Parent=([^;]+)/;
         $parent{$ID} = $parent if ( defined($ID) && defined($parent) );
     }
     foreach ( keys %parent ) {
@@ -1043,8 +1152,8 @@ sub correct_ends_of_transcript_and_exon {
     my (%transcript_content, %transcript_header);
     foreach ( split /\n/, $transcript_info ) {
         my ($ID, $parent);
-        $ID = $1 if m/ID=([^;]+)/;
-        $parent = $1 if m/Parent=([^;]+)/;
+        $ID = $1 if m/(?:\t|;)ID=([^;]+)/;
+        $parent = $1 if m/(?:\t|;)Parent=([^;]+)/;
         if ( defined($ID) && exists $transcript_ID{$ID} ) {
             $transcript_header{$ID} = $_;
         }
@@ -1269,16 +1378,18 @@ sub codon_table {
     return (\%code, \%start_codon, \%stop_codon);
 }
 
-# 英文用法说明
-sub get_usage_english {
-
-my $usage = <<USAGE;
+########################################################################
+# 英文用法说明（放在文件最末尾，运行时通过DATA文件句柄读取）
+########################################################################
+__DATA__
 Usage:
     $0 [options] genome.fasta GeneModelsInput.gff3 > GeneModelsOutput.gff3
 
     This program fills in the ends of gene models so that they become complete. During GETA gene prediction, some gene models cannot be predicted by Augustus; in that case the results predicted only from transcripts or homologs are often missing their starts or ends. This program is used to complete such gene models.
 
     Principle of filling the ends: (1) the 3' end of a gene model is extended directly until a stop codon is met or the end of the genome sequence is reached; (2) the 5' end of a gene model is extended directly until an in-frame upstream stop codon is met, and then the sequence is shortened codon by codon downstream until a start codon is found; (3) transcripts without CDS information, such as lnc_RNA, are not filled, and GFF3 files containing alternative splicing are supported.
+
+    While extending the 5' or 3' end of a gene model, if a codon containing N (or any other non-ATCG base, e.g. a gap region of the genome) is met, the extension is stopped immediately and the transcript is regarded as unable to be filled; in this case the CDS of the transcript is kept unchanged, so that no abnormally long exon/CDS is produced by extending through N regions.
 
     The start codons and stop codons are determined automatically from the genetic code set by --genetic_code.
 
@@ -1304,9 +1415,5 @@ Usage:
     Display this English usage and exit.
 
     --chinese_help    default: None
-    Display the Chinese usage and exit.
+    显示中文用法说明并退出。
 
-USAGE
-
-return $usage;
-}

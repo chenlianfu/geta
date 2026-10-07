@@ -247,8 +247,7 @@ else {
 # 0.5 准备直系同源基因蛋白序列：
 # 读取FASTA序列以>开始的头部时，去除第一个空及之后的字符，将所有怪异字符变为下划线字符；若遇到 > 符号不在句首，则表示fasta文件格式有误，删除该 > 及到下一个 > 之前的数据；去除序列中尾部的换行符, 将所有小写字符氨基酸变换为大写字符。程序中断后再次运行时，则重新读取新的同源蛋白序列文件，利用新的文件进行后续分析。
 $cmdString = "$bin_path/fasta_format_revising.pl --seq_type protein --line_length 80 $protein > homolog.fasta 2> homolog.fasta.fasta_format_revising.log";
-print STDERR (localtime) . ": CMD: $cmdString\n";
-system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
+&execute_cmds($cmdString, "$tmp_dir/homolog.fasta.ok");
 $protein = "$tmp_dir/homolog.fasta";
 
 
@@ -334,12 +333,7 @@ chdir $tmp_dir; print STDERR "\nPWD: $tmp_dir\n";
 mkdir "$tmp_dir/2.homolog_prediction" unless -e "$tmp_dir/2.homolog_prediction";
 
 if ( $protein ) {
-    # 当使用了两个及以上来源（mmseqs、miniprot、spaln）时，homolog_prediction才能输出各方法的两两比较结果。
-    my $method_comparison_option = "";
-    if ( &count_homolog_sources() >= 2 ) {
-        $method_comparison_option = "--method_comparison_stats $tmp_dir/2.homolog_prediction/method_comparison_stats.txt";
-    }
-    $cmdString = "$bin_path/homolog_prediction --tmp_dir $tmp_dir/2.homolog_prediction --cpu $cpu $config{'homolog_prediction'} --genetic_code $genetic_code --output_alignment_GFF3 $tmp_dir/2.homolog_prediction/homolog_alignment.gff3 --output_raw_GFF3 $tmp_dir/2.homolog_prediction/homolog_prediction.raw.gff3 $method_comparison_option $protein $genome > $tmp_dir/2.homolog_prediction/homolog_prediction.gff3 2> $tmp_dir/2.homolog_prediction/homolog_prediction.log";
+    $cmdString = "$bin_path/homolog_prediction --ignore_signature --tmp_dir $tmp_dir/2.homolog_prediction --cpu $cpu $config{'homolog_prediction'} --genetic_code $genetic_code --output_alignment_GFF3 $tmp_dir/2.homolog_prediction/homolog_alignment.gff3 --output_raw_GFF3 $tmp_dir/2.homolog_prediction/homolog_prediction.raw.gff3 $protein $genome > $tmp_dir/2.homolog_prediction/homolog_prediction.gff3 2> $tmp_dir/2.homolog_prediction/homolog_prediction.log";
 }
 else {
     $cmdString = "touch $tmp_dir/2.homolog_prediction/homolog_prediction.gff3 $tmp_dir/2.homolog_prediction/homolog_prediction.raw.gff3";
@@ -386,177 +380,15 @@ else {
 # Step 4: Augustus gene prediction
 print STDERR "\n============================================\n";
 print STDERR "Step 4: Augustus/HMM Trainning " . "(" . (localtime) . ")" . "\n";
+my @input_evidence_gff3;
+push @input_evidence_gff3, "$tmp_dir/3.NGSReads_prediction/NGSReads_prediction.raw.gff3" if -e "$tmp_dir/3.NGSReads_prediction/NGSReads_prediction.raw.gff3";
+push @input_evidence_gff3, "$tmp_dir/2.homolog_prediction/homolog_prediction.raw.gff3" if -e "$tmp_dir/2.homolog_prediction/homolog_prediction.raw.gff3";
+my $input_evidence_gff3 = join ",", @input_evidence_gff3;
+my $intron_tab;
+$intron_tab = " --intron_tab $tmp_dir/3.NGSReads_prediction/intron.txt" if -e "$tmp_dir/3.NGSReads_prediction/intron.txt";
 mkdir "$tmp_dir/4.augustus" unless -e "$tmp_dir/4.augustus";
-chdir "$tmp_dir/4.augustus";
-
-# 4.1 Augustus HMM Training
-mkdir "$tmp_dir/4.augustus/training" unless -e "$tmp_dir/4.augustus/training";
-chdir "$tmp_dir/4.augustus/training"; print STDERR "\nPWD: $tmp_dir/4.augustus/training\n";
-
-# 4.1.1 合并Transcript和Homolog预测的基因模型
-@cmdString = ();
-push @cmdString, "$bin_path/GFF3_filling_gene_models --genetic_code 1 --attribute_for_filling_complete 'Filled_by_homolog=True' --cpu $cpu --output_filling_detail_tab GFF3_filling_detail.tab $genome $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.raw.gff3 $tmp_dir/2.homolog_prediction/homolog_prediction.raw.gff3 > NGSReads_prediction.raw_filled.gff3 2> GFF3_filling_gene_models.log";
-push @cmdString, "$bin_path/GFF3_merging_and_removing_redundancy --cpu $cpu $config{'GFF3_merging_and_removing_redundancy'} --compare_2gff3_stats compare_2gff3_stats.txt $genome NGSReads_prediction.raw_filled.gff3 $tmp_dir/2.homolog_prediction/homolog_prediction.raw.gff3 > evidence_prediction.raw.gff3 2> GFF3_merging_and_removing_redundancy.log";
-
-&execute_cmds(@cmdString, "01.evidence_gene_models.ok");
-
-# 4.1.2 选择完整且准确的基因模型
-unless ( -s "02.evidence_gene_models.AB.ok" ) {
-    my $input = "$tmp_dir/4.augustus/training/evidence_prediction.raw.gff3";
-    open IN, $input or die "Error: Can not open file $input, $!";
-    my $output = "$tmp_dir/4.augustus/training/evidence_prediction.AB.gff3";
-    open OUT, ">", $output or die "Error: Can not create file $output, $!";
-    $/ = "\n\n";
-    while (<IN>) {
-        print OUT if (m/Type=excellent/ or m/Type=good/);
-    }
-    $/ = "\n";
-    close IN; close OUT;
-    open OUT, ">", "02.evidence_gene_models.AB.ok" or die $!; close OUT;
-}
-
-# 4.1.3 选择CDS数量较多、CDS长度较长、CDS/exon比例较大且去冗余的基因模型。
-#$cmdString = "$bin_path/geneModels2AugusutsTrainingInput $config{'geneModels2AugusutsTrainingInput'} --out_prefix ati --cpu $cpu evidence_prediction.AB.gff3 $genome &> geneModels2AugusutsTrainingInput.log";
-$cmdString = "$bin_path/geneModels2AugusutsTrainingInput --out_prefix ati --cpu $cpu evidence_prediction.AB.gff3 $genome &> geneModels2AugusutsTrainingInput.log";
-unless ( -e "03.geneModels2AugusutsTrainingInput.ok" ) {
-    print STDERR (localtime) . ": CMD: $cmdString\n";
-    system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-
-    # 若用于Augustus training的基因数量少于1000个，则重新运行geneModels2AugusutsTrainingInput，降低阈值来增加基因数量。
-    my $input_file = "$tmp_dir/4.augustus/training/geneModels2AugusutsTrainingInput.log";
-    open IN, $input_file or die "Error: Can not open file $input_file, $!";
-    my $training_genes_number = 0;
-    while (<IN>) {
-        $training_genes_number = $1 if m/Best gene Models number:\s+(\d+)/;
-    }
-    close IN;
-    if ( $training_genes_number < 1000 ) {
-        $cmdString = "$bin_path/geneModels2AugusutsTrainingInput --min_evalue 1e-9 --min_identity 0.9 --min_coverage_ratio 0.9 --min_cds_num 1 --min_cds_length 450 --min_cds_exon_ratio 0.40 --keep_ratio_for_excluding_too_long_gene 0.99 --out_prefix ati --cpu $cpu evidence_prediction.AB.gff3 $genome &> geneModels2AugusutsTrainingInput.log.Loose_thresholds";
-        print STDERR (localtime) . ": CMD: $cmdString\n";
-        system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
-    }
-
-    open OUT, ">", "03.geneModels2AugusutsTrainingInput.ok" or die $!; close OUT;
-}
-else {
-    print STDERR "CMD(Skipped): $cmdString\n";
-}
-
-# 4.1.4 分析基因长度和基因间区长度信息，从而确定Trainig时选择基因模型两侧翼序列长度。
-my $flanking_length;
-unless ( -e "04.get_flanking_length.ok" && -s "$tmp_dir/4.augustus/training/flanking_length.txt" ) {
-    my (%gene_info, @intergenic_length, @gene_length);
-    # 读取基因模型信息
-    my $input_file = "$tmp_dir/4.augustus/training/evidence_prediction.AB.gff3";
-    open IN, $input_file or die "Error: Can not open file $input_file, $!";
-    while (<IN>) {
-        if (m/\tgene\t/) {
-            @_ = split /\t/;
-            $gene_info{$_[0]}{$_[6]}{"$_[3]\t$_[4]"} = 1;
-        }
-    }
-    close IN;
-    # 分析基因长度和基因间区长度
-    foreach my $chr (keys %gene_info) {
-        foreach my $strand (keys %{$gene_info{$chr}}) {
-            my @region = sort {$a <=> $b} keys %{$gene_info{$chr}{$strand}};
-            my $first_region = shift @region;
-            my ($start, $end) = split /\t/, $first_region;
-            push @gene_length, $end - $start + 1;
-            foreach (@region) {
-                my ($aa, $bb) = split /\t/;
-                push @gene_length, $bb - $aa + 1;
-                my $distance = $aa - $end - 1;
-                push @intergenic_length, $distance if $distance >= 50;
-                $end = $bb if $end < $bb;
-            }
-        }
-    }
-    # 设置flanking_length长度为(基因间区长度中位数的八分之一，基因长度中位数)的较小值。
-    @gene_length = sort {$a <=> $b} @gene_length;
-    @intergenic_length = sort {$a <=> $b} @intergenic_length;
-    $flanking_length = int($intergenic_length[@intergenic_length/2] / 8);
-    $flanking_length = $gene_length[@gene_length/2] if $flanking_length >= $gene_length[@gene_length/2];
-    # 输出flanking_length到指定文件中。
-    my $outpu_file = "$tmp_dir/4.augustus/training/flanking_length.txt";
-    open OUT, ">", $outpu_file or die "Can not create file $outpu_file, $!";
-    print OUT $flanking_length;
-    close OUT;
-
-    open OUT, ">", "04.get_flanking_length.ok" or die $!; close OUT;
-    print STDERR (localtime) . ": The flanking length was set to $flanking_length for AUGUSTUS Training.\n";
-}
-else {
-    my $input_file = "$tmp_dir/4.augustus/training/flanking_length.txt";
-    open IN, $input_file or die "Error: Can not open file $input_file, $!";
-    $flanking_length = <IN>;
-    close IN;
-    print STDERR (localtime) . ": The flanking length was set to $flanking_length for AUGUSTUS Training.\n";
-}
-
-# 4.1.5 进行Augustus training
-# 若--augustus_species参数设置的文件夹已经存在，则对其进行参数优化；不存在，则完全重新进行Training和优化。
-my $augustus_species_start_from = "";
-if ( -e "$ENV{'AUGUSTUS_CONFIG_PATH'}/species/$augustus_species/${augustus_species}_parameters.cfg" ) {
-    $augustus_species_start_from = "--augustus_species_start_from $augustus_species";
-}
-$cmdString1 = "$bin_path/BGM2AT $config{'BGM2AT'} --AUGUSTUS_CONFIG_PATH $tmp_dir/4.augustus/config $augustus_species_start_from --flanking_length $flanking_length --CPU $cpu --onlytrain_GFF3 ati.filter1.gff3 ati.filter2.gff3 $genome $augustus_species &> BGM2AT.log";
-$cmdString2 = "cp accuary_of_AUGUSTUS_HMM_Training.txt ../";
-$cmdString3 = "cp -a $tmp_dir/4.augustus/config/species/$augustus_species $ENV{'AUGUSTUS_CONFIG_PATH'}/species/ || echo Can not create file in directory $ENV{'AUGUSTUS_CONFIG_PATH'}/species/";
-
-&execute_cmds($cmdString1, $cmdString2, $cmdString3, "$tmp_dir/4.augustus/training.ok");
-
-# 4.2 准备Hints信息
-chdir "$tmp_dir/4.augustus"; print STDERR "\nPWD: $tmp_dir/4.augustus\n";
-$cmdString = "$bin_path/prepareAugusutusHints $config{'prepareAugusutusHints'} --intron_tab $tmp_dir/3.NGSReads_prediction/intron.txt $tmp_dir/4.augustus/training/evidence_prediction.AB.gff3 > hints.gff 2> prepareAugusutusHints.log";
-
-&execute_cmds($cmdString, "prepareAugusutusHints.ok");
-
-# 4.3 进行Augustus基因预测
-# 4.3.1 先分析基因长度信息，从而计算基因组序列打断的长度，以利于并行化运行augustus命令。
-my ($segmentSize, $overlapSize) = (1000000, 100000);
-unless ( -e "get_segmentSize.ok" ) {
-    # 获取最长的基因长度
-    my $input_file = "$tmp_dir/4.augustus/training/evidence_prediction.AB.gff3";
-    open IN, $input_file or die "Error: Can not open file $input_file, $!";
-    my @gene_length;
-    while (<IN>) {
-        if (m/\tgene\t(\d+)\t(\d+)\t/) {
-            push @gene_length, $2 - $1 + 1;
-        }
-    }
-    @gene_length = sort {$a <=> $b} @gene_length;
-    # 打断序列时，要求相邻序列重叠区域至少为最长基因长度的2倍，并取整（保留前两个数字四舍五入，后面的全为0）；片段长度为重叠序列长度10倍。
-    if ($gene_length[-1] * 4 > $overlapSize) {
-        $overlapSize = $gene_length[-1] * 2;
-        my $overlapSize_length = length($overlapSize);
-        $overlapSize_length --;
-        $overlapSize_length --;
-        $overlapSize = int(($overlapSize / (10 ** $overlapSize_length)) + 1) * (10 ** $overlapSize_length);
-        $segmentSize = $overlapSize * 10;
-    }
-    # 将overlapSize和segmentSize输出到文件segmentSize.txt文件中
-    my $outpu_file = "$tmp_dir/4.augustus/segmentSize.txt";
-    open OUT, ">", $outpu_file or die "Can not create file $outpu_file, $!";
-    print OUT "$segmentSize\t$overlapSize";
-    close OUT;
-
-    open OUT, ">", "get_segmentSize.ok" or die $!; close OUT;
-    print STDERR (localtime) . ": When executing augustus command lines using ParaFly, the genome sequences were split into segments. The longest segment spanned $segmentSize bp, and two adjacent segments overlapped by $overlapSize bp.\n";
-}
-else {
-    my $input_file = "$tmp_dir/4.augustus/segmentSize.txt";
-    open IN, $input_file or die "Error: Can not open file $input_file, $!";
-    ($segmentSize, $overlapSize) = split /\t/, <IN>;
-    close IN;
-    print STDERR (localtime) . ": When executing augustus command lines using ParaFly, the genome sequences were split into segments. The longest segment spanned $segmentSize bp, and two adjacent segments overlapped by $overlapSize bp.\n";
-}
-
-# 4.3.2 Augustus gene prediction
-$cmdString1 = "$bin_path/paraAugusutusWithHints $config{'paraAugusutusWithHints'} --species $augustus_species --AUGUSTUS_CONFIG_PATH $tmp_dir/4.augustus/config --cpu $cpu --segmentSize $segmentSize --overlapSize $overlapSize --tmp_dir aug_para_with_hints $genome hints.gff > augustus.raw.gff3";
-$cmdString2 = "$bin_path/addHintRatioToAugustusResult $tmp_dir/4.augustus/training/evidence_prediction.AB.gff3 hints.gff augustus.raw.gff3 > augustus.gff3";
-
-&execute_cmds($cmdString1, $cmdString2, "$tmp_dir/4.augustus.ok");
+$cmdString = "$bin_path/runAugustus --cpu $cpu --input_evidence_gff3 $input_evidence_gff3 --augustus_species $augustus_species --tmp_dir $tmp_dir/4.augustus $intron_tab $genome > $tmp_dir/4.augustus/augustus_prediction.gff3 2> $tmp_dir/4.augustus/augustus_prediction.log";
+&execute_cmds($cmdString, "$tmp_dir/4.augustus.ok");
 
 
 # Step 5: CombineGeneModels
