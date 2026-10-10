@@ -1,0 +1,385 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use Getopt::Long;
+
+########################################################################
+# 中文用法说明（放在代码最前面；英文用法说明放在文件最末尾的__DATA__部分）
+########################################################################
+my $usage_cn = <<'USAGE';
+用法:
+    {PROG} [参数] repeat.gff3 genome.gff3 > genome.filter.gff3 2> genes_in_repeat.txt
+
+功能:
+    移除CDS区域与重复序列重叠比例达到阈值的基因模型。
+
+输入输出:
+    repeat.gff3 为重复序列注释文件；genome.gff3 为基因模型注释文件（两者均支持.gz压缩文件）。标准输出为过滤后保留的基因模型(GFF3格式)。被移除的基因列表默认输出到标准错误输出（设置--out_removed_list后输出到该文件），共三列：基因ID、CDS与重复序列重叠碱基数、CDS总碱基数。
+
+说明:
+    (1) 基因模型按ID/Parent关系归组：每一行沿Parent向上追溯到最顶层的特征（通常为gene），同一顶层特征下的所有行属于同一个基因。因此不要求GFF3文件中子特征紧跟在其gene行之后，也兼容Parent写在ID之前的行。
+    (2) 计算时，同一基因内多个转录本重叠的CDS区域只统计一次；若基因没有CDS则使用exon计算；若两者都没有则保留该基因模型。
+    (3) 重复序列类型的识别：程序在重复序列GFF3文件的第3列，以及第9列Name、Class、class、Type、type、Family、family、repeat_class、Repeat_class标签的值中查找重复序列类型，兼容"Class=Simple_repeat"、"Satellite/centr"、"rnd-1_family-5#Unknown"、"Name=Simple_repeat|(CT)n"等多种写法。"LTR/Unknown"这类已归入某一大类、只是超家族未知的重复序列不会被当作Unknown类型。
+    (4) 重复序列GFF3第9列的Ratio标签可以是小数(如0.85)或百分数(如85%)。没有Ratio标签的重复序列不做覆盖度过滤。
+
+参数:
+    --ratio <float>
+    默认值: 0.2。根据基因模型CDS区域与重复序列的重叠区域计算碱基数，若 重叠碱基数/CDS总碱基数 >= 该值，则该基因模型被移除。若该值设置为大于1.0，则不会移除任何基因模型。
+
+    --min_coverage_ratio <float>
+    默认值: 0.6。设置有效重复序列的最小覆盖度阈值。根据重复序列GFF3文件第九列中的Ratio信息，若其值小于该参数设定的值，则忽略该行重复序列。为兼容旧版本，旧参数名 --min_coverge_ratio 仍然可用。
+
+    --filtered_gene_models <string>
+    默认值: 无。将被过滤掉的基因模型以GFF3格式输出到指定文件。
+
+    --out_removed_list <string>
+    默认值: 无。将被移除基因的列表（三列）输出到指定文件，而不是标准错误输出；设置后，程序的统计信息会输出到标准错误输出。
+
+    --ignore_Simple_repeat
+    默认值: 无。添加该参数后，程序将忽略Simple_repeat、Low_complexity、Satellite和Tandem_repeat类型的重复序列。
+
+    --ignore_Unknown
+    默认值: 无。添加该参数后，程序将忽略Unknown、Unspecified和Other类型的重复序列。
+
+    --help
+    Show the English usage and exit.
+
+    --chinese_help
+    显示中文用法说明并退出。
+USAGE
+
+# 英文用法说明在文件末尾的__DATA__部分，运行时通过DATA文件句柄读取
+my $usage_en = do { local $/; <DATA> };
+$usage_en = '' unless defined $usage_en;
+
+sub get_usage {
+    my ($lang) = @_;
+    my $u = ($lang eq 'cn') ? $usage_cn : $usage_en;
+    $u =~ s/\{PROG\}/$0/g;
+    return $u;
+}
+
+# 程序直接运行(无任何参数)时，给出英文用法说明
+if (@ARGV == 0) {
+    print STDERR get_usage('en');
+    exit 1;
+}
+
+my ($ratio, $min_coverage_ratio, $filtered_gene_models, $out_removed_list, $ignore_Simple_repeat, $ignore_Unknown, $help, $chinese_help);
+GetOptions(
+    "ratio=f"                                => \$ratio,
+    "min_coverge_ratio|min_coverage_ratio=f" => \$min_coverage_ratio,
+    "filtered_gene_models=s"                 => \$filtered_gene_models,
+    "out_removed_list=s"                     => \$out_removed_list,
+    "ignore_Simple_repeat"                   => \$ignore_Simple_repeat,
+    "ignore_Unknown"                         => \$ignore_Unknown,
+    "help|h"                                 => \$help,
+    "chinese_help"                           => \$chinese_help,
+) or do { print STDERR "\n", get_usage('en'); exit 1; };
+
+if ($help)         { print get_usage('en'); exit 0; }
+if ($chinese_help) { print get_usage('cn'); exit 0; }
+
+if (@ARGV != 2) {
+    print STDERR "Error: exactly two input files are required (repeat.gff3 genome.gff3).\n\n", get_usage('en');
+    exit 1;
+}
+
+# 使用defined判断默认值，避免用户显式设置0时被覆盖
+$ratio = 0.2 unless defined $ratio;
+$min_coverage_ratio = 0.6 unless defined $min_coverage_ratio;
+die "Error: --ratio must be >= 0\n" if $ratio < 0;
+die "Error: --min_coverage_ratio must be >= 0\n" if $min_coverage_ratio < 0;
+
+my ($repeat_file, $gff_file) = @ARGV;
+die "Error: can not find file $repeat_file\n" unless -e $repeat_file;
+die "Error: can not find file $gff_file\n" unless -e $gff_file;
+
+# 重复序列类型匹配：类型名需位于某个取值的开头，或紧跟在 # | / , = 之后
+my $SIMPLE_RE  = qr/(?:^|[\t=#|\/,])(?:Simple_repeat|Low_complexity|Satellite|Tandem_repeat)/i;
+my $UNKNOWN_RE = qr/(?:^|[\t=#|,])(?:Unknown|Unspecified|Other)(?=$|[\t\/;|?,\s])/i;
+
+########################################################################
+# 读取重复序列，按染色体合并为不重叠的有序区间
+########################################################################
+my %repeat;
+my %rep_stat = (total => 0, simple => 0, unknown => 0, low_ratio => 0, used => 0);
+my $rep_fh = open_in($repeat_file);
+while (my $line = <$rep_fh>) {
+    $line =~ s/[\r\n]+$//;
+    last if $line =~ /^##FASTA/;
+    next if $line =~ /^#/;
+    next if $line =~ /^\s*$/;
+
+    my @f = split /\t/, $line, 9;
+    if (@f < 5 || $f[3] !~ /^\d+$/ || $f[4] !~ /^\d+$/) {
+        warn "Warning: skip malformed line $. in $repeat_file\n";
+        next;
+    }
+    $rep_stat{total}++;
+    my $attr = defined $f[8] ? $f[8] : '';
+    my $class_text = repeat_class_text($f[2], $attr);
+
+    # 忽略简单重复序列或Unknown类型重复序列
+    if ($ignore_Simple_repeat && $class_text =~ $SIMPLE_RE) { $rep_stat{simple}++;  next; }
+    if ($ignore_Unknown       && $class_text =~ $UNKNOWN_RE) { $rep_stat{unknown}++; next; }
+
+    # 忽略覆盖度不足的重复序列
+    if ($attr =~ /(?:^|;)\s*Ratio=([0-9.eE+\-]+)(%?)/) {
+        my $r = $1;
+        $r /= 100 if $2;
+        if ($r < $min_coverage_ratio) { $rep_stat{low_ratio}++; next; }
+    }
+
+    my ($s, $e) = ($f[3], $f[4]);
+    ($s, $e) = ($e, $s) if $s > $e;
+    push @{$repeat{$f[0]}}, [$s, $e];
+    $rep_stat{used}++;
+}
+close $rep_fh;
+
+foreach my $chr (keys %repeat) {
+    $repeat{$chr} = merge_intervals($repeat{$chr});
+}
+
+########################################################################
+# 读取基因模型：按ID/Parent关系归组，保持原有顺序
+########################################################################
+my (@recs, %first_idx, %parent_of);
+my $gff_fh = open_in($gff_file);
+while (my $raw = <$gff_fh>) {
+    $raw =~ s/[\r\n]+$//;
+    if ($raw =~ /^##FASTA/) {
+        warn "Warning: the sequences after ##FASTA in $gff_file are not output.\n";
+        last;
+    }
+    my $rec = { raw => $raw };
+    push @recs, $rec;
+    next if $raw =~ /^#/ || $raw =~ /^\s*$/;
+    my @f = split /\t/, $raw, 9;
+    next if @f < 9;
+    $rec->{f} = \@f;
+    my ($id)  = $f[8] =~ /(?:^|;)\s*ID=([^;]+)/;
+    my ($par) = $f[8] =~ /(?:^|;)\s*Parent=([^;]+)/;
+    if (defined $id) { $id =~ s/^\s+|\s+$//g; $rec->{id} = $id; }
+    if (defined $par) {
+        my @p = grep { $_ ne '' } map { s/^\s+|\s+$//gr } split /,/, $par;
+        $rec->{parents} = \@p if @p;
+    }
+    if (defined $rec->{id}) {
+        $first_idx{ $rec->{id} } = $#recs unless exists $first_idx{ $rec->{id} };
+        $parent_of{ $rec->{id} } = $rec->{parents}[0] if $rec->{parents} && !exists $parent_of{ $rec->{id} };
+    }
+}
+close $gff_fh;
+
+my (@header, @order, %group);
+my ($cur_key, $seen_feature, $anon) = (undef, 0, 0);
+foreach my $rec (@recs) {
+    unless ($rec->{f}) {
+        # 注释行、空行或格式不正确的行
+        if (!$seen_feature) { push @header, $rec->{raw}; }
+        elsif (defined $cur_key && $rec->{raw} !~ /^###\s*$/ && $rec->{raw} !~ /^\s*$/) {
+            push @{ $group{$cur_key}{lines} }, $rec->{raw};
+        }
+        next;
+    }
+    $seen_feature = 1;
+    my $key;
+    if    ($rec->{parents})    { $key = top_of($rec->{parents}[0]); }
+    elsif (defined $rec->{id}) { $key = $rec->{id}; }
+    else                       { $key = "__anonymous_feature_" . (++$anon); }
+    unless ($group{$key}) {
+        $group{$key} = { id => $key, lines => [], cds => [], exon => [] };
+        push @order, $key;
+    }
+    $cur_key = $key;
+    my $g = $group{$key};
+    push @{ $g->{lines} }, $rec->{raw};
+
+    my @f = @{ $rec->{f} };
+    if (($f[2] eq 'CDS' || $f[2] eq 'exon') && $f[3] =~ /^\d+$/ && $f[4] =~ /^\d+$/) {
+        my ($s, $e) = ($f[3], $f[4]);
+        ($s, $e) = ($e, $s) if $s > $e;
+        push @{ $g->{ $f[2] eq 'CDS' ? 'cds' : 'exon' } }, [$f[0], $s, $e];
+    }
+}
+@recs = ();
+
+my $filter_fh;
+if (defined $filtered_gene_models) {
+    open $filter_fh, '>', $filtered_gene_models or die "Can not create file $filtered_gene_models, $!\n";
+    print $filter_fh "$_\n" foreach @header;
+}
+my $removed_fh = \*STDERR;
+if (defined $out_removed_list) {
+    open $removed_fh, '>', $out_removed_list or die "Can not create file $out_removed_list, $!\n";
+}
+print STDOUT "$_\n" foreach @header;
+
+########################################################################
+# 逐个基因计算CDS与重复序列的重叠比例
+########################################################################
+my ($n_gene, $n_removed, $n_no_feature) = (0, 0, 0);
+foreach my $key (@order) {
+    my $blk  = $group{$key};
+    my $text = join("\n", @{ $blk->{lines} }) . "\n";
+    $n_gene++;
+
+    my @feat = @{ $blk->{cds} };
+    @feat = @{ $blk->{exon} } unless @feat;    # 无CDS时退回使用exon(如非编码基因)
+
+    if (!@feat) {    # 既无CDS也无exon，无法计算，保留
+        $n_no_feature++;
+        print STDOUT $text;
+        next;
+    }
+
+    # 按染色体分组并合并重叠区域(多个转录本共享的CDS只统计一次)
+    my %by_chr;
+    push @{ $by_chr{ $_->[0] } }, [ $_->[1], $_->[2] ] foreach @feat;
+
+    my ($total_length, $overlap_length) = (0, 0);
+    foreach my $chr (keys %by_chr) {
+        my $merged = merge_intervals($by_chr{$chr});
+        foreach my $iv (@$merged) {
+            $total_length   += $iv->[1] - $iv->[0] + 1;
+            $overlap_length += cal_overlap_length($chr, $iv->[0], $iv->[1]);
+        }
+    }
+
+    my $coverage = $total_length ? $overlap_length / $total_length : 0;
+    if ($coverage + 1e-9 >= $ratio) {
+        $n_removed++;
+        print $removed_fh "$blk->{id}\t$overlap_length\t$total_length\n";
+        print $filter_fh $text if $filter_fh;
+    }
+    else {
+        print STDOUT $text;
+    }
+}
+close $filter_fh if $filter_fh;
+
+if (defined $out_removed_list) {
+    close $removed_fh;
+    print STDERR "Repeats: total $rep_stat{total}; ignored as simple repeats $rep_stat{simple}; ignored as unknown repeats $rep_stat{unknown}; ignored for Ratio < $min_coverage_ratio $rep_stat{low_ratio}; used $rep_stat{used}.\n";
+    print STDERR "Gene models: total $n_gene; removed (overlap ratio >= $ratio) $n_removed; kept " . ($n_gene - $n_removed) . " (including $n_no_feature without CDS/exon).\n";
+}
+
+########################################################################
+# 子程序
+########################################################################
+sub open_in {
+    my ($file) = @_;
+    my $fh;
+    if ($file =~ /\.gz$/i) { open($fh, '-|', 'gzip', '-dc', $file) or die "Can not open file $file, $!\n"; }
+    else                   { open($fh, '<', $file) or die "Can not open file $file, $!\n"; }
+    return $fh;
+}
+
+# 沿Parent关系追溯到最顶层特征的ID（带环路保护）
+sub top_of {
+    my ($id) = @_;
+    my %seen;
+    while (defined $parent_of{$id} && !$seen{$id}++) {
+        my $p = $parent_of{$id};
+        last unless exists $first_idx{$p};
+        $id = $p;
+    }
+    return $id;
+}
+
+# 汇总可用于判断重复序列类型的文本：第3列 + 若干标签的值，以制表符连接
+sub repeat_class_text {
+    my ($type, $attr) = @_;
+    my @v = (defined $type ? $type : '');
+    foreach my $tag (qw/Name Class class Type type Family family repeat_class Repeat_class/) {
+        while ($attr =~ /(?:^|;)\s*\Q$tag\E=([^;]*)/g) { push @v, $1; }
+    }
+    return join "\t", @v;
+}
+
+# 合并区间：输入[[s,e],...]，输出按起点排序且互不重叠的区间引用
+sub merge_intervals {
+    my ($list) = @_;
+    my @sorted = sort { $a->[0] <=> $b->[0] || $a->[1] <=> $b->[1] } @$list;
+    my @merged;
+    foreach my $r (@sorted) {
+        if (@merged && $r->[0] <= $merged[-1][1] + 1) {
+            $merged[-1][1] = $r->[1] if $r->[1] > $merged[-1][1];
+        }
+        else {
+            push @merged, [$r->[0], $r->[1]];
+        }
+    }
+    return \@merged;
+}
+
+# 计算 chr:start-end 区间与重复序列的重叠碱基数(二分查找)
+sub cal_overlap_length {
+    my ($chr, $start, $end) = @_;
+    my $iv = $repeat{$chr};
+    return 0 unless $iv && @$iv;
+
+    # 找到第一个终点 >= start 的重复区间
+    my ($lo, $hi) = (0, scalar @$iv);
+    while ($lo < $hi) {
+        my $mid = int(($lo + $hi) / 2);
+        if ($iv->[$mid][1] < $start) { $lo = $mid + 1 }
+        else                         { $hi = $mid }
+    }
+
+    my $length = 0;
+    for (my $i = $lo; $i < @$iv; $i++) {
+        last if $iv->[$i][0] > $end;
+        my $os = $iv->[$i][0] > $start ? $iv->[$i][0] : $start;
+        my $oe = $iv->[$i][1] < $end   ? $iv->[$i][1] : $end;
+        $length += $oe - $os + 1 if $oe >= $os;
+    }
+    return $length;
+}
+
+########################################################################
+# 英文用法说明（放在文件最末尾，运行时通过DATA文件句柄读取）
+########################################################################
+__DATA__
+Usage:
+    {PROG} [options] repeat.gff3 genome.gff3 > genome.filter.gff3 2> genes_in_repeat.txt
+
+Function:
+    Remove gene models whose CDS regions overlap with repeats at or above a given ratio.
+
+Input and output:
+    repeat.gff3 is the repeat annotation file; genome.gff3 is the gene model annotation file (both may be .gz compressed). STDOUT is the retained gene models in GFF3 format. The list of removed genes is written to STDERR by default (or to the file given by --out_removed_list), in three columns: gene ID, number of CDS bases overlapping repeats, total number of CDS bases.
+
+Notes:
+    (1) Gene models are grouped by their ID/Parent relationships: every line is traced up along Parent to its top-level feature (usually the gene), and all lines under the same top-level feature belong to one gene. Child features therefore need not follow their gene line directly, and lines with Parent written before ID are supported.
+    (2) The CDS regions shared by multiple transcripts of one gene are counted only once; if a gene has no CDS, its exons are used instead; if it has neither, the gene model is retained.
+    (3) Repeat type recognition: the program looks for the repeat type in column 3 and in the values of the Name, Class, class, Type, type, Family, family, repeat_class and Repeat_class tags of column 9, supporting forms such as "Class=Simple_repeat", "Satellite/centr", "rnd-1_family-5#Unknown" and "Name=Simple_repeat|(CT)n". Repeats such as "LTR/Unknown", which belong to a known order with an unknown superfamily, are not treated as the Unknown type.
+    (4) The Ratio tag in column 9 of the repeat GFF3 may be a fraction (0.85) or a percentage (85%). Repeats without a Ratio tag are not filtered by coverage.
+
+Options:
+    --ratio <float>
+    Default: 0.2. The number of bases is calculated from the overlap region between the CDS of gene models and repeats. If CDS_overlap_base_number / CDS_total_base_number >= this value, the gene model is removed. If this value is set > 1.0, no gene models will be removed.
+
+    --min_coverage_ratio <float>
+    Default: 0.6. Minimum coverage threshold for effective repeat sequences. According to the Ratio label in the ninth column of the repeat GFF3 file, if its value is less than this value, the line is ignored. The old option name --min_coverge_ratio is still accepted for backward compatibility.
+
+    --filtered_gene_models <string>
+    Default: None. Output the filtered (removed) gene models in GFF3 format to the given file.
+
+    --out_removed_list <string>
+    Default: None. Write the three-column list of removed genes to this file instead of STDERR; summary statistics are then written to STDERR.
+
+    --ignore_Simple_repeat
+    Default: None. If set, repeats of Simple_repeat, Low_complexity, Satellite and Tandem_repeat types are ignored.
+
+    --ignore_Unknown
+    Default: None. If set, repeats of Unknown, Unspecified and Other types are ignored.
+
+    --help
+    Show the English usage and exit.
+
+    --chinese_help
+    显示中文用法说明并退出。
+

@@ -1,0 +1,939 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use Getopt::Long;
+use Cwd qw/abs_path getcwd/;
+use File::Basename;
+use POSIX qw/strftime/;
+
+my $prog_name    = basename($0);
+my $command_line = join(" ", $0, @ARGV);
+
+########################################################################
+# 中文用法说明（放在代码最前面；英文用法说明放在文件最末尾的__DATA__部分）
+########################################################################
+my $usage_cn = <<'USAGE';
+用法:
+    __PROG__ [options] genome.fasta in.gff3 > out.gff3 2> validate.log
+
+    本程序利用HMM数据库（如Pfam）和/或diamond蛋白数据库（推荐使用eggNOG的diamond数据库）对基因模型进行验证，将通过验证的基因模型输出到标准输出中；未通过验证的基因模型可通过--filtered_gene_models输出到文件。
+
+【运行流程】
+    (1) 读取GFF3文件，按ID/Parent关系将各行归入基因（沿Parent追溯到最顶层特征），得到 转录本 -> 基因 的对应关系；不要求子特征紧跟在gene行之后，也兼容Parent写在ID之前的行。
+    (2) 根据基因组序列和CDS信息（含phase，按--genetic_code翻译）提取每个转录本的蛋白序列，去除末尾的终止密码子，内部终止密码子以X代替。没有CDS的转录本不参与验证。
+    (3) HMM验证（设置--HMM_db时）：将蛋白序列按每份--chunk_num个蛋白分成若干份，使用--cpu个hmmscan进程并行比对到每个HMM数据库（不使用GA阈值），并在标准错误输出中用\r刷新显示并行分析的进度。对每个 蛋白-HMM模型 组合，计算全序列E值，以及E值合格的结构域对HMM模型的覆盖度（多个结构域在HMM模型上的匹配区域去冗余合并后，计算整体覆盖度）。E值阈值由HMM模型长度决定：模型长度 < --hmm_length 时使用 --hmm_evalue2，否则使用 --hmm_evalue1。全序列E值 <= 阈值且整体覆盖度 >= --hmm_coverage 时，该蛋白通过HMM验证。
+    (4) BLASTP验证（设置--diamond_db时），分两步进行：第一步调用diamond blastp将蛋白序列依次比对到每个diamond数据库（输出表格包含query和subject长度）；若输入的是蛋白FASTA文件，程序会先调用diamond makedb自动构建数据库。第二步参考parsing_blast_result.pl的算法对比对结果进行过滤：只保留E值 <= --blast_evalue的HSP；对每个 蛋白-数据库蛋白 组合合并所有保留的HSP，计算CIP（累计一致性 = 一致位点数之和 / 比对长度之和）、query覆盖度和subject覆盖度（多个HSP的匹配区域去冗余合并后，计算整体覆盖度）。E值 <= --blast_evalue、CIP >= --blast_CIP、两个整体覆盖度均 >= --blast_coverage 的hit为合格hit；蛋白只要在任意一个diamond数据库中存在合格hit，即通过BLASTP验证。
+    (5) 综合判定：
+        a. 同时提供了HMM和diamond两类数据库时：两类数据库都通过验证的转录本是有效的；只通过其中一类数据库的转录本，需满足更严格的 *_onlyOne 阈值才有效；设置--both_required时，必须两类数据库都通过验证才有效。
+        b. 只提供了一类数据库时：通过该类数据库验证（使用常规阈值）的转录本即为有效。此时不能使用--both_required。
+        c. 一个基因只要有一个转录本有效，则整个基因（含其全部转录本）通过验证。
+    (6) 输出通过验证的基因模型到标准输出，未通过的输出到--filtered_gene_models指定的文件，统计信息输出到标准错误输出（以及--out_stats指定的文件）。每个蛋白的验证明细保存在临时文件夹的validation_detail.tab中。
+
+【输入参数】
+    --diamond_db <string>    default: None
+    输入一个或多个diamond蛋白数据库，多个数据库用逗号分隔（空项和两侧空白会被忽略）。推荐使用eggNOG的diamond数据库（如eggnog_proteins.dmnd）。每个输入可以是：(a) diamond数据库文件（可省略.dmnd后缀）；(b) 蛋白序列FASTA文件（可以是.gz压缩文件），此时程序会自动调用diamond makedb在临时文件夹中构建数据库。蛋白序列只要通过任意一个diamond数据库的验证，即视为通过BLASTP验证。--HMM_db和--diamond_db两个参数至少要输入一个。为兼容旧版本，--eggNOG_db可作为--diamond_db的别名使用。
+
+    --HMM_db <string>    default: None
+    输入一个或多个HMM数据库的前缀，多个数据库用逗号分隔（空项和两侧空白会被忽略）。每个前缀对应4个文件，即前缀后加 .h3f .h3i .h3m .h3p，这4个文件由hmmpress生成（例如对Pfam-A.hmm运行hmmpress后，前缀为Pfam-A.hmm）。蛋白序列只要通过任意一个HMM数据库的验证，即视为通过HMM验证。--HMM_db和--diamond_db两个参数至少要输入一个。
+
+    --genetic_code <int>    default: 1
+    遗传密码编号，用于将CDS翻译为蛋白序列。编号请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi 。
+
+【输出参数】
+    --tmp_dir <string>    default: tmp_$date$pid
+    设置临时文件夹路径。临时文件夹中各步骤完成后会生成.ok文件，重新运行时会跳过已完成的步骤（hmmscan、diamond makedb和diamond比对）。
+
+    --filtered_gene_models <string>    default: None
+    添加该参数，用于输出未通过验证的低质量基因模型。
+
+    --out_stats <string>    default: None
+    将统计信息输出到该文件。
+
+【阈值参数】
+    --hmm_evalue1 <float>    default: 1e-5
+    HMM模型长度不低于--hmm_length时，全序列E值的阈值。
+
+    --hmm_evalue2 <float>    default: 1e-3
+    HMM模型长度低于--hmm_length时，全序列E值的阈值。
+
+    --hmm_length <int>    default: 80
+    区分长、短HMM模型的长度阈值。
+
+    --hmm_coverage <float>    default: 0.25
+    蛋白序列的合格结构域对HMM模型的整体覆盖度阈值（多个匹配区域去冗余合并后计算）。
+
+    --blast_evalue <float>    default: 1e-9
+    和diamond数据库比对时，E值的阈值（同时用于HSP的过滤）。
+
+    --blast_CIP <float>    default: 0.4
+    和diamond数据库比对时，累计一致性（CIP）的阈值。
+
+    --blast_coverage <float>    default: 0.4
+    和diamond数据库比对时，query和subject的整体覆盖度阈值（两者都需要达到阈值）。
+
+    --hmm_evalue_onlyOne <float>    default: 1e-7
+    同时提供了两类数据库，而蛋白序列只能通过HMM验证时，要求的更严格的全序列E值阈值。
+
+    --hmm_coverage_onlyOne <float>    default: 0.5
+    同时提供了两类数据库，而蛋白序列只能通过HMM验证时，要求的更严格的HMM覆盖度阈值。
+
+    --blast_evalue_onlyOne <float>    default: 1e-12
+    同时提供了两类数据库，而蛋白序列只能通过BLASTP验证时，要求的更严格的E值阈值。
+
+    --blast_CIP_onlyOne <float>    default: 0.6
+    同时提供了两类数据库，而蛋白序列只能通过BLASTP验证时，要求的更严格的CIP阈值。
+
+    --blast_coverage_onlyOne <float>    default: 0.6
+    同时提供了两类数据库，而蛋白序列只能通过BLASTP验证时，要求的更严格的query和subject覆盖度阈值。
+
+    --both_required    default: None
+    添加该参数后，基因模型和diamond / HMM两类数据库都有合格的比对结果，才能通过验证。需要同时提供两类数据库。
+
+【比对程序参数】
+    --diamond_options <string>    default: "--sensitive --max-target-seqs 20 --id 10 --block-size 5 --index-chunks 1"
+    diamond blastp的搜索参数。程序会自动添加 --evalue、--threads、--db、--query、--outfmt 和 --out 参数。
+
+【性能参数】
+    --cpu <int>    default: 8
+    设置使用的CPU线程数。hmmscan以--cpu个进程并行运行；diamond使用--cpu个线程。
+
+    --chunk_num <int>    default: 50
+    并行化分析（hmmscan）时，每份数据包含的蛋白数量。蛋白序列按长度从长到短排序后，每--chunk_num个蛋白分为一份，份数 = 蛋白总数 / --chunk_num（向上取整）。并行分析的进度会在标准错误输出中用\r刷新显示。
+
+【帮助参数】
+    --help    default: None
+    Display the English usage and exit.
+
+    --chinese_help    default: None
+    显示中文用法说明并退出。
+
+USAGE
+
+my $usage_en = do { local $/; <DATA> };
+$usage_en = '' unless defined $usage_en;
+s/__PROG__/$0/g for ($usage_cn, $usage_en);
+
+if (@ARGV == 0) { print STDERR $usage_en; exit 1; }
+
+my ($HMM_db, $diamond_db, $diamond_options, $genetic_code, $tmp_dir, $filtered_gene_models, $out_stats);
+my ($hmm_evalue1, $hmm_evalue2, $hmm_length, $hmm_coverage, $blast_evalue, $blast_CIP, $blast_coverage);
+my ($hmm_evalue_onlyOne, $hmm_coverage_onlyOne, $blast_evalue_onlyOne, $blast_CIP_onlyOne, $blast_coverage_onlyOne);
+my ($both_required, $cpu, $chunk_num, $help, $chinese_help);
+GetOptions(
+    "HMM_db=s"                 => \$HMM_db,
+    "diamond_db|eggNOG_db=s"   => \$diamond_db,
+    "diamond_options=s"        => \$diamond_options,
+    "genetic_code=i"           => \$genetic_code,
+    "tmp_dir=s"                => \$tmp_dir,
+    "filtered_gene_models=s"   => \$filtered_gene_models,
+    "out_stats=s"              => \$out_stats,
+    "hmm_evalue1=f"            => \$hmm_evalue1,
+    "hmm_evalue2=f"            => \$hmm_evalue2,
+    "hmm_length=i"             => \$hmm_length,
+    "hmm_coverage=f"           => \$hmm_coverage,
+    "blast_evalue=f"           => \$blast_evalue,
+    "blast_CIP=f"              => \$blast_CIP,
+    "blast_coverage=f"         => \$blast_coverage,
+    "hmm_evalue_onlyOne=f"     => \$hmm_evalue_onlyOne,
+    "hmm_coverage_onlyOne=f"   => \$hmm_coverage_onlyOne,
+    "blast_evalue_onlyOne=f"   => \$blast_evalue_onlyOne,
+    "blast_CIP_onlyOne=f"      => \$blast_CIP_onlyOne,
+    "blast_coverage_onlyOne=f" => \$blast_coverage_onlyOne,
+    "both_required!"           => \$both_required,
+    "cpu=i"                    => \$cpu,
+    "chunk_num=i"              => \$chunk_num,
+    "help"                     => \$help,
+    "chinese_help"             => \$chinese_help,
+) or do { print STDERR $usage_en; exit 1; };
+
+if ($chinese_help) { print $usage_cn; exit 0; }
+if ($help)         { print $usage_en; exit 0; }
+
+########### 解析参数 #################
+# 使用 //= 赋默认值，避免用户显式设置0时被覆盖
+$hmm_evalue1            //= 1e-5;
+$hmm_evalue2            //= 1e-3;
+$hmm_length             //= 80;
+$hmm_coverage           //= 0.25;
+$blast_evalue           //= 1e-9;
+$blast_CIP              //= 0.4;
+$blast_coverage         //= 0.4;
+$hmm_evalue_onlyOne     //= 1e-7;
+$hmm_coverage_onlyOne   //= 0.5;
+$blast_evalue_onlyOne   //= 1e-12;
+$blast_CIP_onlyOne      //= 0.6;
+$blast_coverage_onlyOne //= 0.6;
+$cpu                    //= 8;
+$chunk_num              //= 50;
+$genetic_code           //= 1;
+$diamond_options        //= "--sensitive --max-target-seqs 20 --id 10 --block-size 5 --index-chunks 1";
+$cpu = 1 if $cpu < 1;
+die "Error: --chunk_num must be an integer >= 1.\n" if $chunk_num < 1;
+
+die "Error: genome.fasta and in.gff3 are required.\n\n$usage_en" unless @ARGV == 2;
+
+# 拆分逗号分隔的列表：去除两侧空白，忽略空项（如开头、结尾或连续的逗号产生的空项）
+my @hmm_list = &split_list($HMM_db);
+my @dia_list = &split_list($diamond_db);
+die "Error: at least one of --HMM_db and --diamond_db is required.\n" unless @hmm_list || @dia_list;
+die "Error: --HMM_db was given but contains no database prefix.\n"     if defined $HMM_db     && !@hmm_list;
+die "Error: --diamond_db was given but contains no database path.\n"   if defined $diamond_db && !@dia_list;
+die "Error: --both_required needs both --HMM_db and --diamond_db.\n" if $both_required && !(@hmm_list && @dia_list);
+
+my $input_genome = &abs_exist($ARGV[0]);
+my $input_GFF3   = &abs_exist($ARGV[1]);
+$filtered_gene_models = &abs_out($filtered_gene_models) if defined $filtered_gene_models;
+$out_stats            = &abs_out($out_stats)            if defined $out_stats;
+
+# HMM数据库：输入的是前缀，对应4个文件：前缀.h3f 前缀.h3i 前缀.h3m 前缀.h3p（由hmmpress生成）
+my (@hmm_dbs, @dia_dbs);
+foreach my $p (@hmm_list) {
+    $p =~ s/\.h3[fimp]$//;    # 容错：如果用户输入了带.h3?后缀的文件名，自动去掉后缀
+    my @missing = grep { !-e "$p.$_" } qw/h3f h3i h3m h3p/;
+    if (@missing) {
+        die "Error: HMM database '$p' is not complete, the following file(s) are missing: "
+          . join(" ", map { "$p.$_" } @missing)
+          . "\n       --HMM_db needs the prefix of the hmmpress-processed database (the 4 files prefix.h3f, prefix.h3i, prefix.h3m and prefix.h3p must exist).\n"
+          . "       Please run 'hmmpress $p' first if the database has not been pressed.\n";
+    }
+    my $db = abs_path("$p.h3m");
+    $db =~ s/\.h3m$//;
+    push @hmm_dbs, $db;
+}
+# diamond数据库：可以是.dmnd文件（可省略后缀），也可以是蛋白FASTA文件（后续自动构建数据库）
+foreach (@dia_list) {
+    if (-f $_) {
+        my $p = abs_path($_);
+        if    ($p =~ /\.dmnd$/i)  { push @dia_dbs, { path => $p, type => 'db' }; }
+        elsif (&is_fasta($p))     { push @dia_dbs, { path => $p, type => 'fasta' }; }
+        else                      { push @dia_dbs, { path => $p, type => 'db' }; }
+    }
+    elsif (-f "$_.dmnd") { push @dia_dbs, { path => abs_path("$_.dmnd"), type => 'db' }; }   # 可以省略.dmnd后缀
+    else { die "Error: can not find diamond database or protein FASTA file $_\n"; }
+}
+my $use_hmm   = @hmm_dbs ? 1 : 0;
+my $use_blast = @dia_dbs ? 1 : 0;
+die "Error: at least one valid database is required by --HMM_db or --diamond_db.\n" unless $use_hmm || $use_blast;
+die "Error: --both_required needs both --HMM_db and --diamond_db.\n" if $both_required && !($use_hmm && $use_blast);
+
+# 检查依赖程序
+my @missing;
+push @missing, "hmmscan"    if $use_hmm   && !&which("hmmscan");
+push @missing, "diamond"    if $use_blast && !&which("diamond");
+die "Error: the following program(s) are not found in PATH: @missing\n" if @missing;
+
+# 遗传密码
+my ($code_ref, $start_ref, $stop_ref) = &codon_table($genetic_code);
+my %codon2aa   = %$code_ref;
+my %stop_codon = %$stop_ref;
+
+# 在标准错误输出中给出程序的运行命令
+print STDERR "\n#################### $prog_name | Start ####################\n";
+print STDERR "PWD: " . getcwd() . "\n" . (localtime) . ": CMD: " . $command_line . "\n";
+print STDERR "============================================\n";
+
+# 准备临时文件夹路径
+unless (defined $tmp_dir && $tmp_dir ne '') {
+    my $date = strftime("%Y%m%d%H%M%S", localtime);
+    $tmp_dir = "tmp_$date$$";
+}
+mkdir $tmp_dir unless -e $tmp_dir;
+die "Error: can not create temporary directory $tmp_dir\n" unless -d $tmp_dir;
+$tmp_dir = abs_path($tmp_dir);
+chdir $tmp_dir or die "Error: can not change directory to $tmp_dir, $!\n";
+print STDERR "\nPWD: $tmp_dir\n";
+
+###############################################################################
+# 1. 读取GFF3并提取蛋白序列
+###############################################################################
+print STDERR "\n1. Extract protein sequences from the input GFF3 and genome file.\n";
+my $gff = &parse_gff3($input_GFF3);
+my %need_chr = map { $gff->{tx}{$_}{chr} => 1 } keys %{ $gff->{tx} };
+my $seq = &load_fasta($input_genome, \%need_chr);
+
+my (%prot_len, @prot_ids, %tx2gene);
+{
+    open my $out, '>', "proteins.fasta.tmp" or die "Error: can not create file $tmp_dir/proteins.fasta.tmp, $!\n";
+    my ($n_no_seq, $n_short) = (0, 0);
+    foreach my $tid (sort { $gff->{tx}{$a}{order} <=> $gff->{tx}{$b}{order} } keys %{ $gff->{tx} }) {
+        my $t = $gff->{tx}{$tid};
+        $tx2gene{$tid} = $t->{gene};
+        my $pep = &translate_tx($t, $seq);
+        unless (defined $pep) { $n_no_seq++; next; }
+        unless (length $pep) { $n_short++; next; }
+        $prot_len{$tid} = length $pep;
+        push @prot_ids, $tid;
+        $pep =~ s/(.{60})/$1\n/g;
+        $pep =~ s/\n$//;
+        print $out ">$tid\n$pep\n";
+    }
+    close $out;
+    rename "proteins.fasta.tmp", "proteins.fasta" or die "Error: can not rename proteins.fasta.tmp, $!\n";
+    my $n_gene = scalar @{ $gff->{order} };
+    print STDERR "Genes: $n_gene; transcripts with CDS: " . scalar(keys %{ $gff->{tx} }) . "; protein sequences extracted: " . scalar(@prot_ids) . "\n";
+    print STDERR "Warning: $n_no_seq transcript(s) were skipped because their sequences are absent from the genome or their CDS exceed the sequence end.\n" if $n_no_seq;
+    print STDERR "Warning: $n_short transcript(s) were skipped because their protein sequences are empty.\n" if $n_short;
+}
+%$seq = ();
+
+###############################################################################
+# 2. 对蛋白序列进行HMM和BLASTP验证
+###############################################################################
+print STDERR "\n2. Recheck protein sequences with HMM and BLASTP methods.\n";
+my (%hmm, %blast);   # 蛋白ID => {pass, strict, best => {...}, ...}
+
+if ($use_hmm && @prot_ids) {
+    print STDERR "\n2.1 HMM search with hmmscan.\n";
+    my $E = &max_of($hmm_evalue1, $hmm_evalue2, $hmm_evalue_onlyOne);
+    my $i = 0;
+    foreach my $db (@hmm_dbs) {
+        $i++;
+        my $base = "hmmscan.$i." . basename($db);
+        unless (-e "$base.ok") {
+            mkdir $base unless -d $base;
+            my @chunks = &split_fasta(\@prot_ids, \%prot_len, "proteins.fasta", $base, $chunk_num);
+            print STDERR "Database $db: " . scalar(@prot_ids) . " proteins were split into " . scalar(@chunks) . " chunk(s) (up to $chunk_num proteins per chunk), running with $cpu parallel hmmscan process(es).\n";
+            my @cmds;
+            foreach my $c (@chunks) {
+                push @cmds, "hmmscan --cpu 1 -E $E --domE $E --noali -o /dev/null --domtblout $c.domtbl " . &shq($db) . " $c.fasta > $c.log 2>&1";
+            }
+            my @failed = &run_parallel_cmds(\@cmds, $cpu, "hmmscan");
+            die "Error: failed to execute:\n" . join("\n", @failed) . "\n" if @failed;
+            open my $o, '>', "$base.domtbl" or die "Error: can not create $base.domtbl, $!\n";
+            foreach my $c (@chunks) {
+                open my $in, '<', "$c.domtbl" or die "Error: can not open $c.domtbl, $!\n";
+                while (<$in>) { print $o $_ unless /^#/; }
+                close $in;
+            }
+            close $o;
+            open my $ok, '>', "$base.ok" or die $!; close $ok;
+        }
+        else {
+            print STDERR "CMD(Skipped): hmmscan against $db\n";
+        }
+        &parse_domtbl("$base.domtbl", \%hmm);
+    }
+}
+
+if ($use_blast && @prot_ids) {
+    print STDERR "\n2.2 BLASTP search with diamond, then filter the alignments.\n";
+    my $E = &max_of(1e-5, $blast_evalue, $blast_evalue_onlyOne);
+    my $i = 0;
+    foreach my $d (@dia_dbs) {
+        $i++;
+        my $db = $d->{path};
+        # 如果输入的是蛋白FASTA文件，先自动构建diamond数据库
+        if ($d->{type} eq 'fasta') {
+            my $prefix = "diamond_makedb.$i";
+            my $cmd = "diamond makedb --in " . &shq($db) . " --db $prefix --threads $cpu > $prefix.log 2>&1";
+            &execute_cmds($cmd, "$prefix.ok");
+            $db = "$tmp_dir/$prefix.dmnd";
+        }
+        # 第一步：diamond blastp比对（输出表格含query和subject的长度）
+        my $base = "diamond.$i." . basename($d->{path});
+        my $cmd = "diamond blastp $diamond_options --evalue $E --threads $cpu --db " . &shq($db) . " --query proteins.fasta --outfmt 6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore qlen slen --out $base.tab.tmp > $base.log 2>&1 && mv $base.tab.tmp $base.tab";
+        &execute_cmds($cmd, "$base.ok");
+        # 第二步：参考parsing_blast_result.pl的算法，合并HSP后过滤；任意一个数据库有合格hit即通过
+        &parse_diamond("$base.tab", \%blast);
+    }
+}
+
+###############################################################################
+# 3. 分析HMM和BLASTP结果，得到有效的转录本和基因
+###############################################################################
+print STDERR "\n3. Analyze the HMM and BLASTP results to obtain validated genes.\n";
+my (%valid_tx, %valid_gene);
+my %n = map { $_ => 0 } qw(hmm blast both hmm_only hmm_only_ok blast_only blast_only_ok valid);
+foreach my $pid (@prot_ids) {
+    my $hp = $hmm{$pid}   && $hmm{$pid}{pass}   ? 1 : 0;
+    my $bp = $blast{$pid} && $blast{$pid}{pass} ? 1 : 0;
+    $n{hmm}++   if $hp;
+    $n{blast}++ if $bp;
+    my $ok = 0;
+    if ($use_hmm && $use_blast) {
+        if ($hp && $bp) { $n{both}++; $ok = 1; }
+        elsif ($hp) {
+            $n{hmm_only}++;
+            if (!$both_required && $hmm{$pid}{strict}) { $ok = 1; $n{hmm_only_ok}++; }
+        }
+        elsif ($bp) {
+            $n{blast_only}++;
+            if (!$both_required && $blast{$pid}{strict}) { $ok = 1; $n{blast_only_ok}++; }
+        }
+    }
+    elsif ($use_hmm) { $ok = $hp; }
+    else             { $ok = $bp; }
+    if ($ok) {
+        $valid_tx{$pid} = 1;
+        $valid_gene{ $tx2gene{$pid} } = 1;
+        $n{valid}++;
+    }
+}
+
+# 输出每个蛋白的验证明细表
+open my $detail, '>', "validation_detail.tab" or die "Error: can not create validation_detail.tab, $!\n";
+print $detail join("\t", "#transcript_ID", qw/gene_ID protein_length HMM_best_hit HMM_evalue HMM_coverage HMM_pass HMM_strict BLASTP_best_hit BLASTP_evalue BLASTP_CIP BLASTP_qcov BLASTP_scov BLASTP_pass BLASTP_strict validated/), "\n";
+foreach my $pid (@prot_ids) {
+    my $h  = $hmm{$pid}   || {};
+    my $b  = $blast{$pid} || {};
+    my $bb = $b->{best}   || {};
+    print $detail join("\t", $pid, $tx2gene{$pid}, $prot_len{$pid},
+        $h->{hit} // '-', &fmt_e($h->{evalue}), &fmt_r($h->{coverage}), $h->{pass} ? 1 : 0, $h->{strict} ? 1 : 0,
+        $bb->{hit} // '-', &fmt_e($bb->{emin}), &fmt_r($bb->{cip}), &fmt_r($bb->{qcov}), &fmt_r($bb->{scov}), $b->{pass} ? 1 : 0, $b->{strict} ? 1 : 0,
+        $valid_tx{$pid} ? 1 : 0), "\n";
+}
+close $detail;
+
+my $n_gene     = scalar @{ $gff->{order} };
+my $n_valid_g  = scalar keys %valid_gene;
+my $stats = "";
+$stats .= "Protein sequences:                                   " . scalar(@prot_ids) . "\n";
+$stats .= "Passed HMM validation (normal thresholds):           $n{hmm}\n" if $use_hmm;
+$stats .= "Passed BLASTP validation (normal thresholds):        $n{blast}\n" if $use_blast;
+if ($use_hmm && $use_blast) {
+    $stats .= "Passed both HMM and BLASTP:                          $n{both}\n";
+    $stats .= "Passed HMM only / also passed stricter thresholds:   $n{hmm_only} / $n{hmm_only_ok}" . ($both_required ? " (--both_required: not accepted)" : "") . "\n";
+    $stats .= "Passed BLASTP only / also passed stricter thresholds:$n{blast_only} / $n{blast_only_ok}" . ($both_required ? " (--both_required: not accepted)" : "") . "\n";
+}
+$stats .= "Validated transcripts:                               $n{valid} / " . scalar(@prot_ids) . " = " . &pct($n{valid}, scalar @prot_ids) . "\n";
+$stats .= "Validated genes:                                     $n_valid_g / $n_gene = " . &pct($n_valid_g, $n_gene) . "\n";
+print STDERR $stats;
+
+if (defined $out_stats) {
+    open my $sfh, '>', $out_stats or die "Error: can not create file $out_stats, $!\n";
+    print $sfh $stats;
+    close $sfh;
+}
+
+###############################################################################
+# 4. 输出GFF3结果
+###############################################################################
+my $filter_fh;
+if (defined $filtered_gene_models) {
+    open $filter_fh, '>', $filtered_gene_models or die "Can not create file $filtered_gene_models, $!";
+}
+foreach (@{ $gff->{header} }) {
+    print STDOUT "$_\n";
+    print $filter_fh "$_\n" if $filter_fh;
+}
+foreach my $key (@{ $gff->{order} }) {
+    my $text = join("\n", @{ $gff->{group}{$key} }) . "\n";
+    if ($valid_gene{$key}) { print STDOUT $text; }
+    elsif ($filter_fh)     { print $filter_fh $text; }
+}
+close $filter_fh if $filter_fh;
+print STDERR "\n#################### $prog_name | Done ####################\n";
+
+###############################################################################
+# 子程序
+###############################################################################
+sub abs_exist {
+    my $f = shift;
+    die "Error: can not find $f\n" unless -e $f;
+    return abs_path($f);
+}
+
+sub abs_out {
+    my $f = shift;
+    return $f if $f =~ m#^/#;
+    return getcwd() . "/$f";
+}
+
+# 拆分逗号分隔的列表：去除每一项两侧的空白，忽略空项（开头、结尾或连续的逗号）
+sub split_list {
+    my $s = shift;
+    return () unless defined $s;
+    return grep { $_ ne '' } map { my $x = $_; $x =~ s/^\s+|\s+$//g; $x } split /,/, $s;
+}
+
+sub shq {
+    my $s = shift;
+    return $s if $s =~ m#^[\w./,:=+\-]+$#;
+    $s =~ s/'/'\\''/g;
+    return "'$s'";
+}
+
+sub which {
+    my $p = shift;
+    foreach my $d (split /:/, ($ENV{PATH} || '')) {
+        return "$d/$p" if $d ne '' && -f "$d/$p" && -x "$d/$p";
+    }
+    return undef;
+}
+
+# 判断文件是否为FASTA格式（第一个非空白字符是">"）；支持.gz文件
+sub is_fasta {
+    my $f  = shift;
+    my $fh = &open_in($f);
+    my $c  = '';
+    while (read($fh, $c, 1)) { last if $c !~ /\s/; }
+    close $fh;
+    return $c eq '>' ? 1 : 0;
+}
+
+sub max_of { my $m = shift; foreach (@_) { $m = $_ if $_ > $m } return $m; }
+sub pct    { my ($a1, $b1) = @_; return $b1 ? sprintf("%.2f%%", 100 * $a1 / $b1) : "0.00%"; }
+sub fmt_e  { my $v = shift; return defined $v ? sprintf("%.2e", $v) : '-'; }
+sub fmt_r  { my $v = shift; return defined $v ? sprintf("%.4f", $v) : '-'; }
+
+sub open_in {
+    my ($file) = @_;
+    my $fh;
+    if ($file =~ /\.gz$/i) { open($fh, '-|', 'gzip', '-dc', $file) or die "Can not open file $file, $!\n"; }
+    else                   { open($fh, '<', $file) or die "Can not open file $file, $!\n"; }
+    return $fh;
+}
+
+# 读取GFF3：按ID/Parent关系归组；返回 {header => [...], order => [...], group => {key => [lines]}, tx => {tid => {...}}}
+sub parse_gff3 {
+    my ($file) = @_;
+    my (@recs, %first_idx, %parent_of);
+    my $fh = &open_in($file);
+    while (my $raw = <$fh>) {
+        $raw =~ s/[\r\n]+$//;
+        last if $raw =~ /^##FASTA/;
+        my $rec = { raw => $raw };
+        push @recs, $rec;
+        next if $raw =~ /^#/ || $raw =~ /^\s*$/;
+        my @f = split /\t/, $raw, 9;
+        next if @f < 9;
+        $rec->{f} = \@f;
+        my ($id)  = $f[8] =~ /(?:^|;)\s*ID=([^;]+)/;
+        my ($par) = $f[8] =~ /(?:^|;)\s*Parent=([^;]+)/;
+        if (defined $id) { $id =~ s/^\s+|\s+$//g; $rec->{id} = $id; }
+        if (defined $par) {
+            my @p = grep { $_ ne '' } map { s/^\s+|\s+$//gr } split /,/, $par;
+            $rec->{parents} = \@p if @p;
+        }
+        if (defined $rec->{id}) {
+            $first_idx{ $rec->{id} } = $#recs unless exists $first_idx{ $rec->{id} };
+            $parent_of{ $rec->{id} } = $rec->{parents}[0] if $rec->{parents} && !exists $parent_of{ $rec->{id} };
+        }
+    }
+    close $fh;
+
+    my $top_of = sub {
+        my ($id) = @_;
+        my %seen;
+        while (defined $parent_of{$id} && exists $first_idx{ $parent_of{$id} } && !$seen{$id}++) { $id = $parent_of{$id}; }
+        return $id;
+    };
+
+    my (@header, @order, %group, %tx);
+    my ($cur, $seen_feat, $anon, $tx_order) = (undef, 0, 0, 0);
+    foreach my $rec (@recs) {
+        unless ($rec->{f}) {
+            if (!$seen_feat) { push @header, $rec->{raw}; }
+            elsif (defined $cur && $rec->{raw} !~ /^###\s*$/ && $rec->{raw} !~ /^\s*$/) { push @{ $group{$cur} }, $rec->{raw}; }
+            next;
+        }
+        $seen_feat = 1;
+        my $key;
+        if    ($rec->{parents})    { $key = $top_of->($rec->{parents}[0]); }
+        elsif (defined $rec->{id}) { $key = $rec->{id}; }
+        else                       { $key = "__anonymous_feature_" . (++$anon); }
+        push @order, $key unless $group{$key};
+        push @{ $group{$key} }, $rec->{raw};
+        $cur = $key;
+
+        my @f = @{ $rec->{f} };
+        if ($f[2] eq 'CDS' && $rec->{parents} && $f[3] =~ /^\d+$/ && $f[4] =~ /^\d+$/) {
+            my ($s, $e) = $f[3] <= $f[4] ? ($f[3], $f[4]) : ($f[4], $f[3]);
+            foreach my $p (@{ $rec->{parents} }) {
+                $tx{$p} //= { gene => $key, chr => $f[0], strand => $f[6], cds => [], order => $tx_order++ };
+                push @{ $tx{$p}{cds} }, [ $s, $e, $f[7] ];
+            }
+        }
+    }
+    return { header => \@header, order => \@order, group => \%group, tx => \%tx };
+}
+
+# 读取基因组FASTA（只保留需要的序列）
+sub load_fasta {
+    my ($file, $need) = @_;
+    my (%s, $id);
+    my $fh = &open_in($file);
+    while (my $line = <$fh>) {
+        $line =~ s/[\r\n]+$//;
+        if ($line =~ /^>\s*(\S+)/) { $id = $need->{$1} ? $1 : undef; $s{$id} //= '' if defined $id; }
+        elsif (defined $id) { $line =~ s/\s+//g; $s{$id} .= uc $line; }
+    }
+    close $fh;
+    return \%s;
+}
+
+# 按转录方向拼接CDS序列（以5'端CDS的phase确定阅读框），翻译为蛋白；去除末尾终止密码子，内部终止密码子记为X
+sub translate_tx {
+    my ($t, $seq) = @_;
+    my $g = $seq->{ $t->{chr} };
+    return undef unless defined $g;
+    my $glen = length $g;
+    my @c = sort { $a->[0] <=> $b->[0] } @{ $t->{cds} };
+    # 合并重叠的CDS
+    my @m;
+    foreach my $x (@c) {
+        if (@m && $x->[0] <= $m[-1][1]) { $m[-1][1] = $x->[1] if $x->[1] > $m[-1][1]; }
+        else { push @m, [@$x]; }
+    }
+    my $minus = $t->{strand} eq '-' ? 1 : 0;
+    @m = reverse @m if $minus;
+    my $phase = $m[0][2];
+    $phase = 0 unless defined $phase && $phase =~ /^[012]$/;
+    my $nt = '';
+    foreach my $x (@m) {
+        return undef if $x->[1] > $glen || $x->[0] < 1;
+        my $p = substr($g, $x->[0] - 1, $x->[1] - $x->[0] + 1);
+        if ($minus) { $p = reverse $p; $p =~ tr/ACGT/TGCA/; }
+        $nt .= $p;
+    }
+    $nt = length($nt) > $phase ? substr($nt, $phase) : '';
+    my $pep = '';
+    for (my $i = 0; $i + 3 <= length $nt; $i += 3) {
+        my $codon = substr($nt, $i, 3);
+        if    ($stop_codon{$codon})       { $pep .= '*'; }
+        elsif (exists $codon2aa{$codon})  { $pep .= $codon2aa{$codon}; }
+        else                              { $pep .= 'X'; }
+    }
+    $pep =~ s/\*+$//;
+    $pep =~ tr/*/X/;
+    return $pep;
+}
+
+# 将蛋白序列按长度从长到短排序后，每$size个蛋白分为一份（份数 = 蛋白数 / $size，向上取整），返回各份的文件前缀
+# 长蛋白所在的份排在前面，先开始运行，有利于并行时的负载均衡
+sub split_fasta {
+    my ($ids, $len, $fasta, $dir, $size) = @_;
+    $size = 1 if !defined $size || $size < 1;
+    my %seqs;
+    {
+        my $fh = &open_in($fasta);
+        my $id;
+        while (<$fh>) { chomp; if (/^>(\S+)/) { $id = $1; } elsif (defined $id) { $seqs{$id} .= $_; } }
+        close $fh;
+    }
+    my @sorted = sort { $len->{$b} <=> $len->{$a} or $a cmp $b } @$ids;
+    my @prefix;
+    my $j = 0;
+    while (@sorted) {
+        my @grp = splice(@sorted, 0, $size);
+        $j++;
+        my $p = "$dir/chunk_$j";
+        open my $o, '>', "$p.fasta" or die "Error: can not create $p.fasta, $!\n";
+        print $o ">$_\n$seqs{$_}\n" foreach @grp;
+        close $o;
+        push @prefix, $p;
+    }
+    return @prefix;
+}
+
+# 合并区间并返回总长度
+sub union_length {
+    my @iv = sort { $a->[0] <=> $b->[0] } @_;
+    my ($len, $cs, $ce) = (0, undef, undef);
+    foreach my $x (@iv) {
+        my ($s, $e) = $x->[0] <= $x->[1] ? @$x : ($x->[1], $x->[0]);
+        if (defined $ce && $s <= $ce + 1) { $ce = $e if $e > $ce; }
+        else { $len += $ce - $cs + 1 if defined $ce; ($cs, $ce) = ($s, $e); }
+    }
+    $len += $ce - $cs + 1 if defined $ce;
+    return $len;
+}
+
+# 解析hmmscan的--domtblout结果（hmmscan中target为HMM模型，query为蛋白序列）
+# 全序列E值 <= 阈值，且E值合格的结构域在HMM模型上的匹配区域去冗余合并后的整体覆盖度 >= 阈值，则通过
+sub parse_domtbl {
+    my ($file, $res) = @_;
+    my %pair;
+    open my $fh, '<', $file or die "Error: can not open $file, $!\n";
+    while (<$fh>) {
+        next if /^#/;
+        my @c = split /\s+/;
+        next if @c < 22;
+        my ($t, $tlen, $q, $fullE, $iE, $hf, $ht) = @c[0, 2, 3, 6, 12, 15, 16];
+        my $p = $pair{$q}{$t} //= { tlen => $tlen, fullE => $fullE, doms => [] };
+        $p->{fullE} = $fullE if $fullE < $p->{fullE};
+        push @{ $p->{doms} }, [ $hf, $ht, $iE ];
+    }
+    close $fh;
+    foreach my $q (keys %pair) {
+        foreach my $t (keys %{ $pair{$q} }) {
+            my $p   = $pair{$q}{$t};
+            my $thr = $p->{tlen} < $hmm_length ? $hmm_evalue2 : $hmm_evalue1;
+            my $cov = $p->{tlen} > 0 ? &union_length(map { [ $_->[0], $_->[1] ] } grep { $_->[2] <= $thr } @{ $p->{doms} }) / $p->{tlen} : 0;
+            my $pass   = ($p->{fullE} <= $thr && $cov >= $hmm_coverage) ? 1 : 0;
+            my $strict = ($pass && $p->{fullE} <= $hmm_evalue_onlyOne && $cov >= $hmm_coverage_onlyOne) ? 1 : 0;
+            my $r = $res->{$q} //= { pass => 0, strict => 0 };
+            # 记录最佳结果：优先通过严格阈值，其次通过常规阈值，再次E值更小
+            my $better = !defined $r->{evalue}
+                || $strict > $r->{strict}
+                || ($strict == $r->{strict} && $pass > $r->{pass})
+                || ($strict == $r->{strict} && $pass == $r->{pass} && $p->{fullE} < $r->{evalue});
+            if ($better) {
+                @{$r}{qw/hit evalue coverage/} = ($t, $p->{fullE}, $cov);
+                $r->{pass}   = $pass   if $pass   > $r->{pass};
+                $r->{strict} = $strict if $strict > $r->{strict};
+            }
+        }
+    }
+}
+
+# 解析并过滤diamond blastp结果（参考parsing_blast_result.pl）；可对多个数据库的结果多次调用，结果累积到同一个哈希中
+# outfmt 6: qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore qlen slen
+# (1) 只保留E值 <= --blast_evalue的HSP；
+# (2) 对每个 query-subject 的hit合并所有保留的HSP，计算CIP、query整体覆盖度和subject整体覆盖度（区域去冗余）；
+# (3) 满足阈值的hit为合格hit；蛋白只要有一个合格hit即通过验证。$r->{best}记录最佳hit（优先合格hit，其次bitscore更高）。
+sub parse_diamond {
+    my ($file, $res) = @_;
+    my %pair;
+    open my $fh, '<', $file or die "Error: can not open $file, $!\n";
+    while (<$fh>) {
+        chomp;
+        my @c = split /\t/;
+        next if @c < 14;
+        my ($q, $s, $pident, $alen, $qs, $qe, $ss, $se, $ev, $bits, $qlen, $slen) = @c[0, 1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13];
+        next if $ev > $blast_evalue;
+        my $p = $pair{$q}{$s} //= { emin => $ev, bev => $ev, score => $bits, ident => 0, alen => 0, q => [], s => [], qlen => $qlen, slen => $slen };
+        $p->{emin} = $ev if $ev < $p->{emin};
+        if ($bits > $p->{score}) { $p->{score} = $bits; $p->{bev} = $ev; }   # 得分最高的HSP
+        $p->{ident} += $pident * $alen / 100;
+        $p->{alen}  += $alen;
+        push @{ $p->{q} }, [ $qs, $qe ];
+        push @{ $p->{s} }, [ $ss, $se ];
+    }
+    close $fh;
+    foreach my $q (keys %pair) {
+        my $r = $res->{$q} //= { pass => 0, strict => 0 };
+        foreach my $s (sort keys %{ $pair{$q} }) {
+            my $p    = $pair{$q}{$s};
+            my $cip  = $p->{alen} ? $p->{ident} / $p->{alen} : 0;
+            my $qcov = $p->{qlen} ? &union_length(@{ $p->{q} }) / $p->{qlen} : 0;
+            my $scov = $p->{slen} ? &union_length(@{ $p->{s} }) / $p->{slen} : 0;
+            my $pass   = ($p->{emin} <= $blast_evalue && $cip >= $blast_CIP && $qcov >= $blast_coverage && $scov >= $blast_coverage) ? 1 : 0;
+            my $strict = ($pass && $p->{emin} <= $blast_evalue_onlyOne && $cip >= $blast_CIP_onlyOne && $qcov >= $blast_coverage_onlyOne && $scov >= $blast_coverage_onlyOne) ? 1 : 0;
+            $r->{pass}   = 1 if $pass;
+            $r->{strict} = 1 if $strict;
+            my $b = $r->{best};
+            if (!$b || $pass > $b->{pass} || ($pass == $b->{pass} && $p->{score} > $b->{score})) {
+                $r->{best} = { hit => $s, emin => $p->{emin}, bev => $p->{bev}, score => $p->{score},
+                               cip => $cip, qcov => $qcov, scov => $scov, pass => $pass };
+            }
+        }
+    }
+}
+
+# 并行执行多个Linux命令（最多$n个同时运行），返回失败的命令列表
+# 运行进度输出到标准错误输出，使用\r在同一行刷新（每秒最多刷新一次，全部完成时刷新并换行）
+sub run_parallel_cmds {
+    my ($cmds, $n, $label) = @_;
+    $label //= 'Progress';
+    my $total = scalar @$cmds;
+    my (%running, @failed);
+    my @queue = @$cmds;
+    my ($done, $last_t) = (0, 0);
+    return @failed unless $total;
+
+    print STDERR (localtime) . ": CMD (1 of $total, the first one is shown as an example): $queue[0]\n";
+    my $show = sub {
+        my $force = shift;
+        my $t = time;
+        return if !$force && $t == $last_t;
+        $last_t = $t;
+        printf STDERR "\r%s progress: %d/%d (%.2f%%) | running: %d | failed: %d    ",
+            $label, $done, $total, 100 * $done / $total, scalar(keys %running), scalar(@failed);
+    };
+    $show->(1);
+
+    while (@queue || %running) {
+        while (@queue && keys(%running) < $n) {
+            my $c = shift @queue;
+            my $pid = fork();
+            die "Error: fork failed, $!\n" unless defined $pid;
+            if ($pid == 0) { exec('/bin/sh', '-c', $c) or POSIX::_exit(127); }
+            $running{$pid} = $c;
+        }
+        $show->(0);
+        my $pid = waitpid(-1, 0);
+        last if $pid <= 0;
+        my $c = delete $running{$pid};
+        next unless defined $c;   # 非本函数启动的子进程
+        $done++;
+        push @failed, $c if $? != 0;
+        $show->($done == $total ? 1 : 0);
+    }
+    $show->(1);
+    print STDERR "\n";
+    return @failed;
+}
+
+# 子程序，用于执行调用的Linux命令；全部成功后生成.ok文件，失败则终止程序（不会生成.ok文件）
+sub execute_cmds {
+    my $ok_file = pop @_;
+    if (-e $ok_file) {
+        print STDERR "CMD(Skipped): $_\n" foreach @_;
+        return 1;
+    }
+    foreach (@_) {
+        print STDERR (localtime) . ": CMD: $_\n";
+        system($_) == 0 or die "Error: failed to execute: $_\n";
+    }
+    open my $ok, '>', $ok_file or die "Error: can not create $ok_file, $!\n";
+    close $ok;
+    return 1;
+}
+
+# 根据遗传密码编号返回（密码子表、起始密码子表、终止密码子表）的哈希引用。
+# 遗传密码的设置参考NCBI Genetic Codes，代码来自 GFF3_merging_and_removing_redundancy。
+sub codon_table {
+    my ($genetic_code) = @_;
+    my %code = (
+        "TTT" => "F", "TTC" => "F", "TTA" => "L", "TTG" => "L",
+        "TCT" => "S", "TCC" => "S", "TCA" => "S", "TCG" => "S",
+        "TAT" => "Y", "TAC" => "Y", "TAA" => "X", "TAG" => "X",
+        "TGT" => "C", "TGC" => "C", "TGA" => "X", "TGG" => "W",
+        "CTT" => "L", "CTC" => "L", "CTA" => "L", "CTG" => "L",
+        "CCT" => "P", "CCC" => "P", "CCA" => "P", "CCG" => "P",
+        "CAT" => "H", "CAC" => "H", "CAA" => "Q", "CAG" => "Q",
+        "CGT" => "R", "CGC" => "R", "CGA" => "R", "CGG" => "R",
+        "ATT" => "I", "ATC" => "I", "ATA" => "I", "ATG" => "M",
+        "ACT" => "T", "ACC" => "T", "ACA" => "T", "ACG" => "T",
+        "AAT" => "N", "AAC" => "N", "AAA" => "K", "AAG" => "K",
+        "AGT" => "S", "AGC" => "S", "AGA" => "R", "AGG" => "R",
+        "GTT" => "V", "GTC" => "V", "GTA" => "V", "GTG" => "V",
+        "GCT" => "A", "GCC" => "A", "GCA" => "A", "GCG" => "A",
+        "GAT" => "D", "GAC" => "D", "GAA" => "E", "GAG" => "E",
+        "GGT" => "G", "GGC" => "G", "GGA" => "G", "GGG" => "G",
+    );
+    my %start_table;
+    $start_table{"ATG"} = 1;
+    if    ( $genetic_code == 1 )  { }
+    elsif ( $genetic_code == 2 )  { $code{"AGA"} = "X"; $code{"AGG"} = "X"; $code{"ATA"} = "M"; $code{"TGA"} = "W"; $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG/; }
+    elsif ( $genetic_code == 3 )  { $code{"ATA"} = "M"; $code{"CTT"} = "T"; $code{"CTC"} = "T"; $code{"CTA"} = "T"; $code{"CTG"} = "T"; $code{"TGA"} = "W"; $start_table{$_} = 1 foreach qw/ATA GTG/; }
+    elsif ( $genetic_code == 4 )  { $code{"TGA"} = "W"; $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG CTG TTA TTG/; }
+    elsif ( $genetic_code == 5 )  { $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"ATA"} = "M"; $code{"TGA"} = "W"; $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG TTG/; }
+    elsif ( $genetic_code == 6 )  { $code{"TAA"} = "Q"; $code{"TAG"} = "Q"; }
+    elsif ( $genetic_code == 9 )  { $code{"AAA"} = "N"; $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"TGA"} = "W"; $start_table{"GTG"} = 1; }
+    elsif ( $genetic_code == 10 ) { $code{"TGA"} = "C"; }
+    elsif ( $genetic_code == 11 ) { $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG CTG TTG/; }
+    elsif ( $genetic_code == 12 ) { $code{"CTG"} = "S"; $start_table{"CTG"} = 1; }
+    elsif ( $genetic_code == 13 ) { $code{"AGA"} = "G"; $code{"AGG"} = "G"; $code{"ATA"} = "M"; $code{"TGA"} = "W"; $start_table{$_} = 1 foreach qw/ATA GTG TTG/; }
+    elsif ( $genetic_code == 14 ) { $code{"AAA"} = "N"; $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"TAA"} = "Y"; $code{"TGA"} = "W"; }
+    elsif ( $genetic_code == 15 ) { $code{"TAG"} = "Q"; }
+    elsif ( $genetic_code == 16 ) { $code{"TAG"} = "L"; }
+    elsif ( $genetic_code == 21 ) { $code{"TGA"} = "W"; $code{"ATA"} = "M"; $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"AAA"} = "N"; $start_table{"GTG"} = 1; }
+    elsif ( $genetic_code == 22 ) { $code{"TCA"} = "X"; $code{"TAG"} = "L"; }
+    elsif ( $genetic_code == 23 ) { $code{"TTA"} = "X"; $start_table{$_} = 1 foreach qw/ATT GTG/; }
+    elsif ( $genetic_code == 24 ) { $code{"AGA"} = "S"; $code{"AGG"} = "K"; $code{"TGA"} = "W"; $start_table{$_} = 1 foreach qw/GTG CTG TTG/; }
+    elsif ( $genetic_code == 25 ) { $code{"TGA"} = "G"; $start_table{$_} = 1 foreach qw/GTG TTG/; }
+    elsif ( $genetic_code == 26 ) { $code{"CTG"} = "A"; $start_table{"CTG"} = 1; }
+    elsif ( $genetic_code == 27 ) { $code{"TAG"} = "Q"; $code{"TAA"} = "Q"; }
+    elsif ( $genetic_code == 28 ) { }
+    elsif ( $genetic_code == 29 ) { $code{"TAA"} = "Y"; $code{"TAG"} = "Y"; }
+    elsif ( $genetic_code == 30 ) { $code{"TAA"} = "E"; $code{"TAG"} = "E"; }
+    elsif ( $genetic_code == 31 ) { }
+    elsif ( $genetic_code == 32 ) { $code{"TAG"} = "W"; $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG CTG TTG/; }
+    elsif ( $genetic_code == 33 ) { $code{"TAA"} = "Y"; $code{"TGA"} = "W"; $code{"AGA"} = "S"; $code{"AGG"} = "K"; $start_table{$_} = 1 foreach qw/GTG CTG TTG/; }
+    else { print STDERR "Warning: unsupported genetic code $genetic_code, start and stop codons are set according to the standard genetic code.\n"; }
+
+    my %stop_table;
+    foreach ( keys %code ) { $stop_table{$_} = 1 if $code{$_} eq "X"; }
+    return (\%code, \%start_table, \%stop_table);
+}
+
+########################################################################
+# 英文用法说明（放在文件最末尾，运行时通过DATA文件句柄读取）
+########################################################################
+__DATA__
+Usage:
+    __PROG__ [options] genome.fasta in.gff3 > out.gff3 2> validate.log
+
+    This program validates gene models against HMM databases (e.g. Pfam) and/or diamond protein databases (the eggNOG diamond database is recommended), and writes the validated gene models to STDOUT; gene models that fail validation can be written to a file with --filtered_gene_models.
+
+[Workflow]
+    (1) Read the GFF3 file and group its lines into genes by ID/Parent relationships (traced up to the top-level feature), obtaining the transcript -> gene mapping; child features need not follow their gene line directly, and lines with Parent written before ID are also supported.
+    (2) Extract the protein sequence of each transcript from the genome and its CDS (phase-aware, translated with --genetic_code); the terminal stop codon is removed and internal stop codons are replaced by X. Transcripts without CDS are not validated.
+    (3) HMM validation (with --HMM_db): proteins are split into chunks of --chunk_num proteins each and searched with --cpu parallel hmmscan processes against each HMM database (GA cutoffs are not used); the progress of the parallel analysis is shown on STDERR and refreshed in place with \r. For each protein-HMM pair, the full-sequence E-value and the overall coverage of the HMM by the domains with qualified E-values (the matched regions of multiple domains on the HMM are merged without redundancy before the coverage is calculated) are computed. The E-value threshold depends on the model length: --hmm_evalue2 for models shorter than --hmm_length, otherwise --hmm_evalue1. A protein passes HMM validation if its full-sequence E-value <= threshold and the overall coverage >= --hmm_coverage.
+    (4) BLASTP validation (with --diamond_db), in two steps: first, diamond blastp is used to search the proteins against each diamond database in turn (the output table contains query and subject lengths); if a protein FASTA file is given instead of a diamond database, diamond makedb is run automatically to build the database. Second, the alignments are filtered following the algorithm of parsing_blast_result.pl: only HSPs with E-value <= --blast_evalue are kept; for each protein-subject pair all kept HSPs are merged to compute the CIP (cumulative identity = sum of identical residues / sum of aligned lengths), and the query and subject coverages (the matched regions of multiple HSPs are merged without redundancy before the overall coverage is calculated). A hit is qualified if E-value <= --blast_evalue, CIP >= --blast_CIP, and both overall coverages >= --blast_coverage. A protein passes BLASTP validation if it has at least one qualified hit in any of the diamond databases.
+    (5) Decision:
+        a. When both HMM and diamond databases are given: transcripts passing both are valid; transcripts passing only one type must also pass the stricter *_onlyOne thresholds; with --both_required, both types must be passed.
+        b. When only one type of database is given: transcripts passing that type (normal thresholds) are valid. --both_required can not be used in this case.
+        c. A gene passes validation (with all its transcripts) if at least one of its transcripts is valid.
+    (6) Validated gene models are written to STDOUT, the others to the file given by --filtered_gene_models, and statistics to STDERR (and to --out_stats). The validation details of each protein are saved in validation_detail.tab in the temporary directory.
+
+[Input options]
+    --diamond_db <string>    default: None
+    One or more diamond protein databases, separated by commas (empty items and surrounding whitespace are ignored). The eggNOG diamond database (e.g. eggnog_proteins.dmnd) is recommended. Each input can be: (a) a diamond database file (the .dmnd suffix can be omitted); or (b) a protein FASTA file (may be gzip-compressed), in which case the database is built automatically with diamond makedb in the temporary directory. A protein passes BLASTP validation if it passes any of the diamond databases. At least one of --HMM_db and --diamond_db is required. For backward compatibility, --eggNOG_db is accepted as an alias of --diamond_db.
+
+    --HMM_db <string>    default: None
+    The prefix(es) of one or more HMM databases, separated by commas (empty items and surrounding whitespace are ignored). Each prefix corresponds to 4 files, i.e. the prefix followed by .h3f .h3i .h3m .h3p, which are generated by hmmpress (e.g. after running hmmpress on Pfam-A.hmm, the prefix is Pfam-A.hmm). A protein passes HMM validation if it passes any HMM database. At least one of --HMM_db and --diamond_db is required.
+
+    --genetic_code <int>    default: 1
+    Genetic code used to translate CDS into proteins. See NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi .
+
+[Output options]
+    --tmp_dir <string>    default: tmp_$date$pid
+    Temporary directory. .ok files are created after each step, and finished steps (hmmscan, diamond makedb and diamond blastp) are skipped when the program is run again.
+
+    --filtered_gene_models <string>    default: None
+    Output the gene models that failed validation to this file.
+
+    --out_stats <string>    default: None
+    Write the statistics to this file.
+
+[Threshold options]
+    --hmm_evalue1 <float>    default: 1e-5
+    Full-sequence E-value threshold for HMM models whose length is not shorter than --hmm_length.
+
+    --hmm_evalue2 <float>    default: 1e-3
+    Full-sequence E-value threshold for HMM models shorter than --hmm_length.
+
+    --hmm_length <int>    default: 80
+    Length threshold that distinguishes long and short HMM models.
+
+    --hmm_coverage <float>    default: 0.25
+    Threshold of the overall coverage of the HMM model by the qualified domains of the protein (calculated after merging multiple matched regions).
+
+    --blast_evalue <float>    default: 1e-9
+    E-value threshold for the alignments against the diamond databases (also used to filter HSPs).
+
+    --blast_CIP <float>    default: 0.4
+    Cumulative identity (CIP) threshold for the alignments against the diamond databases.
+
+    --blast_coverage <float>    default: 0.4
+    Threshold of the overall query and subject coverages for the alignments against the diamond databases (both must reach the threshold).
+
+    --hmm_evalue_onlyOne <float>    default: 1e-7
+    Stricter full-sequence E-value threshold required when both types of databases are given but a protein passes only the HMM validation.
+
+    --hmm_coverage_onlyOne <float>    default: 0.5
+    Stricter HMM coverage threshold required when both types of databases are given but a protein passes only the HMM validation.
+
+    --blast_evalue_onlyOne <float>    default: 1e-12
+    Stricter E-value threshold required when both types of databases are given but a protein passes only the BLASTP validation.
+
+    --blast_CIP_onlyOne <float>    default: 0.6
+    Stricter CIP threshold required when both types of databases are given but a protein passes only the BLASTP validation.
+
+    --blast_coverage_onlyOne <float>    default: 0.6
+    Stricter query and subject coverage threshold required when both types of databases are given but a protein passes only the BLASTP validation.
+
+    --both_required    default: None
+    If set, a gene model must pass both diamond and HMM validation. Both types of databases are required.
+
+[Search program options]
+    --diamond_options <string>    default: "--sensitive --max-target-seqs 20 --id 10 --block-size 5 --index-chunks 1"
+    Search options of diamond blastp. --evalue, --threads, --db, --query, --outfmt and --out are added automatically.
+
+[Performance options]
+    --cpu <int>    default: 8
+    Number of CPU threads. hmmscan is run in --cpu parallel processes; diamond uses --cpu threads.
+
+    --chunk_num <int>    default: 50
+    Number of proteins in each chunk of the parallel analysis (hmmscan). Proteins are sorted by length (longest first) and every --chunk_num proteins form one chunk, so the number of chunks = ceil(total proteins / --chunk_num). The progress of the parallel analysis is shown on STDERR and refreshed in place with \r.
+
+[Help options]
+    --help    default: None
+    Display the English usage and exit.
+
+    --chinese_help    default: None
+    显示中文用法说明并退出。
+

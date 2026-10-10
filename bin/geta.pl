@@ -393,78 +393,17 @@ $cmdString = "$bin_path/runAugustus --cpu $cpu --input_evidence_gff3 $input_evid
 
 # Step 5: CombineGeneModels
 print STDERR "\n============================================\n";
-print STDERR "Step 5: CombineGeneModels " . "(" . (localtime) . ")" . "\n";
-mkdir "$tmp_dir/5.combine_gene_models" unless -e "$tmp_dir/5.combine_gene_models";
-chdir "$tmp_dir/5.combine_gene_models"; print STDERR "\nPWD: $tmp_dir/5.combine_gene_models\n";
-
-open OUT, ">", "geneModels.Readme" or die "Can not create file geneModels.Readme, $!";
-print OUT "geneModels.a.gff3\t利用同源蛋白预测的基因模型对转录本预测的基因模型进行了填补
-geneModels.b.gff3\t和同源蛋白预测基因模型进行整合去冗余
-geneModels.c.gff3\t利用augustus预测基因模型进行了填补
-geneModels.d.gff3\t对基因模型末端进行强制填补
-geneModels.e.gff3\t和augustus预测基因模型进行整合去冗余
-geneModels.f.gff3\t对基因模型末端进行强制填补
-geneModels.g.gff3\t去除了位于转座子上的基因模型
-geneModels.h.gff3\t挑选出的高度可信的准确基因模型
-geneModels.i.gff3\t挑选出的需要进行验证的基因模型
-geneModels.j.gff3\t通过了HMM或BLASTP数据库验证的基因模型
-geneModels.k.gff3\t对高可信基因模型和通过了验证的基因模型进行整合去冗余
-geneModels.l.gff3\t添加可变剪接
-geneModels.m.gff3\t对可变剪接转录本进行了ORF分析
-
-geneModels.gff3\t基因模型结果文件
-genes_in_repeats.gff3\t位于转座子序列区域的基因模型
-incomplete.gff3\t不完整的基因模型
-invalidated.gff3\t未能通过HMM或BLASTP数据库验证的基因模型\n";
-close OUT;
-
-# 5.1 合并三种算法的基因预测结果
-@cmdString = ();
-# a. 利用同源蛋白预测的基因模型对转录本预测的基因模型进行填补
-push @cmdString, "$bin_path/GFF3_filling_gene_models_Parallel --cpu $cpu --output_filling_detail_tab FillingGeneModelsByHomolog.tab --start_codon $start_codon --stop_codon $stop_codon --attribute_for_filling_complete Filled_by_Homolog=True $genome $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.raw.gff3 $tmp_dir/2.homolog_prediction/homolog_prediction.raw.gff3 > geneModels.a.gff3 2> GFF3_filling_gene_models.1.log";
-# b. 合并同源蛋白预测基因模型和上一步结果
-push @cmdString, "$bin_path/GFF3_merging_and_removing_redundancy --cpu $cpu $config{'GFF3_merging_and_removing_redundancy'} $genome geneModels.a.gff3 $tmp_dir/2.homolog_prediction/homolog_prediction.raw.gff3 > geneModels.b.gff3 2> GFF3_merging_and_removing_redundancy.1.log";
-# c. 利用augustus预测基因模型进行填补
-push @cmdString, "$bin_path/GFF3_filling_gene_models_Parallel --cpu $cpu --output_filling_detail_tab FillingGeneModelsByAugustus.tab --start_codon $start_codon --stop_codon $stop_codon --attribute_for_filling_complete Filled_by_AUGUSTUS=True $genome geneModels.b.gff3 $tmp_dir/4.augustus/augustus.gff3 > geneModels.c.gff3 2> GFF3_filling_gene_models.2.log";
-# d. 强制填补末端
-push @cmdString, "$bin_path/fillingEndsOfGeneModels $config{'fillingEndsOfGeneModels'} --cpu $cpu --start_codon $start_codon --stop_codon $stop_codon $genome geneModels.c.gff3 > geneModels.d.gff3 2> fillingEndsOfGeneModels.1.log";
-# e. 合并Augustus预测基因模型和上一步结果
-push @cmdString, "$bin_path/GFF3_merging_and_removing_redundancy --cpu $cpu $config{'GFF3_merging_and_removing_redundancy'} $genome geneModels.d.gff3 $tmp_dir/4.augustus/augustus.gff3 > geneModels.e.gff3 2> GFF3_merging_and_removing_redundancy.2.log";
-# f. 强制填补末端，生成不完整基因模型
-push @cmdString, "$bin_path/fillingEndsOfGeneModels $config{'fillingEndsOfGeneModels'} --cpu $cpu --start_codon $start_codon --stop_codon $stop_codon --nonCompletedGeneModels incomplete.gff3 $genome geneModels.e.gff3 > geneModels.f.gff3 2> fillingEndsOfGeneModels.2.log";
-
-&execute_cmds(@cmdString, "01.combineGeneModels.ok");
-
-# 5.2 去除转座子上的基因模型，再将基因模型分为可信和不可信两类。
-@cmdString = ();
-push @cmdString, "$bin_path/GFF3_remove_genes_in_repeats $config{'GFF3_remove_genes_in_repeats'} --filtered_gene_models genes_in_repeats.gff3 ../1.RepeatMasker/genome.repeat.gff3 geneModels.f.gff3 > geneModels.g.gff3 2> genes_in_repeat.txt";
-push @cmdString, "$bin_path/pickout_reliable_geneModels $config{'pickout_reliable_geneModels'} --out_stats pickout_reliable_geneModels.stats geneModels.g.gff3 > geneModels.h.gff3 2> geneModels.i.gff3";
-
-&execute_cmds(@cmdString, "02.ClassGeneModels.ok");
-
-# 5.3 对不可信基因模型进行过滤。
-@cmdString = ();
-push @cmdString, "diamond makedb --db $tmp_dir/homolog --in $tmp_dir/homolog.fasta &> $tmp_dir/diamond_makedb.log";
-push @cmdString, "$bin_path/GFF3_database_validation $config{'GFF3_database_validation'} --cpu $cpu --HMM_db $HMM_db --BLASTP_db $BLASTP_db,$tmp_dir/homolog --tmp_dir GFF3_database_validation.tmp --filtered_gene_models invalidated.gff3 $genome geneModels.i.gff3 > geneModels.j.gff3 2> GFF3_database_validation.log";
-
-&execute_cmds(@cmdString, "03.GFF3_database_validation.ok");
-
-# 5.6 进行可变剪接分析
-@cmdString = ();
-push @cmdString, "$bin_path/GFF3_merging_and_removing_redundancy $config{'GFF3_merging_and_removing_redundancy'} $genome geneModels.h.gff3 geneModels.j.gff3 > geneModels.k.gff3 2> GFF3_merging_and_removing_redundancy.3.log";
-if ( defined $no_alternative_splicing_analysis ) {
-    push @cmdString, "ln -sf geneModels.k.gff3 geneModels.gff3";
-}
-else {
-    push @cmdString, "$bin_path/paraAlternative_splicing_analysis $config{'alternative_splicing_analysis'} --tmp_dir paraAlternative_splicing_analysis.tmp --cpu $cpu geneModels.k.gff3 $tmp_dir/3.NGSReads_prediction/intron.txt $tmp_dir/3.NGSReads_prediction/base_depth.txt > geneModels.l.gff3 2> paraAlternative_splicing_analysis.log";
-    push @cmdString, "$bin_path/GFF3_add_CDS_for_transcript $genome geneModels.l.gff3 > geneModels.m.gff3";
-    push @cmdString, "ln -sf geneModels.m.gff3 geneModels.gff3";
-}
-
-&execute_cmds(@cmdString, "04.Alternative_splicing_analysis.ok");
+print STDERR "Step 5: CurateGeneModels " . "(" . (localtime) . ")" . "\n";
+mkdir "$tmp_dir/5.curate_gene_models" unless -e "$tmp_dir/5.curate_gene_models";
+my @parameter;
+push @parameter, "--HMM_db $HMM_db" if $HMM_db;
+push @parameter, "--diamond_db $BLASTP_db" if $BLASTP_db;
+push @parameter, "--diamond_db $protein" unless (defined $HMM_db or defined $BLASTP_db);
+my $parameter = join " ", @parameter;
+$cmdString = "$bin_path/curateGeneModels $parameter --cpu $cpu --repeat $tmp_dir/1.RepeatMasker/genome.repeat.gff3 --tmp_dir $tmp_dir/5.curate_gene_models --intron $tmp_dir/3.NGSReads_prediction/intron.txt --base_depth $tmp_dir/3.NGSReads_prediction/base_depth.txt $genome $tmp_dir/3.NGSReads_prediction/NGSReads_prediction.raw.gff3 $tmp_dir/2.homolog_prediction/homolog_prediction.raw.gff3 $tmp_dir/4.augustus/augustus_prediction.gff3 > $tmp_dir/5.curate_gene_models/curate_gene_models.gff3 2> $tmp_dir/5.curate_gene_models/curate_gene_models.log";
+&execute_cmds($cmdString, "$tmp_dir/5.curate_gene_models.ok");
 
 
-# Step 6: OutPut
 print STDERR "\n============================================\n";
 print STDERR "Step 6: Output gene models " . "(" . (localtime) . ")" . "\n";
 mkdir "$tmp_dir/6.output_gene_models" unless -e "$tmp_dir/6.output_gene_models";

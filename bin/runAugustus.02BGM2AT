@@ -338,7 +338,7 @@ else {
     "test -s genes.raw.gb || { echo 'Error: genes.raw.gb is empty, please check gff2gbSmallDNA.raw.log' >&2; exit 1; }",
 );
 if ( defined $onlytrain_GFF3 ) {
-    push @cmds, "gff2gbSmallDNA.pl --overlap" . sh_quote($onlytrain_GFF3) . " $fa_q $flanking_length genes.all.gb &> gff2gbSmallDNA.all.log";
+    push @cmds, "gff2gbSmallDNA.pl --overlap " . sh_quote($onlytrain_GFF3) . " $fa_q $flanking_length genes.all.gb &> gff2gbSmallDNA.all.log";
     push @cmds, "test -s genes.all.gb || { echo 'Error: genes.all.gb is empty, please check gff2gbSmallDNA.all.log' >&2; exit 1; }";
 }
 run_cmds(\@cmds, "05b.BGM2AT.gff2gbSmallDNA.ok");

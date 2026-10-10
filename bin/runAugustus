@@ -44,7 +44,7 @@ my $usage_cn = <<'USAGE';
        (4) gene行含type=excellent或type=good（值以excellent/good开头即可，不区分大小写）的基因模型，会生成可信度更高的hints（src=M或src=E）；不含type属性的基因模型只生成src=P的hints，影响较弱。
 
 运行流程:
-    (1) 整合证据: 将--input_evidence_gff3输入的多个GFF3文件整合为一个文件evidence_prediction.raw.gff3。先从最后两个文件开始：用后一个文件的基因模型，通过GFF3_filling_gene_models填补前一个文件中基因模型的首尾；再通过GFF3_merging_and_removing_redundancy对（填补后的前一个文件，后一个文件）去冗余，前者优先保留。得到的结果再与更前面的一个文件按同样方法整合，直至所有文件整合为一个。只输入一个文件时，仅做去冗余。
+    (1) 整合证据: 将--input_evidence_gff3输入的多个GFF3文件整合为一个文件evidence_prediction.raw.gff3。先从最先输入的两个文件开始：用后一个文件（第2个文件）的基因模型，通过GFF3_filling_gene_models填补前一个文件（第1个文件）中基因模型的首尾；再通过GFF3_merging_and_removing_redundancy对（前一个文件填补后的结果，后一个文件）去冗余，前者优先保留。得到的结果再与第3个输入的文件按同样方法整合（用第3个文件填补该结果，再对（填补后的结果，第3个文件）去冗余，前者优先保留），依此类推，直至所有文件整合为一个。只输入一个文件时，仅做去冗余。
     (2) 修复格式: 使用GFF3Clear对整合后的evidence_prediction.raw.gff3进一步检查并修复GFF3格式（校正相位、终止密码子、外显子、UTR等，并检测基因完整性），不重命名基因，得到evidence_prediction.gff3，用于后续筛选基因模型。
     (3) 筛选基因模型: runAugustus.01PickGeneModels对evidence_prediction.gff3去除含内部终止密码子或移码的基因模型，并去冗余，得到用于etraining的ati.filter1.gff3（可含5'或3'不完整的基因），以及用于参数优化的最优完整基因模型ati.filter2.gff3。
     (4) 训练: 确定flanking_length后，runAugustus.02BGM2AT完成etraining、准确性检测和参数优化。
@@ -194,7 +194,8 @@ chdir "$tmp_dir/training" or die $!;
 print STDERR "\nPWD: $tmp_dir/training\n";
 
 # 1 合并Transcript和Homolog预测的基因模型
-# 从最后两个文件开始：用后者填补前者的首尾，再对（填补后的前者，后者）整合去冗余；得到的结果继续作为“后者”与再前一个文件整合。
+# 从最先输入的两个文件开始：用后一个文件填补前一个文件的首尾，再对（填补后的前一个文件，后一个文件）整合去冗余（前者优先）；
+# 得到的结果作为“前一个文件”，继续与下一个输入的文件按同样方法整合，直至所有文件整合为一个。
 {
     my @cmds;
     my $raw = "evidence_prediction.raw.gff3";
@@ -203,15 +204,17 @@ print STDERR "\nPWD: $tmp_dir/training\n";
                   . shq($genome) . " " . shq($input_evidence[0]) . " > $raw 2> evidence.merge.single.log";
     }
     else {
-        my $current = $input_evidence[-1];
-        for (my $i = $#input_evidence - 1; $i >= 0; $i--) {
+        my $current = $input_evidence[0];
+        for (my $i = 1; $i <= $#input_evidence; $i++) {
             my $filled = "evidence.filled$i.gff3";
-            my $merged = ($i == 0) ? $raw : "evidence.merged$i.gff3";
+            my $merged = ($i == $#input_evidence) ? $raw : "evidence.merged$i.gff3";
+            # 用第$i+1个文件（索引$i）的基因模型填补当前整合结果的首尾
             push @cmds, "$tool{GFF3_filling_gene_models} --cpu $cpu --genetic_code $genetic_code "
-                      . shq($genome) . " " . shq($input_evidence[$i]) . " " . shq($current)
+                      . shq($genome) . " " . shq($current) . " " . shq($input_evidence[$i])
                       . " > $filled 2> evidence.filled$i.log";
+            # 对（填补后的当前结果，第$i+1个文件）去冗余，前者优先保留
             push @cmds, "$tool{GFF3_merging_and_removing_redundancy} --cpu $cpu --genetic_code $genetic_code --stable_tie "
-                      . shq($genome) . " $filled " . shq($current) . " > $merged 2> evidence.merged$i.log";
+                      . shq($genome) . " $filled " . shq($input_evidence[$i]) . " > $merged 2> evidence.merged$i.log";
             $current = $merged;
         }
     }
@@ -460,7 +463,7 @@ Before running:
        (4) Gene models whose gene line contains type=excellent or type=good (the value only needs to begin with excellent/good, case-insensitive) generate the more reliable hints (src=M or src=E); gene models without a type attribute generate only src=P hints, which have a weaker effect.
 
 Workflow:
-    (1) Integrate evidence: the GFF3 files given by --input_evidence_gff3 are integrated into one file, evidence_prediction.raw.gff3. Starting from the last two files, GFF3_filling_gene_models fills the 5'/3' ends of the gene models of the earlier file with the gene models of the later file, and then GFF3_merging_and_removing_redundancy removes the redundancy between (the filled earlier file, the later file), the former being preferred. The result is integrated with the previous file in the same way, until all files are integrated into one. With a single input file, only redundancy removal is done.
+    (1) Integrate evidence: the GFF3 files given by --input_evidence_gff3 are integrated into one file, evidence_prediction.raw.gff3. Starting from the first two input files, GFF3_filling_gene_models fills the 5'/3' ends of the gene models of the earlier file (the 1st file) with the gene models of the later file (the 2nd file), and then GFF3_merging_and_removing_redundancy removes the redundancy between (the filled earlier file, the later file), the former being preferred. The result is then integrated with the 3rd input file in the same way (the result is filled with the 3rd file, and then the redundancy between (the filled result, the 3rd file) is removed, the former being preferred), and so on, until all files are integrated into one. With a single input file, only redundancy removal is done.
     (2) Repair format: GFF3Clear further checks and repairs the GFF3 format of the integrated evidence_prediction.raw.gff3 (correcting phases, stop codons, exons, UTRs, etc., and detecting gene integrity) without renaming the genes, giving evidence_prediction.gff3, which is used for picking gene models.
     (3) Pick gene models: runAugustus.01PickGeneModels removes gene models with internal stop codons or frameshifts and redundant ones from evidence_prediction.gff3, giving ati.filter1.gff3 (for etraining; may contain 5'/3' incomplete genes) and ati.filter2.gff3, the best complete gene models (for parameter optimization).
     (4) Training: after determining flanking_length, runAugustus.02BGM2AT performs etraining, accuracy detection and parameter optimization.

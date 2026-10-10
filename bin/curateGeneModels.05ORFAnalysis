@@ -1,0 +1,730 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use Getopt::Long;
+use File::Temp qw(tempdir);
+use POSIX ();
+
+########################################################################
+# 中文用法说明（放在代码最前面；英文用法说明放在文件最末尾的__DATA__部分）
+########################################################################
+my $usage_cn = <<'USAGE';
+名称:
+    __PROG__ - 对带可变剪接的基因模型进行ORF分析，为没有CDS的转录本添加CDS和UTR信息；找不到合格ORF的转录本改为lncRNA。
+
+用法:
+    __PROG__ [参数] --genome genome.fasta geneModels.l.gff3 > geneModels.m.gff3
+
+示例:
+    __PROG__ --cpu 20 --genetic_code 1 --genome genome.fasta geneModels.l.gff3 > geneModels.m.gff3
+
+功能简介:
+    (1) 按ID/Parent关系将GFF3文件分组为基因；同一基因中已带CDS的转录本视为"参考转录本"，原样保留。
+    (2) 没有CDS的mRNA转录本(通常是新增的可变剪接转录本)根据exon提取转录本序列(负链自动反向互补)，并枚举3个读码框中的所有ORF：完整ORF(起始密码子到终止密码子)、3'端不完整ORF(有起始密码子无终止密码子)、5'端不完整ORF(位于序列起始处，无起始密码子)。
+    (3) 将每个候选ORF映射回基因组，计算其与参考转录本CDS在"相同密码子相位"上的重叠碱基数。候选ORF依次按"与参考CDS同相位重叠碱基数、完整性、ORF长度"从高到低排序，并从前往后选取第一个合格的ORF：完整、蛋白长度不低于--min_protein_length、CDS长度不低于--min_cds_ratio乘以参考转录本最长CDS(基因没有参考转录本时不检查该项)。因此可变剪接转录本会优先沿用参考蛋白的阅读框，而不会被偶然出现的更长ORF取代。
+    (4) 找到合格ORF的转录本重新生成CDS、exon、five_prime_UTR、three_prime_UTR和intron(ID命名规则与GFF3Clear一致)，并更新mRNA第九列的Integrity标签。
+    (5) 没有找到合格ORF的转录本，其feature name(第三列)修改为lncRNA，不给出CDS和UTR信息，仅重新生成exon和intron，并删除第九列的Integrity标签；这些转录本仍保留在标准输出的原基因中，基因范围不变。
+    (6) lnc_RNA等非mRNA/transcript类型的转录本以及已带CDS的转录本不做分析，原样输出。
+
+输入输出:
+    输入的GFF3文件(支持.gz压缩文件)放在命令行最后；标准输出为结果GFF3文件；统计信息(包括转为lncRNA的转录本数量及原因分类)输出到标准错误输出。
+
+参数:
+    --genome <文件>
+    默认值: 无。必须设置。基因组序列FASTA文件(支持.gz压缩文件)。
+
+    --genetic_code <整数>
+    默认值: 1。遗传密码编号，请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi 。
+
+    --min_protein_length <整数>
+    默认值: 30。合格ORF编码的最短氨基酸数(不含终止密码子)。
+
+    --min_cds_ratio <小数>
+    默认值: 0.5。合格ORF的CDS长度占参考转录本最长CDS长度的最低比例，取值范围0~1，设为0则不检查。
+
+    --require_ref_frame
+    默认值: 无。设置后，若基因有参考转录本，则合格ORF必须与参考CDS有同相位重叠(不接受新阅读框的ORF)。
+
+    --all_start_codons
+    默认值: 无。默认只把ATG作为起始密码子；设置后使用遗传密码表中的全部起始密码子。
+
+    --cpu <整数>
+    默认值: 8。设置并行进程数。
+
+    --help
+    Display the English usage and exit.
+
+    --chinese_help
+    显示中文用法说明并退出。
+USAGE
+
+my $usage_en = do { local $/; <DATA> };
+$usage_en = '' unless defined $usage_en;
+sub get_usage {
+    my ($lang) = @_;
+    my $u = $lang eq 'cn' ? $usage_cn : $usage_en;
+    $u =~ s/__PROG__/$0/g;
+    return $u;
+}
+
+# 程序直接运行(无任何参数)时，给出英文用法说明
+if ( @ARGV == 0 ) { print STDERR get_usage('en'); exit 1; }
+
+my ( $genome_file, $require_ref_frame, $all_start, $help, $chinese_help );
+my $genetic_code   = 1;
+my $cpu            = 8;
+my $min_aa         = 30;
+my $min_cds_ratio  = 0.5;
+GetOptions(
+    "genome=s"             => \$genome_file,
+    "genetic_code=i"       => \$genetic_code,
+    "min_protein_length=i" => \$min_aa,
+    "min_cds_ratio=f"      => \$min_cds_ratio,
+    "require_ref_frame"    => \$require_ref_frame,
+    "all_start_codons"     => \$all_start,
+    "cpu=i"                => \$cpu,
+    "help|h"               => \$help,
+    "chinese_help"         => \$chinese_help,
+) or do { print STDERR "\n", get_usage('en'); exit 1; };
+if ($help)         { print get_usage('en'); exit 0; }
+if ($chinese_help) { print get_usage('cn'); exit 0; }
+die "Error: --genome is required.\n" unless defined $genome_file;
+die "Error: exactly one input GFF3 file is required.\n\n" . get_usage('en') unless @ARGV == 1;
+my $input_gff3 = $ARGV[0];
+die "Error: can not find file $input_gff3\n" unless -e $input_gff3;
+die "Error: can not find file $genome_file\n" unless -e $genome_file;
+$cpu = 1 if $cpu < 1;
+die "Error: --min_cds_ratio must be between 0 and 1\n" if $min_cds_ratio < 0 || $min_cds_ratio > 1;
+
+my ( $code_ref, $start_ref, $stop_ref ) = codon_table($genetic_code);
+my %stop_codon  = %$stop_ref;
+my %start_codon = $all_start ? %$start_ref : ( "ATG" => 1 );
+die "Error: no stop codon is available.\n" unless %stop_codon;
+
+########################################################################
+# 读取基因组与GFF3
+########################################################################
+my %seq = load_fasta($genome_file);
+
+my ( @recs, %first, %parent_of, @header );
+{
+    my $fh = open_in($input_gff3);
+    my $seen = 0;
+    while ( my $raw = <$fh> ) {
+        $raw =~ s/[\r\n]+$//;
+        last if $raw =~ /^##FASTA/;
+        next if $raw =~ /^\s*$/;
+        if ( $raw =~ /^#/ ) { push @header, $raw unless $seen || $raw =~ /^###/; next; }
+        my @f = split /\t/, $raw, 9;
+        if ( @f < 9 ) { warn "Warning: line with < 9 columns was skipped: $raw\n"; next; }
+        $seen = 1;
+        my ($id)  = $f[8] =~ /(?:^|;)\s*ID=([^;\s]+)/;
+        my ($par) = $f[8] =~ /(?:^|;)\s*Parent=([^;]+)/;
+        my @p = defined $par ? grep { $_ ne '' } map { s/^\s+|\s+$//gr } split( /,/, $par ) : ();
+        push @recs, { line => $raw, f => \@f, id => $id, pars => \@p };
+        if ( defined $id ) {
+            $first{$id} = 1;
+            $parent_of{$id} //= $p[0] if @p;
+        }
+    }
+    close $fh;
+}
+sub top_of {
+    my ($id) = @_;
+    my %seen;
+    while ( defined $parent_of{$id} && exists $first{ $parent_of{$id} } && !$seen{$id}++ ) { $id = $parent_of{$id}; }
+    return $id;
+}
+my ( %grp, @groups );
+{
+    my $anon = 0;
+    foreach my $r (@recs) {
+        my $key;
+        if    ( @{ $r->{pars} } )  { $key = top_of( $r->{pars}[0] ); }
+        elsif ( defined $r->{id} ) { $key = $r->{id}; }
+        else                       { $key = "__anonymous_feature_" . ( ++$anon ); }
+        unless ( $grp{$key} ) { $grp{$key} = { key => $key, recs => [] }; push @groups, $grp{$key}; }
+        push @{ $grp{$key}{recs} }, $r;
+    }
+}
+@recs = ();
+print STDERR "Read $input_gff3: " . scalar(@groups) . " feature groups.\n";
+
+########################################################################
+# 分批并行处理
+########################################################################
+my $tmpdir = tempdir( "curateORF_XXXXXX", TMPDIR => 1, CLEANUP => 1 );
+my $n_groups = scalar @groups;
+my $bsize = int( $n_groups / ( $cpu * 4 ) ) + 1;
+$bsize = 100  if $bsize < 100;
+$bsize = 5000 if $bsize > 5000;
+my @batches;
+for ( my $i = 0 ; $i < $n_groups ; $i += $bsize ) {
+    my $j = $i + $bsize - 1;
+    $j = $n_groups - 1 if $j > $n_groups - 1;
+    push @batches, [ $i, $j ];
+}
+
+{
+    my ( %running, @failed );
+    foreach my $b ( 0 .. $#batches ) {
+        if ( $cpu == 1 ) { run_batch($b); next; }
+        while ( keys %running >= $cpu ) {
+            my $pid = waitpid( -1, 0 );
+            last if $pid <= 0;
+            my $x = delete $running{$pid};
+            push @failed, $x if defined $x && $? != 0;
+        }
+        my $pid = fork();
+        die "Error: fork failed, $!\n" unless defined $pid;
+        if ( $pid == 0 ) {
+            my $ok = eval { run_batch($b); 1 };
+            print STDERR "Error in batch $b: $@" unless $ok;
+            POSIX::_exit( $ok ? 0 : 1 );
+        }
+        $running{$pid} = $b;
+    }
+    while (%running) {
+        my $pid = waitpid( -1, 0 );
+        last if $pid <= 0;
+        my $x = delete $running{$pid};
+        push @failed, $x if defined $x && $? != 0;
+    }
+    die "Error: batch(es) failed: @failed\n" if @failed;
+}
+
+########################################################################
+# 汇总输出
+########################################################################
+print "##gff-version 3\n" unless grep { /^##gff-version/ } @header;
+print "$_\n" foreach @header;
+my %total;
+foreach my $b ( 0 .. $#batches ) {
+    copy_file( "$tmpdir/$b.main", \*STDOUT );
+    open my $sf, '<', "$tmpdir/$b.stat" or die "Error: can not open $tmpdir/$b.stat, $!\n";
+    while (<$sf>) { chomp; my ( $k, $v ) = split /\t/; $total{$k} += $v; }
+    close $sf;
+    unlink "$tmpdir/$b.main", "$tmpdir/$b.stat";
+}
+
+# 统计信息输出到标准错误输出
+{
+    my $an  = $total{analyzed} || 0;
+    my $ps  = $total{passed}   || 0;
+    my $lnc = $total{to_lnc}   || 0;
+    my $pct = sub { $an ? sprintf( "%.2f%%", 100 * $_[0] / $an ) : "NA" };
+    print STDERR "========== ORF analysis statistics ==========\n";
+    print STDERR "Genes:                                                        " . ( $total{genes} || 0 ) . "\n";
+    print STDERR "Transcripts (all):                                            " . ( $total{tx}    || 0 ) . "\n";
+    print STDERR "  with CDS in the input (reference, unchanged):               " . ( $total{with_cds} || 0 ) . "\n";
+    print STDERR "  mRNA without CDS (analysed):                                $an\n";
+    print STDERR "    qualified ORF found, CDS/UTR added:                       $ps (" . $pct->($ps) . ")\n";
+    print STDERR "    no qualified ORF, changed to lncRNA (no CDS):             $lnc (" . $pct->($lnc) . ")\n";
+    print STDERR "      reason: no ORF found:                                   " . ( $total{'lnc_no_ORF'} || 0 ) . "\n";
+    print STDERR "      reason: only incomplete ORF (no start/stop codon):      " . ( $total{'lnc_incomplete_ORF'} || 0 ) . "\n";
+    print STDERR "      reason: ORF shorter than --min_protein_length:          " . ( $total{'lnc_ORF_too_short'} || 0 ) . "\n";
+    print STDERR "      reason: not in the reference reading frame:             " . ( $total{'lnc_not_in_reference_frame'} || 0 ) . "\n";
+    print STDERR "      reason: CDS shorter than --min_cds_ratio * reference:   " . ( $total{'lnc_CDS_shorter_than_reference'} || 0 ) . "\n";
+    print STDERR "Genes with transcripts changed to lncRNA:                     " . ( $total{genes_with_lnc} || 0 ) . "\n";
+    print STDERR "Genes without any coding transcript left (all lncRNA):        " . ( $total{genes_all_lnc}  || 0 ) . "\n";
+    print STDERR "=============================================\n";
+}
+exit 0;
+
+########################################################################
+# 子程序
+########################################################################
+sub copy_file {
+    my ( $f, $out ) = @_;
+    open my $in, '<', $f or die "Error: can not open $f, $!\n";
+    local $/ = \1048576;
+    print {$out} $_ while <$in>;
+    close $in;
+}
+
+sub run_batch {
+    my ($b) = @_;
+    my ( $from, $to ) = @{ $batches[$b] };
+    my ( $main, %st ) = ('');
+    foreach my $i ( $from .. $to ) {
+        my ( $m, $s ) = process_group( $groups[$i] );
+        $main .= $m;
+        $st{$_} += $s->{$_} foreach keys %$s;
+    }
+    open my $o1, '>', "$tmpdir/$b.main" or die "Error: $!\n"; print $o1 $main; close $o1;
+    open my $o3, '>', "$tmpdir/$b.stat" or die "Error: $!\n";
+    print $o3 "$_\t$st{$_}\n" foreach sort keys %st;
+    close $o3;
+}
+
+sub open_in {
+    my ($file) = @_;
+    my $fh;
+    if ( $file =~ /\.gz$/i ) { open( $fh, '-|', 'gzip', '-dc', $file ) or die "Can not open file $file, $!\n"; }
+    else                     { open( $fh, '<', $file ) or die "Can not open file $file, $!\n"; }
+    return $fh;
+}
+
+sub load_fasta {
+    my ($file) = @_;
+    my ( %s, $id );
+    my $fh = open_in($file);
+    while ( my $line = <$fh> ) {
+        $line =~ s/[\r\n]+$//;
+        if ( $line =~ /^>\s*(\S+)/ ) { $id = $1; $s{$id} //= ''; }
+        elsif ( defined $id ) { $line =~ s/\s+//g; $s{$id} .= uc $line; }
+    }
+    close $fh;
+    return %s;
+}
+
+sub set_attr {
+    my ( $attr, $tag, $val ) = @_;
+    my @a = grep { $_ ne '' } split /;/, $attr;
+    my $found = 0;
+    foreach (@a) { if (/^\Q$tag\E=/) { $_ = "$tag=$val"; $found = 1; } }
+    push @a, "$tag=$val" unless $found;
+    return join( ";", @a ) . ";";
+}
+sub del_attr {
+    my ( $attr, $tag ) = @_;
+    my @a = grep { $_ ne '' && $_ !~ /^\Q$tag\E=/ } split /;/, $attr;
+    return join( ";", @a ) . ";";
+}
+sub set_line_attr {
+    my ( $line, $tag, $val ) = @_;
+    my @f = split /\t/, $line, 9;
+    return $line if @f < 9;
+    $f[8] = set_attr( $f[8], $tag, $val );
+    return join( "\t", @f );
+}
+# 将转录本行改为lncRNA类型，并删除Integrity标签
+sub to_lnc_line {
+    my ($line) = @_;
+    my @f = split /\t/, $line, 9;
+    return $line if @f < 9;
+    $f[2] = 'lncRNA';
+    $f[8] = del_attr( $f[8], 'Integrity' );
+    return join( "\t", @f );
+}
+
+# 处理一个分组(基因)，返回 (标准输出文本, 统计哈希引用)
+sub process_group {
+    my ($g)    = @_;
+    my $recs   = $g->{recs};
+    my %st     = ( genes => 1, tx => 0, with_cds => 0, analyzed => 0, passed => 0, to_lnc => 0 );
+    my ($root) = grep { defined $_->{id} && $_->{id} eq $g->{key} } @$recs;
+    unless ( $root && lc( $root->{f}[2] ) eq 'gene' ) {
+        $st{genes} = 0;
+        return ( join( "", map { "$_->{line}\n" } @$recs ) . "\n", \%st );
+    }
+
+    # 转录本(Parent为基因)及其子特征
+    my ( %tx, @tx_order, @other );
+    foreach my $r (@$recs) {
+        next if $r == $root;
+        if ( defined $r->{id} && @{ $r->{pars} } && $r->{pars}[0] eq $g->{key} ) {
+            my $t = { id => $r->{id}, rec => $r, children => [], exons => [], cds => [], res => undef };
+            $tx{ $r->{id} } = $t;
+            push @tx_order, $t;
+        }
+    }
+    foreach my $r (@$recs) {
+        next if $r == $root;
+        next if defined $r->{id} && $tx{ $r->{id} } && $tx{ $r->{id} }{rec} == $r;
+        my @p = grep { $tx{$_} } @{ $r->{pars} };
+        if (@p) {
+            push @{ $tx{ $p[0] }{children} }, $r->{line};
+            my $type = lc $r->{f}[2];
+            my ( $s, $e ) = ( $r->{f}[3], $r->{f}[4] );
+            next unless $s =~ /^\d+$/ && $e =~ /^\d+$/;
+            ( $s, $e ) = ( $e, $s ) if $s > $e;
+            foreach my $p (@p) {
+                if    ( $type eq 'exon' ) { push @{ $tx{$p}{exons} }, [ $s, $e ]; }
+                elsif ( $type eq 'cds' )  { push @{ $tx{$p}{cds} }, [ $s, $e, $r->{f}[7] ]; }
+            }
+        }
+        else { push @other, $r->{line}; }
+    }
+
+    # 参考转录本：已带CDS的转录本
+    my @refs;
+    my $ref_len = 0;
+    foreach my $t (@tx_order) {
+        $st{tx}++;
+        next unless @{ $t->{cds} };
+        $st{with_cds}++;
+        my $strand = tx_strand( $t, $root );
+        my ( $pieces, $len ) = ref_pieces( $t->{cds}, $strand );
+        push @refs, { chr => $t->{rec}{f}[0], strand => $strand, pieces => $pieces, len => $len };
+        $ref_len = $len if $len > $ref_len;
+    }
+
+    # 分析没有CDS的mRNA转录本
+    foreach my $t (@tx_order) {
+        next if @{ $t->{cds} };
+        next unless lc( $t->{rec}{f}[2] ) =~ /^(?:mrna|transcript)$/;
+        $st{analyzed}++;
+        my $strand = tx_strand( $t, $root );
+        my @same = grep { $_->{chr} eq $t->{rec}{f}[0] && $_->{strand} eq $strand } @refs;
+        my $res = analyze_tx( $t, $root, $strand, \@same, $ref_len );
+        if ( !defined $res ) { $st{analyzed}--; next; }
+        $t->{res} = $res;
+        if ( $res->{pass} ) { $st{passed}++; }
+        else {
+            $st{to_lnc}++;
+            $st{ 'lnc_' . $res->{reason} }++;
+        }
+    }
+    if ( $st{to_lnc} ) {
+        $st{genes_with_lnc} = 1;
+        # 基因中是否还有编码转录本：原有CDS的转录本 + 新找到ORF的转录本
+        $st{genes_all_lnc} = 1 if $st{with_cds} + $st{passed} == 0;
+    }
+
+    # 所有转录本(包括改为lncRNA的)都保留在原基因中，基因范围不变
+    my $main = "$root->{line}\n";
+    $main .= tx_text($_) foreach @tx_order;
+    $main .= "$_\n" foreach @other;
+    $main .= "\n";
+    return ( $main, \%st );
+}
+
+sub tx_text {
+    my ($t) = @_;
+    if ( $t->{res} ) {
+        return "$t->{res}{line}\n" . join( '', map { "$_\n" } @{ $t->{res}{children} } );
+    }
+    return "$t->{rec}{line}\n" . join( '', map { "$_\n" } @{ $t->{children} } );
+}
+
+sub tx_strand {
+    my ( $t, $root ) = @_;
+    my $s = $t->{rec}{f}[6];
+    return $s if $s =~ /^[+-]$/;
+    $s = $root->{f}[6];
+    return $s =~ /^[+-]$/ ? $s : '+';
+}
+
+# 参考转录本的CDS片段：[起点, 终点, 相位键]。相位键相同表示在同一基因组位置上具有相同的密码子位置。
+sub ref_pieces {
+    my ( $cds, $strand ) = @_;
+    my @c = sort { $a->[0] <=> $b->[0] } @$cds;
+    @c = reverse @c if $strand eq '-';
+    my $ph = $c[0][2];
+    $ph = 0 unless defined $ph && $ph =~ /^[012]$/;
+    my $cum = ( 3 - $ph ) % 3;
+    my ( @p, $len );
+    $len = 0;
+    foreach my $c (@c) {
+        my ( $s, $e ) = @$c[ 0, 1 ];
+        my $cp  = $cum % 3;
+        my $key = $strand eq '+' ? ( $cp - $s ) % 3 : ( $cp + $e ) % 3;
+        push @p, [ $s, $e, $key ];
+        $cum += $e - $s + 1;
+        $len += $e - $s + 1;
+    }
+    return ( \@p, $len );
+}
+
+# 将转录本坐标区间[a,b]映射到基因组，按转录方向返回 [基因组起点, 基因组终点, 相位键, 长度]
+# 区间内第一个碱基的密码子位置为0。
+sub orf_pieces {
+    my ( $segs, $strand, $a, $b ) = @_;
+    my @p;
+    foreach my $s (@$segs) {
+        my ( $ts, $te, $gs, $ge ) = @$s;
+        next if $te < $a || $ts > $b;
+        my $x = $a > $ts ? $a : $ts;
+        my $y = $b < $te ? $b : $te;
+        my ( $g1, $g2 ) = $strand eq '+' ? ( $gs + $x - $ts, $gs + $y - $ts ) : ( $ge - ( $y - $ts ), $ge - ( $x - $ts ) );
+        my $cp  = ( $x - $a ) % 3;
+        my $key = $strand eq '+' ? ( $cp - $g1 ) % 3 : ( $cp + $g2 ) % 3;
+        push @p, [ $g1, $g2, $key, $y - $x + 1 ];
+    }
+    return @p;
+}
+
+# 枚举三个读码框中的ORF，返回 [起点, 终点, 有起始密码子, 有终止密码子, 读码框]（转录本坐标，1起始）
+sub find_orfs {
+    my ($seq) = @_;
+    my $L = length $seq;
+    my @cand;
+    foreach my $f ( 0 .. 2 ) {
+        my ( $first_seg, $first_start ) = ( 1, undef );
+        my $last_end = $f + 3 * int( ( $L - $f ) / 3 );
+        for ( my $i = $f ; $i + 3 <= $L ; $i += 3 ) {
+            my $c = substr( $seq, $i, 3 );
+            $first_start = $i + 1 if !defined $first_start && $start_codon{$c};
+            if ( $stop_codon{$c} ) {
+                my $e = $i + 3;
+                push @cand, [ $first_start, $e, 1, 1, $f ] if defined $first_start && $e - $first_start + 1 >= 6;
+                if ( $first_seg && ( !defined $first_start || $first_start != $f + 1 ) && $e - $f >= 6 ) {
+                    push @cand, [ $f + 1, $e, 0, 1, $f ];
+                }
+                $first_seg   = 0;
+                $first_start = undef;
+            }
+        }
+        if ( defined $first_start && $last_end - $first_start + 1 >= 3 ) {
+            push @cand, [ $first_start, $last_end, 1, 0, $f ];
+        }
+        if ( $first_seg && ( !defined $first_start || $first_start != $f + 1 ) && $last_end - $f >= 3 ) {
+            push @cand, [ $f + 1, $last_end, 0, 0, $f ];
+        }
+    }
+    return @cand;
+}
+
+# 分析一个没有CDS的转录本；无法分析(缺少序列等)时返回undef
+# 返回 { pass, reason, line, children }；不合格时 line 的类型已改为lncRNA，children只含exon和intron
+sub analyze_tx {
+    my ( $t, $root, $strand, $refs, $ref_len ) = @_;
+    my $r = $t->{rec};
+    my @f = @{ $r->{f} };
+    my ( $chr, $src ) = ( $f[0], $f[1] );
+    my $gseq = $seq{$chr};
+    unless ( defined $gseq ) { warn "Warning: sequence $chr of transcript $t->{id} is not found in the genome, it is output unchanged.\n"; return undef; }
+
+    my @ex = sort { $a->[0] <=> $b->[0] || $a->[1] <=> $b->[1] } @{ $t->{exons} };
+    unless (@ex) {
+        if ( $f[3] =~ /^\d+$/ && $f[4] =~ /^\d+$/ ) {
+            warn "Warning: transcript $t->{id} has no exon, its own range is used as an exon.\n";
+            @ex = ( [ $f[3] <= $f[4] ? ( $f[3], $f[4] ) : ( $f[4], $f[3] ) ] );
+        }
+        else { return undef; }
+    }
+    my @m;
+    foreach my $e (@ex) {
+        if ( @m && $e->[0] <= $m[-1][1] ) { $m[-1][1] = $e->[1] if $e->[1] > $m[-1][1]; }
+        else { push @m, [ $e->[0], $e->[1] ]; }
+    }
+    if ( $m[-1][1] > length $gseq || $m[0][0] < 1 ) {
+        warn "Warning: exons of transcript $t->{id} exceed the sequence $chr, it is output unchanged.\n";
+        return undef;
+    }
+    my $tseq = '';
+    $tseq .= substr( $gseq, $_->[0] - 1, $_->[1] - $_->[0] + 1 ) foreach @m;
+    if ( $strand eq '-' ) { $tseq = reverse $tseq; $tseq =~ tr/ACGT/TGCA/; }
+
+    # 转录方向的外显子片段：[转录本起点, 转录本终点, 基因组起点, 基因组终点]
+    my @ord = $strand eq '-' ? reverse @m : @m;
+    my ( @segs, $pos );
+    $pos = 1;
+    foreach my $e (@ord) {
+        my $l = $e->[1] - $e->[0] + 1;
+        push @segs, [ $pos, $pos + $l - 1, $e->[0], $e->[1] ];
+        $pos += $l;
+    }
+    my $L = $pos - 1;
+
+    # 候选ORF打分
+    my @info;
+    foreach my $c ( find_orfs($tseq) ) {
+        my ( $a, $b, $hs, $he ) = @$c[ 0 .. 3 ];
+        my $ov = 0;
+        if (@$refs) {
+            my @p = orf_pieces( \@segs, $strand, $a, $b );
+            foreach my $rf (@$refs) {
+                my $o = 0;
+                foreach my $p (@p) {
+                    foreach my $q ( @{ $rf->{pieces} } ) {
+                        next unless $p->[2] == $q->[2];
+                        my $s = $p->[0] > $q->[0] ? $p->[0] : $q->[0];
+                        my $e = $p->[1] < $q->[1] ? $p->[1] : $q->[1];
+                        $o += $e - $s + 1 if $e >= $s;
+                    }
+                }
+                $ov = $o if $o > $ov;
+            }
+        }
+        push @info, { a => $a, b => $b, len => $b - $a + 1, rank => 2 * $hs + $he, ov => $ov };
+    }
+    my @sorted = sort { $b->{ov} <=> $a->{ov} || $b->{rank} <=> $a->{rank} || $b->{len} <=> $a->{len} || $a->{a} <=> $b->{a} } @info;
+
+    my ( $best, $pass ) = ( undef, 0 );
+    foreach my $c (@sorted) {
+        next unless $c->{rank} == 3;
+        next if $c->{len} / 3 - 1 < $min_aa;
+        next if @$refs && $require_ref_frame && !$c->{ov};
+        next if $ref_len && $c->{len} < $min_cds_ratio * $ref_len;
+        ( $best, $pass ) = ( $c, 1 );
+        last;
+    }
+    my $reason = '';
+    unless ($pass) {
+        ($best) = sort { $b->{ov} <=> $a->{ov} || $b->{len} <=> $a->{len} || $b->{rank} <=> $a->{rank} } @info;
+        if    ( !$best )               { $reason = 'no_ORF'; }
+        elsif ( $best->{rank} < 3 )    { $reason = 'incomplete_ORF'; }
+        elsif ( $best->{len} / 3 - 1 < $min_aa ) { $reason = 'ORF_too_short'; }
+        elsif ( @$refs && $require_ref_frame && !$best->{ov} ) { $reason = 'not_in_reference_frame'; }
+        else                           { $reason = 'CDS_shorter_than_reference'; }
+    }
+
+    # 生成子特征
+    my $mid = $t->{id};
+    my @feat;
+    my $mkline = sub {
+        my ( $type, $s, $e, $ph, $tag, $i ) = @_;
+        return join( "\t", $chr, $src, $type, $s, $e, '.', $strand, $ph, "ID=$mid.$tag$i;Parent=$mid;" );
+    };
+    my $i = 0;
+    foreach my $s (@segs) {
+        $i++;
+        push @feat, [ $s->[2], 2, $mkline->( 'exon', $s->[2], $s->[3], '.', 'exon', $i ) ];
+    }
+    my @gaps;
+    for my $k ( 1 .. $#m ) {
+        push @gaps, [ $m[ $k - 1 ][1] + 1, $m[$k][0] - 1 ] if $m[$k][0] - $m[ $k - 1 ][1] > 1;
+    }
+    @gaps = reverse @gaps if $strand eq '-';
+    $i = 0;
+    foreach my $g (@gaps) {
+        $i++;
+        push @feat, [ $g->[0], 5, $mkline->( 'intron', $g->[0], $g->[1], '.', 'intron', $i ) ];
+    }
+    my $integrity;
+    if ($pass) {
+        my %name = ( 3 => 'complete', 2 => '3prime_partial', 1 => '5prime_partial', 0 => 'internal' );
+        $integrity = $name{ $best->{rank} };
+        my ( $cum, $k ) = ( 0, 0 );
+        foreach my $p ( orf_pieces( \@segs, $strand, $best->{a}, $best->{b} ) ) {
+            $k++;
+            my $ph = ( 3 - $cum % 3 ) % 3;
+            push @feat, [ $p->[0], 3, $mkline->( 'CDS', $p->[0], $p->[1], $ph, 'CDS', $k ) ];
+            $cum += $p->[3];
+        }
+        if ( $best->{a} > 1 ) {
+            $k = 0;
+            foreach my $p ( orf_pieces( \@segs, $strand, 1, $best->{a} - 1 ) ) {
+                $k++;
+                push @feat, [ $p->[0], 1, $mkline->( $strand eq '+' ? 'five_prime_UTR' : 'three_prime_UTR', $p->[0], $p->[1], '.', $strand eq '+' ? 'utr5p' : 'utr3p', $k ) ];
+            }
+        }
+        if ( $best->{b} < $L ) {
+            $k = 0;
+            foreach my $p ( orf_pieces( \@segs, $strand, $best->{b} + 1, $L ) ) {
+                $k++;
+                push @feat, [ $p->[0], 4, $mkline->( $strand eq '+' ? 'three_prime_UTR' : 'five_prime_UTR', $p->[0], $p->[1], '.', $strand eq '+' ? 'utr3p' : 'utr5p', $k ) ];
+            }
+        }
+    }
+    # 排序：与GFF3Clear一致，负链按坐标从大到小
+    if ( $strand eq '-' ) { @feat = sort { $b->[0] <=> $a->[0] or $a->[1] <=> $b->[1] } @feat; }
+    else                  { @feat = sort { $a->[0] <=> $b->[0] or $a->[1] <=> $b->[1] } @feat; }
+
+    my $line = $r->{line};
+    if ($pass) { $line = set_line_attr( $line, 'Integrity', $integrity ); }
+    else       { $line = to_lnc_line($line); }    # 没有合格ORF：改为lncRNA，不给CDS/UTR
+    return { pass => $pass, reason => $reason, line => $line, children => [ map { $_->[2] } @feat ] };
+}
+
+# 根据遗传密码编号返回（密码子表、起始密码子表、终止密码子表）的哈希引用（参考NCBI Genetic Codes）。
+sub codon_table {
+    my ($genetic_code) = @_;
+    my %code = (
+        "TTT" => "F", "TTC" => "F", "TTA" => "L", "TTG" => "L",
+        "TCT" => "S", "TCC" => "S", "TCA" => "S", "TCG" => "S",
+        "TAT" => "Y", "TAC" => "Y", "TAA" => "X", "TAG" => "X",
+        "TGT" => "C", "TGC" => "C", "TGA" => "X", "TGG" => "W",
+        "CTT" => "L", "CTC" => "L", "CTA" => "L", "CTG" => "L",
+        "CCT" => "P", "CCC" => "P", "CCA" => "P", "CCG" => "P",
+        "CAT" => "H", "CAC" => "H", "CAA" => "Q", "CAG" => "Q",
+        "CGT" => "R", "CGC" => "R", "CGA" => "R", "CGG" => "R",
+        "ATT" => "I", "ATC" => "I", "ATA" => "I", "ATG" => "M",
+        "ACT" => "T", "ACC" => "T", "ACA" => "T", "ACG" => "T",
+        "AAT" => "N", "AAC" => "N", "AAA" => "K", "AAG" => "K",
+        "AGT" => "S", "AGC" => "S", "AGA" => "R", "AGG" => "R",
+        "GTT" => "V", "GTC" => "V", "GTA" => "V", "GTG" => "V",
+        "GCT" => "A", "GCC" => "A", "GCA" => "A", "GCG" => "A",
+        "GAT" => "D", "GAC" => "D", "GAA" => "E", "GAG" => "E",
+        "GGT" => "G", "GGC" => "G", "GGA" => "G", "GGG" => "G",
+    );
+    my %start_table;
+    $start_table{"ATG"} = 1;
+    if    ( $genetic_code == 1 )  { }
+    elsif ( $genetic_code == 2 )  { $code{"AGA"} = "X"; $code{"AGG"} = "X"; $code{"ATA"} = "M"; $code{"TGA"} = "W"; $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG/; }
+    elsif ( $genetic_code == 3 )  { $code{"ATA"} = "M"; $code{"CTT"} = "T"; $code{"CTC"} = "T"; $code{"CTA"} = "T"; $code{"CTG"} = "T"; $code{"TGA"} = "W"; $start_table{$_} = 1 foreach qw/ATA GTG/; }
+    elsif ( $genetic_code == 4 )  { $code{"TGA"} = "W"; $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG CTG TTA TTG/; }
+    elsif ( $genetic_code == 5 )  { $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"ATA"} = "M"; $code{"TGA"} = "W"; $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG TTG/; }
+    elsif ( $genetic_code == 6 )  { $code{"TAA"} = "Q"; $code{"TAG"} = "Q"; }
+    elsif ( $genetic_code == 9 )  { $code{"AAA"} = "N"; $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"TGA"} = "W"; $start_table{"GTG"} = 1; }
+    elsif ( $genetic_code == 10 ) { $code{"TGA"} = "C"; }
+    elsif ( $genetic_code == 11 ) { $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG CTG TTG/; }
+    elsif ( $genetic_code == 12 ) { $code{"CTG"} = "S"; $start_table{"CTG"} = 1; }
+    elsif ( $genetic_code == 13 ) { $code{"AGA"} = "G"; $code{"AGG"} = "G"; $code{"ATA"} = "M"; $code{"TGA"} = "W"; $start_table{$_} = 1 foreach qw/ATA GTG TTG/; }
+    elsif ( $genetic_code == 14 ) { $code{"AAA"} = "N"; $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"TAA"} = "Y"; $code{"TGA"} = "W"; }
+    elsif ( $genetic_code == 15 ) { $code{"TAG"} = "Q"; }
+    elsif ( $genetic_code == 16 ) { $code{"TAG"} = "L"; }
+    elsif ( $genetic_code == 21 ) { $code{"TGA"} = "W"; $code{"ATA"} = "M"; $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"AAA"} = "N"; $start_table{"GTG"} = 1; }
+    elsif ( $genetic_code == 22 ) { $code{"TCA"} = "X"; $code{"TAG"} = "L"; }
+    elsif ( $genetic_code == 23 ) { $code{"TTA"} = "X"; $start_table{$_} = 1 foreach qw/ATT GTG/; }
+    elsif ( $genetic_code == 24 ) { $code{"AGA"} = "S"; $code{"AGG"} = "K"; $code{"TGA"} = "W"; $start_table{$_} = 1 foreach qw/GTG CTG TTG/; }
+    elsif ( $genetic_code == 25 ) { $code{"TGA"} = "G"; $start_table{$_} = 1 foreach qw/GTG TTG/; }
+    elsif ( $genetic_code == 26 ) { $code{"CTG"} = "A"; $start_table{"CTG"} = 1; }
+    elsif ( $genetic_code == 27 ) { $code{"TAG"} = "Q"; $code{"TAA"} = "Q"; }
+    elsif ( $genetic_code == 28 ) { }
+    elsif ( $genetic_code == 29 ) { $code{"TAA"} = "Y"; $code{"TAG"} = "Y"; }
+    elsif ( $genetic_code == 30 ) { $code{"TAA"} = "E"; $code{"TAG"} = "E"; }
+    elsif ( $genetic_code == 31 ) { }
+    elsif ( $genetic_code == 32 ) { $code{"TAG"} = "W"; $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG CTG TTG/; }
+    elsif ( $genetic_code == 33 ) { $code{"TAA"} = "Y"; $code{"TGA"} = "W"; $code{"AGA"} = "S"; $code{"AGG"} = "K"; $start_table{$_} = 1 foreach qw/GTG CTG TTG/; }
+    else { print STDERR "Warning: unsupported genetic code $genetic_code, start and stop codons are set according to the standard genetic code.\n"; }
+
+    my %stop_table;
+    foreach ( keys %code ) { $stop_table{$_} = 1 if $code{$_} eq "X"; }
+    return ( \%code, \%start_table, \%stop_table );
+}
+
+########################################################################
+# 英文用法说明（放在文件最末尾，运行时通过DATA文件句柄读取）
+########################################################################
+__DATA__
+Name:
+    __PROG__ - Perform ORF analysis on gene models with alternative splicing, add CDS and UTR features to transcripts without CDS; transcripts without a qualified ORF are changed to lncRNA.
+
+Usage:
+    __PROG__ [options] --genome genome.fasta geneModels.l.gff3 > geneModels.m.gff3
+
+Example:
+    __PROG__ --cpu 20 --genetic_code 1 --genome genome.fasta geneModels.l.gff3 > geneModels.m.gff3
+
+Function:
+    (1) The GFF3 file is grouped into genes by ID/Parent relationships. Transcripts that already carry CDS features in a gene are regarded as reference transcripts and are output unchanged.
+    (2) For each mRNA transcript without CDS (usually an added alternative splicing transcript), the transcript sequence is built from its exons (reverse-complemented on the minus strand) and all ORFs in the 3 reading frames are enumerated: complete ORFs (start codon to stop codon), 3'-partial ORFs (start codon but no stop codon) and 5'-partial ORFs (located at the beginning of the sequence, no start codon).
+    (3) Every candidate ORF is mapped back to the genome, and the number of bases overlapping the CDS of the reference transcripts in the same codon phase is calculated. The candidate ORFs are sorted from high to low by the in-phase overlap with the reference CDS, then by completeness, then by ORF length, and the first qualified ORF is chosen: it must be complete, its protein length must be not lower than --min_protein_length, and its CDS length must be not lower than --min_cds_ratio times the longest reference CDS (not checked if the gene has no reference transcript). Alternative splicing transcripts therefore inherit the reading frame of the reference protein instead of being replaced by an accidental longer ORF.
+    (4) For transcripts with a qualified ORF, the CDS, exon, five_prime_UTR, three_prime_UTR and intron features are regenerated (IDs are named in the same way as GFF3Clear) and the Integrity tag in column 9 of the mRNA is updated.
+    (5) For transcripts without a qualified ORF, the feature name (column 3) is changed to lncRNA and no CDS/UTR is given; only the exon and intron features are regenerated and the Integrity tag in column 9 is removed. These transcripts stay in their original genes in STDOUT and the gene ranges are not changed.
+    (6) Transcripts that are not of the mRNA/transcript type (such as lnc_RNA) and transcripts that already have CDS are not analysed and are output unchanged.
+
+Input and output:
+    The input GFF3 file (.gz compressed file is supported) is placed at the end of the command line; STDOUT is the result GFF3 file; statistics (including the number of transcripts changed to lncRNA and the breakdown of reasons) are written to STDERR.
+
+Options:
+    --genome <file>
+    Default: none. Required. Genome sequence FASTA file (.gz compressed file is supported).
+
+    --genetic_code <int>
+    Default: 1. Genetic code number. See NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi .
+
+    --min_protein_length <int>
+    Default: 30. Minimum number of amino acids (excluding the stop codon) encoded by a qualified ORF.
+
+    --min_cds_ratio <float>
+    Default: 0.5. Minimum ratio of the CDS length of a qualified ORF to the longest CDS length of the reference transcripts, ranging from 0 to 1; set 0 to disable the check.
+
+    --require_ref_frame
+    Default: none. If set and the gene has reference transcripts, a qualified ORF must overlap the reference CDS in the same phase (ORFs in a novel reading frame are not accepted).
+
+    --all_start_codons
+    Default: none. By default only ATG is used as the start codon; if set, all start codons of the genetic code are used.
+
+    --cpu <int>
+    Default: 8. Number of parallel processes.
+
+    --help
+    Display the English usage and exit.
+
+    --chinese_help
+    显示中文用法说明并退出。
+

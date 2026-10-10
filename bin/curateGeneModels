@@ -1,0 +1,430 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use Getopt::Long;
+use File::Basename;
+use Cwd qw(abs_path getcwd);
+use POSIX qw(strftime);
+
+########################################################################
+# 中文用法说明（放在代码最前面；英文用法说明放在文件最末尾的__DATA__部分）
+########################################################################
+my $usage_cn = <<'USAGE';
+名称:
+    __PROG__ - 整合NGSReads、Homolog和Augustus预测的基因模型，再进行筛选、可变剪接分析和ORF分析，得到最终准确的基因模型。
+
+用法:
+    __PROG__ [参数] genome.fasta NGSReads.gff3 homolog.gff3 augustus.gff3 > geneModels.gff3
+
+示例:
+    __PROG__ --cpu 20 --repeat repeat.gff3 --HMM_db Pfam-A.hmm --diamond_db eggnog_proteins.dmnd --intron intron.txt --base_depth base_depth.txt --genetic_code 1 --tmp_dir tmp_curate genome.fasta NGSReads.gff3 homolog.gff3 augustus.gff3 > geneModels.gff3
+
+功能简介:
+    程序将NGSReads、Homolog和Augustus三种方法预测的基因模型进行整合；去除位于转座子上的基因模型；再将基因模型分为可信和不可信两类，对仅NGSReads预测、仅Homolog预测但支持力度较低、仅Augustus预测等不可信的基因模型使用HMM(如Pfam)或diamond蛋白数据库(如eggNOG)进行验证过滤；然后根据intron信息添加可变剪接并对可变剪接转录本进行ORF分析；最后使用GFF3Clear检测基因模型的完整性，将5'端或3'端不完整的转录本输出到incomplete.gff3，得到最终准确的基因模型。
+
+运行流程:
+    (1) 整合基因模型：先用同源蛋白预测的基因模型填补转录本预测的基因模型，与同源蛋白预测的基因模型合并去冗余，再用augustus预测的基因模型填补，强制填补基因模型末端，与augustus预测的基因模型合并去冗余，最后用GFF3Clear整理修复，得到geneModels.f.gff3。
+    (2) 去除转座子上的基因模型：使用curateGeneModels.01RemoveGenesInRepeats去除CDS区域与重复序列重叠比例达到阈值的基因模型，得到geneModels.g.gff3；未设置--repeat时跳过该步骤。
+    (3) 挑选可信基因：使用curateGeneModels.02PickReliableGenes，根据基因完整性以及NGSReads、Homolog和Augustus三种证据的支持情况，将基因模型分为高度可信的准确基因模型(geneModels.h.gff3)和需要进行验证的基因模型(geneModels.i.gff3)。
+    (4) 验证不可信基因：使用curateGeneModels.03ValidateGenes，用HMM数据库和/或diamond蛋白数据库对需要验证的基因模型进行验证，通过验证的基因模型输出到geneModels.j.gff3，未通过验证的基因模型输出到invalidated.gff3。
+    (5) 合并：将高度可信的基因模型和通过验证的基因模型整合去冗余，得到geneModels.k.gff3。
+    (6) 可变剪接：使用curateGeneModels.04AlternativeSplicing(并行调用alternative_splicing_analysis)，根据intron信息添加可变剪接转录本，得到geneModels.l.gff3；未同时设置--intron和--base_depth时跳过该步骤。
+    (7) ORF分析与完整性过滤：使用curateGeneModels.05ORFAnalysis对可变剪接转录本进行ORF分析，得到geneModels.m.gff3；再使用GFF3Clear(--discard_partial)检测基因模型的完整性，5'端或3'端不完整的转录本输出到incomplete.gff3，其余基因模型输出到geneModels.gff3；最终结果geneModels.gff3输出到标准输出，同时保存在临时文件夹中。
+
+输入文件:
+    genome.fasta    基因组序列文件
+    NGSReads.gff3    根据转录组测序数据预测的基因模型
+    homolog.gff3    根据同源蛋白预测的基因模型
+    augustus.gff3    augustus预测的基因模型
+
+输出文件(位于临时文件夹中):
+    geneModels.gff3    最终的基因模型结果文件，同时输出到标准输出
+    genes_in_repeats.gff3    位于转座子序列区域的基因模型
+    incomplete.gff3    经GFF3Clear分析后得到的5'端或3'端不完整的基因模型(转录本)
+    invalidated.gff3    未能通过HMM或BLASTP数据库验证的基因模型
+    geneModels.Readme    各个中间文件的说明
+
+[输入参数]
+    --repeat <文件>
+    默认值: 无。重复序列注释GFF3文件，用于去除位于转座子上的基因模型；不设置则不进行该步骤。
+
+    --HMM_db <字符串>
+    默认值: 无。一个或多个已用hmmpress处理的HMM数据库(如Pfam-A.hmm)，多个数据库用逗号分隔。--HMM_db和--diamond_db两个参数至少要设置一个。
+
+    --diamond_db <字符串>
+    默认值: 无。一个或多个diamond蛋白数据库(推荐eggNOG的diamond数据库)或蛋白序列FASTA文件，多个用逗号分隔。--eggNOG_db可作为其别名使用。
+
+    --intron <文件>
+    默认值: 无。intron.txt文件，使用制表符分割，共7列，用于可变剪接分析。需要与--base_depth同时设置，否则不进行可变剪接分析。
+
+    --base_depth <文件>
+    默认值: 无。base_depth.txt文件，使用制表符分割，共4列，用于可变剪接分析。需要与--intron同时设置，否则不进行可变剪接分析。
+
+[遗传密码参数]
+    --genetic_code <整数>
+    默认值: 1。遗传密码编号，请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi 。
+
+[转座子过滤参数]
+    --repeat_ratio <小数>
+    默认值: 0.2。若基因模型CDS区域与重复序列的重叠比例不低于该值，则该基因模型被去除。
+
+    --repeat_min_coverage <小数>
+    默认值: 0.6。重复序列GFF3文件第九列Ratio值低于该值的重复序列将被忽略。
+
+[子程序附加参数]
+    --validate_options <字符串>
+    默认值: 无。额外传递给curateGeneModels.03ValidateGenes的参数，需用引号括起来，例如 "--both_required --blast_evalue 1e-10"。
+
+    --alt_splicing_options <字符串>
+    默认值: 无。额外传递给curateGeneModels.04AlternativeSplicing的参数，需用引号括起来，例如 "--min_intron_depth 2"。
+
+[运行参数]
+    --cpu <整数>
+    默认值: 8。设置使用的CPU线程数。
+
+    --tmp_dir <字符串>
+    默认值: tmp_$date$pid。设置临时文件夹路径。各步骤完成后会生成.ok文件，重新运行时会跳过已完成的步骤。
+
+[帮助参数]
+    --help
+    Display the English usage and exit.
+
+    --chinese_help
+    显示中文用法说明并退出。
+USAGE
+
+# 英文用法说明在文件末尾的__DATA__部分，运行时通过DATA文件句柄读取
+my $usage_en = do { local $/; <DATA> };
+$usage_en = '' unless defined $usage_en;
+
+my $prog_name    = basename($0);
+my $bin_path     = dirname( abs_path($0) );
+my $pwd          = getcwd();
+my $command_line = "$0 " . join( " ", map { shq($_) } @ARGV );
+
+sub get_usage {
+    my ($lang) = @_;
+    my $u = ( $lang eq 'cn' ) ? $usage_cn : $usage_en;
+    $u =~ s/__PROG__/$0/g;
+    return $u;
+}
+
+# 程序直接运行(无任何参数)时，给出英文用法说明
+if ( @ARGV == 0 ) {
+    print STDERR get_usage('en');
+    exit 1;
+}
+
+my ( $repeat, $HMM_db, $diamond_db, $intron_file, $base_depth_file, $genetic_code, $repeat_ratio_threshold, $repeat_min_coverage );
+my ( $validate_options, $alt_splicing_options, $cpu, $tmp_dir, $help, $chinese_help );
+GetOptions(
+    "repeat=s"               => \$repeat,
+    "HMM_db=s"               => \$HMM_db,
+    "diamond_db|eggNOG_db=s" => \$diamond_db,
+    "intron=s"               => \$intron_file,
+    "base_depth=s"           => \$base_depth_file,
+    "genetic_code=i"         => \$genetic_code,
+    "repeat_ratio=f"         => \$repeat_ratio_threshold,
+    "repeat_min_coverage=f"  => \$repeat_min_coverage,
+    "validate_options=s"     => \$validate_options,
+    "alt_splicing_options=s" => \$alt_splicing_options,
+    "cpu=i"                  => \$cpu,
+    "tmp_dir=s"              => \$tmp_dir,
+    "help|h"                 => \$help,
+    "chinese_help"           => \$chinese_help,
+) or do { print STDERR "\n", get_usage('en'); exit 1; };
+
+if ($help)         { print get_usage('en'); exit 0; }
+if ($chinese_help) { print get_usage('cn'); exit 0; }
+
+########################################################################
+# 参数检查与默认值
+########################################################################
+if ( @ARGV != 4 ) {
+    print STDERR "Error: exactly four input files are required (genome.fasta NGSReads.gff3 homolog.gff3 augustus.gff3).\n\n", get_usage('en');
+    exit 1;
+}
+$genetic_code           //= 1;
+$repeat_ratio_threshold //= 0.2;
+$repeat_min_coverage    //= 0.6;
+$cpu                    //= 8;
+$cpu = 1 if $cpu < 1;
+$validate_options     //= "";
+$alt_splicing_options //= "";
+die "Error: at least one of --HMM_db and --diamond_db is required.\n" unless $HMM_db || $diamond_db;
+
+my ( $genome, $NGSReads, $homolog, $augustus ) = map { abs_exist($_) } @ARGV;
+$repeat          = abs_exist($repeat)          if defined $repeat;
+$intron_file     = abs_exist($intron_file)     if defined $intron_file;
+$base_depth_file = abs_exist($base_depth_file) if defined $base_depth_file;
+warn "Warning: --intron and --base_depth must be set together, alternative splicing analysis will be skipped.\n" if ( defined $intron_file xor defined $base_depth_file );
+my $do_AS = ( defined $intron_file && defined $base_depth_file ) ? 1 : 0;
+
+# 数据库路径转为绝对路径（逗号分隔的多个数据库；不存在的路径保持原样，由下游程序报错）
+$HMM_db     = abs_list($HMM_db)     if $HMM_db;
+$diamond_db = abs_list($diamond_db) if $diamond_db;
+
+# 检查依赖的子程序
+my @required = qw/GFF3_filling_gene_models GFF3_merging_and_removing_redundancy fillingEndsOfGeneModels GFF3Clear
+                  curateGeneModels.01RemoveGenesInRepeats curateGeneModels.02PickReliableGenes curateGeneModels.03ValidateGenes
+                  curateGeneModels.05ORFAnalysis/;
+push @required, qw/curateGeneModels.04AlternativeSplicing alternative_splicing_analysis/ if $do_AS;
+my @missing = grep { !-e "$bin_path/$_" } @required;
+die "Error: the following program(s) are not found in $bin_path: @missing\n" if @missing;
+
+print STDERR "\n#################### $prog_name | Start ####################\n";
+print STDERR "PWD: $pwd\n" . localtime() . ": CMD: $command_line\n";
+
+unless ( defined $tmp_dir && $tmp_dir ne '' ) {
+    my $date = strftime( "%Y%m%d%H%M%S", localtime );
+    $tmp_dir = "tmp_$date$$";
+}
+mkdir $tmp_dir unless -e $tmp_dir;
+die "Error: can not create temporary directory $tmp_dir\n" unless -d $tmp_dir;
+$tmp_dir = abs_path($tmp_dir);
+chdir $tmp_dir or die "Error: can not change directory to $tmp_dir, $!\n";
+print STDERR "\nPWD: $tmp_dir/\n";
+
+open OUT, ">", "geneModels.Readme" or die "Can not create file geneModels.Readme, $!";
+print OUT "geneModels.a.gff3\t利用同源蛋白预测的基因模型对转录本预测的基因模型进行了填补
+geneModels.b.gff3\t和同源蛋白预测基因模型进行整合去冗余
+geneModels.c.gff3\t利用augustus预测基因模型进行了填补
+geneModels.d.gff3\t对基因模型末端进行强制填补
+geneModels.e.gff3\t和augustus预测基因模型进行整合去冗余
+geneModels.f.gff3\t对基因模型使用GFF3Clear进行整理修复
+geneModels.g.gff3\t去除了位于转座子上的基因模型
+geneModels.h.gff3\t挑选出的高度可信的准确基因模型
+geneModels.i.gff3\t挑选出的需要进行验证的基因模型
+geneModels.j.gff3\t通过了HMM或BLASTP数据库验证的基因模型
+geneModels.k.gff3\t对高可信基因模型和通过了验证的基因模型进行整合去冗余
+geneModels.l.gff3\t添加可变剪接
+geneModels.m.gff3\t对可变剪接转录本进行了ORF分析
+
+geneModels.gff3\t基因模型结果文件(geneModels.m.gff3经GFF3Clear去除不完整转录本之后的结果)
+genes_in_repeats.gff3\t位于转座子序列区域的基因模型
+incomplete.gff3\t经GFF3Clear分析后得到的5'端或3'端不完整的基因模型(转录本)
+invalidated.gff3\t未能通过HMM或BLASTP数据库验证的基因模型\n";
+close OUT;
+
+my $g = shq($genome);
+
+########################################################################
+# 1. 合并Transcript、Homolog和Augustus预测的基因模型
+########################################################################
+print STDERR "\n1. Combine the gene models predicted by NGSReads, homolog and augustus.\n";
+my @cmdString = ();
+# a. 利用同源蛋白预测的基因模型对转录本预测的基因模型进行填补
+push @cmdString, "$bin_path/GFF3_filling_gene_models --cpu $cpu --genetic_code $genetic_code --output_filling_detail_tab FillingGeneModelsByHomolog.tab $g " . shq($NGSReads) . " " . shq($homolog) . " > geneModels.a.gff3 2> GFF3_filling_gene_models.1.log";
+# b. 合并同源蛋白预测基因模型和上一步结果
+push @cmdString, "$bin_path/GFF3_merging_and_removing_redundancy --cpu $cpu --genetic_code $genetic_code --stable_tie $g geneModels.a.gff3 " . shq($homolog) . " > geneModels.b.gff3 2> GFF3_merging_and_removing_redundancy.1.log";
+# c. 利用augustus预测基因模型进行填补
+push @cmdString, "$bin_path/GFF3_filling_gene_models --cpu $cpu --genetic_code $genetic_code --output_filling_detail_tab FillingGeneModelsByAugustus.tab $g geneModels.b.gff3 " . shq($augustus) . " > geneModels.c.gff3 2> GFF3_filling_gene_models.2.log";
+# d. 强制填补末端
+push @cmdString, "$bin_path/fillingEndsOfGeneModels --cpu $cpu --genetic_code $genetic_code $g geneModels.c.gff3 > geneModels.d.gff3 2> fillingEndsOfGeneModels.log";
+# e. 合并Augustus预测基因模型和上一步结果
+push @cmdString, "$bin_path/GFF3_merging_and_removing_redundancy --cpu $cpu --genetic_code $genetic_code --stable_tie $g geneModels.d.gff3 " . shq($augustus) . " > geneModels.e.gff3 2> GFF3_merging_and_removing_redundancy.2.log";
+# f. 使用GFF3Clear对格式进行整理
+push @cmdString, "$bin_path/GFF3Clear --genome $g --cpu $cpu --genetic_code $genetic_code geneModels.e.gff3 > geneModels.f.gff3 2> GFF3Clear.1.log";
+&execute_cmds( @cmdString, "01.combineGeneModels.ok" );
+
+########################################################################
+# 2. 去除转座子上的基因模型
+########################################################################
+print STDERR "\n2. Remove gene models located in repeats.\n";
+my $cmdString;
+if ( defined $repeat ) {
+    $cmdString = "$bin_path/curateGeneModels.01RemoveGenesInRepeats --ignore_Simple_repeat --ignore_Unknown --min_coverage_ratio $repeat_min_coverage --ratio $repeat_ratio_threshold --filtered_gene_models genes_in_repeats.gff3 --out_removed_list genes_in_repeat.txt " . shq($repeat) . " geneModels.f.gff3 > geneModels.g.gff3 2> RemoveGenesInRepeats.log";
+}
+else {
+    print STDERR "Note: --repeat is not set, this step is skipped.\n";
+    $cmdString = "cp geneModels.f.gff3 geneModels.g.gff3 && echo '##gff-version 3' > genes_in_repeats.gff3";
+}
+&execute_cmds( $cmdString, "02.RemoveGenesInRepeats.ok" );
+
+########################################################################
+# 3. 将基因模型分为可信和不可信两类
+########################################################################
+print STDERR "\n3. Divide the gene models into reliable and unreliable classes.\n";
+$cmdString = "$bin_path/curateGeneModels.02PickReliableGenes --cpu $cpu  --NGSReads " . shq($NGSReads) . " --homolog " . shq($homolog) . " --genome $g --genetic_code $genetic_code --output_to_verify geneModels.i.gff3 --out_stats pickout_reliable_geneModels.stats geneModels.g.gff3 > geneModels.h.gff3 2> PickReliableGenes.log";
+&execute_cmds( $cmdString, "03.PickReliableGenes.ok" );
+
+########################################################################
+# 4. 对不可信基因模型进行验证过滤
+########################################################################
+print STDERR "\n4. Validate the unreliable gene models with HMM and/or diamond databases.\n";
+$cmdString = "$bin_path/curateGeneModels.03ValidateGenes --cpu $cpu --genetic_code $genetic_code --tmp_dir 04.ValidateGenes.tmp";
+$cmdString .= " --HMM_db " . shq($HMM_db) if $HMM_db;
+$cmdString .= " --diamond_db " . shq($diamond_db) if $diamond_db;
+$cmdString .= " $validate_options" if $validate_options ne "";
+$cmdString .= " --filtered_gene_models invalidated.gff3 --out_stats validate_geneModels.stats $g geneModels.i.gff3 > geneModels.j.gff3 2> ValidateGenes.log";
+&execute_cmds( $cmdString, "04.ValidateGenes.ok" );
+
+########################################################################
+# 5. 合并高可信基因模型和通过验证的基因模型
+########################################################################
+print STDERR "\n5. Merge the reliable gene models and the validated gene models.\n";
+$cmdString = "$bin_path/GFF3_merging_and_removing_redundancy --cpu $cpu --genetic_code $genetic_code --stable_tie $g geneModels.h.gff3 geneModels.j.gff3 > geneModels.k.gff3 2> GFF3_merging_and_removing_redundancy.3.log";
+&execute_cmds( $cmdString, "05.mergeGeneModels.ok" );
+
+########################################################################
+# 6. 添加可变剪接
+########################################################################
+print STDERR "\n6. Add alternative splicing transcripts.\n";
+if ($do_AS) {
+    $cmdString = "$bin_path/curateGeneModels.04AlternativeSplicing --cpu $cpu --tmp_dir 06.AlternativeSplicing.tmp";
+    $cmdString .= " $alt_splicing_options" if $alt_splicing_options ne "";
+    $cmdString .= " geneModels.k.gff3 " . shq($intron_file) . " " . shq($base_depth_file) . " > geneModels.l.gff3 2> alternative_splicing.stats";
+}
+else {
+    print STDERR "Note: --intron and --base_depth are not both set, this step is skipped.\n";
+    $cmdString = "cp geneModels.k.gff3 geneModels.l.gff3";
+}
+&execute_cmds( $cmdString, "06.AlternativeSplicing.ok" );
+
+########################################################################
+# 7. 对可变剪接转录本进行ORF分析；再用GFF3Clear分析完整性，得到incomplete.gff3和最终结果
+########################################################################
+print STDERR "\n7. ORF analysis of the alternative splicing transcripts, then GFF3Clear analysis to get incomplete.gff3 and the final gene models.\n";
+@cmdString = ();
+# a. ORF分析
+push @cmdString, "$bin_path/curateGeneModels.05ORFAnalysis --genome $g --genetic_code $genetic_code --cpu $cpu geneModels.l.gff3 > geneModels.m.gff3 2> ORFAnalysis.log";
+# b. 使用GFF3Clear检测完整性：不完整的转录本输出到incomplete.gff3，其余输出到geneModels.gff3
+push @cmdString, "$bin_path/GFF3Clear --genome $g --cpu $cpu --genetic_code $genetic_code --discard_partial --filtered_gff3 incomplete.gff3 geneModels.m.gff3 > geneModels.gff3 2> GFF3Clear.2.log";
+&execute_cmds( @cmdString, "07.ORFAnalysis.ok" );
+
+# 最终结果输出到标准输出
+open my $res, '<', "geneModels.gff3" or die "Error: can not open $tmp_dir/geneModels.gff3, $!\n";
+print STDOUT $_ while <$res>;
+close $res;
+print STDERR "\n#################### $prog_name | Done ####################\n";
+
+########################################################################
+# 子程序
+########################################################################
+sub abs_exist {
+    my ($f) = @_;
+    die "Error: can not find file $f\n" unless -e $f;
+    return abs_path($f);
+}
+
+# 逗号分隔的路径列表转为绝对路径（存在的文件才转换；.dmnd后缀省略的数据库也兼容）
+sub abs_list {
+    my ($s) = @_;
+    my @o;
+    foreach ( grep { $_ ne '' } split /,/, $s ) {
+        if    ( -e $_ )          { push @o, abs_path($_) }
+        elsif ( -e "$_.dmnd" )   { push @o, abs_path("$_.dmnd") }
+        else                     { push @o, $_ }
+    }
+    return join ",", @o;
+}
+
+sub shq {
+    my ($s) = @_;
+    return $s if $s =~ m#^[\w./,:=+\-]+$#;
+    $s =~ s/'/'\\''/g;
+    return "'$s'";
+}
+
+# 子程序，用于执行调用的Linux命令；全部成功后生成.ok文件，失败则终止程序（不会生成.ok文件）
+sub execute_cmds {
+    my $ok_file = pop @_;
+    if ( -e $ok_file ) {
+        print STDERR "CMD(Skipped): $_\n" foreach @_;
+        return 1;
+    }
+    foreach (@_) {
+        print STDERR localtime() . ": CMD: $_\n";
+        system($_) == 0 or die "Error: failed to execute: $_\n";
+    }
+    open my $ok, '>', $ok_file or die "Error: can not create $ok_file, $!\n";
+    close $ok;
+    return 1;
+}
+
+########################################################################
+# 英文用法说明（放在文件最末尾，运行时通过DATA文件句柄读取）
+########################################################################
+__DATA__
+Name:
+    __PROG__ - Integrate the gene models predicted from NGSReads, homolog and Augustus, then filter them, add alternative splicing transcripts and perform ORF analysis to obtain the final accurate gene models.
+
+Usage:
+    __PROG__ [options] genome.fasta NGSReads.gff3 homolog.gff3 augustus.gff3 > geneModels.gff3
+
+Example:
+    __PROG__ --cpu 20 --repeat repeat.gff3 --HMM_db Pfam-A.hmm --diamond_db eggnog_proteins.dmnd --intron intron.txt --base_depth base_depth.txt --genetic_code 1 --tmp_dir tmp_curate genome.fasta NGSReads.gff3 homolog.gff3 augustus.gff3 > geneModels.gff3
+
+Function:
+    The program integrates the gene models predicted by NGSReads, homolog and Augustus; removes the gene models located in transposable elements; divides the gene models into reliable and unreliable classes; validates the unreliable gene models (predicted only by NGSReads, predicted only by homolog with low support, or predicted only by Augustus) with HMM databases (e.g. Pfam) and/or diamond protein databases (e.g. eggNOG); then adds alternative splicing transcripts according to intron information and performs ORF analysis on them; finally GFF3Clear is used to check the integrity of the gene models, and the transcripts incomplete at the 5' or 3' end are written to incomplete.gff3, giving the final accurate gene models.
+
+Workflow:
+    (1) Combine gene models: fill the transcript-based gene models with the homolog-based gene models, merge them with the homolog-based gene models and remove redundancy, fill them with the augustus gene models, force-fill the ends of the gene models, merge them with the augustus gene models and remove redundancy, and finally tidy and repair them with GFF3Clear to get geneModels.f.gff3.
+    (2) Remove gene models in repeats: curateGeneModels.01RemoveGenesInRepeats removes the gene models whose CDS overlap ratio with repeats reaches the threshold, giving geneModels.g.gff3; this step is skipped if --repeat is not set.
+    (3) Pick reliable genes: curateGeneModels.02PickReliableGenes divides the gene models, according to gene integrity and the support of the NGSReads, homolog and Augustus evidence, into highly reliable accurate gene models (geneModels.h.gff3) and gene models that need verification (geneModels.i.gff3).
+    (4) Validate unreliable genes: curateGeneModels.03ValidateGenes verifies the gene models needing verification with HMM and/or diamond protein databases; the validated gene models are written to geneModels.j.gff3 and the others to invalidated.gff3.
+    (5) Merge: the highly reliable gene models and the validated gene models are merged and redundancy is removed, giving geneModels.k.gff3.
+    (6) Alternative splicing: curateGeneModels.04AlternativeSplicing (which runs alternative_splicing_analysis in parallel) adds alternative splicing transcripts according to intron information, giving geneModels.l.gff3; this step is skipped unless both --intron and --base_depth are set.
+    (7) ORF analysis and integrity filtering: curateGeneModels.05ORFAnalysis performs ORF analysis on the alternative splicing transcripts, giving geneModels.m.gff3; then GFF3Clear (--discard_partial) checks the integrity of the gene models, the transcripts incomplete at the 5' or 3' end are written to incomplete.gff3 and the remaining gene models are written to geneModels.gff3; the final result geneModels.gff3 is written to STDOUT and also saved in the temporary directory.
+
+Input files:
+    genome.fasta    Genome sequence file
+    NGSReads.gff3    Gene models predicted from transcriptome sequencing data
+    homolog.gff3    Gene models predicted from homologous proteins
+    augustus.gff3    Gene models predicted by augustus
+
+Output files (in the temporary directory):
+    geneModels.gff3    Final gene model result file, also written to STDOUT
+    genes_in_repeats.gff3    Gene models located in transposable element regions
+    incomplete.gff3    Gene models (transcripts) incomplete at the 5' or 3' end, obtained by the GFF3Clear analysis
+    invalidated.gff3    Gene models that failed the HMM or BLASTP database validation
+    geneModels.Readme    Description of the intermediate files
+
+[Input options]
+    --repeat <file>
+    Default: none. Repeat annotation GFF3 file used to remove the gene models located in transposable elements; if not set, this step is skipped.
+
+    --HMM_db <string>
+    Default: none. One or more HMM databases (e.g. Pfam-A.hmm) already processed by hmmpress, separated by commas. At least one of --HMM_db and --diamond_db is required.
+
+    --diamond_db <string>
+    Default: none. One or more diamond protein databases (the eggNOG diamond database is recommended) or protein FASTA files, separated by commas. --eggNOG_db is accepted as an alias.
+
+    --intron <file>
+    Default: none. The intron.txt file (tab-separated, 7 columns) used for alternative splicing analysis. It must be set together with --base_depth, otherwise the alternative splicing analysis is skipped.
+
+    --base_depth <file>
+    Default: none. The base_depth.txt file (tab-separated, 4 columns) used for alternative splicing analysis. It must be set together with --intron, otherwise the alternative splicing analysis is skipped.
+
+[Genetic code options]
+    --genetic_code <int>
+    Default: 1. Genetic code number. See NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi .
+
+[Repeat filtering options]
+    --repeat_ratio <float>
+    Default: 0.6. A gene model is removed if the overlap ratio between its CDS and repeats is not lower than this value.
+
+    --repeat_min_coverage <float>
+    Default: 0.6. Repeats whose Ratio value in column 9 of the repeat GFF3 file is lower than this value are ignored.
+
+[Options passed to sub-programs]
+    --validate_options <string>
+    Default: none. Extra options passed to curateGeneModels.03ValidateGenes, which must be quoted, e.g. "--both_required --blast_evalue 1e-10".
+
+    --alt_splicing_options <string>
+    Default: none. Extra options passed to curateGeneModels.04AlternativeSplicing, which must be quoted, e.g. "--min_intron_depth 2".
+
+[Running options]
+    --cpu <int>
+    Default: 8. Number of CPU threads.
+
+    --tmp_dir <string>
+    Default: tmp_$date$pid. Temporary directory. An .ok file is created after each step is finished, and finished steps are skipped when the program is run again.
+
+[Help options]
+    --help
+    Display the English usage and exit.
+
+    --chinese_help
+    显示中文用法说明并退出。
+

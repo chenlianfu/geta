@@ -3,7 +3,9 @@ use strict;
 use warnings;
 use Getopt::Long;
 use Storable qw(nstore retrieve);
-use File::Temp qw(tempdir);
+use File::Path qw(make_path remove_tree);
+use Digest::MD5 qw(md5_hex);
+use Fcntl qw(:flock);
 use POSIX ();
 
 ########################################################################
@@ -12,7 +14,7 @@ use POSIX ();
 my $usage_cn = <<'USAGE';
 用法:
     perl __SCRIPT__ [参数] --genome genome.fasta input.gff3 > output.gff3
-    程序用于读取一个GFF3文件，对GFF3文件格式进行检查和修正，仅保留编码蛋白和lncRNA基因，并输出标准格式的GFF3文件。程序不对重叠的基因模型进行去冗余，所有基因均被保留。
+    程序用于读取一个GFF3文件，对GFF3文件格式进行检查和修正，仅保留编码蛋白和lncRNA基因，并输出标准格式的GFF3文件。程序不对重叠的基因模型进行去冗余，所有基因均被保留（被过滤参数过滤掉的基因模型除外）。
 
 1. 输入的GFF3文件格式要求
     程序仅支持输入一个GFF3文件（可以是.gz压缩文件）。文件必须包含mRNA、CDS这两个Feature信息，且其第九列含有Parent信息；也可以包含gene、exon和UTR信息。文件中所有的基因/转录本应具有不同的ID编号（若出现重复的转录本ID，则只保留第一次出现的并给出警告）。程序仅读取GFF3文件的gene、mRNA（或transcript）、lnc_RNA（或lncRNA）、CDS、exon、UTR信息；CDS/exon/UTR的Parent可以是逗号分隔的多个转录本。
@@ -27,15 +29,15 @@ my $usage_cn = <<'USAGE';
     2.6 终止密码子修正：根据输入的基因组序列和--genetic_code指定的遗传密码，检测基因模型尾部CDS是否包含终止密码子；若不包含，则检测后续的3个碱基是否为终止密码子，若是则延伸CDS使之包含终止密码子；若尾部有多个连续终止密码子，则仅保留一个。使用--no_stop_fix参数可关闭该步骤；
     2.7 exon修正：若输入GFF3文件中不包含exon，则根据UTR（若有）、CDS以及mRNA的起止边界生成exon（mRNA范围超出CDS的部分作为UTR）；若包含exon，则综合exon、CDS以及mRNA的起止边界修正exon：先根据CDS和exon计算出intron（CDS之间的intron优先，与CDS重叠的exon间隙被舍弃），再根据intron以及所有Feature和mRNA边界的最小/最大坐标得到准确的exon，从而消除相互重叠或相邻的exon，并保证exon覆盖CDS；
     2.8 UTR和intron：根据修正后的exon和CDS重新生成five_prime_UTR、three_prime_UTR（lncRNA除外）和intron信息；
-    2.9 完整性检测：根据CDS的起始密码子和终止密码子检测基因的完整性（起始密码子和终止密码子均由--genetic_code指定的遗传密码确定），在mRNA的第九列添加Integrity信息，其值为complete、5prime_partial、3prime_partial或internal；同时统计CDS阅读框内（不含末尾终止密码子）的终止密码子，若存在则在标准错误输出中给出警告；若添加了--discard_frameshift_stop参数，则存在移码或内部终止密码子的转录本会在此步骤被过滤；
+    2.9 完整性检测与过滤：根据CDS的起始密码子和终止密码子检测基因的完整性（起始密码子和终止密码子均由--genetic_code指定的遗传密码确定），在mRNA的第九列添加Integrity信息，其值为complete、5prime_partial、3prime_partial或internal；同时统计CDS阅读框内（不含末尾终止密码子）的终止密码子，若存在则在标准错误输出中给出警告；若添加了--discard_frameshift_stop参数，则存在移码或内部终止密码子的转录本会在此步骤被过滤；若添加了--discard_partial参数，则5'端或3'端不完整的转录本（Integrity不是complete）会在此步骤被过滤；被过滤的基因模型可通过--filtered_gff3参数保存到单独的文件中；
     2.10 排序和命名：程序对基因模型按输入的基因组FASTA文件中的序列顺序及位置信息进行排序，然后根据需要对基因ID进行重命名，输出标准GFF3格式的基因模型信息，此外也输出文件中的原有的Attribute信息；
     2.11 Attribute信息：CDS/exon/intron/UTR的原有Attribute信息按其所属转录本分别保存，不同基因/转录本中坐标相同的Feature不会相互混淆；同一Feature中重复出现的标签，仅保留第一次出现的值；
-    2.12 Feature类型过滤：除编码蛋白和lncRNA之外的其他类型转录本（如tRNA、rRNA、miRNA、pseudogene等）及其子Feature会被忽略；使用--discard_lncRNA时，lncRNA转录本的子Feature也一并被忽略。
+    2.12 Feature类型过滤：除编码蛋白和lncRNA之外的其他类型转录本（如tRNA、rRNA、miRNA、pseudogene等）及其子Feature会被忽略；使用--discard_lncRNA时，lncRNA转录本的子Feature也一并被忽略。这些在读取阶段就被忽略的Feature不属于"被过滤的基因模型"，不会写入--filtered_gff3指定的文件。
 
 3. 参数信息
 [输入参数]
     --genome <fasta文件>    默认: 无
-    输入基因组fasta文件（可以是.gz压缩文件）。该参数是必须的，用于修正尾部的CDS、推断和修正phase、基因完整性检测和内部终止密码子检测。
+    输入基因组fasta文件（可以是.gz压缩文件）。该参数是必须的，用于修正尾部的CDS、推断和修正phase、基因完整性检测和内部终止密码子检测。非压缩的fasta文件不会被整体读入内存，程序只建立序列索引，各并行任务仅读取自己需要的区域；.gz压缩文件则整体读入内存。
 
 [遗传密码参数]
     --genetic_code <整数>    默认: 1
@@ -51,6 +53,9 @@ my $usage_cn = <<'USAGE';
     --discard_frameshift_stop    默认: 无
     添加该参数后，程序会过滤存在移码或内部终止密码子的转录本（基因模型）。判断依据为：经过phase修正（选择内部终止密码子最少的阅读框）和尾部终止密码子修正之后，(1) CDS阅读框内（不含末尾的终止密码子）仍存在终止密码子；或 (2) CDS长度（去除5'端phase后）不是3的倍数（CDS总长度与阅读框不匹配，即移码或末端密码子不完整）。若一个基因的所有转录本都被过滤，则整个基因被过滤。被过滤的转录本会在标准错误输出中给出警告。lncRNA没有CDS，不受该参数影响；位于基因组中找不到的参考序列上的转录本无法检测，不会被过滤。
 
+    --discard_partial    默认: 无
+    添加该参数后，程序会过滤5'端或3'端不完整的基因模型。判断依据为经过phase修正和尾部终止密码子修正之后检测得到的Integrity信息：只保留Integrity为complete（同时具有起始密码子和终止密码子）的转录本，Integrity为5prime_partial、3prime_partial或internal（两端均不完整）的转录本都会被过滤。若一个基因的所有转录本都被过滤，则整个基因被过滤。被过滤的转录本会在标准错误输出中给出警告。lncRNA没有CDS，不受该参数影响；位于基因组中找不到的参考序列上的转录本无法检测完整性，不会被过滤。
+
 [修正参数]
     --min_intron <整数>    默认: 1
     设置一个最短intron长度阈值。当检测到相邻两CDS之间相距的碱基距离 < 该阈值时，程序会在标准错误输出中给出警告。当使用默认参数 1 时，出现警告表示基因模型有错误（注意：间隔为0的相邻CDS会被合并）。
@@ -59,6 +64,9 @@ my $usage_cn = <<'USAGE';
     添加该参数后，程序不再修正基因模型尾部的终止密码子（不再延伸CDS，也不再删除多余的连续终止密码子），但仍会检测基因完整性。
 
 [输出参数]
+    --filtered_gff3 <文件>    默认: 无
+    若设置该参数，则被--discard_partial、--discard_frameshift_stop、--discard_mRNA_without_CDS过滤掉的基因模型会保存到该GFF3文件中。该文件中的基因和转录本使用输入文件中的原始ID（不受--gene_prefix影响），每个被过滤的mRNA行的第九列会添加Discard_reason信息，其值可能为5prime_partial、3prime_partial、5prime_and_3prime_partial、internal_stop、frameshift、no_CDS，同一转录本有多个原因时以逗号连接。若一个基因只有部分转录本被过滤，则被过滤的转录本以相同的基因ID保存到该文件中，其余转录本仍输出到标准输出。若不设置该参数，则被过滤的基因模型直接丢弃。
+
     --gene_prefix <字符串>    默认: 无
     若设置该参数，则程序会对基因ID进行重命名，该参数用于设置gene ID前缀。若不设置该参数，则程序不会对基因进行重命名。
 
@@ -73,7 +81,13 @@ my $usage_cn = <<'USAGE';
 
 [运行参数]
     --cpu <整数>    默认: 1
-    并行进程数。不同参考序列（染色体/scaffold）上的基因模型相互独立，程序按参考序列拆分任务，使用多进程（fork）并行进行模型修正。并行结果与 --cpu 1 完全一致。临时文件写入环境变量 TMPDIR 指定的目录（默认 /tmp），程序结束后自动删除。
+    并行进程数。程序在以下步骤使用多进程（fork）并行：(1) 基因模型修正：每条参考序列上的基因按位置拆分为多个相互独立的任务块，各进程动态领取任务块，因此即使只有少数几条染色体也能充分利用多核；(2) 输出格式化：各任务块并行生成输出文本，最后由主进程按全局顺序合并。GFF3文件的读取解析以及基因组索引的建立仍为单进程。并行结果与 --cpu 1 完全一致。临时文件写入--tmp_dir指定的目录。
+
+    --chunk_size <整数>    默认: 自动
+    并行时每个任务块包含的基因数。默认根据基因总数和 --cpu 自动确定（至少200个基因）。仅在 --cpu > 1 时起作用；该参数只影响任务划分，不影响结果。
+
+    --tmp_dir <字符串>    默认: tmp_$date$pid
+    临时文件目录（不存在时自动创建）。基因模型修正和输出格式化两个步骤中，每个任务块完成后都会生成对应的.ok文件，再次运行程序时，已完成的任务块会被跳过（被跳过的任务块不会重复输出其警告信息）。目录中的params.sig文件记录了输入文件和参数的签名，若再次运行时输入文件或参数（包括影响任务划分的--cpu、--chunk_size）发生了变化，则该目录中旧的临时结果会被清除并重新计算。若未设置该参数，则使用默认目录，程序正常结束后自动删除该目录；若设置了该参数，则程序结束后保留该目录（以便断点续跑），不再需要时请手动删除。
 
 [帮助参数]
     --help    默认: 无
@@ -87,7 +101,7 @@ USAGE
 my $usage_english = &get_usage_english();
 if ( @ARGV == 0 ) { die $usage_english }
 
-my ( $genome, $discard_lncRNA, $discard_mRNA_without_CDS, $discard_frameshift_stop, $no_stop_fix, $gene_prefix, $gene_code_length, $no_attr_add, $GFF3_source, $help, $chinese_help );
+my ( $genome, $discard_lncRNA, $discard_mRNA_without_CDS, $discard_frameshift_stop, $discard_partial, $filtered_gff3, $no_stop_fix, $gene_prefix, $gene_code_length, $no_attr_add, $GFF3_source, $chunk_size_opt, $tmp_dir_opt, $help, $chinese_help );
 my $min_intron   = 1;
 my $cpu          = 1;
 my $genetic_code = 1;
@@ -97,6 +111,8 @@ GetOptions(
     "discard_lncRNA"           => \$discard_lncRNA,
     "discard_mRNA_without_CDS" => \$discard_mRNA_without_CDS,
     "discard_frameshift_stop"  => \$discard_frameshift_stop,
+    "discard_partial"          => \$discard_partial,
+    "filtered_gff3=s"          => \$filtered_gff3,
     "min_intron=i"             => \$min_intron,
     "no_stop_fix"              => \$no_stop_fix,
     "gene_prefix=s"            => \$gene_prefix,
@@ -104,6 +120,8 @@ GetOptions(
     "GFF3_source=s"            => \$GFF3_source,
     "no_attr_add"              => \$no_attr_add,
     "cpu=i"                    => \$cpu,
+    "chunk_size=i"             => \$chunk_size_opt,
+    "tmp_dir=s"                => \$tmp_dir_opt,
     "help|h"                   => \$help,
     "chinese_help"             => \$chinese_help,
 ) or die $usage_english;
@@ -114,11 +132,36 @@ die "No input GFF3 file.\n$usage_english" unless @ARGV;
 die "Only one input GFF3 file is supported, but " . scalar(@ARGV) . " files were given.\n" if @ARGV > 1;
 die "--min_intron should be >= 0\n" if $min_intron < 0;
 die "--cpu should be >= 1\n" if $cpu < 1;
+die "--chunk_size should be >= 1\n" if defined $chunk_size_opt && $chunk_size_opt < 1;
 die "--genetic_code should be a positive integer\n" if $genetic_code < 1;
+die "--tmp_dir should not be an empty string\n" if defined $tmp_dir_opt && $tmp_dir_opt eq '';
 my $input_gff3 = $ARGV[0];
 die "can not find input file: $input_gff3\n" unless -e $input_gff3;
 die "can not find genome file: $genome\n" unless -e $genome;
 my $rename = ( defined $gene_prefix && $gene_prefix ne '' ) ? 1 : 0;
+if ( defined $filtered_gff3 ) {
+    die "--filtered_gff3 should not be an empty string\n" if $filtered_gff3 eq '';
+    warn "Warning: --filtered_gff3 is set, but none of --discard_partial, --discard_frameshift_stop and --discard_mRNA_without_CDS is set, so the file will contain no gene model.\n"
+        unless $discard_partial || $discard_frameshift_stop || $discard_mRNA_without_CDS;
+}
+
+########## 临时目录 ##########
+# 未设置 --tmp_dir 时使用默认目录 tmp_$date$pid，程序结束后自动删除；
+# 设置了 --tmp_dir 时，目录在程序结束后保留，各任务块完成后生成 .ok 文件，再次运行时已完成的任务块会被跳过。
+my $main_pid = $$;
+my $auto_tmp = defined $tmp_dir_opt ? 0 : 1;
+my $tmpdir   = defined $tmp_dir_opt ? $tmp_dir_opt : "tmp_" . POSIX::strftime( "%Y%m%d", localtime ) . $$;
+$tmpdir =~ s{/+$}{} unless $tmpdir =~ m{^/+$};
+END {
+    if ( $auto_tmp && defined $main_pid && $$ == $main_pid && defined $tmpdir && -d $tmpdir ) {
+        local $?;
+        remove_tree($tmpdir);
+    }
+}
+unless ( -d $tmpdir ) {
+    make_path($tmpdir);
+    die "can not create temporary directory $tmpdir, $!\n" unless -d $tmpdir;
+}
 
 # 根据遗传密码确定密码子表、起始密码子和终止密码子（代码来自 GFF3_merging_and_removing_redundancy）
 # %codon2aa    : 密码子 => 氨基酸（终止密码子在表中为X，翻译时统一用 %stop_codon 判断并记为'*'）
@@ -130,9 +173,15 @@ my %stop_codon  = %$stop_codon_ref;
 die "Error: no start codon is available.\n" unless %start_codon;
 die "Error: no stop codon is available.\n"  unless %stop_codon;
 
-########## 读取基因组序列（统一转为大写，兼容软屏蔽序列、Windows换行符和.gz压缩文件） ##########
-my ( %seq, %seq_sort, %seq_ci, %chr_map_warned );
-{
+########## 基因组序列 ##########
+# 非压缩FASTA：不读入序列，只建立索引（%seq_rec），各任务按需读取所需区域；
+# .gz压缩FASTA：整体读入内存（%seq_mem，统一转为大写），fork后各子进程共享。
+# %seq_sort : 序列名 => 在基因组中的顺序    %seq_ci : 小写序列名 => 序列名（忽略大小写后不唯一时为''）
+# 当前任务正在使用的序列（由 process_chunk 设置）：
+#   $cur_seq 为序列片段（大写），其第一个碱基对应基因组位置 $cur_off+1；$cur_len 为整条序列的长度
+my ( %seq_sort, %seq_ci, %chr_map_warned, %seq_rec, %seq_mem );
+my ( $cur_seq, $cur_off, $cur_len ) = ( '', 0, 0 );
+if ( $genome =~ m/\.gz$/i ) {
     my $fh = &open_in($genome);
     my ( $id, $n ) = ( undef, 0 );
     while ( my $line = <$fh> ) {
@@ -144,19 +193,22 @@ my ( %seq, %seq_sort, %seq_ci, %chr_map_warned );
             }
             else {
                 $seq_sort{$id} = ++$n;
-                $seq{$id} = '';
+                $seq_mem{$id}  = '';
             }
         }
         elsif ( defined $id ) {
             $line =~ s/\s+//g;
-            $seq{$id} .= uc $line;
+            $seq_mem{$id} .= uc $line;
         }
     }
     close $fh;
-    foreach my $sid ( keys %seq ) {
-        my $l = lc $sid;
-        $seq_ci{$l} = exists $seq_ci{$l} ? '' : $sid;    # 空字符串表示忽略大小写后不唯一
-    }
+}
+else {
+    &index_genome($genome);
+}
+foreach my $sid ( keys %seq_sort ) {
+    my $l = lc $sid;
+    $seq_ci{$l} = exists $seq_ci{$l} ? '' : $sid;    # 空字符串表示忽略大小写后不唯一
 }
 
 ########## 读取GFF3文件 ##########
@@ -170,78 +222,130 @@ my ( %seq, %seq_sort, %seq_ci, %chr_map_warned );
 my ( %gene_attr, %gene_score, %gene_strand, %tx_attr, %tx_score, %is_lnc, %feat_attr, %model, %chr_genes );
 &parse_gff3($input_gff3);
 
-########## 按参考序列拆分任务并行处理 ##########
+########## 按参考序列和基因位置拆分为任务块 ##########
 my @chrs = keys %chr_genes;
-foreach my $chr ( sort grep { !exists $seq{$_} } @chrs ) {
+foreach my $chr ( sort grep { !exists $seq_sort{$_} } @chrs ) {
     warn "Warning: sequence $chr is not found in $genome; stop codon correction and integrity detection are skipped for genes on it, and these genes are output after all other sequences.\n";
 }
 my @chr_sorted = sort { ( $seq_sort{$a} || 9e18 ) <=> ( $seq_sort{$b} || 9e18 ) or $a cmp $b } @chrs;
 
-my %chr_gene_num;
-$chr_gene_num{$_} = scalar @{ $chr_genes{$_} } foreach @chrs;
-
-my $tmpdir = tempdir( "GFF3Clear_XXXXXX", TMPDIR => 1, CLEANUP => 1 );
-my %task_file;
-foreach my $i ( 0 .. $#chr_sorted ) { $task_file{ $chr_sorted[$i] } = "$tmpdir/$i.sto" }
-# 基因数多的参考序列优先调度，以获得更好的负载均衡
-my @tasks = sort { $chr_gene_num{$b} <=> $chr_gene_num{$a} or $a cmp $b } @chrs;
-
-if ( $cpu == 1 or @tasks <= 1 ) {
-    &run_task( $_, $task_file{$_} ) foreach @tasks;
-}
-else {
-    my ( %running, @failed );
-    foreach my $chr (@tasks) {
-        while ( keys %running >= $cpu ) {
-            my $pid = waitpid( -1, 0 );
-            last if $pid <= 0;
-            my $c = delete $running{$pid};
-            push @failed, $c if defined $c && $? != 0;
+# 每个任务块：{ chr, genes => [gene_ID,...], lo, hi }，lo/hi为这些基因涉及的坐标范围
+my ( @tasks, %chr_tasks );
+my ( $total_input_genes, $chunk_size_used ) = ( 0, 0 );
+{
+    my $total = 0;
+    $total += scalar @{ $chr_genes{$_} } foreach @chrs;
+    $total_input_genes = $total;
+    my $chunk_size = 2**31;
+    if ( $cpu > 1 ) {
+        if ( defined $chunk_size_opt ) { $chunk_size = $chunk_size_opt }
+        else {
+            $chunk_size = int( $total / ( $cpu * 8 ) ) + 1;
+            $chunk_size = 200 if $chunk_size < 200;
         }
-        my $pid = fork();
-        die "Can not fork: $!\n" unless defined $pid;
-        if ( $pid == 0 ) {
-            my $ok = eval { &run_task( $chr, $task_file{$chr} ); 1 };
-            unless ($ok) {
-                print STDERR "Error when processing sequence $chr: $@";
-                POSIX::_exit(1);
+    }
+    $chunk_size_used = $chunk_size;
+    foreach my $chr (@chr_sorted) {
+        my @gl;
+        foreach my $gid ( @{ $chr_genes{$chr} } ) {
+            my ( $lo, $hi ) = &gene_extent( $model{$gid} );
+            push @gl, [ $gid, $lo, $hi ];
+        }
+        @gl = sort {
+                   ( $a->[1] // 0 ) <=> ( $b->[1] // 0 )
+                or ( $a->[2] // 0 ) <=> ( $b->[2] // 0 )
+                or $a->[0] cmp $b->[0]
+        } @gl;
+        my $i = 0;
+        while ( $i < @gl ) {
+            my $j = $i + $chunk_size - 1;
+            $j = $#gl if $j > $#gl;
+            my @c = @gl[ $i .. $j ];
+            my ( $lo, $hi );
+            foreach my $x (@c) {
+                $lo = $x->[1] if defined $x->[1] && ( !defined $lo || $x->[1] < $lo );
+                $hi = $x->[2] if defined $x->[2] && ( !defined $hi || $x->[2] > $hi );
             }
-            POSIX::_exit(0);
+            push @tasks, { chr => $chr, genes => [ map { $_->[0] } @c ], lo => $lo, hi => $hi };
+            push @{ $chr_tasks{$chr} }, $#tasks;
+            $i = $j + 1;
         }
-        $running{$pid} = $chr;
     }
-    while (%running) {
-        my $pid = waitpid( -1, 0 );
-        last if $pid <= 0;
-        my $c = delete $running{$pid};
-        push @failed, $c if defined $c && $? != 0;
-    }
-    die "Failed to process sequence(s): " . join( ", ", @failed ) . "\n" if @failed;
 }
+# 基因数多的任务块优先调度，以获得更好的负载均衡
+my @task_ids = sort { scalar( @{ $tasks[$b]{genes} } ) <=> scalar( @{ $tasks[$a]{genes} } ) or $a <=> $b } 0 .. $#tasks;
 
-########## 汇总输出 ##########
-my $total_gene_number = 0;
+########## 检查临时目录中已有的结果是否与本次运行一致 ##########
+&check_tmp_signature();
+
+########## 第一阶段（并行）：基因模型修正 ##########
+&run_parallel( 'p1', \@task_ids, \&run_phase1 );
+
+########## 全局排序和编号（轻量，主进程完成） ##########
+my ( %num, %order_kept, %order_filt );
+my ( $total_gene_number, $filtered_gene_number ) = ( 0, 0 );
 foreach my $chr (@chr_sorted) {
-    open my $fh, '<', "$task_file{$chr}.n" or die "can not open file $task_file{$chr}.n, $!\n";
-    my $n = <$fh>;
-    close $fh;
-    chomp $n;
-    $total_gene_number += $n;
+    my ( @kk, @fk );
+    foreach my $tid ( @{ $chr_tasks{$chr} || [] } ) {
+        my $k = retrieve("$tmpdir/$tid.key");
+        push @kk, map { [ @$_, $tid ] } @{ $k->{kept} };
+        push @fk, map { [ @$_, $tid ] } @{ $k->{filtered} };
+    }
+    # 与 sort_genes 的排序规则完全一致：start, end, strand, sort5, id
+    my $cmp = sub {
+               $_[0][0] <=> $_[1][0]
+            or $_[0][1] <=> $_[1][1]
+            or $_[0][2] cmp $_[1][2]
+            or $_[0][3] <=> $_[1][3]
+            or $_[0][4] cmp $_[1][4];
+    };
+    @kk = sort { $cmp->( $a, $b ) } @kk;
+    @fk = sort { $cmp->( $a, $b ) } @fk;
+    foreach my $x (@kk) {
+        $total_gene_number++;
+        $num{ $x->[6] }[ $x->[5] ] = $total_gene_number;
+        push @{ $order_kept{$chr} }, [ $x->[6], $x->[5] ];
+    }
+    foreach my $x (@fk) {
+        $filtered_gene_number++;
+        push @{ $order_filt{$chr} }, [ $x->[6], $x->[5] ];
+    }
 }
 my $code_length = length($total_gene_number);
 $code_length = $gene_code_length if $gene_code_length;
 
-print "##gff-version 3\n";
-my $gene_number = 0;
-foreach my $chr (@chr_sorted) {
-    my $genes = retrieve( $task_file{$chr} );
-    foreach my $g (@$genes) {
-        $gene_number++;
-        &print_gene( $g, $gene_number, $code_length );
-    }
-    unlink $task_file{$chr}, "$task_file{$chr}.n";
+########## 第二阶段（并行）：各任务块并行生成输出文本 ##########
+&run_parallel( 'p2', \@task_ids, \&run_phase2 );
+
+########## 汇总输出（按全局顺序拼接） ##########
+my ( %fh_cache, %off_cache );
+
+# 保存被过滤基因模型的文件
+my $fh_filtered;
+if ( defined $filtered_gff3 ) {
+    open( $fh_filtered, '>', $filtered_gff3 ) or die "can not write file $filtered_gff3, $!\n";
+    print $fh_filtered "##gff-version 3\n";
 }
+
+print "##gff-version 3\n";
+foreach my $chr (@chr_sorted) {
+    foreach my $x ( @{ $order_kept{$chr} || [] } ) {
+        &copy_blob( $x->[0], 'kept', $x->[1], \*STDOUT );
+    }
+    if ( defined $fh_filtered ) {
+        foreach my $x ( @{ $order_filt{$chr} || [] } ) {
+            &copy_blob( $x->[0], 'filtered', $x->[1], $fh_filtered );
+        }
+    }
+}
+close $_ foreach values %fh_cache;
+if ( defined $fh_filtered ) {
+    close $fh_filtered or die "can not write file $filtered_gff3, $!\n";
+}
+# 默认临时目录在程序结束时（END块）自动删除；用户通过 --tmp_dir 指定的目录保留，以便断点续跑
 print STDERR "Done: $total_gene_number genes were output.\n";
+print STDERR "$filtered_gene_number filtered genes were saved to $filtered_gff3.\n" if defined $filtered_gff3;
+print STDERR "Temporary directory $tmpdir is kept (set by --tmp_dir); finished steps will be skipped if the program is run again with the same input and options. Remove it manually when it is no longer needed.\n" unless $auto_tmp;
 
 
 ########## 子程序 ##########
@@ -257,6 +361,350 @@ sub open_in {
         open( $fh, '<', $file ) or die "can not open file $file, $!\n";
     }
     return $fh;
+}
+
+# 创建 .ok 文件，表示某个任务块的某个步骤已完成
+sub write_ok {
+    my ($file) = @_;
+    open( my $ok, '>', $file ) or die "can not write file $file, $!\n";
+    print $ok "done\n";
+    close $ok or die "can not write file $file, $!\n";
+}
+
+# 计算本次运行的签名（输入文件、所有影响结果的参数以及任务划分），并与临时目录中已有的签名比较：
+# 一致则保留已有结果（已完成的任务块将被跳过）；不一致或不存在则清除旧的临时结果并写入新签名。
+sub check_tmp_signature {
+    my $layout = Digest::MD5->new;
+    foreach my $t (@tasks) {
+        $layout->add( join( "\t", $t->{chr}, $t->{lo} // '', $t->{hi} // '', @{ $t->{genes} } ) . "\n" );
+    }
+    my $sig = join( "\n",
+        "GFF3Clear_tmp_v1",
+        "genome=$genome\t" . join( ',', map { defined $_ ? $_ : '' } ( stat $genome )[ 7, 9 ] ),
+        "gff3=$input_gff3\t" . join( ',', map { defined $_ ? $_ : '' } ( stat $input_gff3 )[ 7, 9 ] ),
+        "genetic_code=$genetic_code",
+        "discard_lncRNA=" . ( $discard_lncRNA ? 1 : 0 ),
+        "discard_mRNA_without_CDS=" . ( $discard_mRNA_without_CDS ? 1 : 0 ),
+        "discard_frameshift_stop=" . ( $discard_frameshift_stop ? 1 : 0 ),
+        "discard_partial=" . ( $discard_partial ? 1 : 0 ),
+        "min_intron=$min_intron",
+        "no_stop_fix=" . ( $no_stop_fix ? 1 : 0 ),
+        "gene_prefix=" . ( defined $gene_prefix ? $gene_prefix : '' ),
+        "gene_code_length=" . ( defined $gene_code_length ? $gene_code_length : '' ),
+        "GFF3_source=" . ( defined $GFF3_source ? $GFF3_source : '' ),
+        "no_attr_add=" . ( $no_attr_add ? 1 : 0 ),
+        "ntask=" . scalar(@tasks),
+        "ngene=$total_input_genes",
+        "chunk_size=$chunk_size_used",
+        "layout=" . $layout->hexdigest,
+    ) . "\n";
+
+    my $sigfile = "$tmpdir/params.sig";
+    my $old;
+    if ( -e $sigfile ) {
+        if ( open( my $in, '<', $sigfile ) ) {
+            local $/ = undef;
+            $old = <$in>;
+            close $in;
+        }
+    }
+    return if defined $old && $old eq $sig;
+
+    warn "Warning: the input files or options differ from those of the previous run in $tmpdir, the old temporary results are discarded.\n" if defined $old;
+    if ( opendir( my $dh, $tmpdir ) ) {
+        foreach my $f ( readdir $dh ) {
+            next unless $f =~ m/^(?:\d+\.(?:sto|key|off|txt|p1\.ok|p2\.ok)|queue\.p[12])$/;
+            unlink "$tmpdir/$f";
+        }
+        closedir $dh;
+    }
+    open( my $out, '>', $sigfile ) or die "can not write file $sigfile, $!\n";
+    print $out $sig;
+    close $out or die "can not write file $sigfile, $!\n";
+}
+
+# 并行执行一批任务：fork 最多 $cpu 个工作进程，各进程通过带文件锁的计数文件动态领取任务。
+# $cpu == 1 或只有一个任务时在当前进程中顺序执行。
+# 已有 "$tmpdir/<任务号>.<label>.ok" 文件的任务块视为已完成，会被跳过。
+sub run_parallel {
+    my ( $label, $ids, $worker ) = @_;
+    my @all = @$ids;
+    my @ids = grep { !-e "$tmpdir/$_.$label.ok" } @all;
+    my $skipped = @all - @ids;
+    warn "Step $label: $skipped of " . scalar(@all) . " task(s) were finished in a previous run and are skipped.\n" if $skipped;
+    return unless @ids;
+    if ( $cpu == 1 or @ids == 1 ) {
+        $worker->($_) foreach @ids;
+        return;
+    }
+    my $qfile = "$tmpdir/queue.$label";
+    open( my $qf, '>', $qfile ) or die "can not write file $qfile, $!\n";
+    print $qf "0\n";
+    close $qf or die "can not write file $qfile, $!\n";
+
+    my $nw = $cpu < @ids ? $cpu : scalar @ids;
+    my ( %running, @failed );
+    foreach my $w ( 1 .. $nw ) {
+        my $pid = fork();
+        die "Can not fork: $!\n" unless defined $pid;
+        if ( $pid == 0 ) {
+            my $ok = eval {
+                while (1) {
+                    open( my $q, '+<', $qfile ) or die "can not open file $qfile, $!\n";
+                    flock( $q, LOCK_EX ) or die "can not lock file $qfile, $!\n";
+                    my $i = <$q>;
+                    $i = 0 unless defined $i;
+                    chomp $i;
+                    seek( $q, 0, 0 );
+                    truncate( $q, 0 );
+                    print $q ( $i + 1 ), "\n";
+                    close $q or die "can not write file $qfile, $!\n";
+                    last if $i >= @ids;
+                    $worker->( $ids[$i] );
+                }
+                1;
+            };
+            unless ($ok) {
+                print STDERR "Error in worker process ($label): $@";
+                POSIX::_exit(1);
+            }
+            POSIX::_exit(0);
+        }
+        $running{$pid} = $w;
+    }
+    while (%running) {
+        my $pid = waitpid( -1, 0 );
+        last if $pid <= 0;
+        my $w = delete $running{$pid};
+        push @failed, $w if defined $w && $? != 0;
+    }
+    die "Failed to finish the parallel step $label (worker(s): " . join( ", ", @failed ) . ")\n" if @failed;
+}
+
+# 第一阶段任务：修正一个任务块中的基因，保存完整结果(.sto)和用于全局排序的轻量键(.key)，最后生成 .p1.ok
+sub run_phase1 {
+    my ($tid) = @_;
+    unlink "$tmpdir/$tid.p1.ok", "$tmpdir/$tid.p2.ok";    # 本任务块重新计算，其后续结果同样失效
+    my $res = &process_chunk( $tasks[$tid] );
+    nstore( $res, "$tmpdir/$tid.sto" );
+    my %k;
+    foreach my $w (qw(kept filtered)) {
+        my $i = 0;
+        $k{$w} = [ map { [ $_->{start}, $_->{end}, $_->{strand}, $_->{sort5}, $_->{id}, $i++ ] } @{ $res->{$w} } ];
+    }
+    nstore( \%k, "$tmpdir/$tid.key" );
+    &write_ok("$tmpdir/$tid.p1.ok");
+}
+
+# 第二阶段任务：把一个任务块中每个基因的输出文本写入 .txt，并记录每个基因的偏移和长度(.off)，最后生成 .p2.ok
+sub run_phase2 {
+    my ($tid) = @_;
+    unlink "$tmpdir/$tid.p2.ok";
+    my $res = retrieve("$tmpdir/$tid.sto");
+    open( my $out, '>:raw', "$tmpdir/$tid.txt" ) or die "can not write file $tmpdir/$tid.txt, $!\n";
+    my ( %off, $pos );
+    $pos = 0;
+    foreach my $w (qw(kept filtered)) {
+        $off{$w} = [];
+        my $list = $res->{$w};
+        foreach my $i ( 0 .. $#$list ) {
+            my $text = '';
+            open( my $o, '>', \$text ) or die "can not open in-memory file, $!\n";
+            if ( $w eq 'kept' ) { &print_gene( $list->[$i], $num{$tid}[$i], $code_length, $o, 0 ) }
+            else                { &print_gene( $list->[$i], $i + 1,         0,            $o, 1 ) }
+            close $o;
+            push @{ $off{$w} }, [ $pos, length $text ];
+            print $out $text;
+            $pos += length $text;
+        }
+    }
+    close $out or die "can not write file $tmpdir/$tid.txt, $!\n";
+    nstore( \%off, "$tmpdir/$tid.off" );
+    &write_ok("$tmpdir/$tid.p2.ok");
+}
+
+# 把某任务块中第 $idx 个基因的输出文本复制到输出句柄
+sub copy_blob {
+    my ( $tid, $which, $idx, $out ) = @_;
+    my $o = $off_cache{$tid} ||= retrieve("$tmpdir/$tid.off");
+    my ( $pos, $len ) = @{ $o->{$which}[$idx] };
+    return if $len == 0;
+    my $fh = $fh_cache{$tid};
+    unless ($fh) {
+        if ( keys %fh_cache >= 200 ) {
+            close $_ foreach values %fh_cache;
+            %fh_cache = ();
+        }
+        open( $fh, '<:raw', "$tmpdir/$tid.txt" ) or die "can not open file $tmpdir/$tid.txt, $!\n";
+        $fh_cache{$tid} = $fh;
+    }
+    seek( $fh, $pos, 0 );
+    my $buf = '';
+    my $got = read( $fh, $buf, $len );
+    die "can not read file $tmpdir/$tid.txt\n" unless defined $got && $got == $len;
+    print $out $buf;
+}
+
+# 读取文件中从 $off 开始的 $len 个字节
+sub read_bytes {
+    my ( $fh, $off, $len ) = @_;
+    return '' if $len <= 0;
+    sysseek( $fh, $off, 0 ) or die "can not seek in genome file: $!\n";
+    my $out = '';
+    while ( length($out) < $len ) {
+        my $want = $len - length($out);
+        $want = 67108864 if $want > 67108864;
+        my $n = sysread( $fh, $out, $want, length $out );
+        die "can not read genome file: $!\n" unless defined $n;
+        last if $n == 0;
+    }
+    return $out;
+}
+
+# 对非压缩的基因组FASTA建立索引：按块扫描文件，记录每条序列的名称、序列数据的起止位置，
+# 然后分析每条序列的排版（每行碱基数、换行符长度、序列长度），以便之后直接定位任意区域。
+sub index_genome {
+    my ($file) = @_;
+    my $size = -s $file;
+    open( my $fh, '<:raw', $file ) or die "can not open file $file, $!\n";
+    my $blk = 64 * 1024 * 1024;
+    # 在文件内容之前加一个虚拟的换行符，这样每个">"行首都以"\n>"开头；$buf_off为$buf第0个字符对应的文件偏移
+    my ( $buf, $buf_off, $eof, $n_seq ) = ( "\n", -1, 0, 0 );
+    my ( $cur_id, $cur_data );
+    while ( !$eof ) {
+        my $n = sysread( $fh, my $chunk, $blk );
+        die "can not read file $file, $!\n" unless defined $n;
+        if   ( $n == 0 ) { $eof = 1 }
+        else             { $buf .= $chunk }
+        my $incomplete_at;
+        pos($buf) = 0;
+        while ( $buf =~ m/\n>/g ) {
+            my $m = $-[0];
+            my $e = index( $buf, "\n", $m + 2 );
+            my $data_start;
+            if ( $e < 0 ) {
+                if ( !$eof ) { $incomplete_at = $m; last }
+                $e = length $buf;
+                $data_start = $buf_off + length $buf;
+            }
+            else {
+                $data_start = $buf_off + $e + 1;
+            }
+            my $line = substr( $buf, $m + 2, $e - $m - 2 );
+            next unless $line =~ m/^\s*(\S+)/;
+            my $id        = $1;
+            my $hdr_start = $buf_off + $m + 1;
+            if ( defined $cur_id ) {
+                push @{ $seq_rec{$cur_id}{segs} }, [ $cur_data, $hdr_start - $cur_data ];
+            }
+            if ( exists $seq_sort{$id} ) {
+                warn "Warning: duplicated sequence ID $id in $file, the sequences will be concatenated.\n";
+                $seq_rec{$id}{regular} = 0;
+            }
+            else {
+                $seq_sort{$id} = ++$n_seq;
+                $seq_rec{$id} = { segs => [], regular => 1 };
+            }
+            ( $cur_id, $cur_data ) = ( $id, $data_start );
+        }
+        my $cut = defined $incomplete_at ? $incomplete_at : ( length($buf) > 0 ? length($buf) - 1 : 0 );
+        if ( $cut > 0 ) {
+            substr( $buf, 0, $cut, '' );
+            $buf_off += $cut;
+        }
+    }
+    if ( defined $cur_id ) {
+        push @{ $seq_rec{$cur_id}{segs} }, [ $cur_data, $size - $cur_data ];
+    }
+    &analyze_record( $fh, $seq_rec{$_} ) foreach keys %seq_rec;
+    close $fh;
+}
+
+# 分析一条序列的排版：若每行碱基数固定（最后一行除外），则记录 W（每行碱基数）、E（换行符字节数）和序列长度；
+# 否则标记为不规则，读取时整条序列读入。
+sub analyze_record {
+    my ( $fh, $r ) = @_;
+    $r->{regular} = 0 if @{ $r->{segs} } != 1;
+    return unless $r->{regular};
+    my ( $off, $B ) = @{ $r->{segs}[0] };
+    if ( $B <= 0 ) { $r->{regular} = 0; return }
+    my ( $pos, $nl ) = ( 0, -1 );
+    while ( $nl < 0 && $pos < $B ) {
+        my $want = $B - $pos;
+        $want = 1048576 if $want > 1048576;
+        my $s = &read_bytes( $fh, $off + $pos, $want );
+        last if $s eq '';
+        my $i = index( $s, "\n" );
+        $nl = $pos + $i if $i >= 0;
+        $pos += length $s;
+    }
+    if ( $nl <= 0 ) { $r->{regular} = 0; return }
+    my $E  = ( &read_bytes( $fh, $off + $nl - 1, 1 ) eq "\r" ) ? 2 : 1;
+    my $W  = $nl + 1 - $E;
+    if ( $W <= 0 ) { $r->{regular} = 0; return }
+    my $LW = $W + $E;
+    my $n_full     = int( $B / $LW );
+    my $tail_start = $n_full > 0 ? ( $n_full - 1 ) * $LW : 0;
+    if ( $B - $tail_start > 4 * 1048576 + 2 * $LW ) { $r->{regular} = 0; return }
+    my $tail = &read_bytes( $fh, $off + $tail_start, $B - $tail_start );
+    $tail =~ tr/ \t\r\n\f\x0b//d;
+    $r->{W}        = $W;
+    $r->{E}        = $E;
+    $r->{LW}       = $LW;
+    $r->{data_off} = $off;
+    $r->{len}      = ( $n_full > 0 ? ( $n_full - 1 ) * $W : 0 ) + length $tail;
+}
+
+# 读取序列 $chr 上包含 [$lo,$hi] 的区域（两侧各多取10个碱基）。
+# 返回 ($序列片段(大写), $偏移, $整条序列长度)，片段第一个碱基对应基因组位置 偏移+1。
+# 区域读取后会校验排版，校验失败（或序列排版不规则）则读入整条序列。
+sub load_seq {
+    my ( $chr, $lo, $hi ) = @_;
+    return ( $seq_mem{$chr}, 0, length $seq_mem{$chr} ) if exists $seq_mem{$chr};
+    my $r = $seq_rec{$chr} or return ( '', 0, 0 );
+    open( my $fh, '<:raw', $genome ) or die "can not open file $genome, $!\n";
+    if ( $r->{regular} && defined $lo ) {
+        my $len = $r->{len};
+        my $p1  = $lo - 10;
+        $p1 = 1 if $p1 < 1;
+        my $p2 = ( defined $hi ? $hi : $len ) + 10;
+        $p2 = $len if $p2 > $len;
+        if ( $p1 > $p2 ) { close $fh; return ( '', 0, $len ) }
+        my ( $W, $E, $LW, $d ) = @$r{qw(W E LW data_off)};
+        my $bs = $d + int( ( $p1 - 1 ) / $W ) * $LW + ( $p1 - 1 ) % $W;
+        my $be = $d + int( ( $p2 - 1 ) / $W ) * $LW + ( $p2 - 1 ) % $W;
+        my $s  = &read_bytes( $fh, $bs, $be - $bs + 1 );
+        my $nnl      = ( $s =~ tr/\n// );
+        my $expected = int( ( $p2 - 1 ) / $W ) - int( ( $p1 - 1 ) / $W );
+        $s =~ tr/\r\n//d;
+        if ( $nnl == $expected && length($s) == $p2 - $p1 + 1 && ( $s =~ tr/ \t\f\x0b// ) == 0 ) {
+            close $fh;
+            $s =~ tr/a-z/A-Z/;
+            return ( $s, $p1 - 1, $len );
+        }
+    }
+    my $s = '';
+    foreach my $seg ( @{ $r->{segs} } ) {
+        $s .= &read_bytes( $fh, $seg->[0], $seg->[1] );
+    }
+    close $fh;
+    $s =~ tr/ \t\r\n\f\x0b//d;
+    $s =~ tr/a-z/A-Z/;
+    return ( $s, 0, length $s );
+}
+
+# 一个基因涉及的最小/最大坐标（转录本、CDS、exon、UTR）
+sub gene_extent {
+    my ($g) = @_;
+    my ( $min, $max );
+    foreach my $t ( values %{ $g->{mRNA} } ) {
+        foreach my $p ( [ $t->{start}, $t->{end} ], @{ $t->{CDS} }, @{ $t->{exon} }, @{ $t->{UTR} } ) {
+            next unless defined $p->[0] && defined $p->[1];
+            $min = $p->[0] if !defined $min || $p->[0] < $min;
+            $max = $p->[1] if !defined $max || $p->[1] > $max;
+        }
+    }
+    return ( $min, $max );
 }
 
 # 子程序，根据遗传密码编号返回（密码子表、起始密码子表、终止密码子表）的哈希引用。
@@ -435,7 +883,7 @@ sub norm_type {
 # 将GFF3中的参考序列名对应到基因组中的序列名（精确匹配优先，其次忽略大小写、增减chr前缀）
 sub map_chr {
     my ($c) = @_;
-    return $c if exists $seq{$c};
+    return $c if exists $seq_sort{$c};
     my $l = lc $c;
     ( my $nochr = $l ) =~ s/^chr//;
     foreach my $cand ( $l, "chr$nochr", $nochr ) {
@@ -645,66 +1093,82 @@ sub parse_gff3 {
     }
 }
 
-sub run_task {
-    my ( $chr, $file ) = @_;
-    my $result = &process_chr($chr);
-    nstore( $result, $file );
-    open my $fh, '>', "$file.n" or die "can not write file $file.n, $!\n";
-    print $fh scalar(@$result), "\n";
-    close $fh or die "can not write file $file.n, $!\n";
+# 由一组转录本构建一个基因记录（基因范围由转录本推算）
+sub build_gene {
+    my ( $gid, $g, $chr, $strand, $tx ) = @_;
+    my ( $start, $end, $cds_min );
+    foreach my $t (@$tx) {
+        $start = $t->{start} if !defined $start || $t->{start} < $start;
+        $end   = $t->{end}   if !defined $end   || $t->{end} > $end;
+        foreach my $c ( @{ $t->{CDS} } ) {
+            $cds_min = $c->[0] if !defined $cds_min || $c->[0] < $cds_min;
+        }
+    }
+    return {
+        id     => $gid,
+        chr    => $chr,
+        strand => $strand,
+        source => $g->{source},
+        start  => $start,
+        end    => $end,
+        sort5  => defined $cds_min ? $cds_min : $start,
+        mRNA   => $tx,
+    };
 }
 
-# 处理一条参考序列上的所有基因：模型修正（不进行去冗余，所有基因均保留）
-sub process_chr {
-    my ($chr) = @_;
-    my $has_seq = exists $seq{$chr} ? 1 : 0;
-    my @out;
+sub sort_genes {
+    my ($list) = @_;
+    my @s = sort {
+               $a->{start} <=> $b->{start}
+            or $a->{end} <=> $b->{end}
+            or $a->{strand} cmp $b->{strand}
+            or $a->{sort5} <=> $b->{sort5}
+            or $a->{id} cmp $b->{id}
+    } @$list;
+    return \@s;
+}
 
-    my $list = $chr_genes{$chr} or return [];
-    foreach my $gid (@$list) {
+# 处理一个任务块（同一参考序列上的一批基因）：模型修正（不进行去冗余）。
+# 返回 { kept => [保留的基因], filtered => [被过滤掉的基因（仅包含被过滤的转录本）] }
+sub process_chunk {
+    my ($task) = @_;
+    my $chr     = $task->{chr};
+    my $has_seq = exists $seq_sort{$chr} ? 1 : 0;
+    ( $cur_seq, $cur_off, $cur_len ) = ( '', 0, 0 );
+    ( $cur_seq, $cur_off, $cur_len ) = &load_seq( $chr, $task->{lo}, $task->{hi} ) if $has_seq;
+    my ( @out, @fout );
+
+    foreach my $gid ( @{ $task->{genes} } ) {
         my $g      = $model{$gid};
         my $strand = $g->{strand};
         unless ( $strand eq '+' or $strand eq '-' ) {
             warn "Warning: the strand of gene $gid can not be determined, '+' is assumed.\n";
             $strand = '+';
         }
-        my @tx;
+        my ( @tx, @ftx );
         foreach my $tid ( sort { &natcmp( $a, $b ) } keys %{ $g->{mRNA} } ) {
             my $t = $g->{mRNA}{$tid};
             my $p = &process_transcript( $t, $chr, $strand, $tid, $has_seq );
             next unless $p;
-            # lncRNA 本身没有CDS，不受 --discard_mRNA_without_CDS 影响
-            next if $discard_mRNA_without_CDS && !@{ $p->{CDS} } && !$is_lnc{$tid};
-            push @tx, { id => $tid, source => $t->{source}, %$p };
-        }
-        next unless @tx;
-        my ( $start, $end, $cds_min );
-        foreach my $t (@tx) {
-            $start = $t->{start} if !defined $start || $t->{start} < $start;
-            $end   = $t->{end}   if !defined $end   || $t->{end} > $end;
-            foreach my $c ( @{ $t->{CDS} } ) {
-                $cds_min = $c->[0] if !defined $cds_min || $c->[0] < $cds_min;
+            my $rec = { id => $tid, source => $t->{source}, %$p };
+            # 被 --discard_frameshift_stop / --discard_partial 过滤的转录本
+            if ( defined $p->{discard} ) {
+                push @ftx, $rec;
+                next;
             }
+            # lncRNA 本身没有CDS，不受 --discard_mRNA_without_CDS 影响
+            if ( $discard_mRNA_without_CDS && !@{ $p->{CDS} } && !$is_lnc{$tid} ) {
+                $rec->{discard} = 'no_CDS';
+                push @ftx, $rec;
+                next;
+            }
+            push @tx, $rec;
         }
-        push @out, {
-            id     => $gid,
-            chr    => $chr,
-            strand => $strand,
-            source => $g->{source},
-            start  => $start,
-            end    => $end,
-            sort5  => defined $cds_min ? $cds_min : $start,
-            mRNA   => \@tx,
-        };
+        push @out,  &build_gene( $gid, $g, $chr, $strand, \@tx )  if @tx;
+        push @fout, &build_gene( $gid, $g, $chr, $strand, \@ftx ) if @ftx;
     }
-    @out = sort {
-               $a->{start} <=> $b->{start}
-            or $a->{end} <=> $b->{end}
-            or $a->{strand} cmp $b->{strand}
-            or $a->{sort5} <=> $b->{sort5}
-            or $a->{id} cmp $b->{id}
-    } @out;
-    return \@out;
+    $cur_seq = '';
+    return { kept => &sort_genes( \@out ), filtered => &sort_genes( \@fout ) };
 }
 
 # 去除超出参考序列末端的部分（起点超出的删除，终点超出的截断）
@@ -726,10 +1190,12 @@ sub clip_list {
     return @out;
 }
 
-# 对一个转录本进行修正，返回 CDS / exon / intron / UTR / 完整性信息；无任何可用信息（或被--discard_frameshift_stop过滤）时返回undef
+# 对一个转录本进行修正，返回 CDS / exon / intron / UTR / 完整性信息；无任何可用信息时返回undef。
+# 被 --discard_frameshift_stop 或 --discard_partial 过滤的转录本仍返回完整的模型，
+# 但其中的 discard 字段记录过滤原因（未被过滤时为undef），由调用者决定如何输出。
 sub process_transcript {
     my ( $t, $chr, $strand, $tid, $has_seq ) = @_;
-    my $seq_len = $has_seq ? length $seq{$chr} : undef;
+    my $seq_len = $has_seq ? $cur_len : undef;
     my ( $ts, $te ) = ( $t->{start}, $t->{end} );
     if ( defined $seq_len && defined $ts ) {
         if ( $ts > $seq_len ) {
@@ -797,6 +1263,7 @@ sub process_transcript {
     }
 
     my ( $integrity, $internal_stop, $frameshift ) = ( undef, 0, 0 );
+    my @reason;    # 被过滤的原因
     if (@cds) {
         # 先修正尾部终止密码子，之后的 exon / UTR 均基于修正后的CDS计算
         ( $integrity, $internal_stop, $frameshift ) = &fix_stop_codon_and_integrity( \@cds, $chr, $strand, $tid ) if $has_seq;
@@ -806,14 +1273,23 @@ sub process_transcript {
 
         # --discard_frameshift_stop：过滤存在移码（CDS长度不是3的倍数）或内部终止密码子的转录本
         if ( $discard_frameshift_stop && ( $internal_stop > 0 || $frameshift ) ) {
-            my @reason;
-            push @reason, "$internal_stop in-frame internal stop codon(s)" if $internal_stop > 0;
-            push @reason, "frameshift (CDS length is not a multiple of 3)" if $frameshift;
-            warn "Warning: mRNA $tid was discarded (--discard_frameshift_stop): " . join( " and ", @reason ) . ".\n";
-            return undef;
+            my @r;
+            push @r, "$internal_stop in-frame internal stop codon(s)" if $internal_stop > 0;
+            push @r, "frameshift (CDS length is not a multiple of 3)" if $frameshift;
+            warn "Warning: mRNA $tid was discarded (--discard_frameshift_stop): " . join( " and ", @r ) . ".\n";
+            push @reason, 'internal_stop' if $internal_stop > 0;
+            push @reason, 'frameshift'    if $frameshift;
         }
-        &check_cds_intron( \@cds, $tid );
+
+        # --discard_partial：过滤5'端或3'端不完整的转录本（Integrity不是complete）
+        if ( $discard_partial && defined $integrity && $integrity ne 'complete' ) {
+            my $why = $integrity eq 'internal' ? '5prime_and_3prime_partial' : $integrity;
+            warn "Warning: mRNA $tid was discarded (--discard_partial): the gene model is incomplete ($why).\n";
+            push @reason, $why;
+        }
+        &check_cds_intron( \@cds, $tid ) unless @reason;
     }
+    my $discard = @reason ? join( ',', @reason ) : undef;
 
     my @exon_new = &modify_exon( \@cds, \@exon, $ts, $te );
     my @intron   = &gaps( \@exon_new );
@@ -828,6 +1304,7 @@ sub process_transcript {
         UTR3          => $utr3,
         integrity     => $integrity,
         internal_stop => $internal_stop,
+        discard       => $discard,
         start         => $exon_new[0][0],
         end           => $exon_new[-1][1],
     };
@@ -846,9 +1323,10 @@ sub count_internal_stop {
 # @$cds 已按坐标升序排列；直接修改其中的坐标和5'端CDS的phase。
 # 返回列表：(完整性信息, 内部终止密码子数量, 移码标志)。移码标志为1表示CDS长度（去除5'端phase后）不是3的倍数。
 # 终止密码子和起始密码子由 --genetic_code 指定的遗传密码确定。
+# 基因组序列取自当前任务的 $cur_seq（位置 p 对应 substr 下标 p-1-$cur_off），整条序列长度为 $cur_len。
 sub fix_stop_codon_and_integrity {
     my ( $cds, $chr, $strand, $tid ) = @_;
-    my $seq_len = length $seq{$chr};
+    my $seq_len = $cur_len;
     foreach (@$cds) {
         if ( $_->[1] > $seq_len ) {
             warn "Warning: CDS of $tid exceeds the end of sequence $chr, stop codon correction skipped.\n";
@@ -857,7 +1335,7 @@ sub fix_stop_codon_and_integrity {
     }
 
     my $nt_all = '';
-    $nt_all .= substr( $seq{$chr}, $_->[0] - 1, $_->[1] - $_->[0] + 1 ) foreach @$cds;
+    $nt_all .= substr( $cur_seq, $_->[0] - 1 - $cur_off, $_->[1] - $_->[0] + 1 ) foreach @$cds;
     my $c5 = $strand eq '-' ? $cds->[-1] : $cds->[0];    # 5'端的CDS
     if ( $strand eq '-' ) {
         $nt_all = reverse $nt_all;
@@ -910,7 +1388,7 @@ sub fix_stop_codon_and_integrity {
         if ( $strand eq '-' ) {
             my $c = $cds->[0];
             if ( $c->[0] > 3 ) {
-                my $codon = reverse substr( $seq{$chr}, $c->[0] - 4, 3 );
+                my $codon = reverse substr( $cur_seq, $c->[0] - 4 - $cur_off, 3 );
                 $codon =~ tr/ACGT/TGCA/;
                 if ( $stop_codon{$codon} ) {
                     $c->[0] -= 3;
@@ -921,7 +1399,7 @@ sub fix_stop_codon_and_integrity {
         else {
             my $c = $cds->[-1];
             if ( $c->[1] + 3 <= $seq_len ) {
-                my $codon = substr( $seq{$chr}, $c->[1], 3 );
+                my $codon = substr( $cur_seq, $c->[1] - $cur_off, 3 );
                 if ( $stop_codon{$codon} ) {
                     $c->[1] += 3;
                     $pep .= '*';
@@ -1130,15 +1608,17 @@ sub feat_extra {
     return ( $score, $attr );
 }
 
+# 输出一个基因。参数：基因记录, 基因序号, 编号长度, 输出文件句柄, 是否保留原始ID（用于被过滤基因的输出，此时不重命名）
 sub print_gene {
-    my ( $g, $n, $code_length ) = @_;
+    my ( $g, $n, $code_length, $out, $keep_id ) = @_;
     my ( $gid, $chr, $strand ) = ( $g->{id}, $g->{chr}, $g->{strand} );
-    my $new_gid = $rename ? $gene_prefix . ( '0' x ( $code_length - length($n) ) ) . $n : $gid;
+    my $do_rename = ( $rename && !$keep_id ) ? 1 : 0;
+    my $new_gid = $do_rename ? $gene_prefix . ( '0' x ( $code_length - length($n) ) ) . $n : $gid;
     my $gsrc    = defined $GFF3_source ? $GFF3_source : $g->{source};
     my $gscore  = ( defined $gene_score{$gid} && $gene_score{$gid} ne '' ) ? $gene_score{$gid} : '.';
     my $gattr   = defined $gene_attr{$gid} ? $gene_attr{$gid} : '';
-    $gattr = &strip_tag( $gattr, 'Source' ) . "Source=$gid;" if $rename && !$no_attr_add;
-    print join( "\t", $chr, $gsrc, 'gene', $g->{start}, $g->{end}, $gscore, $strand, '.', "ID=$new_gid;$gattr" ), "\n";
+    $gattr = &strip_tag( $gattr, 'Source' ) . "Source=$gid;" if $do_rename && !$no_attr_add;
+    print $out join( "\t", $chr, $gsrc, 'gene', $g->{start}, $g->{end}, $gscore, $strand, '.', "ID=$new_gid;$gattr" ), "\n";
 
     my $rev   = $strand eq '-' ? 1 : 0;
     my $width = length( scalar @{ $g->{mRNA} } );
@@ -1147,16 +1627,18 @@ sub print_gene {
     foreach my $t ( @{ $g->{mRNA} } ) {
         $k++;
         my $tid   = $t->{id};
-        my $mid   = $rename ? "$new_gid.t" . ( '0' x ( $width - length($k) ) ) . $k : $tid;
+        my $mid   = $do_rename ? "$new_gid.t" . ( '0' x ( $width - length($k) ) ) . $k : $tid;
         my $src   = defined $GFF3_source ? $GFF3_source : $t->{source};
         my $type  = $is_lnc{$tid} ? 'lnc_RNA' : 'mRNA';
         my $score = ( defined $tx_score{$tid} && $tx_score{$tid} ne '' ) ? $tx_score{$tid} : '.';
         my $tattr = defined $tx_attr{$tid} ? $tx_attr{$tid} : '';
         unless ($no_attr_add) {
             $tattr = &strip_tag( $tattr, 'Integrity' ) . "Integrity=$t->{integrity};" if defined $t->{integrity};
-            $tattr = &strip_tag( $tattr, 'Source' ) . "Source=$tid;" if $rename;
+            $tattr = &strip_tag( $tattr, 'Source' ) . "Source=$tid;" if $do_rename;
         }
-        print join( "\t", $chr, $src, $type, $t->{start}, $t->{end}, $score, $strand, '.', "ID=$mid;Parent=$new_gid;$tattr" ), "\n";
+        # 被过滤的转录本：记录过滤原因
+        $tattr = &strip_tag( $tattr, 'Discard_reason' ) . "Discard_reason=$t->{discard};" if $keep_id && defined $t->{discard};
+        print $out join( "\t", $chr, $src, $type, $t->{start}, $t->{end}, $score, $strand, '.', "ID=$mid;Parent=$new_gid;$tattr" ), "\n";
 
         # 各子Feature按转录方向编号
         my $ordered = sub {
@@ -1191,9 +1673,9 @@ sub print_gene {
         else {
             @feat = sort { $a->[0] <=> $b->[0] or $a->[1] <=> $b->[1] } @feat;
         }
-        print "$_->[2]\n" foreach @feat;
+        print $out "$_->[2]\n" foreach @feat;
     }
-    print "\n";
+    print $out "\n";
 }
 
 # 英文用法说明：从文件末尾的__DATA__部分读取
@@ -1211,7 +1693,7 @@ sub get_usage_english {
 __DATA__
 Usage:
     perl __SCRIPT__ [options] --genome genome.fasta input.gff3 > output.gff3
-    This program reads one GFF3 file, checks and corrects the GFF3 format, keeps only protein-coding genes and lncRNA genes, and outputs them in standard GFF3 format. The program does not remove redundant (overlapping) gene models, all genes are kept.
+    This program reads one GFF3 file, checks and corrects the GFF3 format, keeps only protein-coding genes and lncRNA genes, and outputs them in standard GFF3 format. The program does not remove redundant (overlapping) gene models, all genes are kept (except for the gene models removed by the filtering options).
 
 1. Requirements for the input GFF3 file
     Only one input GFF3 file is supported (it can be a .gz compressed file). The file must contain the mRNA and CDS features, and the 9th column of these features must contain the Parent information; gene, exon and UTR features may also be present. All genes/transcripts in the file should have different IDs (if a transcript ID is duplicated, only the first one is kept and a warning is given). The program only reads the gene, mRNA (or transcript), lnc_RNA (or lncRNA), CDS, exon and UTR features; the Parent of a CDS/exon/UTR can be several transcripts separated by commas.
@@ -1226,15 +1708,15 @@ Usage:
     2.6 Stop codon correction: according to the input genome sequence and the genetic code given by --genetic_code, the program checks whether the CDS at the tail of a gene model contains a stop codon; if not, it checks whether the following 3 bases are a stop codon, and if so extends the CDS to include it; if there are several consecutive stop codons at the tail, only one is kept. This step can be switched off with --no_stop_fix;
     2.7 Exon correction: if the input GFF3 file contains no exon, the exons are generated from the UTRs (if any), the CDSs and the start/end boundaries of the mRNA (the part of the mRNA range beyond the CDSs becomes UTR); if it contains exons, the exons are corrected using the exons, the CDSs and the start/end boundaries of the mRNA: the introns are calculated first (the introns between CDSs take priority, and exon gaps overlapping a CDS are discarded), and then the accurate exons are obtained from the introns and the minimum/maximum coordinates of all features and the mRNA boundaries, which removes overlapping or adjacent exons and guarantees that exons cover the CDSs;
     2.8 UTR and intron: the five_prime_UTR, three_prime_UTR (except for lncRNAs) and intron features are regenerated from the corrected exons and CDSs;
-    2.9 Integrity detection: the integrity of each gene model is detected from its start codon and stop codon (both determined by the genetic code given by --genetic_code), and the Integrity attribute is added to the 9th column of the mRNA, with the value complete, 5prime_partial, 3prime_partial or internal; in-frame stop codons inside the CDS (the terminal stop codon is not counted) are counted, and a warning is printed to standard error if any exist; if --discard_frameshift_stop is set, transcripts with a frameshift or internal stop codons are filtered out in this step;
+    2.9 Integrity detection and filtering: the integrity of each gene model is detected from its start codon and stop codon (both determined by the genetic code given by --genetic_code), and the Integrity attribute is added to the 9th column of the mRNA, with the value complete, 5prime_partial, 3prime_partial or internal; in-frame stop codons inside the CDS (the terminal stop codon is not counted) are counted, and a warning is printed to standard error if any exist; if --discard_frameshift_stop is set, transcripts with a frameshift or internal stop codons are filtered out in this step; if --discard_partial is set, transcripts that are incomplete at the 5' end or the 3' end (Integrity is not complete) are filtered out in this step; the filtered gene models can be saved to a separate file with --filtered_gff3;
     2.10 Sorting and naming: the gene models are sorted by the order of the sequences in the input genome FASTA file and by position, the gene IDs are renamed if required, and the gene models are output in standard GFF3 format, together with the original attributes in the input file;
     2.11 Attributes: the original attributes of CDS/exon/intron/UTR features are stored per transcript they belong to, so features with identical coordinates in different genes/transcripts are never mixed up; if a tag appears more than once in the same feature, only the value of its first occurrence is kept;
-    2.12 Feature type filtering: transcripts of other types (such as tRNA, rRNA, miRNA, pseudogene) and their child features are ignored; with --discard_lncRNA, the child features of lncRNA transcripts are ignored as well.
+    2.12 Feature type filtering: transcripts of other types (such as tRNA, rRNA, miRNA, pseudogene) and their child features are ignored; with --discard_lncRNA, the child features of lncRNA transcripts are ignored as well. Features ignored at the reading stage are not "filtered gene models" and are not written to the file given by --filtered_gff3.
 
 3. Options
 [Input options]
     --genome <fasta file>    default: None
-    The input genome fasta file (it can be a .gz compressed file). This option is required; it is used to correct the tail CDS, infer and correct the phase, detect gene integrity and detect internal stop codons.
+    The input genome fasta file (it can be a .gz compressed file). This option is required; it is used to correct the tail CDS, infer and correct the phase, detect gene integrity and detect internal stop codons. A plain (uncompressed) fasta file is not loaded into memory as a whole: the program only builds a sequence index and each parallel task reads just the region it needs; a .gz file is loaded into memory entirely.
 
 [Genetic code options]
     --genetic_code <int>    default: 1
@@ -1250,6 +1732,9 @@ Usage:
     --discard_frameshift_stop    default: None
     If set, transcripts (gene models) with a frameshift or internal stop codons are filtered out. After the phase correction (the reading frame with the fewest internal stop codons is chosen) and the tail stop codon correction, a transcript is discarded if (1) the CDS still contains in-frame stop codons (the terminal stop codon is not counted), or (2) the CDS length (after removing the 5' phase) is not a multiple of 3 (frameshift, or an incomplete terminal codon). If all transcripts of a gene are filtered out, the whole gene is filtered out. A warning is printed to standard error for each discarded transcript. lncRNAs have no CDS and are not affected by this option; transcripts on reference sequences that are not found in the genome can not be checked and are not filtered.
 
+    --discard_partial    default: None
+    If set, incomplete gene models (incomplete at the 5' end or the 3' end) are filtered out. The decision is based on the Integrity detected after the phase correction and the tail stop codon correction: only transcripts whose Integrity is complete (having both a start codon and a stop codon) are kept; transcripts whose Integrity is 5prime_partial, 3prime_partial or internal (incomplete at both ends) are discarded. If all transcripts of a gene are filtered out, the whole gene is filtered out. A warning is printed to standard error for each discarded transcript. lncRNAs have no CDS and are not affected by this option; transcripts on reference sequences that are not found in the genome can not be checked and are not filtered.
+
 [Correction options]
     --min_intron <int>    default: 1
     Set a minimum intron length threshold. When the distance between two adjacent CDSs is < this threshold, the program prints a warning to standard error. With the default value 1, a warning means that the gene model is erroneous (note that adjacent CDSs with a gap of 0 are merged).
@@ -1258,6 +1743,9 @@ Usage:
     If set, the program no longer corrects the stop codon at the tail of gene models (the CDS is neither extended nor are redundant consecutive stop codons removed), but gene integrity is still detected.
 
 [Output options]
+    --filtered_gff3 <file>    default: None
+    If set, the gene models filtered out by --discard_partial, --discard_frameshift_stop and --discard_mRNA_without_CDS are saved to this GFF3 file. The genes and transcripts in this file keep the original IDs of the input file (they are not affected by --gene_prefix), and the 9th column of each filtered mRNA gets a Discard_reason attribute, whose value can be 5prime_partial, 3prime_partial, 5prime_and_3prime_partial, internal_stop, frameshift or no_CDS (several reasons of the same transcript are joined by commas). If only some transcripts of a gene are filtered, the filtered transcripts are saved to this file under the same gene ID, and the remaining transcripts are still written to the standard output. If not set, the filtered gene models are simply discarded.
+
     --gene_prefix <string>    default: None
     If set, the gene IDs are renamed, and this option sets the prefix of the new gene IDs. If not set, genes are not renamed.
 
@@ -1272,7 +1760,13 @@ Usage:
 
 [Runtime options]
     --cpu <int>    default: 1
-    The number of parallel processes. Gene models on different reference sequences (chromosomes/scaffolds) are independent of each other, so the program splits the work by reference sequence and uses multiple processes (fork) to correct the gene models in parallel. The parallel result is exactly the same as that of --cpu 1. Temporary files are written to the directory specified by the environment variable TMPDIR (default /tmp) and are deleted automatically when the program finishes.
+    The number of parallel processes. The following steps run in parallel (fork): (1) gene model correction: the genes on each reference sequence are split by position into independent task chunks that the worker processes pick up dynamically, so that all cores are used even if there are only a few chromosomes; (2) output formatting: the output text of each task chunk is generated in parallel and the main process only concatenates it in the global order. Reading/parsing the GFF3 file and building the genome index are still done by a single process. The parallel result is exactly the same as that of --cpu 1. Temporary files are written to the directory specified by --tmp_dir.
+
+    --chunk_size <int>    default: automatic
+    The number of genes in each parallel task chunk. By default it is calculated from the total number of genes and --cpu (at least 200 genes). It only takes effect when --cpu > 1 and only affects how the work is divided, not the result.
+
+    --tmp_dir <string>    default: tmp_$date$pid
+    Temporary directory (created if it does not exist). In both the gene model correction step and the output formatting step, an .ok file is created for each task chunk after it is finished, and finished task chunks are skipped when the program is run again (the warnings of skipped task chunks are not printed again). The file params.sig in the directory records a signature of the input files and options; if the input files or options (including --cpu and --chunk_size, which affect how the work is divided) differ from those of the previous run, the old temporary results in the directory are discarded and recalculated. If this option is not set, the default directory is used and it is removed automatically when the program finishes normally; if this option is set, the directory is kept after the program finishes (so that the run can be resumed), please remove it manually when it is no longer needed.
 
 [Help options]
     --help    default: None

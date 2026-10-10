@@ -1,0 +1,701 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use Getopt::Long;
+use File::Basename;
+use File::Path qw(make_path remove_tree);
+use Cwd qw(abs_path);
+use POSIX qw(strftime);
+
+########################################################################
+# 中文用法说明（放在代码最前面；英文用法说明放在文件最末尾的__DATA__部分）
+########################################################################
+my $usage_cn = <<'USAGE';
+名称:
+    {PROG} - 并行地为GFF3文件中的基因模型添加可变剪接转录本。
+
+用法:
+    {PROG} [参数] geneModels.gff3 intron.txt base_depth.txt > out.gff3 2> alternative_splicing.stats
+
+示例:
+    {PROG} --cpu 20 --min_intron_depth 2 --tmp_dir tmp_AS geneModels.gff3 intron.txt base_depth.txt > geneModels.AS.gff3 2> alternative_splicing.stats
+
+功能简介:
+    本程序将基因模型按基因分组，把输入的GFF3、intron.txt和base_depth.txt按基因组位置分割成多份互不影响的数据块(chunk)，再用--cpu个worker并行调用alternative_splicing_analysis对各数据块进行可变剪接分析，最后按输入顺序合并结果。由于每个基因的分析只依赖其自身区域的数据，分割不改变分析结果，同时每个worker只需加载自己区域的intron和碱基测序深度数据，大幅降低内存消耗。
+    intron.txt和base_depth.txt(通常很大)的分割也是并行的：文件按字节范围切成多段，由--split_cpu个进程同时扫描，每个进程把所属数据行写入各自的分块片段文件，之后在各数据块运行前自动合并片段。
+
+运行流程:
+    (1) 读取GFF3文件，按ID/Parent关系将各行归入基因（沿Parent追溯到最顶层特征）。有gene行、转录本(Parent为该基因且有ID)和exon的基因才会进行可变剪接分析；其余特征原样输出。
+    (2) 将基因按 染色体+链 排序，把区间相互重叠的基因合并为不可拆分的小块，再将若干小块组合成数据块(每块约--chunk_gene_num个基因，最多300块)。不同数据块在同一染色体同一条链上的区间互不重叠。
+    (3) 并行扫描intron.txt和base_depth.txt(按字节范围分段，--split_cpu个进程)，把每一行分发到其所在区间对应的数据块片段文件中，不在任何基因区间内的行被丢弃。
+    (4) 使用--cpu个并行进程处理各数据块：先合并该数据块的片段文件，再调用alternative_splicing_analysis；每个数据块完成后生成.ok文件并删除其大体积中间文件，重新运行时跳过已完成的数据块。数据量大的数据块优先运行。
+    (5) 按输入文件中基因的顺序合并输出，标准错误输出各worker的警告信息和统计信息。
+
+输入文件(必须是未压缩的普通文件，不能是管道或压缩文件):
+    geneModels.gff3    基因模型GFF3文件，必须有exon信息，建议使用不带可变剪接的GFF3文件
+    intron.txt         制表符分割，7列：转录本ID、基因组序列ID、正负链、intron起始、intron结束、intron测序深度、intron区域碱基测序深度中位数
+    base_depth.txt     制表符分割，4列：基因组序列ID、正负链、碱基坐标、碱基测序深度
+
+输出:
+    标准输出为添加了可变剪接转录本的GFF3文件(mRNA第九列含Transcript_Ratio)；标准错误输出为各worker的警告及汇总统计。
+
+参数(以下与alternative_splicing_analysis一致；未设置时使用alternative_splicing_analysis的默认值):
+    --min_intron_depth <整数>    默认值: 1
+    最小intron测序深度。intron.txt第6列小于该值的行被忽略。
+
+    --min_base_depth_ratio_for_ref_specific_intron <小数>    默认值: 0.3
+    ref intron特有的intron，若 碱基测序深度/基因测序深度 超过该值，则存在IR事件。
+
+    --min_intron_depth_ratio_for_evidence_specific_intron <小数>    默认值: 0.2
+    evidence intron特有的intron，若 intron测序深度/基因测序深度 超过该值，则intron可信。
+
+    --min_base_depth_ratio_for_common_intron <小数>    默认值: 0.2
+    共有的intron，若 碱基测序深度/基因测序深度 超过该值，则存在IR事件。
+
+    --min_gene_depth <整数>    默认值: 10
+    基因测序深度低于该值时，按该值计算。
+
+    --min_transcript_confidence_for_output <小数>    默认值: 0.05
+    增加的可变剪接转录本所占比例不低于该值才输出。
+
+    --transcript_num_for_output_when_all_low_confidence <整数>    默认值: 8
+    所有可变剪接转录本比例都低于上述阈值时，强制输出比例靠前的转录本，直至mRNA数量达到该值。
+
+    --added_mRNA_ID_prefix <字符串>    默认值: t
+    增加的转录本ID格式为 <geneID>.<前缀><两位数字编号>。
+
+本程序新增的参数:
+    --cpu <整数>    默认值: 8
+    并行worker数量(同时运行的alternative_splicing_analysis进程数)。
+
+    --split_cpu <整数>    默认值: 与--cpu相同
+    分割intron.txt和base_depth.txt时并行的进程数。分割主要受磁盘读取速度限制，并行文件系统上可适当调大。
+
+    --split_block_mb <数值>    默认值: 32
+    每个并行分割任务至少处理的文件大小(MB)。文件小于该值的2倍时不并行。
+
+    --chunk_gene_num <整数>    默认值: 自动
+    每个数据块的大致基因数。默认根据基因总数和--cpu自动计算(20~5000之间，且数据块总数不超过300)。
+
+    --tmp_dir <字符串>    默认值: tmp_$date$pid
+    临时文件夹。各数据块完成后生成.ok文件，重新运行时(输入、参数和分块方式未变)会跳过已完成的步骤。未设置时临时文件夹在运行成功后自动删除；设置后则保留。
+
+    --keep_tmp
+    默认值: 无。未设置--tmp_dir时，也保留自动创建的临时文件夹。
+
+    --help
+    Display the English usage and exit.
+
+    --chinese_help
+    显示中文用法说明并退出。
+USAGE
+
+my $usage_en = do { local $/; <DATA> };
+$usage_en = '' unless defined $usage_en;
+
+my $prog_name  = basename($0);
+my $bin_path   = dirname( abs_path($0) );
+my $MAX_CHUNKS = 300;
+
+sub get_usage {
+    my ($lang) = @_;
+    my $u = ( $lang eq 'cn' ) ? $usage_cn : $usage_en;
+    my $p = $0;
+    $u =~ s/\{PROG\}/$p/g;
+    return $u;
+}
+
+if ( @ARGV == 0 ) {
+    print STDERR get_usage('en');
+    exit 1;
+}
+
+my %alt;
+my ( $cpu, $split_cpu, $split_block_mb, $tmp_dir, $keep_tmp, $chunk_gene_num, $help, $chinese_help );
+GetOptions(
+    "min_intron_depth=i"                                    => \$alt{min_intron_depth},
+    "min_base_depth_ratio_for_ref_specific_intron=f"        => \$alt{min_base_depth_ratio_for_ref_specific_intron},
+    "min_intron_depth_ratio_for_evidence_specific_intron=f" => \$alt{min_intron_depth_ratio_for_evidence_specific_intron},
+    "min_base_depth_ratio_for_common_intron=f"              => \$alt{min_base_depth_ratio_for_common_intron},
+    "min_gene_depth=i"                                      => \$alt{min_gene_depth},
+    "min_transcript_confidence_for_output=f"                => \$alt{min_transcript_confidence_for_output},
+    "transcript_num_for_output_when_all_low_confidence=i"   => \$alt{transcript_num_for_output_when_all_low_confidence},
+    "added_mRNA_ID_prefix=s"                                => \$alt{added_mRNA_ID_prefix},
+    "cpu=i"                                                 => \$cpu,
+    "split_cpu=i"                                           => \$split_cpu,
+    "split_block_mb=f"                                      => \$split_block_mb,
+    "chunk_gene_num=i"                                      => \$chunk_gene_num,
+    "tmp_dir=s"                                             => \$tmp_dir,
+    "keep_tmp"                                              => \$keep_tmp,
+    "help|h"                                                => \$help,
+    "chinese_help"                                          => \$chinese_help,
+) or do { print STDERR "\n", get_usage('en'); exit 1; };
+
+if ($help)         { print get_usage('en'); exit 0; }
+if ($chinese_help) { print get_usage('cn'); exit 0; }
+
+if ( @ARGV != 3 ) {
+    print STDERR "Error: exactly three input files are required (geneModels.gff3 intron.txt base_depth.txt).\n\n", get_usage('en');
+    exit 1;
+}
+$cpu //= 8;
+$cpu = 1 if $cpu < 1;
+$split_cpu //= $cpu;
+$split_cpu = 1 if $split_cpu < 1;
+$split_block_mb //= 32;
+$split_block_mb = 0.001 if $split_block_mb <= 0;
+my $MIN_RANGE_BYTES = int( $split_block_mb * 1024 * 1024 );
+$MIN_RANGE_BYTES = 1 if $MIN_RANGE_BYTES < 1;
+
+my ( $gff_file, $intron_file, $depth_file ) = map { abs_exist($_) } @ARGV;
+my $alt_bin = "$bin_path/alternative_splicing_analysis";
+die "Error: $alt_bin is not found.\n" unless -e $alt_bin;
+# 若alternative_splicing_analysis没有可执行权限，则用当前perl解释器运行
+my $alt_cmd = ( -x $alt_bin ) ? shq($alt_bin) : shq($^X) . " " . shq($alt_bin);
+
+# 传递给alternative_splicing_analysis的参数(只传递用户设置了的参数，其余使用其默认值)
+my $alt_opts = '';
+foreach my $name (qw/min_intron_depth min_base_depth_ratio_for_ref_specific_intron min_intron_depth_ratio_for_evidence_specific_intron
+                     min_base_depth_ratio_for_common_intron min_gene_depth min_transcript_confidence_for_output
+                     transcript_num_for_output_when_all_low_confidence added_mRNA_ID_prefix/) {
+    next unless defined $alt{$name};
+    $alt_opts .= " --$name " . shq( $alt{$name} );
+}
+
+print STDERR "\n#################### $prog_name | Start ####################\n";
+print STDERR scalar( localtime() ) . ": CMD: $0 " . join( " ", map { shq($_) } @ARGV ) . "\n";
+
+########################################################################
+# 1. 读取GFF3，按基因分组
+########################################################################
+my ( @recs, %first, %parent_of, @header );
+my $seen_feat = 0;
+{
+    open my $fh, '<', $gff_file or die "Error: can not open $gff_file, $!\n";
+    while ( my $raw = <$fh> ) {
+        $raw =~ s/[\r\n]+$//;
+        last if $raw =~ /^##FASTA/;
+        next if $raw =~ /^\s*$/;
+        if ( $raw =~ /^#/ ) { push @header, $raw unless $seen_feat || $raw =~ /^###/; next; }
+        my @f = split /\t/, $raw, 9;
+        if ( @f < 9 ) { warn "Warning: line with < 9 columns was skipped: $raw\n"; next; }
+        $seen_feat = 1;
+        my ($id)  = $f[8] =~ /(?:^|;)\s*ID=([^;\s]+)/;
+        my ($par) = $f[8] =~ /(?:^|;)\s*Parent=([^;]+)/;
+        my @p = defined $par ? grep { $_ ne '' } map { s/^\s+|\s+$//gr } split( /,/, $par ) : ();
+        push @recs, { line => $raw, f => \@f, id => $id, pars => \@p };
+        if ( defined $id ) {
+            $first{$id} = 1;
+            $parent_of{$id} //= $p[0] if @p;
+        }
+    }
+    close $fh;
+}
+
+sub top_of {
+    my ($id) = @_;
+    my %seen;
+    while ( defined $parent_of{$id} && exists $first{ $parent_of{$id} } && !$seen{$id}++ ) { $id = $parent_of{$id}; }
+    return $id;
+}
+
+my ( %grp, @order );
+my $anon = 0;
+foreach my $r (@recs) {
+    my $key;
+    if    ( @{ $r->{pars} } )  { $key = top_of( $r->{pars}[0] ); }
+    elsif ( defined $r->{id} ) { $key = $r->{id}; }
+    else                       { $key = "__anonymous_feature_" . ( ++$anon ); }
+    unless ( $grp{$key} ) {
+        $grp{$key} = { lines => [], n_child => 0, n_exon => 0, gene => undef };
+        push @order, $key;
+    }
+    my $g = $grp{$key};
+    push @{ $g->{lines} }, $r->{line};
+    my $f = $r->{f};
+    if (   $f->[2] eq 'gene' && defined $r->{id} && $r->{id} eq $key && !$g->{gene}
+        && $f->[3] =~ /^\d+$/ && $f->[4] =~ /^\d+$/ ) {
+        my ( $s, $e ) = $f->[3] <= $f->[4] ? ( $f->[3], $f->[4] ) : ( $f->[4], $f->[3] );
+        $g->{gene} = [ $f->[0], $s, $e, $f->[6] ];
+    }
+    # alternative_splicing_analysis只把"Parent为基因且带ID"的行当作转录本，这里保持一致
+    $g->{n_child}++ if defined $r->{id} && grep { $_ eq $key } @{ $r->{pars} };
+    $g->{n_exon}++ if $f->[2] eq 'exon';
+}
+@recs = ();
+
+my @elig    = grep { $grp{$_}{gene} && $grp{$_}{n_child} && $grp{$_}{n_exon} } @order;
+my $n_elig  = scalar @elig;
+my $n_total = scalar @order;
+print STDERR "Read $gff_file: $n_total feature groups, $n_elig genes are analysed.\n";
+
+my %out_text;
+my ( $n_tx_in, $n_tx_out, $n_gene_added ) = ( 0, 0, 0 );
+
+if ( $n_elig > 0 ) {
+
+    ####################################################################
+    # 2. 划分数据块
+    ####################################################################
+    my $target;
+    if ( defined $chunk_gene_num && $chunk_gene_num > 0 ) { $target = $chunk_gene_num; }
+    else {
+        $target = int( $n_elig / ( $cpu * 8 ) ) + 1;
+        $target = 20   if $target < 20;
+        $target = 5000 if $target > 5000;
+    }
+    my $min_t = int( ( $n_elig + $MAX_CHUNKS - 1 ) / $MAX_CHUNKS );
+    $target = $min_t if $target < $min_t;
+
+    my ( %by_key, @key_order );
+    foreach my $k (@elig) {
+        my $g  = $grp{$k}{gene};
+        my $kk = "$g->[0]\t$g->[3]";
+        push @key_order, $kk unless $by_key{$kk};
+        push @{ $by_key{$kk} }, $k;
+    }
+
+    my ( @chunk_genes, %seg );
+    my ( $cid, $cnt ) = ( 0, 0 );
+    $chunk_genes[0] = [];
+    foreach my $kk (@key_order) {
+        my @gs = sort {
+            $grp{$a}{gene}[1] <=> $grp{$b}{gene}[1] || $grp{$a}{gene}[2] <=> $grp{$b}{gene}[2] || $a cmp $b
+        } @{ $by_key{$kk} };
+        my ( @blk, $bmin, $bmax );
+        my $flush = sub {
+            return unless @blk;
+            if ( $cnt >= $target ) { $cid++; $chunk_genes[$cid] = []; $cnt = 0; }
+            push @{ $chunk_genes[$cid] }, @blk;
+            $cnt += @blk;
+            push @{ $seg{$kk} }, [ $bmin, $bmax, $cid ];
+            @blk = ();
+            undef $bmin;
+            undef $bmax;
+        };
+        foreach my $k (@gs) {
+            my ( $s, $e ) = @{ $grp{$k}{gene} }[ 1, 2 ];
+            $flush->() if @blk && $s > $bmax;
+            push @blk, $k;
+            $bmin = $s if !defined $bmin;
+            $bmax = $e if !defined $bmax || $e > $bmax;
+        }
+        $flush->();
+    }
+    my $nchunk = $cid + 1;
+    print STDERR "The genes are divided into $nchunk chunk(s) (about $target genes per chunk).\n";
+
+    ####################################################################
+    # 3. 临时文件夹，并行分割输入数据
+    ####################################################################
+    my $auto_tmp = 0;
+    unless ( defined $tmp_dir && $tmp_dir ne '' ) {
+        $tmp_dir  = "tmp_" . strftime( "%Y%m%d%H%M%S", localtime ) . $$;
+        $auto_tmp = 1;
+    }
+    mkdir $tmp_dir unless -e $tmp_dir;
+    die "Error: can not create temporary directory $tmp_dir\n" unless -d $tmp_dir;
+    $tmp_dir = abs_path($tmp_dir);
+    my $parts_dir = "$tmp_dir/parts";
+
+    my $sig = "version=3\n";
+    $sig .= join( "", map { my @s = stat $_; "$_\t$s[7]\t$s[9]\n" } ( $gff_file, $intron_file, $depth_file ) );
+    $sig .= "chunks=$nchunk\ntarget=$target\ngenes=$n_elig\nopts=$alt_opts\n";
+    my $old_sig = '';
+    if ( -e "$tmp_dir/split.ok" && open my $sf, '<', "$tmp_dir/split.sig" ) { local $/; $old_sig = <$sf>; close $sf; }
+
+    if ( $old_sig eq $sig ) {
+        print STDERR "Splitting of the input data is skipped (finished before).\n";
+    }
+    else {
+        # 清除旧的分块文件
+        if ( opendir my $dh, $tmp_dir ) {
+            foreach my $f ( grep { /^chunk_/ || /^split\./ } readdir $dh ) { unlink "$tmp_dir/$f"; }
+            closedir $dh;
+        }
+        remove_tree($parts_dir) if -d $parts_dir;
+        make_path($parts_dir);
+
+        print STDERR scalar( localtime() ) . ": Split the GFF3 file.\n";
+        foreach my $c ( 0 .. $nchunk - 1 ) {
+            open my $o, '>', "$tmp_dir/chunk_$c.gff3" or die "Error: can not create $tmp_dir/chunk_$c.gff3, $!\n";
+            print $o "##gff-version 3\n";
+            foreach my $k ( @{ $chunk_genes[$c] } ) { print $o join( "\n", @{ $grp{$k}{lines} } ), "\n\n"; }
+            close $o;
+        }
+
+        # 把intron.txt和base_depth.txt按字节范围切成多个任务，由--split_cpu个进程并行扫描
+        my @tasks;
+        foreach my $spec ( [ $intron_file, 'intron' ], [ $depth_file, 'depth' ] ) {
+            my ( $file, $type ) = @$spec;
+            my @rg = byte_ranges( $file, $split_cpu );
+            my $i  = 0;
+            foreach my $r (@rg) {
+                push @tasks, { file => $file, type => $type, start => $r->[0], end => $r->[1], dir => "$parts_dir/$type." . ( $i++ ) };
+            }
+        }
+        print STDERR scalar( localtime() ) . ": Split $intron_file and $depth_file in parallel: " . scalar(@tasks)
+          . " task(s), $split_cpu process(es).\n";
+        my @jobs = map {
+            my $t = $_;
+            +{ name => "split $t->{type} [$t->{start},$t->{end})", code => sub { split_task( $t, \%seg ); } }
+        } @tasks;
+        my @failed = run_parallel( \@jobs, $split_cpu );
+        die "Error: failed to split input data: $failed[0]{name}\n" if @failed;
+
+        my %cnt_in  = ( intron => 0, depth => 0 );
+        my %cnt_out = ( intron => 0, depth => 0 );
+        foreach my $t (@tasks) {
+            open my $sfh, '<', "$t->{dir}/stat" or die "Error: can not read $t->{dir}/stat, $!\n";
+            my ( $a, $b ) = split /\t/, scalar(<$sfh>);
+            close $sfh;
+            $cnt_in{ $t->{type} }  += $a;
+            $cnt_out{ $t->{type} } += $b;
+        }
+        print STDERR "  $intron_file: $cnt_in{intron} lines read, $cnt_out{intron} lines kept.\n";
+        print STDERR "  $depth_file: $cnt_in{depth} lines read, $cnt_out{depth} lines kept.\n";
+
+        open my $so, '>', "$tmp_dir/split.sig" or die "Error: can not create $tmp_dir/split.sig, $!\n";
+        print $so $sig;
+        close $so;
+        open my $ok, '>', "$tmp_dir/split.ok" or die "Error: can not create $tmp_dir/split.ok, $!\n";
+        close $ok;
+        print STDERR scalar( localtime() ) . ": Splitting finished.\n";
+    }
+
+    ####################################################################
+    # 4. 并行调用alternative_splicing_analysis(先合并各数据块的片段文件)
+    ####################################################################
+    # 找出每个数据块的所有片段文件: $parts{intron|depth}[chunk] = [files]
+    my ( %parts, @csize );
+    if ( opendir my $pd, $parts_dir ) {
+        foreach my $d ( sort grep { /^(?:intron|depth)\.\d+$/ } readdir $pd ) {
+            next unless opendir my $cd, "$parts_dir/$d";
+            foreach my $f ( sort readdir $cd ) {
+                next unless $f =~ /^chunk_(\d+)\.(intron|depth)$/;
+                my ( $c, $sfx ) = ( $1, $2 );
+                push @{ $parts{$sfx}[$c] }, "$parts_dir/$d/$f";
+                $csize[$c] += -s "$parts_dir/$d/$f";
+            }
+            closedir $cd;
+        }
+        closedir $pd;
+    }
+
+    my @by_size = sort { ( $csize[$b] // 0 ) <=> ( $csize[$a] // 0 ) || scalar( @{ $chunk_genes[$b] } ) <=> scalar( @{ $chunk_genes[$a] } ) || $a <=> $b } 0 .. $nchunk - 1;
+    my @jobs;
+    foreach my $c (@by_size) {
+        next if -e "$tmp_dir/chunk_$c.ok";
+        die "Error: $parts_dir is missing, please delete $tmp_dir/split.ok and run again.\n" unless -d $parts_dir;
+        my $p = "$tmp_dir/chunk_$c";
+        my ( $merge, @rm ) = ( '', "$p.intron", "$p.depth" );
+        foreach my $sfx (qw/intron depth/) {
+            my @pf = @{ $parts{$sfx}[$c] || [] };
+            $merge .= @pf ? "cat " . join( " ", map { shq($_) } @pf ) . " > " . shq("$p.$sfx") : ": > " . shq("$p.$sfx");
+            $merge .= " && ";
+            push @rm, @pf;
+        }
+        my $cmd = $merge . "$alt_cmd$alt_opts " . shq("$p.gff3") . " " . shq("$p.intron") . " " . shq("$p.depth")
+          . " > " . shq("$p.out.tmp") . " 2> " . shq("$p.log")
+          . " && mv " . shq("$p.out.tmp") . " " . shq("$p.out") . " && touch " . shq("$p.ok")
+          . " && rm -f " . join( " ", map { shq($_) } @rm );
+        push @jobs, { name => "chunk_$c", cmd => $cmd };
+    }
+    print STDERR scalar( localtime() ) . ": Run alternative_splicing_analysis on $nchunk chunk(s) with $cpu worker(s).\n";
+    if (@jobs) {
+        print STDERR "CMD (example): $jobs[0]{cmd}\n";
+        my @failed = run_parallel( \@jobs, $cpu );
+        if (@failed) {
+            die "Error: failed to execute $failed[0]{name} (and possibly other chunks); see $tmp_dir/chunk_*.log. "
+              . "The temporary directory is kept; the finished chunks will be skipped when the program is run again.\n"
+              . "The command is:\n$failed[0]{cmd}\n";
+        }
+    }
+    else {
+        print STDERR "All chunks were finished before, skipped.\n";
+    }
+
+    ####################################################################
+    # 5. 收集结果
+    ####################################################################
+    foreach my $c ( 0 .. $nchunk - 1 ) {
+        open my $in, '<', "$tmp_dir/chunk_$c.out" or die "Error: can not open $tmp_dir/chunk_$c.out, $!\n";
+        my ( $cur_id, $cur_text );
+        while ( my $l = <$in> ) {
+            if ( $l =~ /^\s*$/ ) {
+                if ( defined $cur_id ) { $out_text{$cur_id} = $cur_text . "\n"; undef $cur_id; $cur_text = ''; }
+                next;
+            }
+            if ( !defined $cur_id && $l =~ /^[^\t]*\t[^\t]*\tgene\t/ ) {
+                # 注意：ID通常紧跟在制表符之后，必须先取出第9列再匹配
+                my @c9 = split /\t/, $l, 9;
+                ($cur_id) = ( $c9[8] // '' ) =~ /(?:^|;)\s*ID=([^;\s]+)/;
+                $cur_text = '';
+            }
+            $cur_text .= $l if defined $cur_id;
+        }
+        $out_text{$cur_id} = $cur_text . "\n" if defined $cur_id;
+        close $in;
+        if ( open my $lg, '<', "$tmp_dir/chunk_$c.log" ) {
+            while (<$lg>) { print STDERR $_ unless /^Read over/; }
+            close $lg;
+        }
+    }
+
+    foreach my $k (@elig) {
+        $n_tx_in += $grp{$k}{n_child};
+        next unless exists $out_text{$k};
+        my $oc = () = $out_text{$k} =~ /(?:^|[;\t])Parent=\Q$k\E(?=;|\s|$)/mg;
+        $n_tx_out += $oc;
+        $n_gene_added++ if $oc > $grp{$k}{n_child};
+    }
+
+    if ( $auto_tmp && !$keep_tmp ) {
+        remove_tree($tmp_dir);
+    }
+}
+
+########################################################################
+# 6. 按输入顺序输出
+########################################################################
+print "##gff-version 3\n" unless grep { /^##gff-version/ } @header;
+print "$_\n" foreach @header;
+my ( $n_pass, $n_missing ) = ( 0, 0 );
+foreach my $k (@order) {
+    my $g = $grp{$k};
+    if ( $g->{gene} && $g->{n_child} && $g->{n_exon} ) {
+        if ( exists $out_text{$k} ) { print $out_text{$k}; next; }
+        warn "Warning: gene $k is absent from the result of alternative_splicing_analysis, it is output unchanged.\n";
+        $n_missing++;
+    }
+    else { $n_pass++; }
+    print join( "\n", @{ $g->{lines} } ), "\n\n";
+}
+
+print STDERR "Feature groups: $n_total; genes analysed: $n_elig; groups output unchanged (no gene/transcript/exon): $n_pass";
+print STDERR "; genes missing from the results: $n_missing" if $n_missing;
+print STDERR ".\n";
+print STDERR "Transcripts of the analysed genes: input $n_tx_in, output $n_tx_out; genes with added alternative splicing transcripts: $n_gene_added.\n";
+print STDERR "\n#################### $prog_name | Done ####################\n";
+exit( $n_missing ? 2 : 0 );
+
+########################################################################
+# 子程序
+########################################################################
+sub abs_exist {
+    my ($f) = @_;
+    die "Error: can not find file $f\n" unless -e $f;
+    return abs_path($f);
+}
+
+sub shq {
+    my ($s) = @_;
+    return $s if $s =~ m#^[\w./,:=+\-]+$#;
+    $s =~ s/'/'\\''/g;
+    return "'$s'";
+}
+
+# 把文件按字节切成最多$n段(每段不少于$MIN_RANGE_BYTES)，每段的边界都落在行首。返回 ([起点,终点), ...)
+sub byte_ranges {
+    my ( $file, $n ) = @_;
+    return ( [ 0, 1e18 ] ) unless -f $file;    # 非普通文件(如管道)无法分段，整体作为一段
+    my $size = -s $file;
+    return () unless $size;
+    my $by_size = int( $size / $MIN_RANGE_BYTES );
+    $n = $by_size if $by_size < $n;
+    $n = 1 if $n < 1;
+    my @starts = (0);
+    if ( $n > 1 ) {
+        open my $fh, '<', $file or die "Error: can not open $file, $!\n";
+        foreach my $i ( 1 .. $n - 1 ) {
+            my $off = int( $size * $i / $n );
+            next if $off <= $starts[-1];
+            # 从$off-1处读到行尾：若$off恰为行首，则读到的只是上一行的换行符，边界即为$off
+            seek( $fh, $off - 1, 0 );
+            my $dummy = <$fh>;
+            my $pos   = tell($fh);
+            push @starts, $pos if $pos > $starts[-1] && $pos < $size;
+        }
+        close $fh;
+    }
+    my @r;
+    foreach my $i ( 0 .. $#starts ) { push @r, [ $starts[$i], $i < $#starts ? $starts[ $i + 1 ] : $size ]; }
+    return @r;
+}
+
+# 在互不重叠且按起点排序的区间列表[[min,max,chunk],...]中定位坐标p。
+# 返回 (区间起点, 区间终点, 数据块编号)；若p落在两个区间之间的空隙，返回该空隙范围及数据块编号-1，便于调用者缓存
+sub locate_seg {
+    my ( $segs, $p ) = @_;
+    my ( $lo, $hi ) = ( 0, scalar @$segs );
+    while ( $lo < $hi ) {
+        my $m = ( $lo + $hi ) >> 1;
+        if ( $segs->[$m][0] <= $p ) { $lo = $m + 1; } else { $hi = $m; }
+    }
+    my $prev = $lo > 0 ? $segs->[ $lo - 1 ] : undef;
+    return ( $prev->[0], $prev->[1], $prev->[2] ) if $prev && $p <= $prev->[1];
+    my $gmin = $prev ? $prev->[1] + 1 : 0;
+    my $gmax = $lo < @$segs ? $segs->[$lo][0] - 1 : 1e18;
+    return ( $gmin, $gmax, -1 );
+}
+
+# 并行分割任务：扫描文件的一个字节范围，把每一行按 染色体+链+坐标 写入所属数据块的片段文件
+# 片段文件位于 $t->{dir}/chunk_<编号>.<intron|depth>；统计信息(读取行数 保留行数)写入 $t->{dir}/stat
+sub split_task {
+    my ( $t, $seg ) = @_;
+    my ( $file, $type, $start, $end, $dir ) = @{$t}{qw/file type start end dir/};
+    make_path($dir);
+    open my $in, '<', $file or die "can not open $file, $!\n";
+    seek( $in, $start, 0 ) or die "can not seek $file, $!\n" if $start > 0;
+    # intron.txt: 第2、3列为 序列ID和链，第4列为intron起始；base_depth.txt: 第1、2列为序列ID和链，第3列为坐标
+    my $re = $type eq 'intron' ? qr/^[^\t]*\t([^\t]*\t[^\t]*)\t(\d+)/ : qr/^([^\t]*\t[^\t]*)\t(\d+)/;
+    my %fh;
+    my ( $lastkey, $segs, $cmin, $cmax, $cc ) = ( '', undef, 0, -1, -1 );
+    my ( $nin, $nout ) = ( 0, 0 );
+    my $remain = $end - $start;
+    while ( $remain > 0 ) {
+        my $line = <$in>;
+        last unless defined $line;
+        $remain -= length $line;
+        next if substr( $line, 0, 1 ) eq '#';
+        $nin++;
+        $line =~ $re or next;
+        my ( $key, $p ) = ( $1, $2 );
+        if ( $key ne $lastkey ) {
+            $lastkey = $key;
+            $segs    = $seg->{$key};
+            ( $cmin, $cmax, $cc ) = ( 0, -1, -1 );
+        }
+        next unless $segs;
+        if ( $p < $cmin || $p > $cmax ) { ( $cmin, $cmax, $cc ) = locate_seg( $segs, $p ); }
+        next if $cc < 0;
+        my $fh = $fh{$cc};
+        unless ($fh) {
+            open $fh, '>', "$dir/chunk_$cc.$type" or die "can not create $dir/chunk_$cc.$type, $!\n";
+            $fh{$cc} = $fh;
+        }
+        $line .= "\n" unless substr( $line, -1 ) eq "\n";
+        print $fh $line;
+        $nout++;
+    }
+    close $in;
+    foreach my $c ( keys %fh ) { close $fh{$c} or die "can not write $dir/chunk_$c.$type, $!\n"; }
+    open my $so, '>', "$dir/stat" or die "can not create $dir/stat, $!\n";
+    print $so "$nin\t$nout\n";
+    close $so or die "can not write $dir/stat, $!\n";
+}
+
+# 并行执行多个任务(最多$n个同时运行)。每个任务是 { name => 名称, cmd => shell命令 } 或 { name => 名称, code => 代码引用 }。
+# 出现失败后不再启动新任务，等待已运行的任务结束，返回失败的任务列表
+sub run_parallel {
+    my ( $jobs, $n ) = @_;
+    my ( %running, @failed );
+    my @queue = @$jobs;
+    my $stop  = 0;
+    while ( ( @queue && !$stop ) || %running ) {
+        while ( @queue && !$stop && keys(%running) < $n ) {
+            my $j   = shift @queue;
+            my $pid = fork();
+            die "Error: fork failed, $!\n" unless defined $pid;
+            if ( $pid == 0 ) {
+                if ( $j->{code} ) {
+                    my $ok = eval { $j->{code}->(); 1 };
+                    print STDERR "Error in task '$j->{name}': $@" unless $ok;
+                    POSIX::_exit( $ok ? 0 : 1 );
+                }
+                exec( '/bin/sh', '-c', $j->{cmd} ) or POSIX::_exit(127);
+            }
+            $running{$pid} = $j;
+        }
+        last unless %running;
+        my $pid = waitpid( -1, 0 );
+        last if $pid <= 0;
+        my $j = delete $running{$pid};
+        next unless defined $j;
+        if ( $? != 0 ) { push @failed, $j; $stop = 1; }
+    }
+    return @failed;
+}
+
+########################################################################
+# 英文用法说明（放在文件最末尾，运行时通过DATA文件句柄读取）
+########################################################################
+__DATA__
+Name:
+    {PROG} - Add alternative splicing transcripts to the gene models of a GFF3 file in parallel.
+
+Usage:
+    {PROG} [options] geneModels.gff3 intron.txt base_depth.txt > out.gff3 2> alternative_splicing.stats
+
+Example:
+    {PROG} --cpu 20 --min_intron_depth 2 --tmp_dir tmp_AS geneModels.gff3 intron.txt base_depth.txt > geneModels.AS.gff3 2> alternative_splicing.stats
+
+Function:
+    The program groups the gene models by gene, splits the input GFF3, intron.txt and base_depth.txt by genomic position into independent chunks, runs alternative_splicing_analysis on the chunks with --cpu parallel workers, and merges the results in the input order. The analysis of a gene only depends on the data of its own region, so splitting does not change the result, and each worker only has to load the intron and base depth data of its own region, which greatly reduces memory consumption.
+    The splitting of the (usually huge) intron.txt and base_depth.txt is parallel too: each file is cut into byte ranges that are scanned simultaneously by --split_cpu processes, each process writing its own part files per chunk; the part files of a chunk are concatenated right before that chunk is analysed.
+
+Workflow:
+    (1) Read the GFF3 file and group the lines into genes by ID/Parent relationships (traced up to the top-level feature). Only genes that have a gene line, transcripts (whose Parent is the gene, with an ID) and exons are analysed; the other features are output unchanged.
+    (2) Sort the genes by chromosome + strand, merge genes whose intervals overlap into indivisible blocks, and combine blocks into chunks (about --chunk_gene_num genes per chunk, at most 300 chunks). The intervals of different chunks on the same chromosome and strand never overlap.
+    (3) Scan intron.txt and base_depth.txt in parallel (byte ranges, --split_cpu processes) and distribute every line to the part file of the chunk of the region it falls in; lines outside all gene regions are discarded.
+    (4) Process the chunks with --cpu parallel processes: concatenate the part files of the chunk, then run alternative_splicing_analysis. An .ok file is created for each finished chunk (its large intermediate files are deleted) and finished chunks are skipped when the program is run again. Chunks with more data are run first.
+    (5) Merge the results in the order of the genes in the input file; warnings of the workers and summary statistics are written to STDERR.
+
+Input files (plain uncompressed regular files; pipes and compressed files are not supported):
+    geneModels.gff3    GFF3 file of gene models; exon features are required, a GFF3 file without alternative splicing is recommended
+    intron.txt         Tab-separated, 7 columns: transcript ID, genome sequence ID, strand, intron start, intron end, intron depth, median base depth in the intron region
+    base_depth.txt     Tab-separated, 4 columns: genome sequence ID, strand, base position, base depth
+
+Output:
+    STDOUT is the GFF3 file with the added alternative splicing transcripts (column 9 of mRNA contains Transcript_Ratio); STDERR contains the warnings of the workers and summary statistics.
+
+Options (the same as alternative_splicing_analysis; when not set, its defaults are used):
+    --min_intron_depth <int>    default: 1
+    Minimum intron depth. Lines whose intron depth (column 6 of intron.txt) is lower than this value are ignored.
+
+    --min_base_depth_ratio_for_ref_specific_intron <float>    default: 0.3
+    For an intron specific to the ref introns, an IR event exists if base depth / gene depth exceeds this value.
+
+    --min_intron_depth_ratio_for_evidence_specific_intron <float>    default: 0.2
+    For an intron specific to the evidence introns, the intron is reliable if intron depth / gene depth exceeds this value.
+
+    --min_base_depth_ratio_for_common_intron <float>    default: 0.2
+    For an intron shared by ref and evidence introns, an IR event exists if base depth / gene depth exceeds this value.
+
+    --min_gene_depth <int>    default: 10
+    If the gene depth is lower than this value, this value is used instead.
+
+    --min_transcript_confidence_for_output <float>    default: 0.05
+    Added alternative splicing transcripts are output only if their ratio is not lower than this value.
+
+    --transcript_num_for_output_when_all_low_confidence <int>    default: 8
+    When the ratios of all alternative splicing transcripts are below the threshold above, the top transcripts are output until the number of mRNAs reaches this value.
+
+    --added_mRNA_ID_prefix <string>    default: t
+    IDs of the added transcripts are <geneID>.<prefix><two-digit number>.
+
+Options added by this program:
+    --cpu <int>    default: 8
+    Number of parallel workers (alternative_splicing_analysis processes running at the same time).
+
+    --split_cpu <int>    default: same as --cpu
+    Number of parallel processes used to split intron.txt and base_depth.txt. Splitting is mostly disk-read bound; a larger value may help on parallel file systems.
+
+    --split_block_mb <number>    default: 32
+    Minimum amount of file data (MB) handled by one parallel split task. A file smaller than twice this value is not split in parallel.
+
+    --chunk_gene_num <int>    default: auto
+    Approximate number of genes per chunk. By default it is calculated from the number of genes and --cpu (between 20 and 5000, with at most 300 chunks in total).
+
+    --tmp_dir <string>    default: tmp_$date$pid
+    Temporary directory. An .ok file is created for each finished chunk, and finished steps are skipped when the program is run again (with unchanged inputs, options and chunking). If not set, the temporary directory is removed after a successful run; if set, it is kept.
+
+    --keep_tmp
+    default: none. Keep the automatically created temporary directory when --tmp_dir is not set.
+
+    --help
+    Display the English usage and exit.
+
+    --chinese_help
+    显示中文用法说明并退出。
+

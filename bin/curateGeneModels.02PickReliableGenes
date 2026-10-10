@@ -1,0 +1,1092 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use Getopt::Long qw(GetOptions);
+use File::Path qw(make_path remove_tree);
+use File::Spec;
+use Storable qw(store retrieve);
+use POSIX ();
+use IO::Handle;
+
+########################################################################
+# 中文用法说明（放在代码最前面；英文用法说明放在文件最末尾的__DATA__部分）
+########################################################################
+my $usage_cn = <<'USAGE';
+用法:
+    {PROG} [参数] 输入.gff3 > 可信基因.gff3 2> 待验证基因.gff3
+    {PROG} [参数] --output_to_verify 待验证基因.gff3 输入.gff3 > 可信基因.gff3 2> log.txt
+
+功能:
+    将输入GFF3文件中的基因模型分为两类：第一类为可信的准确基因，输出到标准输出；第二类为需要进一步检测验证的基因，默认输出到标准错误输出（推荐使用--output_to_verify输出到文件，避免警告信息混入GFF3结果）。
+
+分类规则:
+    (0)先检验完整性（起始密码子、终止密码子、移码、内部终止密码子，密码子由--genetic_code决定），5'或3'端缺失或存在移码/内部终止密码子的基因归为第二类；(1)CDS与NGSReads和homolog两种证据的重叠比例都不低于阈值，归为第一类；(2)仅被homolog支持且第9列没有Low_support标签，归为第一类；(3)仅被NGSReads支持且第9列含有Type=excellent_gene_models_predicted_by_NGSReads，归为第一类；(4)其余基因归为第二类。
+    一个基因有多个转录本时，取CDS最长的转录本作为代表转录本进行判断；第9列标签同时检查gene行和代表转录本行。
+    基因模型按ID/Parent关系归组（沿Parent追溯到最顶层特征），不要求子特征紧跟在gene行之后。
+
+输入.gff3
+    待分类的GFF3文件，直接放在命令行最后（支持.gz压缩文件，"-"表示从标准输入读取）
+
+    --NGSReads <文件>    default: 无
+    来自RNA-Seq的基因模型GFF3文件，用于计算CDS重叠比例
+
+    --homolog <文件>    default: 无
+    来自同源蛋白的基因模型GFF3文件，用于计算CDS重叠比例
+
+    --output_to_verify <文件>    default: 无
+    将第二类基因（需要进一步检测验证的基因）输出到该文件；不设置时输出到标准错误输出（兼容旧版本）
+
+    --out_stats <文件>    default: 无
+    将统计信息（分类数量、支持证据组合、第二类原因、单/两外显子基因的数量和比例）输出到指定文件
+
+    --genome <文件>    default: 无
+    可选，基因组FASTA文件，用于检验起始密码子、终止密码子、移码和内部终止密码子；未提供时仅依据CDS相位、移码（相位不连续）、长度和第9列属性判断完整性
+
+    --genetic_code <整数>    default: 1
+    设置遗传密码，程序据此自动确定起始密码子和终止密码子，用于基因完整性检验（需要同时提供--genome才能检验起始/终止密码子和内部终止密码子）。编号请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi 。支持的遗传密码编号为：1、2、3、4、5、6、9、10、11、12、13、14、15、16、21、22、23、24、25、26、27、28、29、30、31、32、33。
+
+    --min_overlap <小数>    default: 0.5
+    CDS重叠比例阈值（重叠碱基数/目标基因CDS长度）
+
+    --cpu <整数>    default: 1
+    并行worker进程数。读取输入文件和建立索引仍由主进程完成，基因分类（完整性检验和证据重叠计算）由多个worker进程并行完成，最后按原始顺序合并输出，结果与单进程完全一致。设置为1时不启动worker
+
+    --tmp_dir <字符串>    default: tmp_$date$pid
+    临时目录。基因被切分为若干批次，每完成一个批次（step）就在该目录中创建对应的.ok文件；再次使用同一个--tmp_dir运行程序时，已完成的批次会被跳过（断点续跑），只处理未完成的批次。再次运行时输入文件和参数（--NGSReads、--homolog、--genome、--genetic_code、--min_overlap）必须与第一次一致，否则程序报错退出（--cpu可以不同）。程序正常结束后，用户显式指定的--tmp_dir会保留（以便再次运行时直接跳过所有已完成的批次），默认生成的临时目录（tmp_日期时间+进程号）会自动删除；程序异常中断时临时目录一律保留。不指定--tmp_dir且--cpu为1时不使用临时目录，直接在内存中处理
+
+    --help    default: 无
+    Display the English usage message and exit
+
+    --chinese_help    default: 无
+    显示中文用法说明并退出
+USAGE
+
+# 直接运行（没有任何参数）时，给出英文用法说明
+if (!@ARGV) {
+    print_usage('en', \*STDERR);
+    exit 1;
+}
+
+my ($ngs_file, $hom_file, $out_stats, $genome_file, $verify_file, $tmp_dir);
+my ($help, $chelp);
+my $obsolete_aug;    # 已废弃的--augustus参数：仅为兼容旧命令而接受，不再使用
+my $min_overlap  = 0.5;
+my $genetic_code = 1;
+my $cpu          = 1;
+
+GetOptions(
+    'NGSReads=s'         => \$ngs_file,
+    'homolog=s'          => \$hom_file,
+    'augustus=s'         => \$obsolete_aug,
+    'output_to_verify=s' => \$verify_file,
+    'out_stats=s'        => \$out_stats,
+    'genome=s'           => \$genome_file,
+    'genetic_code=i'     => \$genetic_code,
+    'min_overlap=f'      => \$min_overlap,
+    'cpu=i'              => \$cpu,
+    'tmp_dir=s'          => \$tmp_dir,
+    'help'               => \$help,
+    'chinese_help'       => \$chelp,
+) or do { print_usage('en', \*STDERR); exit 1; };
+
+if ($chelp) { print_usage('cn', \*STDOUT); exit 0; }
+if ($help)  { print_usage('en', \*STDOUT); exit 0; }
+
+warn "Warning: --augustus is no longer used and is ignored.\n" if defined $obsolete_aug;
+
+my $input = shift @ARGV;
+if (!defined $input) {
+    print STDERR "Error: no input GFF3 file given.\n\n";
+    print_usage('en', \*STDERR);
+    exit 1;
+}
+warn "Warning: extra arguments ignored: @ARGV\n" if @ARGV;
+die "Error: can not find input file $input\n" unless $input eq '-' || -e $input;
+foreach my $f ($ngs_file, $hom_file, $genome_file) {
+    die "Error: can not find file $f\n" if defined $f && $f ne '-' && !-e $f;
+}
+die "Error: --min_overlap must be between 0 and 1\n" if $min_overlap < 0 || $min_overlap > 1;
+die "Error: --cpu must be a positive integer\n" if !defined $cpu || $cpu < 1;
+die "Error: --tmp_dir must not be empty\n" if defined $tmp_dir && $tmp_dir eq '';
+my $tmp_dir_given = defined $tmp_dir ? 1 : 0;    # 是否由用户显式指定了临时目录
+warn "Warning: neither --NGSReads nor --homolog is given; all genes will be classified as class 2.\n"
+    unless defined $ngs_file || defined $hom_file;
+
+$genetic_code = 1 unless (defined $genetic_code && $genetic_code > 0);
+
+my @SRC      = qw(NGS HOM);
+my %SRC_NAME = (NGS => 'NGSReads', HOM => 'homolog');
+
+# 根据遗传密码确定起始密码子和终止密码子
+my ($code_ref, $start_codon_ref, $stop_codon_ref) = codon_table($genetic_code);
+my %start_codon = %$start_codon_ref;
+my %stop_codon  = %$stop_codon_ref;
+die "Error: no start codon is available.\n" unless %start_codon;
+die "Error: no stop codon is available.\n"  unless %stop_codon;
+
+# 用于统计内部终止密码子的正则（只编译一次）
+my $COUNT_STOP_RE;
+{
+    my $alt = join "|", grep { length($_) == 3 } sort keys %stop_codon;
+    $alt = "(?!)" if $alt eq "";
+    $COUNT_STOP_RE = qr/\G(?:(?!(?:$alt)).{3})*(?:$alt)/s;
+}
+
+# 第二类基因的输出句柄
+my $verify_fh = \*STDERR;
+if (defined $verify_file) {
+    open(my $vh, '>', $verify_file) or die "Error: can not create file $verify_file: $!\n";
+    $verify_fh = $vh;    # 独立的文件句柄，不再占用STDERR，使警告/错误/汇总信息仍输出到标准错误
+}
+
+########################################################################
+# 读取证据基因模型并建立索引
+########################################################################
+my (%index, %ev_file, %ev_count);
+for my $pair (['NGS', $ngs_file], ['HOM', $hom_file]) {
+    my ($k, $f) = @$pair;
+    $ev_file{$k} = $f;
+    if (defined $f) {
+        my $tx = load_cds($f);
+        $ev_count{$k} = scalar keys %$tx;
+        $index{$k}    = build_index($tx);
+    }
+}
+
+my $genome;
+$genome = load_fasta($genome_file) if defined $genome_file;
+
+########################################################################
+# 读取目标GFF3，并按基因分组
+########################################################################
+my $fh = open_in($input);
+my (@header, @feats, %feat_by_id, %parent_of);
+my $seen_feat = 0;
+while (<$fh>) {
+    s/[\r\n]+$//;
+    next if /^\s*$/;
+    last if /^##FASTA/;
+    if (/^#/) {
+        push @header, $_ unless $seen_feat || /^###/;
+        next;
+    }
+    my @f = split /\t/, $_, 9;
+    next if @f < 9;
+    $seen_feat = 1;
+    my ($id)  = $f[8] =~ /(?:^|;)\s*ID=([^;]+)/;
+    my ($par) = $f[8] =~ /(?:^|;)\s*Parent=([^;]+)/;
+    $id =~ s/^\s+|\s+$//g if defined $id;
+    my @pars  = defined $par ? grep { $_ ne '' } map { s/^\s+|\s+$//gr } split(/,/, $par) : ();
+    my $ft = {
+        line => $_, chr => $f[0], type => $f[2], s => $f[3], e => $f[4],
+        strand => $f[6], phase => $f[7], attr => $f[8], id => $id, pars => \@pars,
+    };
+    if ($ft->{s} =~ /^\d+$/ && $ft->{e} =~ /^\d+$/ && $ft->{s} > $ft->{e}) { ($ft->{s}, $ft->{e}) = ($ft->{e}, $ft->{s}); }
+    push @feats, $ft;
+    if (defined $id) {
+        $feat_by_id{$id} //= $ft;
+        $parent_of{$id}  //= $pars[0] if @pars;
+    }
+}
+close $fh unless $input eq '-';
+
+my (%rec, @order);
+my $anon = 0;
+for my $ft (@feats) {
+    my $key;
+    if    (@{ $ft->{pars} })    { $key = top_of($ft->{pars}[0]); }
+    elsif (defined $ft->{id})   { $key = $ft->{id}; }
+    else                        { $key = '__anon' . (++$anon); }
+    if (!$rec{$key}) {
+        $rec{$key} = { lines => [], tx => {}, attr => '' };
+        push @order, $key;
+    }
+    my $r = $rec{$key};
+    push @{ $r->{lines} }, $ft->{line};
+    $r->{attr} .= ';' . $ft->{attr} unless @{ $ft->{pars} };
+    next unless $ft->{s} =~ /^\d+$/ && $ft->{e} =~ /^\d+$/;
+
+    if ($ft->{type} eq 'CDS') {
+        for my $p (@{ $ft->{pars} }) {
+            my $t = get_tx($r, $p, $ft);
+            push @{ $t->{cds} }, [$ft->{s}, $ft->{e}, $ft->{phase}];
+        }
+    }
+    elsif ($ft->{type} eq 'exon') {
+        for my $p (@{ $ft->{pars} }) {
+            my $t = get_tx($r, $p, $ft);
+            $t->{exons}++;
+        }
+    }
+    elsif ($ft->{type} eq 'stop_codon') {
+        for my $p (@{ $ft->{pars} }) {
+            my $t = get_tx($r, $p, $ft);
+            push @{ $t->{stop} }, [$ft->{s}, $ft->{e}];
+        }
+    }
+}
+@feats = ();
+
+########################################################################
+# 分类（可多进程并行）
+########################################################################
+for my $h (@header) {
+    print STDOUT "$h\n";
+    print {$verify_fh} "$h\n";
+}
+# 在fork之前把已写入的表头刷新到文件，避免子进程重复输出缓冲区内容
+STDOUT->flush();
+$verify_fh->flush();
+
+my $st;    # 统计信息：total, n_class, reason, combo, exon_n
+my $n_gene = scalar @order;
+my $ncpu   = $cpu;
+$ncpu = $n_gene if $ncpu > $n_gene;
+my $tmp_auto = 0;    # 临时目录是否为默认自动生成（成功结束后自动删除）
+
+# 需要并行，或用户显式指定了--tmp_dir（需要断点续跑）时，按批次处理并使用临时目录；
+# 否则（--cpu 1且未指定--tmp_dir）与旧版相同，直接在主进程中处理
+if ($n_gene > 0 && ($ncpu > 1 || $tmp_dir_given)) {
+    if (!$tmp_dir_given) {
+        $tmp_dir  = 'tmp_' . POSIX::strftime('%Y%m%d%H%M%S', localtime) . $$;    # tmp_$date$pid
+        $tmp_auto = 1;
+    }
+    $st = run_batches($ncpu);
+}
+else {
+    $st = new_stats();
+    process_range(0, $#order, \*STDOUT, $verify_fh, $st);
+}
+close $verify_fh if defined $verify_file;
+
+my $total    = $st->{total};
+my %n_class  = %{ $st->{n_class} };
+my %reason   = %{ $st->{reason} };
+my %combo    = %{ $st->{combo} };
+my %exon_n   = %{ $st->{exon_n} };
+
+my $c1_all = $n_class{1} // 0;
+my $c2_all = $n_class{2} // 0;
+print STDERR "Total genes: $total; class 1 (reliable): $c1_all; class 2 (to be verified): $c2_all.\n" if defined $verify_file;
+
+########################################################################
+# 输出统计信息
+########################################################################
+if (defined $out_stats) {
+    open(my $sfh, '>', $out_stats) or die "Cannot write $out_stats: $!\n";
+    my $c1 = $n_class{1} // 0;
+    my $c2 = $n_class{2} // 0;
+    print $sfh "# GFF3基因模型分类统计\n";
+    print $sfh "输入文件\t$input\n";
+    print $sfh "CDS重叠比例阈值\t$min_overlap\n";
+    print $sfh "遗传密码\t$genetic_code\n";
+    print $sfh "并行进程数\t$ncpu\n";
+    print $sfh "基因组序列\t", (defined $genome_file ? $genome_file : '未提供(仅依据CDS相位、移码、长度和属性判断完整性)'), "\n";
+    for my $k (@SRC) {
+        my $f = $ev_file{$k};
+        print $sfh "证据来源 $SRC_NAME{$k}\t", (defined $f ? "$f (转录本数: $ev_count{$k})" : '未提供'), "\n";
+    }
+    print $sfh "\n## 总体分类\n";
+    print $sfh "基因总数\t$total\n";
+    print $sfh "第一类(可信的准确基因)\t$c1\t", pct($c1, $total), "\n";
+    print $sfh "第二类(需要进一步检测验证的基因)\t$c2\t", pct($c2, $total), "\n";
+
+    print $sfh "\n## 证据支持组合(CDS重叠比例不低于阈值)\n";
+    print $sfh "证据组合\t第一类\t第二类\t合计\n";
+    for my $cb (sort keys %combo) {
+        my $x = $combo{$cb}{1} // 0;
+        my $y = $combo{$cb}{2} // 0;
+        print $sfh "$cb\t$x\t$y\t", $x + $y, "\n";
+    }
+
+    for my $c (1, 2) {
+        print $sfh "\n## 第${c}类分类原因\n";
+        my $cn = $n_class{$c} // 0;
+        for my $rs (sort { $reason{$c}{$b} <=> $reason{$c}{$a} || $a cmp $b } keys %{ $reason{$c} || {} }) {
+            print $sfh "$rs\t$reason{$c}{$rs}\t", pct($reason{$c}{$rs}, $cn), "\n";
+        }
+    }
+
+    print $sfh "\n## 单/两外显子基因统计\n";
+    print $sfh "类型\t基因数\t占本类基因比例\t占该外显子类型全部基因比例\n";
+    my %all_e;
+    for my $c (1, 2) { $all_e{$_} += $exon_n{$c}{$_} // 0 for qw(single two multi other); }
+    my %ename = (single => '单外显子基因', two => '两外显子基因', multi => '三个及以上外显子基因', other => '外显子数未知');
+    for my $c (1, 2) {
+        my $cn = $n_class{$c} // 0;
+        for my $e (qw(single two multi other)) {
+            my $n = $exon_n{$c}{$e} // 0;
+            next if $e eq 'other' && !$n;
+            print $sfh "第${c}类 $ename{$e}\t$n\t", pct($n, $cn), "\t", pct($n, $all_e{$e}), "\n";
+        }
+    }
+    close $sfh;
+}
+
+exit 0;
+
+########################################################################
+# 子程序
+########################################################################
+sub print_usage {
+    my ($lang, $out) = @_;
+    my $u;
+    if ($lang eq 'cn') {
+        $u = $usage_cn;
+    }
+    else {
+        local $/ = undef;
+        $u = <DATA>;
+        $u = '' unless defined $u;
+    }
+    $u =~ s/\{PROG\}/$0/g;
+    print {$out} $u;
+}
+
+sub pct {
+    my ($n, $d) = @_;
+    return $d ? sprintf('%.2f%%', 100 * $n / $d) : '0.00%';
+}
+
+sub new_stats {
+    return { total => 0, n_class => {}, reason => {}, combo => {}, exon_n => {} };
+}
+
+# 把一个统计结果合并到总统计中
+sub merge_stats {
+    my ($dst, $src) = @_;
+    $dst->{total} += $src->{total};
+    $dst->{n_class}{$_} += $src->{n_class}{$_} for keys %{ $src->{n_class} };
+    for my $c (keys %{ $src->{reason} }) {
+        $dst->{reason}{$c}{$_} += $src->{reason}{$c}{$_} for keys %{ $src->{reason}{$c} };
+    }
+    for my $cb (keys %{ $src->{combo} }) {
+        $dst->{combo}{$cb}{$_} += $src->{combo}{$cb}{$_} for keys %{ $src->{combo}{$cb} };
+    }
+    for my $c (keys %{ $src->{exon_n} }) {
+        $dst->{exon_n}{$c}{$_} += $src->{exon_n}{$c}{$_} for keys %{ $src->{exon_n}{$c} };
+    }
+}
+
+# 处理 @order 中下标 $from..$to 的基因：第一类写入$out1，第二类写入$out2，统计累加到$st
+sub process_range {
+    my ($from, $to, $out1, $out2, $st) = @_;
+
+    for my $ix ($from .. $to) {
+        my $key = $order[$ix];
+        my $r   = $rec{$key};
+        $st->{total}++;
+
+        # 取CDS最长的转录本作为该基因的代表转录本
+        my @txs = grep { @{ $r->{tx}{$_}{cds} } } sort keys %{ $r->{tx} };
+        my ($class, $reason, $combo, $nexon) = (2, '', 'none', 0);
+
+        if (!@txs) {
+            $reason = '无CDS注释(no_CDS)';
+        }
+        else {
+            for my $id (@txs) {
+                my $t = $r->{tx}{$id};
+                $t->{cds} = [sort { $a->[0] <=> $b->[0] } @{ $t->{cds} }];
+                my $len = 0;
+                $len += $_->[1] - $_->[0] + 1 for @{ $t->{cds} };
+                $t->{len} = $len;
+            }
+            my ($rep_id) = sort { $r->{tx}{$b}{len} <=> $r->{tx}{$a}{len} || $a cmp $b } @txs;
+            my $rep = $r->{tx}{$rep_id};
+            $nexon = $rep->{exons} > 0 ? $rep->{exons} : scalar @{ $rep->{cds} };
+
+            my $attr_all = $r->{attr} . ';' . (exists $feat_by_id{$rep_id} ? $feat_by_id{$rep_id}{attr} : '');
+
+            # (0) 完整性检验
+            my @problems = check_complete($rep, $attr_all);
+
+            # (1) 计算与NGSReads、homolog两种证据的CDS重叠比例
+            my @merged = merge_intervals(map { [$_->[0], $_->[1]] } @{ $rep->{cds} });
+            my $merged_len = 0;
+            $merged_len += $_->[1] - $_->[0] + 1 for @merged;
+            my ($ts, $te) = ($merged[0][0], $merged[-1][1]);
+            my @sup;
+            for my $k (@SRC) {
+                next unless $index{$k};
+                my $ratio = best_overlap($index{$k}, $rep->{chr}, $rep->{strand}, \@merged, $merged_len, $ts, $te);
+                push @sup, $k if $ratio > 0 && $ratio >= $min_overlap;
+            }
+            $combo = @sup ? join('+', map { $SRC_NAME{$_} } @sup) : 'none';
+
+            if (@problems) {
+                $reason = '不完整(' . join(',', @problems) . ')';
+            }
+            elsif (@sup == 2) {
+                $class  = 1;
+                $reason = '同时被NGSReads和homolog支持';
+            }
+            elsif (@sup == 1 && $sup[0] eq 'HOM') {
+                if ($attr_all =~ /(?:^|;)\s*Low_support\b/) { $reason = '仅homolog支持且带有Low_support标签'; }
+                else { $class = 1; $reason = '仅homolog支持且无Low_support标签'; }
+            }
+            elsif (@sup == 1 && $sup[0] eq 'NGS') {
+                if ($attr_all =~ /(?:^|;)\s*Type=excellent_gene_models_predicted_by_NGSReads\b/) {
+                    $class = 1; $reason = '仅NGSReads支持且为excellent基因模型';
+                }
+                else { $reason = '仅NGSReads支持但不是excellent基因模型'; }
+            }
+            else {
+                $reason = '无任何证据支持';
+            }
+        }
+
+        $st->{n_class}{$class}++;
+        $st->{reason}{$class}{$reason}++;
+        $st->{combo}{$combo}{$class}++;
+        my $ecat = $nexon == 1 ? 'single' : $nexon == 2 ? 'two' : $nexon >= 3 ? 'multi' : 'other';
+        $st->{exon_n}{$class}{$ecat}++;
+
+        my $out = $class == 1 ? $out1 : $out2;
+        print {$out} join("\n", @{ $r->{lines} }), "\n";
+    }
+}
+
+# 为--tmp_dir断点续跑生成一行文件签名（路径、大小、修改时间）
+sub file_sig {
+    my ($tag, $f) = @_;
+    return "$tag\tNA" unless defined $f;
+    return "$tag\t$f\tstdin" if $f eq '-';
+    my @s = stat($f);
+    return "$tag\t" . File::Spec->rel2abs($f) . "\t" . ($s[7] // 0) . "\t" . ($s[9] // 0);
+}
+
+# 临时目录中的运行签名：输入文件和影响分类结果的参数。--cpu不影响结果，不计入签名
+sub run_signature {
+    return (
+        'curateGM_tmp_v1',
+        file_sig('input',    $input),
+        file_sig('NGSReads', $ngs_file),
+        file_sig('homolog',  $hom_file),
+        file_sig('genome',   $genome_file),
+        "genetic_code\t$genetic_code",
+        "min_overlap\t$min_overlap",
+        "n_gene\t$n_gene",
+    );
+}
+
+# 处理第$b批基因（批次大小$bs），结果写入$tmp下的 b$b.1 / b$b.2 / b$b.st，
+# 全部写完后才创建 b$b.ok，因此没有.ok文件的批次一定会被重新处理
+sub process_batch {
+    my ($b, $tmp, $bs) = @_;
+    my $from = $b * $bs;
+    my $to   = $from + $bs - 1;
+    $to = $#order if $to > $#order;
+
+    unlink "$tmp/b$b.ok";
+    my $bst = new_stats();
+    open(my $o1, '>', "$tmp/b$b.1") or die "Cannot write $tmp/b$b.1: $!\n";
+    open(my $o2, '>', "$tmp/b$b.2") or die "Cannot write $tmp/b$b.2: $!\n";
+    process_range($from, $to, $o1, $o2, $bst);
+    close $o1 or die "Cannot close $tmp/b$b.1: $!\n";
+    close $o2 or die "Cannot close $tmp/b$b.2: $!\n";
+    store($bst, "$tmp/b$b.st");
+    open(my $ok, '>', "$tmp/b$b.ok") or die "Cannot write $tmp/b$b.ok: $!\n";
+    print {$ok} "done\n";
+    close $ok or die "Cannot close $tmp/b$b.ok: $!\n";
+}
+
+# 分批处理基因：已有.ok文件的批次被跳过；未完成的批次由$n个worker并行处理（$n<=1或只剩一个批次时直接在主进程处理），
+# 最后按原始顺序合并输出并汇总统计
+sub run_batches {
+    my ($n) = @_;
+    my $tmp = $tmp_dir;
+
+    die "Error: --tmp_dir $tmp exists but is not a directory\n" if -e $tmp && !-d $tmp;
+    make_path($tmp) unless -d $tmp;
+    die "Error: can not create temporary directory $tmp\n" unless -d $tmp;
+
+    # 检查临时目录中已有内容是否与本次运行一致
+    my @sig  = run_signature();
+    my $meta = "$tmp/meta.txt";
+    my $bs;
+    if (-e $meta) {
+        open(my $mh, '<', $meta) or die "Cannot read $meta: $!\n";
+        my (@old, $old_bs);
+        while (my $l = <$mh>) {
+            $l =~ s/[\r\n]+$//;
+            if ($l =~ /^batch_size\t(\d+)$/) { $old_bs = $1; }
+            else                             { push @old, $l; }
+        }
+        close $mh;
+        if (!defined $old_bs || $old_bs < 1 || join("\n", @old) ne join("\n", @sig)) {
+            die "Error: --tmp_dir $tmp was created by a run with a different input file or different parameters "
+              . "(--NGSReads/--homolog/--genome/--genetic_code/--min_overlap); remove it or use another --tmp_dir.\n";
+        }
+        $bs = $old_bs;    # 沿用第一次运行的批次大小，使--cpu可以与第一次不同
+    }
+    else {
+        opendir(my $dh, $tmp) or die "Cannot open directory $tmp: $!\n";
+        my @stale = grep { /\.ok$/ } readdir $dh;
+        closedir $dh;
+        die "Error: --tmp_dir $tmp contains .ok files but no meta.txt; remove it or use another --tmp_dir.\n" if @stale;
+
+        my $nb_target = $n * 8;    # 批次数约为worker数的8倍，使负载更均衡
+        $nb_target = 32 if $nb_target < 32;    # 批次不能太少，否则断点续跑的粒度太粗
+        $bs = int(($n_gene + $nb_target - 1) / $nb_target);
+        $bs = 1 if $bs < 1;
+        open(my $mh, '>', $meta) or die "Cannot write $meta: $!\n";
+        print {$mh} "$_\n" for @sig;
+        print {$mh} "batch_size\t$bs\n";
+        close $mh or die "Cannot close $meta: $!\n";
+    }
+    my $nbatch = int(($n_gene + $bs - 1) / $bs);
+
+    # 找出尚未完成的批次（没有.ok文件）
+    my @pending = grep { !-e "$tmp/b$_.ok" } 0 .. $nbatch - 1;
+
+    my $nw = $n;
+    $nw = scalar @pending if $nw > @pending;
+
+    if ($nw <= 1) {
+        # 不需要并行：在主进程中依次处理
+        process_batch($_, $tmp, $bs) for @pending;
+    }
+    else {
+        my @pids;
+        for my $w (0 .. $nw - 1) {
+            my $pid = fork();
+            die "Error: fork failed: $!\n" unless defined $pid;
+            if ($pid == 0) {
+                # ---- worker进程：按轮转方式领取未完成的批次 ----
+                my $ok = eval {
+                    for (my $i = $w; $i < @pending; $i += $nw) {
+                        process_batch($pending[$i], $tmp, $bs);
+                    }
+                    1;
+                };
+                if (!$ok) {
+                    my $err = $@ || 'unknown error';
+                    print STDERR "Error in worker $w: $err";
+                    POSIX::_exit(1);
+                }
+                POSIX::_exit(0);
+            }
+            push @pids, $pid;
+        }
+
+        # ---- 主进程：等待所有worker结束 ----
+        my $failed = 0;
+        for my $pid (@pids) {
+            waitpid($pid, 0);
+            $failed++ if $? != 0;
+        }
+        die "Error: $failed worker process(es) failed. Finished batches are kept in $tmp; "
+          . "run again with --tmp_dir $tmp to continue.\n" if $failed;
+    }
+
+    # 确认所有批次都已完成
+    for my $b (0 .. $nbatch - 1) {
+        die "Error: batch $b is not finished (no $tmp/b$b.ok).\n" unless -e "$tmp/b$b.ok";
+    }
+
+    # 按原始顺序合并输出，并汇总统计
+    my $all = new_stats();
+    for my $b (0 .. $nbatch - 1) {
+        append_file("$tmp/b$b.1", \*STDOUT);
+        append_file("$tmp/b$b.2", $verify_fh);
+        merge_stats($all, retrieve("$tmp/b$b.st"));
+    }
+
+    # 默认自动生成的临时目录在成功结束后删除；用户指定的--tmp_dir保留
+    remove_tree($tmp) if $tmp_auto;
+    return $all;
+}
+
+sub append_file {
+    my ($f, $out) = @_;
+    open(my $in, '<', $f) or die "Cannot read $f: $!\n";
+    binmode $in;
+    my $buf;
+    while (read($in, $buf, 1 << 20)) {
+        print {$out} $buf;
+    }
+    close $in;
+}
+
+sub open_in {
+    my $f = shift;
+    return \*STDIN if $f eq '-';
+    my $h;
+    if ($f =~ /\.gz$/i) { open($h, '-|', 'gzip', '-dc', $f) or die "Cannot open $f: $!\n"; }
+    else                { open($h, '<', $f) or die "Cannot open $f: $!\n"; }
+    return $h;
+}
+
+# 沿Parent关系追溯到最顶层特征的ID（带环路保护）
+sub top_of {
+    my $id = shift;
+    my %seen;
+    while (defined $parent_of{$id} && exists $feat_by_id{ $parent_of{$id} } && !$seen{$id}++) {
+        $id = $parent_of{$id};
+    }
+    return $id;
+}
+
+sub get_tx {
+    my ($r, $p, $ft) = @_;
+    $r->{tx}{$p} //= { chr => $ft->{chr}, strand => $ft->{strand}, cds => [], stop => [], exons => 0, len => 0 };
+    return $r->{tx}{$p};
+}
+
+# 读取证据GFF3，返回 转录本ID => {chr, strand, cds}
+sub load_cds {
+    my $f  = shift;
+    my $h  = open_in($f);
+    my %tx;
+    while (<$h>) {
+        s/[\r\n]+$//;
+        last if /^##FASTA/;
+        next if /^#/ || /^\s*$/;
+        my @c = split /\t/, $_, 9;
+        next if @c < 9 || $c[2] ne 'CDS';
+        next unless $c[3] =~ /^\d+$/ && $c[4] =~ /^\d+$/;
+        my ($s, $e) = $c[3] <= $c[4] ? ($c[3], $c[4]) : ($c[4], $c[3]);
+        my ($par) = $c[8] =~ /(?:^|;)\s*Parent=([^;]+)/;
+        next unless defined $par;
+        for my $p (split /,/, $par) {
+            $p =~ s/^\s+|\s+$//g;
+            next if $p eq '';
+            $tx{$p} //= { chr => $c[0], strand => $c[6], cds => [] };
+            push @{ $tx{$p}{cds} }, [$s, $e];
+        }
+    }
+    close $h unless $f eq '-';
+    return \%tx;
+}
+
+sub merge_intervals {
+    my @iv = sort { $a->[0] <=> $b->[0] || $a->[1] <=> $b->[1] } @_;
+    my @m;
+    for my $i (@iv) {
+        if (@m && $i->[0] <= $m[-1][1]) {
+            $m[-1][1] = $i->[1] if $i->[1] > $m[-1][1];
+        }
+        else { push @m, [$i->[0], $i->[1]]; }
+    }
+    return @m;
+}
+
+# 按染色体和链建立索引：按起点排序，并记录最大终点前缀，便于二分查找
+sub build_index {
+    my $tx = shift;
+    my %idx;
+    for my $id (keys %$tx) {
+        my $t = $tx->{$id};
+        my @m = merge_intervals(@{ $t->{cds} });
+        next unless @m;
+        push @{ $idx{ $t->{chr} }{ $t->{strand} }{list} }, [$m[0][0], $m[-1][1], \@m];
+    }
+    for my $chr (keys %idx) {
+        for my $st (keys %{ $idx{$chr} }) {
+            my $d = $idx{$chr}{$st};
+            $d->{list} = [sort { $a->[0] <=> $b->[0] } @{ $d->{list} }];
+            my $max = 0;
+            my @pm;
+            for my $e (@{ $d->{list} }) {
+                $max = $e->[1] if $e->[1] > $max;
+                push @pm, $max;
+            }
+            $d->{pmax} = \@pm;
+        }
+    }
+    return \%idx;
+}
+
+# 两组已排序、互不重叠区间的重叠碱基数
+sub interval_overlap {
+    my ($x, $y) = @_;
+    my ($i, $j, $ov) = (0, 0, 0);
+    while ($i < @$x && $j < @$y) {
+        my $s = $x->[$i][0] > $y->[$j][0] ? $x->[$i][0] : $y->[$j][0];
+        my $e = $x->[$i][1] < $y->[$j][1] ? $x->[$i][1] : $y->[$j][1];
+        $ov += $e - $s + 1 if $e >= $s;
+        if ($x->[$i][1] < $y->[$j][1]) { $i++; } else { $j++; }
+    }
+    return $ov;
+}
+
+# 返回目标CDS与同链证据转录本CDS的最大重叠比例(重叠碱基/目标CDS长度)
+sub best_overlap {
+    my ($idx, $chr, $strand, $cds, $tlen, $ts, $te) = @_;
+    my $d = $idx->{$chr}{$strand} or return 0;
+    return 0 unless $tlen > 0;
+    my ($l, $pm) = ($d->{list}, $d->{pmax});
+    my ($lo, $hi) = (0, scalar @$l);
+    while ($lo < $hi) {
+        my $mid = int(($lo + $hi) / 2);
+        if ($pm->[$mid] >= $ts) { $hi = $mid; } else { $lo = $mid + 1; }
+    }
+    my $best = 0;
+    for (my $i = $lo; $i < @$l; $i++) {
+        last if $l->[$i][0] > $te;
+        next if $l->[$i][1] < $ts;
+        my $ov = interval_overlap($cds, $l->[$i][2]);
+        $best = $ov if $ov > $best;
+    }
+    return $best / $tlen;
+}
+
+# 读取基因组FASTA：序列名取 ">" 之后第一个空白之前的部分
+sub load_fasta {
+    my $f = shift;
+    my $h = open_in($f);
+    my (%g, $id);
+    while (my $line = <$h>) {
+        $line =~ s/[\r\n]+$//;
+        if ($line =~ /^>\s*(\S+)/) {
+            $id = $1;
+            warn "Warning: duplicated sequence ID $id in $f, the sequences are concatenated.\n" if exists $g{$id};
+            $g{$id} //= '';
+        }
+        elsif (defined $id) {
+            $line =~ s/\s+//g;
+            $g{$id} .= uc $line;
+        }
+    }
+    close $h;
+    return \%g;
+}
+
+sub revcomp {
+    my $s = reverse $_[0];
+    $s =~ tr/ACGTacgtNn/TGCAtgcaNn/;
+    return $s;
+}
+
+# 分析代表转录本的起始/终止密码子、移码和内部终止密码子（参考GFF3_merging_and_removing_redundancy）。
+# 返回哈希引用：
+#   have_seq        基因组中是否有该染色体（未提供--genome时为0）
+#   out_of_range    CDS是否超出染色体序列范围
+#   start_ok        5'端第一个CDS的phase是否为0（非0则缺少起始密码子）
+#   first_phase     5'端第一个CDS的phase
+#   has_start       是否有正确的起始密码子
+#   has_stop        拼接后的编码序列末尾是否为终止密码子
+#   stop_downstream CDS不含终止密码子时，紧邻下游三个碱基是否为终止密码子
+#   internal_stop   内部终止密码子数量
+#   frameshift      移码数量
+sub analyze_integrity {
+    my ($rep) = @_;
+    my ($chr, $strand) = ($rep->{chr}, $rep->{strand});
+    my %res = (
+        have_seq => 0, out_of_range => 0, start_ok => 1, first_phase => 0, has_start => 0,
+        has_stop => 0, stop_downstream => 0, internal_stop => 0, frameshift => 0,
+    );
+    my @cds = @{ $rep->{cds} };
+    return \%res unless @cds;
+
+    my $gs       = $genome ? $genome->{$chr} : undef;
+    my $have_seq = defined $gs ? 1 : 0;
+    $res{have_seq} = $have_seq;
+
+    # 每个片段：[起始, 结束, phase, 是否CDS]
+    my @cds_seg = map { [ $_->[0], $_->[1], $_->[2], 1 ] } @cds;
+    my @seg = @cds_seg;
+    foreach my $st (@{ $rep->{stop} || [] }) {
+        my ($s, $e) = @$st;
+        my $overlap = grep { $s <= $_->[1] && $e >= $_->[0] } @cds_seg;
+        push @seg, [ $s, $e, undef, 0 ] unless $overlap;
+    }
+
+    if ($have_seq) {
+        foreach my $x (@seg) {
+            if ($x->[1] > length $gs) { $res{out_of_range} = 1; return \%res; }
+        }
+    }
+
+    # 按转录方向排序：正链起始坐标从小到大，负链从大到小
+    my $minus = ($strand eq '-') ? 1 : 0;
+    @seg = sort { $minus ? ($b->[0] <=> $a->[0]) : ($a->[0] <=> $b->[0]) } @seg;
+
+    # phase是否有信息量：至少有一个CDS的phase为1或2
+    my $phase_informative = scalar grep { defined $_->[2] && $_->[2] =~ m/^[12]$/ } @cds_seg;
+
+    my $coding = '';
+    my $first  = 1;
+    foreach my $s (@seg) {
+        my $len   = $s->[1] - $s->[0] + 1;
+        my $piece = $have_seq ? substr($gs, $s->[0] - 1, $len) : ('N' x $len);
+        $piece = '' unless defined $piece;
+        if ($minus) { $piece = revcomp($piece); }
+        my $phase     = $s->[2];
+        my $has_phase = (defined $phase && $phase =~ m/^[012]$/) ? 1 : 0;
+
+        if ($first) {
+            $phase = 0 unless $has_phase;
+            $res{first_phase} = $phase;
+            if ($phase > 0) {
+                # 5'端第一个CDS：开头phase个碱基属于上游缺失的密码子，只能丢弃
+                $piece = $phase < length($piece) ? substr($piece, $phase) : '';
+                $res{start_ok} = 0;
+            }
+            $coding = $piece;
+            $first  = 0;
+        }
+        else {
+            if ($s->[3] && $has_phase && $phase_informative) {
+                my $frame_pos = length($coding) % 3;
+                my $expected  = (3 - $frame_pos) % 3;
+                if ($phase != $expected) {
+                    # 检测到移码：丢弃无法拼成密码子的碱基，并按注释的phase重建阅读框
+                    $res{frameshift}++;
+                    $coding = substr($coding, 0, length($coding) - $frame_pos);
+                    $piece  = $phase < length($piece) ? substr($piece, $phase) : '';
+                }
+            }
+            $coding .= $piece;
+        }
+    }
+
+    # 没有基因组序列时，只能判断相位和移码
+    return \%res unless $have_seq;
+
+    my $n_codon = int(length($coding) / 3);
+    $res{has_start} = ($res{start_ok} && $n_codon && exists $start_codon{ substr($coding, 0, 3) }) ? 1 : 0;
+    $res{has_stop}  = (length($coding) % 3 == 0 && $n_codon && exists $stop_codon{ substr($coding, ($n_codon - 1) * 3, 3) }) ? 1 : 0;
+
+    # CDS不含终止密码子时，检查紧邻下游三个碱基（无独立stop_codon行、编码长度为3的倍数时）
+    if (!$res{has_stop} && length($coding) % 3 == 0 && !@{ $rep->{stop} || [] }) {
+        if ($minus) {
+            my $st = $cds[0][0] - 4;
+            $res{stop_downstream} = 1 if $st >= 0 && $stop_codon{ revcomp(substr($gs, $st, 3)) };
+        }
+        else {
+            my $st = $cds[-1][1];
+            $res{stop_downstream} = 1 if $st + 3 <= length($gs) && $stop_codon{ substr($gs, $st, 3) };
+        }
+    }
+
+    # 统计内部终止密码子（若编码序列末尾是终止密码子，该密码子是正常的，不计入）
+    my $last_i = $res{has_stop} ? $n_codon - 2 : $n_codon - 1;
+    my $limit  = ($last_i + 1) * 3;
+    my $n_internal = 0;
+    if ($limit > 0) {
+        my $sub = substr($coding, 0, $limit);
+        $n_internal++ while $sub =~ m/$COUNT_STOP_RE/g;
+    }
+    $res{internal_stop} = $n_internal;
+
+    return \%res;
+}
+
+# 完整性检验：返回问题列表，空列表表示完整
+sub check_complete {
+    my ($rep, $attr_all) = @_;
+    my @p;
+    my $r   = analyze_integrity($rep);
+    # 编码长度需扣除5'端phase后再判断是否为3的倍数（5'端不完整但阅读框正确的模型不应被判为移码）
+    my $len = $rep->{len} - ($r->{first_phase} || 0);
+
+    if ($genome) {
+        if (!$r->{have_seq})    { push @p, '基因组中无该序列'; return @p; }
+        if ($r->{out_of_range}) { push @p, 'CDS超出序列范围'; return @p; }
+
+        if (!$r->{start_ok})       { push @p, '5端缺失(相位非0)'; }
+        elsif (!$r->{has_start})   { push @p, '5端缺失(无起始密码子)'; }
+
+        if ($r->{frameshift})      { push @p, '移码(' . $r->{frameshift} . '处)'; }
+        elsif ($len % 3)           { push @p, '长度非3的倍数(疑似移码)'; }
+
+        if ($r->{internal_stop})   { push @p, '内部终止密码子(' . $r->{internal_stop} . '个)'; }
+
+        push @p, '3端缺失(无终止密码子)' unless $r->{has_stop} || $r->{stop_downstream};
+    }
+    else {
+        push @p, '5端缺失(相位非0)' unless $r->{start_ok};
+        if ($r->{frameshift})      { push @p, '移码(' . $r->{frameshift} . '处)'; }
+        elsif ($len % 3)           { push @p, '长度非3的倍数(疑似移码)'; }
+        push @p, '属性标注5端缺失' if $attr_all =~ /(?:^|;)\s*(?:5_prime_partial|partial)=true/i || $attr_all =~ /start_range/ || $attr_all =~ /Integrity=(?:5prime_partial|internal)\b/;
+        push @p, '属性标注3端缺失' if $attr_all =~ /(?:^|;)\s*(?:3_prime_partial|partial)=true/i || $attr_all =~ /end_range/ || $attr_all =~ /Integrity=(?:3prime_partial|internal)\b/;
+        push @p, '属性标注内部终止密码子或移码' if $attr_all =~ /internal_stop|frameshift/i;
+    }
+    return @p;
+}
+
+# 根据遗传密码编号返回（密码子表、起始密码子表、终止密码子表）的哈希引用。
+# 遗传密码的设置参考NCBI Genetic Codes，代码来自 GFF3_merging_and_removing_redundancy。
+sub codon_table {
+    my ($genetic_code) = @_;
+    my %code = (
+        "TTT" => "F", "TTC" => "F", "TTA" => "L", "TTG" => "L",
+        "TCT" => "S", "TCC" => "S", "TCA" => "S", "TCG" => "S",
+        "TAT" => "Y", "TAC" => "Y", "TAA" => "X", "TAG" => "X",
+        "TGT" => "C", "TGC" => "C", "TGA" => "X", "TGG" => "W",
+        "CTT" => "L", "CTC" => "L", "CTA" => "L", "CTG" => "L",
+        "CCT" => "P", "CCC" => "P", "CCA" => "P", "CCG" => "P",
+        "CAT" => "H", "CAC" => "H", "CAA" => "Q", "CAG" => "Q",
+        "CGT" => "R", "CGC" => "R", "CGA" => "R", "CGG" => "R",
+        "ATT" => "I", "ATC" => "I", "ATA" => "I", "ATG" => "M",
+        "ACT" => "T", "ACC" => "T", "ACA" => "T", "ACG" => "T",
+        "AAT" => "N", "AAC" => "N", "AAA" => "K", "AAG" => "K",
+        "AGT" => "S", "AGC" => "S", "AGA" => "R", "AGG" => "R",
+        "GTT" => "V", "GTC" => "V", "GTA" => "V", "GTG" => "V",
+        "GCT" => "A", "GCC" => "A", "GCA" => "A", "GCG" => "A",
+        "GAT" => "D", "GAC" => "D", "GAA" => "E", "GAG" => "E",
+        "GGT" => "G", "GGC" => "G", "GGA" => "G", "GGG" => "G",
+    );
+    my %start_table;
+    $start_table{"ATG"} = 1;
+    if ( $genetic_code == 1 ) {
+        # The Standard Code
+    }
+    elsif ( $genetic_code == 2 ) {
+        $code{"AGA"} = "X"; $code{"AGG"} = "X"; $code{"ATA"} = "M"; $code{"TGA"} = "W";
+        $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG/;
+    }
+    elsif ( $genetic_code == 3 ) {
+        $code{"ATA"} = "M"; $code{"CTT"} = "T"; $code{"CTC"} = "T"; $code{"CTA"} = "T"; $code{"CTG"} = "T"; $code{"TGA"} = "W";
+        $start_table{$_} = 1 foreach qw/ATA GTG/;
+    }
+    elsif ( $genetic_code == 4 ) {
+        $code{"TGA"} = "W";
+        $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG CTG TTA TTG/;
+    }
+    elsif ( $genetic_code == 5 ) {
+        $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"ATA"} = "M"; $code{"TGA"} = "W";
+        $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG TTG/;
+    }
+    elsif ( $genetic_code == 6 ) {
+        $code{"TAA"} = "Q"; $code{"TAG"} = "Q";
+    }
+    elsif ( $genetic_code == 9 ) {
+        $code{"AAA"} = "N"; $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"TGA"} = "W";
+        $start_table{"GTG"} = 1;
+    }
+    elsif ( $genetic_code == 10 ) {
+        $code{"TGA"} = "C";
+    }
+    elsif ( $genetic_code == 11 ) {
+        $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG CTG TTG/;
+    }
+    elsif ( $genetic_code == 12 ) {
+        $code{"CTG"} = "S";
+        $start_table{"CTG"} = 1;
+    }
+    elsif ( $genetic_code == 13 ) {
+        $code{"AGA"} = "G"; $code{"AGG"} = "G"; $code{"ATA"} = "M"; $code{"TGA"} = "W";
+        $start_table{$_} = 1 foreach qw/ATA GTG TTG/;
+    }
+    elsif ( $genetic_code == 14 ) {
+        $code{"AAA"} = "N"; $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"TAA"} = "Y"; $code{"TGA"} = "W";
+    }
+    elsif ( $genetic_code == 15 ) {
+        $code{"TAG"} = "Q";
+    }
+    elsif ( $genetic_code == 16 ) {
+        $code{"TAG"} = "L";
+    }
+    elsif ( $genetic_code == 21 ) {
+        $code{"TGA"} = "W"; $code{"ATA"} = "M"; $code{"AGA"} = "S"; $code{"AGG"} = "S"; $code{"AAA"} = "N";
+        $start_table{"GTG"} = 1;
+    }
+    elsif ( $genetic_code == 22 ) {
+        $code{"TCA"} = "X"; $code{"TAG"} = "L";
+    }
+    elsif ( $genetic_code == 23 ) {
+        $code{"TTA"} = "X";
+        $start_table{$_} = 1 foreach qw/ATT GTG/;
+    }
+    elsif ( $genetic_code == 24 ) {
+        $code{"AGA"} = "S"; $code{"AGG"} = "K"; $code{"TGA"} = "W";
+        $start_table{$_} = 1 foreach qw/GTG CTG TTG/;
+    }
+    elsif ( $genetic_code == 25 ) {
+        $code{"TGA"} = "G";
+        $start_table{$_} = 1 foreach qw/GTG TTG/;
+    }
+    elsif ( $genetic_code == 26 ) {
+        $code{"CTG"} = "A";
+        $start_table{"CTG"} = 1;
+    }
+    elsif ( $genetic_code == 27 ) {
+        # TAA和TAG编码Gln；TGA既可编码Trp也可作为终止密码子，这里仍将TGA视为终止密码子。
+        $code{"TAG"} = "Q"; $code{"TAA"} = "Q";
+    }
+    elsif ( $genetic_code == 28 ) {
+        # TAA、TAG、TGA均可根据上下文作为终止密码子，这里都视为终止密码子。
+    }
+    elsif ( $genetic_code == 29 ) {
+        $code{"TAA"} = "Y"; $code{"TAG"} = "Y";
+    }
+    elsif ( $genetic_code == 30 ) {
+        $code{"TAA"} = "E"; $code{"TAG"} = "E";
+    }
+    elsif ( $genetic_code == 31 ) {
+    }
+    elsif ( $genetic_code == 32 ) {
+        $code{"TAG"} = "W";
+        $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG CTG TTG/;
+    }
+    elsif ( $genetic_code == 33 ) {
+        $code{"TAA"} = "Y"; $code{"TGA"} = "W"; $code{"AGA"} = "S"; $code{"AGG"} = "K";
+        $start_table{$_} = 1 foreach qw/GTG CTG TTG/;
+    }
+    else {
+        print STDERR "Warning: unsupported genetic code $genetic_code, start and stop codons are set according to the standard genetic code.\n";
+    }
+
+    my %stop_table;
+    foreach ( keys %code ) {
+        $stop_table{$_} = 1 if $code{$_} eq "X";
+    }
+
+    return (\%code, \%start_table, \%stop_table);
+}
+
+########################################################################
+# 英文用法说明（放在文件最末尾，运行时通过DATA文件句柄读取）
+########################################################################
+__DATA__
+Usage:
+    {PROG} [options] input.gff3 > reliable.gff3 2> to_verify.gff3
+    {PROG} [options] --output_to_verify to_verify.gff3 input.gff3 > reliable.gff3 2> log.txt
+
+Function:
+    Classify the gene models in the input GFF3 file into two classes: class 1 are reliable and accurate genes, written to STDOUT; class 2 are genes that need further verification, written to STDERR by default (using --output_to_verify is recommended so that warnings never mix with the GFF3 result).
+
+Classification rules:
+    (0) Completeness (start codon, stop codon, frameshift and internal stop codon; the codons are determined by --genetic_code) is checked first: genes lacking the 5' or 3' end, or having a frameshift/internal stop codon, go to class 2; (1) genes whose CDS overlap ratio with both the NGSReads and homolog evidence sets is not lower than the threshold go to class 1; (2) genes supported only by homolog and without a Low_support tag in column 9 go to class 1; (3) genes supported only by NGSReads and carrying Type=excellent_gene_models_predicted_by_NGSReads in column 9 go to class 1; (4) all other genes go to class 2.
+    For a gene with several transcripts, the transcript with the longest CDS is the representative; column 9 tags are checked on both the gene line and the representative transcript line.
+    Gene models are grouped by their ID/Parent relationships (traced up to the top-level feature), so child features need not follow their gene line directly.
+
+input.gff3
+    GFF3 file to be classified, placed at the end of the command line (.gz files are supported, "-" reads from STDIN)
+
+    --NGSReads <file>    default: none
+    GFF3 file of gene models derived from RNA-Seq, used to compute the CDS overlap ratio
+
+    --homolog <file>    default: none
+    GFF3 file of gene models derived from homologous proteins, used to compute the CDS overlap ratio
+
+    --output_to_verify <file>    default: none
+    Write class 2 genes (to be verified) to this file; if not set they are written to STDERR (backward compatible)
+
+    --out_stats <file>    default: none
+    Write statistics (class counts, evidence combinations, class reasons, number and proportion of single-/two-exon genes) to the given file
+
+    --genome <file>    default: none
+    Optional genome FASTA file used to check the start codon, stop codon, frameshifts and internal stop codons; if absent, completeness is judged only from CDS phase, frameshift (discontinuous phases), CDS length and column 9 attributes
+
+    --genetic_code <int>    default: 1
+    Genetic code, from which the start and stop codons used in the completeness check are determined automatically (--genome is also required to check start/stop codons and internal stop codons). See NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi . Supported numbers: 1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33.
+
+    --min_overlap <float>    default: 0.5
+    Threshold of the CDS overlap ratio (overlapped bases / CDS length of the target gene)
+
+    --cpu <int>    default: 1
+    Number of parallel worker processes. Reading the input files and building the indexes are still done by the main process; gene classification (completeness check and evidence overlap calculation) is done in parallel by the workers, and the results are merged in the original order, so the output is identical to the single-process run. With 1, no worker is started.
+
+    --tmp_dir <string>    default: tmp_$date$pid
+    Temporary directory. The genes are split into batches; a .ok file is created in this directory after each batch (step) is finished, and finished batches are skipped when the program is run again with the same --tmp_dir. When re-running, the input file and the parameters (--NGSReads, --homolog, --genome, --genetic_code, --min_overlap) must be the same as in the first run, otherwise the program stops with an error (--cpu may differ). After a successful run, a --tmp_dir explicitly given by the user is kept (so that a re-run skips all finished batches), whereas the default directory (tmp_date+pid) is removed automatically; after an abnormal termination the temporary directory is always kept. Without --tmp_dir and with --cpu 1, no temporary directory is used and everything is processed in memory.
+
+    --help    default: none
+    Display the English usage message and exit
+
+    --chinese_help    default: none
+    显示中文用法说明并退出
+
