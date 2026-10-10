@@ -22,7 +22,7 @@ my $usage_cn = <<'USAGE';
     (1) 读取GFF3文件，按ID/Parent关系将各行归入基因（沿Parent追溯到最顶层特征），得到 转录本 -> 基因 的对应关系；不要求子特征紧跟在gene行之后，也兼容Parent写在ID之前的行。
     (2) 根据基因组序列和CDS信息（含phase，按--genetic_code翻译）提取每个转录本的蛋白序列，去除末尾的终止密码子，内部终止密码子以X代替。没有CDS的转录本不参与验证。
     (3) HMM验证（设置--HMM_db时）：将蛋白序列按每份--chunk_num个蛋白分成若干份，使用--cpu个hmmscan进程并行比对到每个HMM数据库（不使用GA阈值），并在标准错误输出中用\r刷新显示并行分析的进度。对每个 蛋白-HMM模型 组合，计算全序列E值，以及E值合格的结构域对HMM模型的覆盖度（多个结构域在HMM模型上的匹配区域去冗余合并后，计算整体覆盖度）。E值阈值由HMM模型长度决定：模型长度 < --hmm_length 时使用 --hmm_evalue2，否则使用 --hmm_evalue1。全序列E值 <= 阈值且整体覆盖度 >= --hmm_coverage 时，该蛋白通过HMM验证。
-    (4) BLASTP验证（设置--diamond_db时），分两步进行：第一步调用diamond blastp将蛋白序列依次比对到每个diamond数据库（输出表格包含query和subject长度）；若输入的是蛋白FASTA文件，程序会先调用diamond makedb自动构建数据库。第二步参考parsing_blast_result.pl的算法对比对结果进行过滤：只保留E值 <= --blast_evalue的HSP；对每个 蛋白-数据库蛋白 组合合并所有保留的HSP，计算CIP（累计一致性 = 一致位点数之和 / 比对长度之和）、query覆盖度和subject覆盖度（多个HSP的匹配区域去冗余合并后，计算整体覆盖度）。E值 <= --blast_evalue、CIP >= --blast_CIP、两个整体覆盖度均 >= --blast_coverage 的hit为合格hit；蛋白只要在任意一个diamond数据库中存在合格hit，即通过BLASTP验证。
+    (4) BLASTP验证（设置--diamond_db时），分两步进行：第一步调用diamond blastp将蛋白序列依次比对到每个diamond数据库（输出表格包含query和subject长度）；若输入的是蛋白FASTA文件，程序会先调用diamond makedb自动构建数据库。第二步对比对结果进行过滤：只保留E值 <= --blast_evalue的HSP；对每个 蛋白-数据库蛋白 组合合并所有保留的HSP，计算CIP（累计一致性 = 一致位点数之和 / 比对长度之和）、query覆盖度和subject覆盖度（多个HSP的匹配区域去冗余合并后，计算整体覆盖度）。E值 <= --blast_evalue、CIP >= --blast_CIP、两个整体覆盖度均 >= --blast_coverage 的hit为合格hit；蛋白只要在任意一个diamond数据库中存在合格hit，即通过BLASTP验证。
     (5) 综合判定：
         a. 同时提供了HMM和diamond两类数据库时：两类数据库都通过验证的转录本是有效的；只通过其中一类数据库的转录本，需满足更严格的 *_onlyOne 阈值才有效；设置--both_required时，必须两类数据库都通过验证才有效。
         b. 只提供了一类数据库时：通过该类数据库验证（使用常规阈值）的转录本即为有效。此时不能使用--both_required。
@@ -333,7 +333,7 @@ if ($use_blast && @prot_ids) {
         my $base = "diamond.$i." . basename($d->{path});
         my $cmd = "diamond blastp $diamond_options --evalue $E --threads $cpu --db " . &shq($db) . " --query proteins.fasta --outfmt 6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore qlen slen --out $base.tab.tmp > $base.log 2>&1 && mv $base.tab.tmp $base.tab";
         &execute_cmds($cmd, "$base.ok");
-        # 第二步：参考parsing_blast_result.pl的算法，合并HSP后过滤；任意一个数据库有合格hit即通过
+        # 第二步：合并HSP后过滤；任意一个数据库有合格hit即通过
         &parse_diamond("$base.tab", \%blast);
     }
 }
@@ -677,7 +677,7 @@ sub parse_domtbl {
     }
 }
 
-# 解析并过滤diamond blastp结果（参考parsing_blast_result.pl）；可对多个数据库的结果多次调用，结果累积到同一个哈希中
+# 解析并过滤diamond blastp结果；可对多个数据库的结果多次调用，结果累积到同一个哈希中
 # outfmt 6: qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore qlen slen
 # (1) 只保留E值 <= --blast_evalue的HSP；
 # (2) 对每个 query-subject 的hit合并所有保留的HSP，计算CIP、query整体覆盖度和subject整体覆盖度（区域去冗余）；
@@ -852,7 +852,7 @@ Usage:
     (1) Read the GFF3 file and group its lines into genes by ID/Parent relationships (traced up to the top-level feature), obtaining the transcript -> gene mapping; child features need not follow their gene line directly, and lines with Parent written before ID are also supported.
     (2) Extract the protein sequence of each transcript from the genome and its CDS (phase-aware, translated with --genetic_code); the terminal stop codon is removed and internal stop codons are replaced by X. Transcripts without CDS are not validated.
     (3) HMM validation (with --HMM_db): proteins are split into chunks of --chunk_num proteins each and searched with --cpu parallel hmmscan processes against each HMM database (GA cutoffs are not used); the progress of the parallel analysis is shown on STDERR and refreshed in place with \r. For each protein-HMM pair, the full-sequence E-value and the overall coverage of the HMM by the domains with qualified E-values (the matched regions of multiple domains on the HMM are merged without redundancy before the coverage is calculated) are computed. The E-value threshold depends on the model length: --hmm_evalue2 for models shorter than --hmm_length, otherwise --hmm_evalue1. A protein passes HMM validation if its full-sequence E-value <= threshold and the overall coverage >= --hmm_coverage.
-    (4) BLASTP validation (with --diamond_db), in two steps: first, diamond blastp is used to search the proteins against each diamond database in turn (the output table contains query and subject lengths); if a protein FASTA file is given instead of a diamond database, diamond makedb is run automatically to build the database. Second, the alignments are filtered following the algorithm of parsing_blast_result.pl: only HSPs with E-value <= --blast_evalue are kept; for each protein-subject pair all kept HSPs are merged to compute the CIP (cumulative identity = sum of identical residues / sum of aligned lengths), and the query and subject coverages (the matched regions of multiple HSPs are merged without redundancy before the overall coverage is calculated). A hit is qualified if E-value <= --blast_evalue, CIP >= --blast_CIP, and both overall coverages >= --blast_coverage. A protein passes BLASTP validation if it has at least one qualified hit in any of the diamond databases.
+    (4) BLASTP validation (with --diamond_db), in two steps: first, diamond blastp is used to search the proteins against each diamond database in turn (the output table contains query and subject lengths); if a protein FASTA file is given instead of a diamond database, diamond makedb is run automatically to build the database. Second, only HSPs with E-value <= --blast_evalue are kept; for each protein-subject pair all kept HSPs are merged to compute the CIP (cumulative identity = sum of identical residues / sum of aligned lengths), and the query and subject coverages (the matched regions of multiple HSPs are merged without redundancy before the overall coverage is calculated). A hit is qualified if E-value <= --blast_evalue, CIP >= --blast_CIP, and both overall coverages >= --blast_coverage. A protein passes BLASTP validation if it has at least one qualified hit in any of the diamond databases.
     (5) Decision:
         a. When both HMM and diamond databases are given: transcripts passing both are valid; transcripts passing only one type must also pass the stricter *_onlyOne thresholds; with --both_required, both types must be passed.
         b. When only one type of database is given: transcripts passing that type (normal thresholds) are valid. --both_required can not be used in this case.

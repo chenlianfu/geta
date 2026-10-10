@@ -1,0 +1,42 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use Getopt::Long;
+use Cwd qw/abs_path getcwd cwd/;
+
+
+my $dir = abs_path($ARGV[0]);
+
+print STDERR "\n============================================\n";
+print STDERR "Step 6: Output gene models " . "(" . (localtime) . ")" . "\n";
+mkdir "$dir/6.output_gene_models" unless -e "$dir/6.output_gene_models";
+
+# 1. 输出GFF3格式文件基因结构注释信息
+my @cmdString = ();
+push @cmdString, "$bin_path/GFF3Clear --GFF3_source GETA --gene_prefix $gene_prefix --gene_code_length 6 --genome $genome $dir/5.curate_gene_models/geneModels.gff3 > $out_prefix.geneModels.gff3 2> /dev/null";
+push @cmdString, "$bin_path/GFF3_extract_bestGeneModels  $out_prefix.geneModels.gff3 > $out_prefix.bestGeneModels.gff3 2> $out_prefix.AS_num_of_codingTranscripts.stats";
+
+
+
+
+
+# 子程序，用于执行调用的Linux命令。程序运行完毕后，生成.ok文件。
+sub execute_cmds {
+    my $ok_file = pop @_;
+
+    if ( -e $ok_file ) {
+        foreach ( @_ ) {
+            print STDERR "CMD(Skipped): $_\n";
+        }
+    }
+    else {
+        foreach ( @_ ) {
+            print STDERR (localtime) . ": CMD: $_\n";
+            system($_) == 0 or die "failed to execute: $_\n";
+        }
+        open OUT, ">", "$ok_file" or die $!; close OUT;
+    }
+
+    return 1;
+}
+
