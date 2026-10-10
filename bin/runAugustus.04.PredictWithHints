@@ -13,7 +13,7 @@ my $usage_cn = <<'USAGE';
 用法:
     perl $0 [options] genome.fasta hints.gff
 
-    程序将基因组序列和hints信息分成多份，使用内置的Perl多进程(fork)工作池并行调用augustus，不再依赖外部ParaFly，最后合并并行化结果，将最终的GFF3结果输出到标准输出(STDOUT)。输入的hints.gff3文件无需预先排序；相邻分段重叠区域内的基因只保留一份，不会重复输出。
+    程序将基因组序列和hints信息分成多份，使用内置的Perl多进程(fork)工作池并行调用augustus，最后合并并行化结果，将最终的GFF3结果输出到标准输出(STDOUT)。输入的hints.gff3文件无需预先排序；相邻分段重叠区域内的基因只保留一份，不会重复输出。
 
     --species <string>    默认值: 无
     设置用于进行Augustus基因预测的物种HMM模型名称。该参数必须设置。
@@ -439,7 +439,7 @@ __DATA__
 Usage:
     perl $0 [options] genome.fasta hints.gff
 
-    The program splits the genome sequences and the hints into segments, runs augustus on all segments in parallel with a built-in Perl worker pool (fork), so no external ParaFly is needed, and finally merges the parallel results into the final GFF3 written to STDOUT. The input hints.gff file does not need to be sorted, and genes lying in the overlapping regions of adjacent segments are reported only once.
+    The program splits the genome sequences and the hints into segments, runs augustus on all segments in parallel with a built-in Perl worker pool (fork), and finally merges the parallel results into the final GFF3 written to STDOUT. The input hints.gff file does not need to be sorted, and genes lying in the overlapping regions of adjacent segments are reported only once.
 
     --species <string>    default: None
     Set the name of the Augustus species (HMM model) used for gene prediction. This parameter is required.

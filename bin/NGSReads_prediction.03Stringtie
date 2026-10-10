@@ -18,7 +18,7 @@ Usage:
 
     程序流程：(1) 检测输入BAM文件是否已建立索引，若无则调用samtools index建立索引；(2) 调用samtools view获取BAM文件头部信息，得到参考基因组序列长度；(3) 调用samtools view命令按染色体对BAM文件进行分割，每份序列总长度不低于--min_genome_length_during_segmentation设定值；(4) 对每份分割后的BAM文件，并行调用stringtie独立进行转录本组装，得到各自的GTF文件；(5) 将各分割区域组装得到的GTF文件合并为一个GTF文件；(6) 在程序内部直接将合并后的GTF转换为GFF3格式并输出到标准输出，不再需要额外调用独立的gtfToGff3.pl脚本；(7) 程序结束前，若未设置--keep_tmp_files，则直接删除--tmp_dir指定的整个临时文件夹；若设置了该参数，则保留所有中间文件。
 
-    程序使用须知：(1) 本程序仅接受一个输入文件，且其必须为已按坐标排序的BAM文件；(2) 系统中需能够直接执行stringtie和samtools命令，本程序对BAM文件的染色体分割、以及各分割区域的stringtie组装，均通过Perl自身fork出的worker子进程并行完成，不再依赖外部parafly或parallel命令；(3) 若不设置--keep_tmp_files，程序运行到最后一步会删除整个临时文件夹；在此之前的步骤若运行中断，临时文件夹不会被删除，再次运行程序并使用--tmp_dir参数指定相同的临时文件夹，则程序能接续运行；但若程序已运行结束后再次以相同的--tmp_dir重新运行（仅在设置了--keep_tmp_files保留临时文件夹的情况下可能出现），将无法得到正确结果；(4) 请勿将--tmp_dir设置为包含重要文件的已有文件夹（例如当前目录或家目录），因为未设置--keep_tmp_files时该文件夹会被整体删除。
+    程序使用须知：(1) 本程序仅接受一个输入文件，且其必须为已按坐标排序的BAM文件；(2) 系统中需能够直接执行stringtie和samtools命令，本程序对BAM文件的染色体分割、以及各分割区域的stringtie组装，均通过Perl自身fork出的worker子进程并行完成；(3) 若不设置--keep_tmp_files，程序运行到最后一步会删除整个临时文件夹；在此之前的步骤若运行中断，临时文件夹不会被删除，再次运行程序并使用--tmp_dir参数指定相同的临时文件夹，则程序能接续运行；但若程序已运行结束后再次以相同的--tmp_dir重新运行（仅在设置了--keep_tmp_files保留临时文件夹的情况下可能出现），将无法得到正确结果；(4) 请勿将--tmp_dir设置为包含重要文件的已有文件夹（例如当前目录或家目录），因为未设置--keep_tmp_files时该文件夹会被整体删除。
 
 参数:
 [输入参数]
@@ -76,7 +76,7 @@ Usage:
 
 [性能参数]
     --cpu <int>    default: 8
-    设置程序运行时并行使用的worker子进程/CPU线程数：一方面用于samtools命令自身的多线程参数(-\@)，另一方面用于控制染色体分割、stringtie组装等步骤中同时并行运行的worker子进程数目上限；本程序所有并行化步骤均通过Perl自身fork出的worker子进程完成，不再依赖外部parafly或parallel命令。为避免CPU超订，每个worker子进程内部调用stringtie时固定使用单线程(-p 1)。
+    设置程序运行时并行使用的worker子进程/CPU线程数：一方面用于samtools命令自身的多线程参数(-\@)，另一方面用于控制染色体分割、stringtie组装等步骤中同时并行运行的worker子进程数目上限；本程序所有并行化步骤均通过Perl自身fork出的worker子进程完成。为避免CPU超订，每个worker子进程内部调用stringtie时固定使用单线程(-p 1)。
 
     --help    default: None
     display this help and exit.
@@ -176,7 +176,7 @@ print STDERR "\n2. Using the \"samtools view\" command to obtain header of the i
 &execute_cmds("samtools view -H $input_single_sorted_BAM_file > header.sam", "$tmp_dir/02.samtools_view_header.ok");
 
 # ============================================================================
-# 3. 按染色体分割BAM文件（并行化：Perl worker子进程代替parafly）
+# 3. 按染色体分割BAM文件（并行化：Perl worker子进程）
 # ============================================================================
 print STDERR "\n3. Splitting the BAM file by chromosome and its length. If there are multiple sequences that are shorter, merge them until the size exceeds $min_genome_length_during_segmentation bp. (" . (localtime) . ")\n";
 ## 说明：染色体分组的计算仅依赖header.sam（第2步已生成），开销很小，因此
@@ -368,7 +368,7 @@ sub execute_cmds {
     return 1;
 }
 
-# 基于Perl fork()的worker并行化调度器，代替外部parafly/parallel命令。
+# 基于Perl fork()的worker并行化调度器。
 # $tasks: 一个数组引用，每个元素是一个代码引用（coderef），在子进程中被调用执行。
 # $cpu: 最大并发子进程数。
 # $ok_file: 整个并行步骤完成后创建的标记文件，用于断点续跑（若已存在则直接跳过该步骤）。
@@ -861,7 +861,7 @@ Usage:
 
     Workflow: (1) check whether the input BAM file is indexed, and index it with samtools index if not; (2) use samtools view to read the BAM header and obtain reference sequence lengths; (3) use samtools view to split the BAM file by chromosome so that each split file covers at least --min_genome_length_during_segmentation bp; (4) for each split BAM file, run stringtie independently and in parallel to assemble transcripts into its own GTF file; (5) merge the per-region GTF files into a single combined GTF file; (6) convert the combined GTF into GFF3 format internally and print it to standard output, with no need for a separate gtfToGff3.pl script; (7) at the end, unless --keep_tmp_files is set, the whole directory given by --tmp_dir is deleted; if --keep_tmp_files is set, all intermediate files are kept.
 
-    Notes: (1) the program accepts only a single, already coordinate-sorted BAM file as input; (2) both the stringtie and samtools commands must be directly executable on the system; the chromosome-splitting step and the per-region stringtie assembly step are both parallelized through worker subprocesses forked by Perl itself, with no dependency on any external parafly or parallel command; (3) unless --keep_tmp_files is set, the whole temporary directory is removed at the very last step; if a run is interrupted before that, the temporary directory is not deleted and the run can be resumed by rerunning with the same --tmp_dir, but rerunning with the same --tmp_dir after a successful completion (possible only when the directory was kept via --keep_tmp_files) will not produce correct results; (4) do not point --tmp_dir at an existing directory holding important files (e.g. the current or home directory), because without --keep_tmp_files the whole directory will be deleted.
+    Notes: (1) the program accepts only a single, already coordinate-sorted BAM file as input; (2) both the stringtie and samtools commands must be directly executable on the system; the chromosome-splitting step and the per-region stringtie assembly step are both parallelized through worker subprocesses forked by Perl itself; (3) unless --keep_tmp_files is set, the whole temporary directory is removed at the very last step; if a run is interrupted before that, the temporary directory is not deleted and the run can be resumed by rerunning with the same --tmp_dir, but rerunning with the same --tmp_dir after a successful completion (possible only when the directory was kept via --keep_tmp_files) will not produce correct results; (4) do not point --tmp_dir at an existing directory holding important files (e.g. the current or home directory), because without --keep_tmp_files the whole directory will be deleted.
 
 Parameters:
 [INPUT]
@@ -919,7 +919,7 @@ Parameters:
 
 [PERFORMANCE]
     --cpu <int>    default: 8
-    number of worker subprocesses/CPU threads used by the program: it is used both as the thread count (-\@) for samtools commands, and as the upper limit on the number of worker subprocesses run concurrently during the chromosome-splitting and stringtie-assembly steps; all parallelism is implemented with Perl's own fork()-based worker pool, no external parafly or parallel command is used. To avoid CPU oversubscription, each worker subprocess always calls stringtie with a single thread (-p 1).
+    number of worker subprocesses/CPU threads used by the program: it is used both as the thread count (-\@) for samtools commands, and as the upper limit on the number of worker subprocesses run concurrently during the chromosome-splitting and stringtie-assembly steps; all parallelism is implemented with Perl's own fork()-based worker pool. To avoid CPU oversubscription, each worker subprocess always calls stringtie with a single thread (-p 1).
 
     --help    default: None
     display this help and exit.

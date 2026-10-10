@@ -27,7 +27,7 @@ Usage:
 
     程序流程和工作原理如下：(1) 分析第一个输入SAM/BAM文件的头部信息，得到参考基因组序列长度；(2) 调用samtools merge命令将多个输入SAM/BAM文件合并为一个文件；(3) 调用samtools sort命令对合并结果按坐标排序；(4) 调用samtools index命令建立索引；(5) 调用samtools view命令按染色体对BAM文件进行分割，每份序列总长度不低于--min_genome_length_during_segmentation设定值；(6) 对每份染色体分割文件，在程序内部直接分析比对区域的覆盖空白，将其切分为更多SAM文件，每份代表一个基因的转录区域；(7) 对每个切分区域，在程序内部直接搜索表达量最高的转录本序列；(8) 对每个转录区域，在程序内部直接进行可变剪接分析，鉴定出可变剪接转录本；(9) 输出GFF3格式转录本（基因ID按--gene_prefix和--gene_code_length统一编号），以及可选的intron和exon测序深度信息；随后默认直接删除--tmp_dir指定的整个临时文件夹，若添加--keep_tmp_files参数则保留全部中间文件。
 
-    程序使用须知：(1) 本程序不再依赖SplitRNASeqSam、Sam2TransfragLite、alternative_splicing_analysis和parafly等外部程序，相关切分、转录本搜索和可变剪接分析算法均已直接整合进本脚本内部，仅要求系统中能够直接执行samtools命令；(2) 本程序所有并行化计算均通过Perl自身fork出的worker子进程完成，不再调用外部的parallel或parafly命令；(3) 本程序输入文件可以是一个或多个SAM/BAM格式文件，当输入一个已按坐标排序的BAM文件并添加--input_single_sorted_BAM_file参数后，程序会跳过合并、排序、索引三个步骤；(4) 本程序仅在最后一步才会处理临时文件（默认删除整个--tmp_dir文件夹；添加--keep_tmp_files则全部保留）。在此之前的步骤若运行中断，再次运行程序并使用--tmp_dir参数指定相同的临时文件夹，则程序能接续运行；若程序已正常运行结束且临时文件夹已被删除，则再次运行相当于从头开始；若使用了--keep_tmp_files，则可以使用相同的--tmp_dir重新运行，程序会跳过已完成的步骤并重新输出结果；(5) 默认（未添加--keep_tmp_files）会删除整个--tmp_dir文件夹，因此请不要将--tmp_dir指向已存放有其他重要文件的文件夹，也不要指向当前工作目录、输入文件或输出文件所在的上级目录，程序检测到这类情况会直接报错退出。
+    程序使用须知：(1) 本程序的相关切分、转录本搜索和可变剪接分析算法均已直接整合进本脚本内部，仅要求系统中能够直接执行samtools命令；(2) 本程序所有并行化计算均通过Perl自身fork出的worker子进程完成；(3) 本程序输入文件可以是一个或多个SAM/BAM格式文件，当输入一个已按坐标排序的BAM文件并添加--input_single_sorted_BAM_file参数后，程序会跳过合并、排序、索引三个步骤；(4) 本程序仅在最后一步才会处理临时文件（默认删除整个--tmp_dir文件夹；添加--keep_tmp_files则全部保留）。在此之前的步骤若运行中断，再次运行程序并使用--tmp_dir参数指定相同的临时文件夹，则程序能接续运行；若程序已正常运行结束且临时文件夹已被删除，则再次运行相当于从头开始；若使用了--keep_tmp_files，则可以使用相同的--tmp_dir重新运行，程序会跳过已完成的步骤并重新输出结果；(5) 默认（未添加--keep_tmp_files）会删除整个--tmp_dir文件夹，因此请不要将--tmp_dir指向已存放有其他重要文件的文件夹，也不要指向当前工作目录、输入文件或输出文件所在的上级目录，程序检测到这类情况会直接报错退出。
 
 参数:
 [输入参数]
@@ -121,7 +121,7 @@ Usage:
 
 [性能参数]
     --cpu <int>    default: 8
-    设置程序运行时并行使用的worker子进程/CPU线程数；本程序所有并行化步骤均通过Perl自身fork出的worker子进程完成，不再依赖外部parafly或parallel命令。
+    设置程序运行时并行使用的worker子进程/CPU线程数；本程序所有并行化步骤均通过Perl自身fork出的worker子进程完成。
 
     --help    default: None
     display this help and exit.
@@ -140,7 +140,7 @@ Usage:
 
     Workflow: (1) read the header of the first input SAM/BAM file to obtain reference sequence lengths; (2) use samtools merge to combine multiple input SAM/BAM files into one; (3) use samtools sort to coordinate-sort the result; (4) use samtools index to index it; (5) use samtools view to split the BAM file by chromosome so that each piece covers at least --min_genome_length_during_segmentation bp; (6) for each chromosome piece, split it internally at gaps with no read coverage into smaller SAM files, each representing one gene transcription region; (7) for each region, search internally for the transcript sequence with the highest coverage; (8) for each region, perform alternative splicing analysis internally to identify alternatively spliced transcripts; (9) output GFF3-format transcripts (gene IDs are numbered according to --gene_prefix and --gene_code_length), plus optional intron and exon sequencing depth information; afterwards the whole --tmp_dir folder is deleted by default, unless --keep_tmp_files is given, in which case all intermediate files are kept.
 
-    Notes: (1) this program no longer depends on the external SplitRNASeqSam, Sam2TransfragLite, alternative_splicing_analysis or parafly programs -- all of that logic is now built directly into this script, and only the samtools command is required on the system; (2) all parallel computation is performed through worker subprocesses forked by Perl itself, not through an external parallel or parafly command; (3) input may be one or more SAM/BAM files, and adding --input_single_sorted_BAM_file together with a single coordinate-sorted BAM file skips the merge/sort/index steps; (4) the temporary files are handled only at the very last step (the whole --tmp_dir folder is deleted by default; everything is kept with --keep_tmp_files). An interrupted run can be resumed by rerunning with the same --tmp_dir; after a successful run whose --tmp_dir has been deleted, rerunning simply starts from scratch; if --keep_tmp_files was used, rerunning with the same --tmp_dir skips the finished steps and simply regenerates the outputs; (5) because the whole --tmp_dir folder is deleted by default (i.e. without --keep_tmp_files), do not point --tmp_dir to a folder holding other important files, nor to the current working directory or a parent directory of any input/output file -- the program aborts with an error if it detects such a case.
+    Notes: (1) this program no longer depends on the external SplitRNASeqSam, Sam2TransfragLite, alternative_splicing_analysis -- all of that logic is now built directly into this script, and only the samtools command is required on the system; (2) all parallel computation is performed through worker subprocesses forked by Perl itself; (3) input may be one or more SAM/BAM files, and adding --input_single_sorted_BAM_file together with a single coordinate-sorted BAM file skips the merge/sort/index steps; (4) the temporary files are handled only at the very last step (the whole --tmp_dir folder is deleted by default; everything is kept with --keep_tmp_files). An interrupted run can be resumed by rerunning with the same --tmp_dir; after a successful run whose --tmp_dir has been deleted, rerunning simply starts from scratch; if --keep_tmp_files was used, rerunning with the same --tmp_dir skips the finished steps and simply regenerates the outputs; (5) because the whole --tmp_dir folder is deleted by default (i.e. without --keep_tmp_files), do not point --tmp_dir to a folder holding other important files, nor to the current working directory or a parent directory of any input/output file -- the program aborts with an error if it detects such a case.
 
 Parameters:
 [INPUT]
@@ -234,7 +234,7 @@ Parameters:
 
 [PERFORMANCE]
     --cpu <int>    default: 8
-    number of worker subprocesses/CPU threads used for every parallel step; all parallelism is implemented with Perl's own fork()-based worker pool, no external parafly or parallel command is used.
+    number of worker subprocesses/CPU threads used for every parallel step; all parallelism is implemented with Perl's own fork()-based worker pool.
 
     --help    default: None
     display this help and exit.
@@ -439,7 +439,7 @@ $cmdString = "samtools index -\@ $cpu alignment.bam";
 $alignment_BAM_file = "$tmp_dir/alignment.bam" unless defined $alignment_BAM_file;
 
 # ============================================================================
-# 5. 按染色体分割BAM文件（并行化：Perl worker子进程代替parafly）
+# 5. 按染色体分割BAM文件（并行化：Perl worker子进程）
 # ============================================================================
 print STDERR "\n5. Splitting the SAM file by chromosome and its length. If there are multiple sequences that are shorter, merge them until the size exceeds $min_genome_length_during_segmentation bp. (" . (localtime) . ")\n";
 ## 说明：染色体分组的计算仅依赖header.sam（第1步已生成的断点文件），
@@ -755,7 +755,7 @@ sub execute_cmds {
     return 1;
 }
 
-# 基于Perl fork()的worker并行化调度器，代替外部parafly/parallel命令。
+# 基于Perl fork()的worker并行化调度器。
 # $tasks: 一个数组引用，每个元素是一个代码引用（coderef），在子进程中被调用执行。
 # $cpu: 最大并发子进程数。
 # $ok_file: 整个并行步骤完成后创建的标记文件，用于断点续跑（若已存在则直接跳过该步骤）。

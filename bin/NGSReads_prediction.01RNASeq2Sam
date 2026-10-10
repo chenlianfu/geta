@@ -127,7 +127,7 @@ my $usage_cn = <<'USAGE';
 
 [性能参数]
     --cpu <int>    默认值：8
-    设置程序使用的CPU线程数，用于Trimmomatic质控（多进程并行调度）、比对软件（HISAT2/STAR）建索引、各分片的比对及排序、以及samtools merge。Trimmomatic质控阶段会根据--cpu和可用内存自动计算同时运行的Trimmomatic进程数（每个进程占用16个线程），由本程序内置的fork/worker进程池直接调度执行，不再依赖外部的ParaFly程序。注意：建索引在程序开始时就与质控、数据切分同时并行运行，两者各自使用的线程数都不减少（建索引最多使用--cpu个线程，且最多80个），因此该阶段程序实际占用的总线程数会暂时超过--cpu；由于建索引的大部分时间是单线程运行的，这样安排可以节约总运行时间。
+    设置程序使用的CPU线程数，用于Trimmomatic质控（多进程并行调度）、比对软件（HISAT2/STAR）建索引、各分片的比对及排序、以及samtools merge。Trimmomatic质控阶段会根据--cpu和可用内存自动计算同时运行的Trimmomatic进程数（每个进程占用16个线程），由本程序内置的fork/worker进程池直接调度执行。注意：建索引在程序开始时就与质控、数据切分同时并行运行，两者各自使用的线程数都不减少（建索引最多使用--cpu个线程，且最多80个），因此该阶段程序实际占用的总线程数会暂时超过--cpu；由于建索引的大部分时间是单线程运行的，这样安排可以节约总运行时间。
 
     --chunk_num <int>    默认值：10
     设置将质控后数据切分成的份数，用于对Step 2比对阶段进行并行化加速。质控完成后，双末端和/或单端质控后数据会分别按read数尽量均匀地切分为最多--chunk_num份（某类型数据的实际read总数少于--chunk_num时按实际read数切分），随后对这些分片同时并行调用--aligner指定的比对软件进行比对：HISAT2支持在一条命令中混合双末端和单端数据，故同一分片序号对应一条HISAT2命令；STAR不支持混合两种数据类型，故双末端、单端分片分别独立并行比对。每条比对命令实际使用的线程数为--cpu除以--chunk_num后向下取整（不足1时按1计算）。比对完成后，Step 3排序阶段对这些分片比对结果（以及--sam直接输入的文件）调用samtools sort的命令同样会并行执行，各条排序命令实际可用的线程数在受限于--cpu及可用内存总量的排序总线程预算内、按同时运行的排序任务数平均分配。
@@ -844,7 +844,7 @@ sub run_command_pool {
 
 # 并行运行一批Trimmomatic命令；若因个别reads质量全为固定值导致Trimmomatic无法自动探测phred格式
 # 而运行失败，则对失败的命令强制指定-phred33后重跑一次（与原NGSReads_prediction脚本行为一致）。
-# 并行调度完全由本程序内置的fork/worker进程池（&run_command_pool）实现，不再依赖外部的ParaFly程序。
+# 并行调度完全由本程序内置的fork/worker进程池（&run_command_pool）实现。
 sub run_trimmomatic_batch {
     my ($cmds_ref, $cpu, $mode) = @_;
     print STDERR localtime() . ": running " . scalar(@$cmds_ref) . " Trimmomatic $mode command(s) with up to $cpu parallel worker(s)\n";
@@ -1273,7 +1273,7 @@ Parameters:
 
 [PERFORMANCE]
     --cpu <int>    default: 8
-    Number of CPU threads used for Trimmomatic quality control (multi-process worker pool), aligner (HISAT2/STAR) index building, each chunk's alignment and sorting, and samtools merge. During Trimmomatic quality control, the number of concurrent Trimmomatic processes (each using 16 threads) is calculated automatically from --cpu and the available memory, and is dispatched directly by this program's own built-in fork/worker process pool; the external ParaFly program is no longer required. Note: index building runs in the background from the very start of the program, in parallel with quality control and data splitting, and neither of them has its thread count reduced (index building uses up to --cpu threads, at most 80), so during this phase the program may temporarily use more threads in total than --cpu; since index building is single-threaded for most of its run, this arrangement saves overall run time.
+    Number of CPU threads used for Trimmomatic quality control (multi-process worker pool), aligner (HISAT2/STAR) index building, each chunk's alignment and sorting, and samtools merge. During Trimmomatic quality control, the number of concurrent Trimmomatic processes (each using 16 threads) is calculated automatically from --cpu and the available memory, and is dispatched directly by this program's own built-in fork/worker process pool. Note: index building runs in the background from the very start of the program, in parallel with quality control and data splitting, and neither of them has its thread count reduced (index building uses up to --cpu threads, at most 80), so during this phase the program may temporarily use more threads in total than --cpu; since index building is single-threaded for most of its run, this arrangement saves overall run time.
 
     --chunk_num <int>    default: 10
     The number of chunks the quality-controlled clean data is split into, to parallelize the Step 2 alignment stage. After quality control, paired-end and/or single-end clean data are each independently split into up to --chunk_num roughly equal chunks by read count (fewer chunks are produced when the actual read count of a given type is smaller than --chunk_num). The aligner selected by --aligner is then run on all chunks in parallel: HISAT2 supports mixing paired-end and single-end data in one command, so the chunks sharing the same chunk index are combined into a single HISAT2 command; STAR does not support mixing the two data types, so paired-end and single-end chunks are aligned independently in parallel. Each alignment command uses --cpu / --chunk_num threads, floored, at least 1. Afterwards, in the Step 3 sorting stage, the samtools sort commands for these alignment chunks (and any --sam input files) are likewise run in parallel, with the CPU threads actually usable by each sort command divided evenly among the concurrently running sort jobs, within a total sort thread budget bounded by --cpu and the available memory.

@@ -31,7 +31,7 @@ my $usage_chinese = <<'USAGE_CN';
 [并行参数]
 
     --cpu <int>    默认值: 8
-    设置并行进程数。程序内部使用 fork 并行，不再依赖 ParaFly。设置为1时不启动子进程。
+    设置并行进程数。程序内部使用 fork 并行。设置为1时不启动子进程。
 
     --tmp_dir <string>    默认值: 无
     设置存放并行运算中间文件的目录，程序结束后其中的临时子目录会被自动删除。默认使用系统临时目录。
@@ -859,7 +859,7 @@ Usage:
 [Parallel Options]
 
     --cpu <int>    default: 8
-    Set the number of parallel processes. The program forks worker processes itself and does not depend on ParaFly any more. No child process is started when set to 1.
+    Set the number of parallel processes. The program forks worker processes itself. No child process is started when set to 1.
 
     --tmp_dir <string>    default: None
     Set the directory in which the temporary sub-directory for the intermediate files of the parallel workers is created; the sub-directory is removed automatically when the program finishes. The system temporary directory is used by default.
