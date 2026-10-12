@@ -18,6 +18,8 @@ my $usage_cn = <<'USAGE';
 
     本程序补齐基因模型首尾的原理：（1）对基因模型尾部直接进行延长，直至遇到终止密码子或到基因组序列最尾部；（2）对基因模型首部直接进行延长，直至遇到终止密码子，再吐出密码子碱基直至遇到起始密码子；（3）若遇到没有CDS信息的转录本，例如长链非编码RNA（lnc_RNA），不会对其进行补齐，程序同时支持含有可变剪接的GFF3文件。
 
+    关于读码框（phase）：程序仅以转录方向上第一个CDS的phase作为整个转录本的读码框依据，并结合各CDS的累计长度推算其后各CDS的phase，不依赖其它CDS行自带的phase值（输入文件中它们可能缺失或不自洽）。（1）判断末端是否完整的标准与 check_gene_model_integrity.pl 保持一致：5'端完整要求首个CDS的phase为0且以起始密码子开头；3'端完整要求CDS长度（扣除phase）为3的倍数且以终止密码子结尾。因此，首个CDS的phase不为0的转录本，即使扣除phase后以起始密码子开头，也会被当作5'端不完整而进行填补。（2）3'端延长时，先补全末端不完整的密码子，再逐个密码子向下游搜索终止密码子。（3）5'端延长时，先补全首端不完整的密码子，再逐个密码子向上游搜索第一个框内终止密码子，然后从该终止密码子之后向下游寻找第一个起始密码子；若在遇到框内终止密码子之前找不到起始密码子，则视为不能填补。（4）填补完成后，按上述标准重新检验两端，只有两端都满足标准才算成功填补完整；输出文件中所有CDS行的phase均按首个CDS的phase和累计长度重新计算。
+
     在延长基因模型首部或尾部的过程中，若遇到含有N（或其它非ATCG碱基）的密码子（例如基因组上的gap区域），程序将立即停止延长，并认为该转录本不能被填补完整；此时该转录本的CDS保持原样，不会因为穿越N区域而产生超长的exon/CDS。
 
     本程序根据 --genetic_code 参数设置的遗传密码，自动确定起始密码子和终止密码子。
@@ -400,8 +402,8 @@ sub sort_mRNA_info {
     my ($mRNA_content, %sort1, %sort2);
     # sort1：按照位置排序； sort2：按照five_prime_UTR、exon、CDS、intron、three_prime_UTR顺序进行排序。
 
-    # 修正：读取转录方向上第一个CDS的frame。输入的基因模型若5'端不完整且未能被填补，首个CDS的frame可能不为0，
-    # 原代码总是假设首个CDS的frame为0，会导致这类转录本输出的所有CDS的frame都发生错误。
+    # 读取转录方向上第一个CDS的frame。fillingEnd返回的CDS行中，每个CDS的第三列均已按首个CDS的phase和累计长度重新计算，
+    # 这里只需读取转录方向上第一个CDS的frame，并据此推算其后各个CDS的frame（二者结果一致）。
     my $first_frame = 0;
     {
         my @cds_lines = split /\n/, $mRNA_CDSs;
@@ -427,7 +429,7 @@ sub sort_mRNA_info {
             my $out_content = &get_content($chr, $source, $feature_type, $_[0], $_[1], $strand, $frame, $mRNA_ID, $num, $feature_showname, \%gff3_score_attr);
             $sort1{$out_content} = $_[0];
             $sort2{$out_content} = 3;
-            $frame = $CDS_length % 3; if ($frame == 1) {$frame = 2;} elsif ($frame == 2) {$frame = 1;}
+            $frame = (-$CDS_length) % 3;
         }
         my $num = 0;
         foreach ( split /\n/, $mRNA_introns ) {
@@ -475,7 +477,7 @@ sub sort_mRNA_info {
             my $out_content = &get_content($chr, $source, $feature_type, $_[0], $_[1], $strand, $frame, $mRNA_ID, $num, $feature_showname, \%gff3_score_attr);
             $sort1{$out_content} = $_[0];
             $sort2{$out_content} = 3;
-            $frame = $CDS_length % 3; if ($frame == 1) {$frame = 2;} elsif ($frame == 2) {$frame = 1;}
+            $frame = (-$CDS_length) % 3;
         }
         my $num = 0;
         foreach ( reverse split /\n/, $mRNA_introns ) {
@@ -672,10 +674,68 @@ sub modify_exon {
 }
 
 
+########################################################################
+# 以下为基因模型首尾填补的核心算法（已按phase重写）。
+#
+# 设计要点：
+#   (1) 所有计算都在“转录方向”上进行：@tx 为转录方向上排列的CDS数组，每个元素为 [基因组起始, 基因组终止]（起始<=终止）。
+#       正链时@tx按坐标从小到大排列，负链时按坐标从大到小排列；因此“5'端”永远是$tx[0]的5'侧，“3'端”永远是$tx[-1]的3'侧。
+#   (2) 读码框只由“转录方向第一个CDS的phase($p0)”决定：拼接后的CDS序列去掉前$p0个碱基后，才是以密码子为单位的编码序列。
+#       其余CDS行输入文件中自带的phase不再被使用（它们可能缺失、全为0或与长度不自洽），输出时按累计长度重新计算。
+#   (3) 末端完整性的判定标准与 check_gene_model_integrity.pl 完全一致（见 check_ends）；填补完成后用同一标准重新检验。
+########################################################################
+
+# 子程序，反向互补（基因组序列在读取时已转换为大写的ATCGN）。
+sub revcomp_seq {
+    my $s = reverse $_[0];
+    $s =~ tr/ATCGatcg/TAGCTAGC/;
+    return $s;
+}
+
+# 子程序，按转录方向拼接CDS序列（尚未去除phase对应的碱基）。
+sub get_tx_seq {
+    my ($tx_ref, $genome_seq, $strand) = @_;
+    my $s = '';
+    foreach my $c ( @$tx_ref ) {
+        my $piece = substr($genome_seq, $c->[0] - 1, $c->[1] - $c->[0] + 1);
+        $piece = &revcomp_seq($piece) if $strand eq "-";
+        $s .= $piece;
+    }
+    return $s;
+}
+
+# 子程序，判断CDS两端是否完整，返回 ($five_ok, $three_ok)。判定标准与 check_gene_model_integrity.pl 一致：
+#   5'端完整：首个CDS的phase为0，且去除phase后的序列以起始密码子开头；
+#   3'端完整：去除phase后的序列长度为3的倍数，且以终止密码子结尾。
+sub check_ends {
+    my ($tx_seq, $p0) = @_;
+    return (0, 0) if length($tx_seq) < $p0;
+    my $s = substr($tx_seq, $p0);
+    my $len = length($s);
+    my $five_ok = ( $p0 == 0 && $len >= 3 && exists $start_codon{ substr($s, 0, 3) } ) ? 1 : 0;
+    my $three_ok = ( $len >= 3 && $len % 3 == 0 && exists $stop_codon{ substr($s, -3) } ) ? 1 : 0;
+    return ($five_ok, $three_ok);
+}
+
+# 子程序，把转录方向的CDS数组转换为按基因组坐标从小到大排列的CDS文本（每行 start\tend\tphase），
+# 其中phase由首个CDS的phase($p0)和各CDS的累计长度重新计算。
+sub tx_to_cds_lines {
+    my ($tx_ref, $p0) = @_;
+    my $consumed = -$p0;     # 已读入的、位于密码子边界之后的碱基数
+    my $phase = $p0;
+    my @lines;
+    foreach my $c ( @$tx_ref ) {
+        push @lines, [ $c->[0], $c->[1], $phase ];
+        $consumed += $c->[1] - $c->[0] + 1;
+        $phase = (-$consumed) % 3;    # 下一个CDS需要跳过的碱基数，使其从密码子边界开始读码
+    }
+    @lines = sort { $a->[0] <=> $b->[0] } @lines;
+    return join "\n", map { "$_->[0]\t$_->[1]\t$_->[2]" } @lines;
+}
+
 # 子程序，对mRNA进行首尾填补，主要返回填补后的CDSs信息。
 sub fillingEnd {
     my ($mRNA_info, $genome_seq, $strand, $mRNA_ID) = @_;
-    my ($fill_need, $fill_ok) = (1, 1);
 
     # 获取 CDS 和 exon 信息
     my (@CDS, @exon, %gff3_score_attr);
@@ -684,335 +744,188 @@ sub fillingEnd {
         $gff3_score_attr{"$_[0]\t$_[6]\t$_[2]\t$_[3]\t$_[4]"}{"score"} = $_[5];
         $gff3_score_attr{"$_[0]\t$_[6]\t$_[2]\t$_[3]\t$_[4]"}{"attr"} = &get_attr($_[8]);
         if ( m/\tCDS\t/ ) {
-            push @CDS, "$_[3]\t$_[4]\t$_[7]";
+            # 第三个元素为输入文件中的phase；缺失（"."）时记为undef。
+            push @CDS, [ $_[3], $_[4], ( $_[7] =~ m/^[012]$/ ? $_[7] : undef ) ];
         }
         elsif ( m/\texon\t/ ) {
             push @exon, "$_[3]\t$_[4]";
         }
     }
-    @CDS = sort {$a <=> $b} @CDS;
+    @CDS = sort { $a->[0] <=> $b->[0] } @CDS;
     @exon = sort {$a <=> $b} @exon;
 
-    # 根据CDS获取mRNA的起始密码子和结束密码子
-    my ($mRNA_start_codon, $mRNA_end_codon) = &get_start_and_stop_codon(\@CDS, $genome_seq, $strand);
-    #print STDERR "$mRNA_start_codon\t$mRNA_end_codon\n";
-    $fill_need = 0 if ( exists $stop_codon{$mRNA_end_codon}  && exists $start_codon{$mRNA_start_codon} );
-    #print "$mRNA_start_codon\t$mRNA_end_codon\n";
-    if ( ! exists $stop_codon{$mRNA_end_codon} ) {
-        # 修复终止密码
-        @CDS = &modify_stop(\@CDS, $genome_seq, $strand, $mRNA_ID);
-        $fill_ok = 0 if $CDS[0] == 0; shift @CDS;
-    }
-    if ( ! exists $start_codon{$mRNA_start_codon} ) {
-        # 修复起始密码
-        @CDS = &modify_start(\@CDS, $genome_seq, $strand, $mRNA_ID);
-        $fill_ok = 0 if $CDS[0] == 0; shift @CDS;
-    }
-    #foreach (@CDS) { print "$_\t$strand\n"; }
+    # 转换为转录方向上的CDS数组，并取转录方向第一个CDS的phase作为整个转录本的读码框依据。
+    my @tx = map { [ $_->[0], $_->[1] ] } ( $strand eq "-" ? reverse @CDS : @CDS );
+    my $p0 = ( $strand eq "-" ) ? $CDS[-1][2] : $CDS[0][2];
+    $p0 = 0 unless defined $p0;
 
-    my $CDS_out = join "\n", @CDS;
+    my $tx_seq = &get_tx_seq(\@tx, $genome_seq, $strand);
+    my ($five_ok, $three_ok) = &check_ends($tx_seq, $p0);
+    my ($fill_need, $fill_ok) = ( ($five_ok && $three_ok) ? 0 : 1, 1 );
+
+    if ( $fill_need == 1 ) {
+        # 先填补3'端，再填补5'端。每次修改后都重新获取CDS序列。
+        if ( ! $three_ok ) {
+            &extend_3prime(\@tx, $genome_seq, $strand, $p0, $tx_seq, $mRNA_ID);
+            $tx_seq = &get_tx_seq(\@tx, $genome_seq, $strand);
+        }
+        if ( ! $five_ok ) {
+            $p0 = &fill_5prime(\@tx, $genome_seq, $strand, $p0, $tx_seq, $mRNA_ID);
+            $tx_seq = &get_tx_seq(\@tx, $genome_seq, $strand);
+        }
+        # 填补后按统一标准重新检验两端，两端都满足才算成功。
+        ($five_ok, $three_ok) = &check_ends($tx_seq, $p0);
+        $fill_ok = ( $five_ok && $three_ok ) ? 1 : 0;
+    }
+
+    my $CDS_out = &tx_to_cds_lines(\@tx, $p0);
     my $exon_out = join "\n", @exon;
     return ($fill_need, $fill_ok, $CDS_out, $exon_out, %gff3_score_attr);
 }
 
-# 子程序，返回修复了终止密码子的CDS信息
-# 修正：在向下游延伸寻找终止密码子的过程中，若遇到含N（或其它非ATCG碱基）的密码子（如基因组gap区域），
-# 则立即停止延伸，视为未能填补，并保持该末端CDS的原始坐标不变，避免穿越N区域产生超长的exon/CDS。
-sub modify_stop {
-    # 获取CDS、基因组序列和strand信息
-    my ($CDS_ref, $genome_seq, $strand, $mRNA_ID) = @_;
-    my @CDS = @$CDS_ref;
-    @CDS = sort {$a <=> $b} @CDS;
-    my $fill_ok = 0;
-    my $blocked_by_N = 0;
-    my $genome_seq_length = length($genome_seq);
+# 子程序，填补3'端：从转录本3'端继续向下游读码，直至遇到终止密码子。
+# 读码框由首个CDS的phase($p0)和CDS累计长度决定：
+#   去除phase后的CDS长度$L若不是3的倍数，则末尾$r=$L%3个碱基是一个不完整的密码子，需要从下游再取(3-$r)个碱基补全它，
+#   之后每次取3个碱基作为一个密码子。若遇到终止密码子则停止；若遇到含N的密码子则放弃填补并保持CDS不变；
+#   若直到序列末端都未遇到终止密码子，则保留延伸到最后一个完整密码子的结果（但不算填补成功）。
+# 直接修改@$tx_ref中最后一个CDS的坐标；返回1表示找到了终止密码子，否则返回0。
+sub extend_3prime {
+    my ($tx_ref, $genome_seq, $strand, $p0, $tx_seq, $mRNA_ID) = @_;
+    my $glen = length($genome_seq);
+    my $L = length($tx_seq) - $p0;
+    if ( $L < 0 ) {
+        print STDERR "Warning: 位于 $strand 链上的 $mRNA_ID 首个CDS的phase超过了CDS总长度，无法填补3'端。\n";
+        return 0;
+    }
+    my $r = $L % 3;
+    my $prefix = ( $r > 0 ) ? substr($tx_seq, -$r) : '';    # 已在CDS中的不完整密码子的碱基
+    my $take = ( $r > 0 ) ? 3 - $r : 3;                     # 本次需要从下游读取的碱基数
+    my $last = $tx_ref->[-1];
+    my ($ext, $found, $blocked) = (0, 0, 0);
 
-    if ( $strand eq "+" ) {
-        my $CDS_terminal = pop @CDS;
-        my $CDS_terminal_orig = $CDS_terminal;
-        my ($start, $end, $frame) = split /\t/, $CDS_terminal;
-        #my $end_old = $end;
-        # 根据Frame信息定位准确的CDS结束位点。
-        $end = $end - (($end - ($start + $frame) + 1) % 3);
-        #print "ERROR1: $mRNA_ID" if $end_old != $end;
-        # 得到最后一个CDS的结束位点，往后推导出终止密码子位置，或到序列结束；遇到含N的密码子则中止。
-        if ( $genome_seq_length - $end >= 3 ) {
-            my $codon = substr($genome_seq, $end, 3);
-            $end += 3;
-            while (1) {
-                last if exists $stop_codon{$codon};
-                if ( $codon =~ m/[^ATCG]/ ) { $blocked_by_N = 1; last; }
-                last unless $genome_seq_length - $end >= 3;
-                $codon = substr($genome_seq, $end, 3);
-                $end += 3;
-            }
-            $fill_ok = 1 if exists $stop_codon{$codon};
-        }
-        if ( $blocked_by_N ) {
-            # 被N区域阻断，恢复原始的末端CDS。
-            push @CDS, $CDS_terminal_orig;
+    while (1) {
+        my $bases;
+        if ( $strand eq "-" ) {
+            my $s_pos = $last->[0] - $ext - $take;          # 本次读取区间的第一个碱基（1-based）
+            last if $s_pos < 1;
+            $bases = &revcomp_seq( substr($genome_seq, $s_pos - 1, $take) );
         }
         else {
-            push @CDS, "$start\t$end\t$frame";
+            my $e_pos = $last->[1] + $ext + $take;
+            last if $e_pos > $glen;
+            $bases = substr($genome_seq, $last->[1] + $ext, $take);
         }
+        my $codon = $prefix . $bases;
+        $ext += $take;
+        if ( $codon =~ m/[^ATCG]/ ) { $blocked = 1; last; }
+        if ( exists $stop_codon{$codon} ) { $found = 1; last; }
+        $prefix = '';
+        $take = 3;
     }
-    elsif ( $strand eq "-" ) {
-        my $CDS_terminal = shift @CDS;
-        my $CDS_terminal_orig = $CDS_terminal;
-        my ($start, $end, $frame) = split /\t/, $CDS_terminal;
-        #my $start_old = $start;
-        # 根据Frame信息定位准确的CDS结束位点。
-        $start = ($end - $frame - $start + 1) % 3 + $start;
-        #print "ERROR2: $mRNA_ID" if $start != $start_old;
-        # 得到最后一个CDS的结束位点，往后推导出终止密码子位置，或到序列起始；遇到含N的密码子则中止。
-        if ( $start >= 4 ) {
-            my $codon = substr($genome_seq, $start - 4, 3);
-            $codon = reverse($codon); $codon =~ tr/ATCGatcg/TAGCTAGC/;
-            $start -= 3;
-            while (1) {
-                last if exists $stop_codon{$codon};
-                if ( $codon =~ m/[^ATCG]/ ) { $blocked_by_N = 1; last; }
-                last unless $start >= 4;
-                $codon = substr($genome_seq, $start - 4, 3);
-                $codon = reverse($codon); $codon =~ tr/ATCGatcg/TAGCTAGC/;
-                $start -= 3;
-            }
-            $fill_ok = 1 if exists $stop_codon{$codon};
-        }
-        if ( $blocked_by_N ) {
-            # 被N区域阻断，恢复原始的末端CDS。
-            unshift @CDS, $CDS_terminal_orig;
-        }
-        else {
-            unshift @CDS, "$start\t$end\t$frame";
-        }
-    }
-    if ( $blocked_by_N ) {
+
+    if ( $blocked ) {
         print STDERR "Warning: 位于 $strand 链上的 $mRNA_ID 在下游延伸寻找终止密码子时遇到含N的区域，已停止延伸，保持原CDS末端不变。\n";
+        return 0;
     }
-    elsif ( $fill_ok == 0 ) {
+    if ( $ext > 0 ) {
+        if ( $strand eq "-" ) { $last->[0] -= $ext; }
+        else                  { $last->[1] += $ext; }
+    }
+    unless ( $found ) {
         print STDERR "Warning: 位于 $strand 链上的 $mRNA_ID 在下游未能找到终止密码子。\n";
+        return 0;
     }
-
-    unshift @CDS, $fill_ok;
-    return @CDS;
+    return 1;
 }
 
-# 子程序，返回修复了起始密码子的CDS信息。
-# 修正：在向上游延伸寻找终止密码子的过程中，若遇到含N（或其它非ATCG碱基）的密码子（如基因组gap区域），
-# 则立即停止延伸，视为未能填补，并恢复为原始CDS，避免穿越N区域产生超长的exon/CDS。
-sub modify_start {
-    # 获取CDS、基因组序列和strand信息（优化：同modify_stop，改为直接对参数命名）。
-    my ($CDS_ref, $genome_seq, $strand, $mRNA_ID) = @_;
-    my @CDS = @$CDS_ref;
-    @CDS = sort {$a <=> $b} @CDS;
-    my @CDS_orig = @CDS;
-    my $fill_ok = 0;
-    my $genome_seq_length = length($genome_seq);
+# 子程序，填补5'端：从转录本5'端向上游逐个密码子搜索第一个框内终止密码子，再从该终止密码子之后向下游寻找第一个起始密码子。
+# 读码框由首个CDS的phase($p0)决定：
+#   若$p0>0，则CDS开头的$p0个碱基属于一个上游不完整的密码子，需要从上游再取(3-$p0)个碱基补全它，之后每次向上游取3个碱基。
+#   向上游找到终止密码子后，首个CDS从该终止密码子的第一个碱基开始（phase为0）；然后向下游逐个密码子扫描，
+#   找到第一个起始密码子即停止，并把其上游的碱基（含终止密码子）全部从CDS中去除（可能整个CDS被去除）；
+#   若扫描中先遇到框内终止密码子，说明起始密码子之前没有可用的ORF，视为不能填补。
+#   遇到含N的密码子、找不到上游终止密码子、找不到起始密码子时，均放弃填补，CDS保持原样。
+# 直接修改@$tx_ref；返回填补后首个CDS的phase（成功时为0，失败时为原来的$p0）。
+sub fill_5prime {
+    my ($tx_ref, $genome_seq, $strand, $p0, $tx_seq, $mRNA_ID) = @_;
+    my $glen = length($genome_seq);
+    if ( length($tx_seq) < $p0 ) {
+        print STDERR "Warning: 位于 $strand 链上的 $mRNA_ID 首个CDS的phase超过了CDS总长度，无法填补5'端。\n";
+        return $p0;
+    }
+    my $suffix = ( $p0 > 0 ) ? substr($tx_seq, 0, $p0) : '';    # 已在CDS中的、不完整密码子的后半部分
+    my $take = ( $p0 > 0 ) ? 3 - $p0 : 3;
+    my $first = $tx_ref->[0];
+    my ($ext, $found, $blocked) = (0, 0, 0);
 
-    if ( $strand eq "+" ) {
-        my $CDS_first = shift @CDS;
-        my ($start, $end, $frame) = split /\t/, $CDS_first;
-        $start = $start + $frame;
-        # 得到第一个CDS起始，往前推导出终止密码子位置，或到序列起始；遇到含N的密码子则中止。
-        if ( $start >= 4 ) {
-            my $codon = substr($genome_seq, $start - 4, 3);
-            $start -= 3;
-            my $blocked_by_N = 0;
-            while (1) {
-                last if exists $stop_codon{$codon};
-                if ( $codon =~ m/[^ATCG]/ ) { $blocked_by_N = 1; last; }
-                last unless $start >= 4;
-                $codon = substr($genome_seq, $start - 4, 3);
-                $start -= 3;
-            }
-            if ( $blocked_by_N ) {
-                @CDS = @CDS_orig;
-                print STDERR "Warning: 位于 $strand 链上的 $mRNA_ID 在上游延伸寻找终止密码子时遇到含N的区域，已停止延伸，保持原CDS不变。\n";
-            }
-            else {
-                unshift @CDS, "$start\t$end\t0";
-                # 若往前找到终止密码子，则往后找起始密码子
-                if ( exists $stop_codon{$codon} ) {
-                    @CDS = &locating_start_codon(\@CDS, $genome_seq, $strand, $mRNA_ID);
-                    if ( $CDS[0] == 1 ) {
-                        $fill_ok = 1;
-                        shift @CDS;
-                    }
-                    else {
-                        @CDS = @CDS_orig;
-                    }
-                }
-                else {
-                    print STDERR "Warning: 在位于 $strand 链上的 $mRNA_ID 在上游未能找到终止密码子。\n";
-                }
-            }
+    while (1) {
+        my $bases;
+        if ( $strand eq "-" ) {
+            # 负链的上游是坐标更大的一侧
+            my $e_pos = $first->[1] + $ext + $take;
+            last if $e_pos > $glen;
+            $bases = &revcomp_seq( substr($genome_seq, $first->[1] + $ext, $take) );
         }
         else {
-            unshift @CDS, "$start\t$end\t0";
-            print STDERR "Warning: 在位于 $strand 链上的 $mRNA_ID 上游未能找到终止密码子。\n";
+            my $s_pos = $first->[0] - $ext - $take;
+            last if $s_pos < 1;
+            $bases = substr($genome_seq, $s_pos - 1, $take);
         }
-    }
-    elsif ( $strand eq "-" ) {
-        my $CDS_first = pop @CDS;
-        my ($start, $end, $frame) = split /\t/, $CDS_first;
-        $end = $end - $frame;
-        # 得到第一个CDS起始，往前推导出终止密码子位置，或到序列结束；遇到含N的密码子则中止。
-        if ( $genome_seq_length - $end >= 3 ) {
-            my $codon = substr($genome_seq, $end, 3);
-            $codon = reverse($codon); $codon =~ tr/ATCGatcg/TAGCTAGC/;
-            $end += 3;
-            my $blocked_by_N = 0;
-            while (1) {
-                last if exists $stop_codon{$codon};
-                if ( $codon =~ m/[^ATCG]/ ) { $blocked_by_N = 1; last; }
-                last unless $genome_seq_length - $end >= 3;
-                $codon = substr($genome_seq, $end, 3);
-                $codon = reverse($codon); $codon =~ tr/ATCGatcg/TAGCTAGC/;
-                $end += 3;
-            }
-            if ( $blocked_by_N ) {
-                @CDS = @CDS_orig;
-                print STDERR "Warning: 位于 $strand 链上的 $mRNA_ID 在上游延伸寻找终止密码子时遇到含N的区域，已停止延伸，保持原CDS不变。\n";
-            }
-            else {
-                push @CDS, "$start\t$end\t0";
-                # 若往前找到终止密码子，则往后找起始密码子
-                if ( exists $stop_codon{$codon} ) {
-                    @CDS = &locating_start_codon(\@CDS, $genome_seq, $strand, $mRNA_ID);
-                    if ( $CDS[0] == 1 ) {
-                        $fill_ok = 1;
-                        shift @CDS;
-                    }
-                    else {
-                        @CDS = @CDS_orig;
-                    }
-                }
-                else {
-                    print STDERR "Warning: 位于 $strand 链上的 $mRNA_ID 的前端未能找到终止密码子。\n";
-                }
-            }
-        }
-        else {
-            push @CDS, "$start\t$end\t0";
-            print STDERR "Warning: 位于 $strand 链上的 $mRNA_ID 的前端未能找到终止密码子。\n";
-        }
+        my $codon = $bases . $suffix;
+        $ext += $take;
+        if ( $codon =~ m/[^ATCG]/ ) { $blocked = 1; last; }
+        if ( exists $stop_codon{$codon} ) { $found = 1; last; }
+        $suffix = '';
+        $take = 3;
     }
 
-    unshift @CDS, $fill_ok;
-    return @CDS;
-}
-
-# 子程序，定位起始密码子，返回mRNA的CDS信息
-sub locating_start_codon {
-    # 获取CDS、基因组序列和strand信息（优化：同modify_stop，改为直接对参数命名；
-    # 同时把内部循环里复用全局@_做临时变量的写法也改成了具名数组，更清晰）。
-    my ($CDS_ref, $genome_seq, $strand, $mRNA_ID) = @_;
-    my @CDS = @$CDS_ref;
-    @CDS = sort {$a <=> $b} @CDS;
-    my $fill_ok = 0;
-    my $genome_seq_length = length($genome_seq);
-
-    # 根据CDS位置信息获取序列
-    my $seq_CDS;
-    foreach ( @CDS ) {
-        my @fields = split /\t/, $_;
-        $seq_CDS .= substr($genome_seq, $fields[0] - 1, $fields[1] - $fields[0] + 1);
+    if ( $blocked ) {
+        print STDERR "Warning: 位于 $strand 链上的 $mRNA_ID 在上游延伸寻找终止密码子时遇到含N的区域，已停止延伸，保持原CDS不变。\n";
+        return $p0;
     }
-    if ( $strand eq "-" ) {
-        $seq_CDS = reverse $seq_CDS;
-        $seq_CDS =~ tr/ATCGatcg/TAGCTAGC/;
+    unless ( $found ) {
+        print STDERR "Warning: 位于 $strand 链上的 $mRNA_ID 在上游未能找到终止密码子。\n";
+        return $p0;
     }
-    #print STDERR "TEST(子程序locating_start_codon)：位于 $strand 链上的$mRNA_ID包含上游终止密码子的序列 $seq_CDS\n";
 
-    # 定位到第一个起始密码子
-    my $codon_num = 0;
-    while ( $seq_CDS =~ s/^(\w\w\w)// && ( ! exists $start_codon{$1} ) ) {
-        $codon_num ++;
-    }
-    if ( length($seq_CDS) >= 3 ) {
-        $fill_ok = 1;
-        #print STDERR "TEST(子程序locating_start_codon)：位于 $strand 链上的$mRNA_ID在上游终止密码子后第 $codon_num 个密码子处找到了起始密码子。\n";
+    # 备份原CDS，失败时恢复。
+    my @backup = map { [ @$_ ] } @$tx_ref;
 
+    # 首个CDS延伸到上游终止密码子的第一个碱基，此时CDS序列以终止密码子开头，读码框phase为0。
+    if ( $strand eq "-" ) { $first->[1] += $ext; }
+    else                  { $first->[0] -= $ext; }
+    my $new_seq = &get_tx_seq($tx_ref, $genome_seq, $strand);
+
+    # 从终止密码子之后向下游扫描，寻找第一个起始密码子（遇到框内终止密码子则放弃）。
+    my $codon_num = int( length($new_seq) / 3 );
+    my $start_idx = -1;
+    for (my $i = 1; $i < $codon_num; $i ++) {
+        my $c = substr($new_seq, $i * 3, 3);
+        if ( exists $start_codon{$c} ) { $start_idx = $i; last; }
+        last if exists $stop_codon{$c};
     }
-    else {
-        # 未能找到起始密码子：直接返回失败标志，调用方会恢复为原始CDS，无需再做后面的碱基去除操作。
+    if ( $start_idx < 0 ) {
         print STDERR "Warning：位于 $strand 链上的 $mRNA_ID 在上游终止密码子后未能找到起始密码子。\n";
-        unshift @CDS, $fill_ok;
-        return @CDS;
+        @$tx_ref = @backup;
+        return $p0;
     }
 
-    # 去除前 $codon_num 个密码子后，下一个密码子即是起始密码子
-    my $removed_base_num = $codon_num * 3;
-    if ( $strand eq "+" ) {
-        while ( $removed_base_num ) {
-            my $CDS = shift @CDS;
-            my @fields = split /\t/, $CDS;
-            my $CDS_length = $fields[1] - $fields[0] + 1;
-            if ($CDS_length > $removed_base_num) {
-                $fields[0] = $fields[0] + $removed_base_num;
-                unshift @CDS, "$fields[0]\t$fields[1]\t0";
-                $removed_base_num = 0;
-            }
-            else {
-                $removed_base_num = $removed_base_num - $CDS_length;
-            }
+    # 从5'端去除起始密码子之前的 $start_idx*3 个碱基（含上游终止密码子）。
+    my $remove = $start_idx * 3;
+    while ( $remove > 0 ) {
+        my $c = $tx_ref->[0];
+        my $len = $c->[1] - $c->[0] + 1;
+        if ( $len > $remove ) {
+            if ( $strand eq "-" ) { $c->[1] -= $remove; }
+            else                  { $c->[0] += $remove; }
+            $remove = 0;
+        }
+        else {
+            shift @$tx_ref;
+            $remove -= $len;
         }
     }
-    elsif ( $strand eq "-" ) {
-        while ( $removed_base_num ) {
-            my $CDS = pop @CDS;
-            my @fields = split /\t/, $CDS;
-            my $CDS_length = $fields[1] - $fields[0] + 1;
-            if ($CDS_length > $removed_base_num) {
-                $fields[1] = $fields[1] - $removed_base_num;
-                push @CDS, "$fields[0]\t$fields[1]\t0";
-                $removed_base_num = 0;
-            }
-            else {
-                $removed_base_num = $removed_base_num - $CDS_length;
-            }
-        }
-    }
-
-    unshift @CDS, $fill_ok;
-    return @CDS;
-}
-
-# 子程序，返回mRNA的起始和终止密码子
-sub get_start_and_stop_codon {
-    # 获取CDS、基因组序列和strand信息（优化：同modify_stop，改为直接对参数命名）。
-    my ($CDS_ref, $genome_seq, $strand) = @_;
-    my @CDS = @$CDS_ref;
-
-    # 得到CDS序列
-    @CDS = sort {$a <=> $b} @CDS;
-    my $CDS_seq;
-    foreach ( @CDS ) {
-        my @fields = split /\t/, $_;
-        $CDS_seq .= substr($genome_seq, $fields[0] - 1, $fields[1] - $fields[0] + 1);
-    }
-    if ( $strand eq "-" ) {
-        $CDS_seq = reverse $CDS_seq;
-        $CDS_seq =~ tr/ATCGatcgn/TAGCTAGCN/;
-    }
-
-    # 消除CDS序列的读码框偏移
-    my $frame = 0;
-    if ( $strand eq "+" ) {
-        $frame = $1 if $CDS[0] =~ m/(\d+)$/;
-    }
-    elsif ( $strand eq "-" ) {
-        $frame = $1 if $CDS[-1] =~ m/(\d+)$/;
-    }
-    $CDS_seq =~ s/^\w{$frame}//;
-
-    my ($out_codon_start, $out_codon_end);
-    $out_codon_start = $1 if $CDS_seq =~ m/^(\w\w\w)/;
-    # 修正：仅当消除读码框偏移后的CDS长度为3的整数倍时，末尾3个碱基才是一个完整的密码子；
-    # 否则末端是不完整的密码子（没有终止密码子），原代码直接取最后3个碱基，可能把错位的碱基误判为终止密码子。
-    $out_codon_end = $1 if ( length($CDS_seq) % 3 == 0 && $CDS_seq =~ m/(\w\w\w)$/ );
-    return ($out_codon_start, $out_codon_end);
+    return 0;
 }
 
 # 子程序，返回基因的GFF3哈希信息：
@@ -1388,6 +1301,8 @@ Usage:
     This program fills in the ends of gene models so that they become complete. During GETA gene prediction, some gene models cannot be predicted by Augustus; in that case the results predicted only from transcripts or homologs are often missing their starts or ends. This program is used to complete such gene models.
 
     Principle of filling the ends: (1) the 3' end of a gene model is extended directly until a stop codon is met or the end of the genome sequence is reached; (2) the 5' end of a gene model is extended directly until an in-frame upstream stop codon is met, and then the sequence is shortened codon by codon downstream until a start codon is found; (3) transcripts without CDS information, such as lnc_RNA, are not filled, and GFF3 files containing alternative splicing are supported.
+
+    About the reading frame (phase): the program takes only the phase of the first CDS in the transcription direction as the frame of the whole transcript, and deduces the phase of every following CDS from the accumulated CDS length; the phase values written on the other CDS lines of the input are not used (they may be missing or inconsistent). (1) The criteria for complete ends are the same as in check_gene_model_integrity.pl: the 5' end is complete only if the phase of the first CDS is 0 and the sequence begins with a start codon; the 3' end is complete only if the CDS length (after removing the phase) is a multiple of 3 and the sequence ends with a stop codon. Therefore a transcript whose first CDS has a non-zero phase is regarded as 5' partial and is filled, even if the codon right after the phase is a start codon. (2) When extending the 3' end, the incomplete last codon is completed first, and then the downstream sequence is searched codon by codon for a stop codon. (3) When extending the 5' end, the incomplete first codon is completed first, then the upstream sequence is searched codon by codon for the nearest in-frame stop codon, and then the first start codon downstream of that stop codon is located; if an in-frame stop codon is met before any start codon, the transcript is regarded as unable to be filled. (4) After filling, both ends are checked again with the criteria above, and the transcript counts as successfully filled only if both ends pass; the phase of every CDS line in the output is recalculated from the phase of the first CDS and the accumulated length.
 
     While extending the 5' or 3' end of a gene model, if a codon containing N (or any other non-ATCG base, e.g. a gap region of the genome) is met, the extension is stopped immediately and the transcript is regarded as unable to be filled; in this case the CDS of the transcript is kept unchanged, so that no abnormally long exon/CDS is produced by extending through N regions.
 

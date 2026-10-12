@@ -1,0 +1,453 @@
+########################################################################
+# GETA 配置文件 config.txt
+########################################################################
+# 本文件用于设置 geta.pl 所调用的各个子程序的详细参数，默认放在软件安装目录中，
+# geta.pl 未设置 --config 时自动读取本文件；也可将本文件复制一份修改后，
+# 通过 geta.pl 的 --config 参数输入（此时只读取该文件，不再读取软件安装目录中的config.txt）。
+#
+# 【格式说明】
+#   1. 以 [程序名] 作为小节标题，其下每一行的内容会原样附加到该程序的命令行中。
+#      支持的小节：[runRepeatMaskerModeler] [homolog_prediction] [NGSReads_prediction]
+#                  [runAugustus] [curateGeneModels] [outputResults]
+#   2. 以 # 开头的行（或行内 # 之后的内容）是注释，会被忽略。因此参数值中不能含有 # 字符。
+#   3. 一个参数写一行，格式为 "--参数名 参数值"；开关参数（无参数值）只写 "--参数名"。
+#      开关参数默认都是关闭的，下面以注释行形式给出，需要时去掉行首的 # 即可开启。
+#   4. 参数值含有空格时，需要用英文引号括起来，例如 --miniprot_options="--outs=0.95 -N 20"。
+#      注意：引号内的内容必须写在同一行，且不能含有 # 字符。
+#   5. 配置文件中没有出现的小节或参数，该子程序使用其自身的默认值。
+#      本文件中凡是以有效行（没有#）给出的参数，其值都是该参数的默认值。
+#   6. geta.pl 命令行中设置的参数，优先于本文件中的同名参数。
+#
+# 【不要在本文件中设置的参数】
+#   下列参数由 geta.pl 统一设置并传递（例如 --cpu、--genetic_code、--tmp_dir、输入输出文件等），
+#   请在 geta.pl 的命令行中设置它们，而不要写在本文件中：
+#     通用：  --cpu --genetic_code --tmp_dir
+#     homolog_prediction：  --method（由 geta.pl 的 --homolog_prediction_method 设置）--ignore_signature
+#                           --output_raw_GFF3 --output_alignment_GFF3
+#     NGSReads_prediction： --pe1 --pe2 --se --sam --strand_specific --aligner --homolog_protein
+#                           --pe_used_pair_num --se_used_read_num（由 geta.pl 的 --max_used_read_num 设置）
+#                           --intron_info_out --base_depth_out --output_raw_GFF3 --output_alignment_GFF3
+#     runAugustus： --input_evidence_gff3 --augustus_species --intron_tab
+#     curateGeneModels： --HMM_db --diamond_db --repeat --intron --base_depth
+#                        （--validate_options 和 --alt_splicing_options 的值中也不要出现
+#                          --HMM_db --diamond_db --genetic_code --cpu --tmp_dir
+#                          --filtered_gene_models --out_stats 这些由上层统一设置的参数）
+#     outputResults： --genome --out_prefix --gene_prefix --BUSCO_lineage_dataset --busco_for_all_gff3
+#
+# 【关于基因组大小】
+#   geta.pl 不再根据基因组大小自动切换配置文件。对于很大（>1Gb）或很小（<50Mb）的基因组，
+#   如有需要，请自行调整下面的参数，例如：最大intron长度（--max_intron_size）、
+#   RepeatMasker 的任务大小（--batch_size）、Sam2Transfrag 的测序深度阈值等。
+#
+# 【基因数量异常时】
+#   当预测的基因数量明显偏多或偏少时，通常需要调整基因模型的筛选阈值，例如：
+#   [homolog_prediction] 中的 --threshold_ratio_of_*_Supported_times、--threshold_homolog_coverage_*，
+#   [NGSReads_prediction] 中的 --min_fragment_count_per_transfrag、--cds_*、--quantile_*，
+#   [curateGeneModels] 中的 --repeat_ratio，以及 --validate_options 中的 --hmm_*、--blast_* 阈值。
+#   修改后需要删除受影响步骤的 .ok 文件，再重新运行 geta.pl。
+########################################################################
+
+
+########################################################################
+# runRepeatMaskerModeler：重复序列分析（geta.pl 的 Step 1）
+########################################################################
+[runRepeatMaskerModeler]
+
+# ---- 并行与资源参数 ----
+# 单个RepeatMasker命令的 -pa 参数值。默认自动：通常为1；当任务数少于可并行的worker数
+# （如只有一条染色体）时，程序自动增大以充分利用 --cpu 指定的线程数。一般不需要设置。
+# --pa 1
+
+# 单个并行任务的目标碱基数（bp）。长度不小于该值的序列单独成为一个任务；更短的序列（如大量scaffold）
+# 按顺序打包到同一个任务，直到总长度达到该值。设置为0则每条序列单独一个任务。
+--batch_size 10000000
+
+# 某个并行任务失败后的最大重试次数。重试次数用完仍失败，程序报错退出。
+--retry 1
+
+# ---- 合并与屏蔽参数 ----
+# 合并RepeatMasker结果时的最小覆盖率阈值（0~1）：匹配区域对目标重复序列（共有序列）的覆盖率低于该值的结果被过滤。
+--min_coverge_ratio 0.25
+
+# 屏蔽重复序列的类型：softmask（全部转小写）、hardmaskX（硬屏蔽碱基换成X）、hardmaskN（硬屏蔽碱基换成N）。
+# 注意：本流程后续步骤（如转座子基因过滤）依赖屏蔽结果，一般不需要修改。
+--mask_type hardmaskN
+
+# 开关参数：对重复序列GFF3中的所有重复序列都进行屏蔽。
+# 默认不屏蔽 Low_complexity、Simple_repeat、Satellite 和 Tandem_repeat（它们较短，出现在基因区域的可能性高）。
+# --mask_all
+
+# 硬屏蔽所需的最小覆盖率（0~1）：需要硬屏蔽的重复序列，覆盖率（GFF3第9列Ratio值）不低于该值才硬屏蔽，否则改为软屏蔽。
+--mask_min_coverge_ratio 0.6
+
+# 开关参数：保留并行RepeatMasker步骤的worker临时文件夹（para_RepeatMasker.tmp）。
+# 默认在步骤成功后删除，运行失败时始终保留以便续跑。
+# --keep_tmp
+
+
+########################################################################
+# homolog_prediction：利用同源蛋白预测基因模型（geta.pl 的 Step 2）
+########################################################################
+[homolog_prediction]
+
+# ---------- 输出相关 ----------
+# 最终基因ID的前缀（不影响 --output_raw_GFF3 的基因ID）。建议保持默认值。
+--gene_prefix homolog
+
+# 输出同源蛋白比对GFF3时，每个来源每个基因区域最多输出的同源蛋白个数。
+--max_alignment_num_for_each_gene_region 5
+
+# ---------- 基因模型分类与过滤 ----------
+# 对同源蛋白覆盖度的 good 阈值（(0,1]）：覆盖度不低于该值（且无移码和内部终止密码子）的评为B类（覆盖度100%且完整的为A类）。
+--threshold_homolog_coverage_good 0.8
+
+# 对同源蛋白覆盖度的 fair 阈值（(0,1]，不能大于good阈值）：覆盖度不低于该值且低于good阈值的评为C类；更低的为D类。
+--threshold_homolog_coverage_fair 0.4
+
+# 用gene行Supported_times过滤C和D类基因模型、并标记Low_support时的分位比例（[0,1]）。
+# 将A和B类基因模型gene行的Supported_times从大到小排序，取该比例所处位置的值作为阈值1（0.5即中位数）。
+# 该值越小，阈值越高，过滤和标记越严格。
+--threshold_ratio_of_gene_Supported_times 0.5
+
+# 同上，针对intron行的Supported_times，得到阈值2。
+--threshold_ratio_of_intron_Supported_times 0.5
+
+# ---------- 整合去冗余（传递给GFF3_merging_and_removing_redundancy） ----------
+# CDS重叠覆盖度阈值（[0,1]）：用于去除CDS有重叠的冗余基因模型。
+--overlap_coverage 0.30
+
+# 开关参数：整合去冗余时仅按染色体分区，位于不同链上但CDS重叠超过阈值的基因模型也判定为冗余。
+# 适用于同源蛋白预测结果中存在大量链方向错误的预测的情况；基因组中若存在真实的反义重叠基因，请不要使用。
+# --both_strands
+
+# intron让基因模型得分提升的比例p（[0,1]）。第k个intron让得分增加的比例为 p*(1-p)**(k-1)。
+--intron_bonus 0.3
+
+# 基因模型缺少正确起始密码子时，扣除 该参数值*S 的得分。
+--missing_start_penalty 0.2
+
+# 基因模型缺少正确终止密码子时，扣除 该参数值*S 的得分。
+--missing_stop_penalty 0.2
+
+# 基因模型每含有一个内部终止密码子，扣除 该参数值*S 的得分，多个则累加。
+--internal_stop_penalty 0.1
+
+# 基因模型每含有一个移码，扣除 该参数值*S 的得分，多个则累加。
+--frameshift_penalty 0.1
+
+# ---------- 通用比对参数 ----------
+# 最大intron长度，传递给exonerate(--maxintron)、miniprot(-G)和spaln(-yM)。
+# 默认自动计算：3.6 * sqrt(基因组总长度)，如400Mb的基因组为72000。若基因组中存在很长的intron，可手动设置更大的值。
+# --max_intron_size 72000
+
+# ---------- MMseqs2比对与Hit过滤（gth/exonerate/genewise方法使用，传递给 homolog_prediction.01MMseqs2CalHits） ----------
+# HSP（High-scoring Segment Pair）的Identity过滤阈值，范围(0,1]。
+--HSP_identity 0.1
+
+# HSP的E-value过滤阈值，必须大于0。
+--HSP_evalue 1e-3
+
+# 将HSPs合并为同一个Hit时，HSPs在基因组上的最大距离（bp）。默认自动计算：3.6 * sqrt(基因组总长度)。
+# --HSP_max_distance 72000
+
+# 将HSPs合并为同一个Hit时，待加入HSP与已有HSP组在同源蛋白序列上的最大重叠比例，范围(0,1]。
+--HSP_max_overlap_ratio 0.5
+
+# Hit的Identity过滤阈值（多个HSPs累积的一致性氨基酸数/匹配长度），范围(0,1]。
+--identity 0.2
+
+# Hit的E-value过滤阈值（Hit的E-value为其所有HSPs中的最低E-value），必须大于0。
+--evalue 1e-9
+
+# Hit对同源蛋白覆盖度的过滤阈值（所有HSPs的氨基酸占同源蛋白序列的比例），范围(0,1]。
+--homolog_coverage 0.3
+
+# Hit A包含Hit B时，要求两个Hits的重叠区域对Hit B匹配区域的覆盖比例阈值，范围(0,1]。
+--threshold_Hit_cover_ratio 0.9
+
+# Hit A包含Hit B且Hit A更优时，若Hit B的Score低于Hit A的Score乘以该比例，则去除Hit B，范围(0,1]。
+--threshold_Hit_score_ratio 0.4
+
+# 基因组上一个同源匹配区域与单个物种的最大同源蛋白匹配数量。
+# 该参数生效需要蛋白序列名称中含有物种信息（如XP_002436309_2_SpeciesSorghumBicolor）。
+--max_hit_num_per_single_species 2
+
+# 基因组上一个同源匹配区域（一个基因区域）的最大同源蛋白匹配数量。
+--max_hits_num_per_match_region 10
+
+# ---------- 基因结构预测（gth/exonerate/genewise方法使用，传递给 homolog_prediction.02HitToGenePrediction） ----------
+# 基因区域两侧的侧翼序列长度。默认自动计算（刚好超过90%以上的基因区域长度）；直接指定时推荐5000。
+# 修改该参数会重新切分基因预测任务。
+# --flanking_length 5000
+
+# 每个chunk包含的基因预测命令数量。过大会导致末尾负载不均衡，过小会增加进程启动开销。
+--chunk_num 100
+
+# 单个基因预测命令的最长运行时间（秒），0表示不限制。
+--timeout 120
+
+# 超时的基因预测命令的自动重试轮数，第r轮重试的超时时间为 --timeout * 2^r，0表示不重试。
+--retry 1
+
+# 最小intron长度，仅在使用exonerate时生效。
+--min_intron_length 20
+
+# 要求基因模型对同源蛋白的匹配长度（氨基酸数）不小于该值，否则过滤该基因模型，可设置为0。
+--threshold_protein_length 25
+
+# 要求基因模型对同源蛋白的覆盖率不低于该值，否则过滤该基因模型，可设置为0。
+--threshold_homolog_coverage 0.2
+
+# 要求基因模型的内部终止密码子数量不高于该值，否则过滤该基因模型，可设置为0。
+--threshold_inter_stop_codon_num 3
+
+# ---------- miniprot 参数 ----------
+# 额外传递给miniprot的参数，默认无。值以--开头时，请使用等号连接并加引号，例如：
+# --miniprot_options="--outs=0.95 -N 20"
+
+# ---------- spaln 参数 ----------
+# spaln使用的物种特异参数集（spaln的-T参数），建议设置为与目标物种亲缘关系最近的物种，
+# 例如 arabidopsis_thaliana、zea_mays。默认无。
+# --spaln_species arabidopsis_thaliana
+
+# 额外传递给spaln比对命令的参数，默认无。例如：
+# --spaln_options="-LS -yX2"
+
+# spaln动态规划的计算模式（spaln的-A参数），取值0~7。0最精确但最慢，3最快但精度最低。
+--spaln_dp_mode 1
+
+# 每个同源蛋白最多输出的基因座数量，不小于1。大于1时传递给spaln的-M参数。
+--spaln_max_loci 4
+
+# 基因组上最长基因的长度，格式化基因组时传递给spaln的-XG参数。默认由spaln根据基因组大小自动推算。
+# --spaln_max_gene_size 1000000
+
+
+########################################################################
+# NGSReads_prediction：利用RNA-Seq数据预测基因模型（geta.pl 的 Step 3）
+########################################################################
+[NGSReads_prediction]
+
+# ---------- 质量控制与比对（传递给 NGSReads_prediction.01RNASeq2Sam） ----------
+# 以下三个参数一旦设置，就整体替换对应软件的内置默认参数（而不是追加），所以必须写出完整内容。
+# 仅输入了--sam数据（不做质控和比对）时，这三个参数不生效，程序会给出无害的警告。
+
+# Trimmomatic在ILLUMINACLIP（去接头，使用子程序默认设置）之后的其它质控步骤及参数。
+--trimmomatic_opts="LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:50 TOPHRED33"
+
+# 传递给hisat2的比对参数，仅在 geta.pl 的 --aligner hisat2 时有效。
+--hisat2_opts="--min-intronlen 20 --max-intronlen 200000 --dta --score-min L,0.0,-0.4 -k 1"
+
+# 传递给STAR的比对参数，仅在使用STAR（默认）时有效。
+--star_opts="--alignIntronMax 200000 --alignMatesGapMax 200000 --outFilterType BySJout --outFilterMultimapNmax 20 --alignSJoverhangMin 8 --alignSJDBoverhangMin 1 --outFilterMismatchNmax 999 --outFilterMismatchNoverReadLmax 0.04"
+
+# 质控后Clean data切分的份数，各分片同时并行比对，每个比对命令使用 --cpu/--chunk_num 个线程。
+# STAR每个进程都要载入一份基因组索引，内存消耗随分片数增加，内存较小时请调低。默认值为 min(--cpu, 10)。
+# --chunk_num 10
+
+# ---------- 转录本组装（传递给 NGSReads_prediction.02Sam2Transfrag） ----------
+# 打断比对区域时，exon碱基测序深度和intron测序深度两个阈值 = 转录本区域最高碱基测序深度 * 本参数，范围(0,1]。
+--fraction 0.05
+
+# exon碱基测序深度阈值的下限。
+--min_expressed_base_depth 2
+
+# exon碱基测序深度阈值的上限。
+--max_expressed_base_depth 50
+
+# intron测序深度阈值的下限。
+--min_junction_depth 2
+
+# intron测序深度阈值的上限。
+--max_junction_depth 50
+
+# 输出转录本时，要求支持该转录本的fragment数目不低于该值。测序数据量很少时可适当调低。
+--min_fragment_count_per_transfrag 10
+
+# ---------- ORF预测（传递给 NGSReads_prediction.04Transfrag2ORF） ----------
+# 鉴定ORF时蛋白质序列的最小长度（氨基酸数）。
+--min_protein_length 100
+
+# ORF预测软件，可选 TransDecoder 或 TIdeS。默认自动：提供了同源蛋白时使用TIdeS，否则使用TransDecoder。
+# （TIdeS必须以同源蛋白作为数据库）
+# --ORF_predictor TIdeS
+
+# 使用TIdeS时，默认同时预测完整ORF和5'/3'不完整的ORF（即默认启用 --TIdeS_partial）。
+# 若只需要完整ORF，去掉下面一行的#（此时所有基因模型的Integrity都为complete）。
+# --noTIdeS_partial
+
+# ---------- 转录组转录本整合去冗余（传递给 GFF3_merging_and_removing_redundancy） ----------
+# Sam2Transfrag与StringTie两种方法的基因模型整合时，CDS重叠碱基数占较小基因模型CDS碱基数的比例超过该阈值，
+# 则去除得分较低者。范围(0,1]。
+--overlap_coverage 0.30
+
+# ---------- 基因模型分类（A/B/C/D） ----------
+# 计算"较大"阈值（CDS长度、CDS间intron数）所用的分位数，范围(0,1]：参考基因模型从大到小排序后，
+# 取排在该比例位置处的值，即至少该比例的参考基因模型满足该阈值。
+--quantile_high 0.80
+
+# 计算"较小"阈值所用的分位数，规则同上，须不小于 --quantile_high。
+--quantile_low 0.95
+
+# 以下四个参数手动指定后，对应的阈值不再自动计算（默认自动计算）：
+# A、B类要求的CDS最小长度（bp）
+# --cds_length_high 1000
+# C类要求的CDS最小长度（bp）
+# --cds_length_low 500
+# A、B类要求的CDS之间最少intron数量
+# --cds_intron_high 3
+# C类要求的CDS之间最少intron数量
+# --cds_intron_low 1
+
+# A类要求的CDS占exon的最小比例（0~1，取自GFF3第9列Form信息末尾的百分数）。
+--cds_ratio_high 0.6
+
+# B、C类要求的CDS占exon的最小比例（0~1），须不大于 --cds_ratio_high。
+--cds_ratio_low 0.3
+
+# ---------- 其它 ----------
+# 最终结果基因ID的前缀（编号按输出顺序递增）。建议保持默认值。
+--gene_prefix RNASeqORF
+
+# 基因编号的位数，不足时左侧补0。
+--gene_code_length 6
+
+# 开关参数：跳过对不完整基因模型末端的强制补齐，直接以分类结果作为最终结果。
+# --no_filling_ends
+
+# 开关参数：保留各子程序（01RNASeq2Sam、02Sam2Transfrag、03Stringtie、04Transfrag2ORF）各自的临时文件。
+# --keep_tmp_files
+
+
+########################################################################
+# runAugustus：训练AUGUSTUS并结合hints预测基因（geta.pl 的 Step 4）
+########################################################################
+[runAugustus]
+
+# 最终基因ID的前缀。
+--gene_prefix augustus
+
+# Augustus和etraining使用的最小intron长度。Augustus自身默认值为39，对小基因组偏大，本流程默认使用20。
+--min_intron_len 20
+
+# 训练时在每个基因两侧添加的侧翼序列长度。默认自动计算：取（基因间区长度中位数的1/8，基因长度中位数）
+# 中的较小值，且在1~10000之间。基因比较密集的物种（如真菌）建议手动设置，例如100。
+# --flanking_length 100
+
+
+########################################################################
+# curateGeneModels：整合、过滤基因模型，可变剪接与ORF分析（geta.pl 的 Step 5）
+########################################################################
+[curateGeneModels]
+
+# ---- 转座子过滤（仅在有重复序列注释时生效） ----
+# 若基因模型CDS区域与重复序列的重叠比例不低于该值，则该基因模型被去除。
+--repeat_ratio 0.2
+
+# 重复序列GFF3文件第9列Ratio值低于该值的重复序列将被忽略。
+--repeat_min_coverage 0.6
+
+
+# ======================================================================
+# 基因模型验证：--validate_options（传递给 curateGeneModels.03ValidateGenes）
+# ======================================================================
+# 该程序利用 HMM 数据库（hmmscan）和/或 diamond 蛋白数据库对基因模型进行验证；
+# 一个基因只要有一个转录本通过验证，整个基因即通过验证，未通过的基因模型进入低质量基因模型。
+# HMM数据库和diamond数据库由 geta.pl 的 --HMM_db、--BLASTP_db（或 --protein）设置，不在此处设置。
+#
+# 该选项的值必须用英文引号括起来，并写成一整行（见本节最后的有效行）。
+# 下面逐项说明各参数及其默认值：
+#
+# 【HMM验证】蛋白序列同时满足"全序列E值 <= 阈值"和"合格结构域对HMM模型的整体覆盖度 >= --hmm_coverage"，
+#            则通过HMM验证；HMM模型长度 < --hmm_length 用 --hmm_evalue2，否则用 --hmm_evalue1。
+#   --hmm_evalue1 1e-5     HMM模型长度不低于 --hmm_length 时，全序列E值的阈值。
+#   --hmm_evalue2 1e-3     HMM模型长度低于 --hmm_length 时，全序列E值的阈值（短模型要求更宽松）。
+#   --hmm_length 80        区分长、短HMM模型的长度阈值。
+#   --hmm_coverage 0.25    蛋白序列的合格结构域对HMM模型的整体覆盖度阈值（多个匹配区域去冗余合并后计算）。
+#
+# 【BLASTP验证】只保留E值 <= --blast_evalue 的HSP，对每个 蛋白-数据库蛋白 组合合并HSP，
+#               累计一致性CIP、query覆盖度和subject覆盖度均达标的hit为合格hit；
+#               蛋白在任意一个diamond数据库中有合格hit，即通过BLASTP验证。
+#   --blast_evalue 1e-9    E值阈值（同时用于HSP过滤）。
+#   --blast_CIP 0.4        累计一致性（一致位点数之和 / 比对长度之和）阈值。
+#   --blast_coverage 0.4   query和subject的整体覆盖度阈值（两者都需要达到）。
+#
+# 【同时提供HMM和diamond两类数据库时】两类都通过验证的转录本有效；
+#               仅通过其中一类的转录本，需满足下列更严格的 *_onlyOne 阈值才有效。
+#               只提供一类数据库时，这5个参数不生效。
+#   --hmm_evalue_onlyOne 1e-7        仅通过HMM验证时，要求的全序列E值阈值。
+#   --hmm_coverage_onlyOne 0.5       仅通过HMM验证时，要求的HMM覆盖度阈值。
+#   --blast_evalue_onlyOne 1e-12     仅通过BLASTP验证时，要求的E值阈值。
+#   --blast_CIP_onlyOne 0.6          仅通过BLASTP验证时，要求的CIP阈值。
+#   --blast_coverage_onlyOne 0.6     仅通过BLASTP验证时，要求的query和subject覆盖度阈值。
+#
+# 【开关参数】（默认关闭，需要时把它加到下面有效行的引号内）
+#   --both_required   必须同时通过HMM和diamond两类验证才有效；需要同时提供两类数据库，
+#                     因此仅使用 --HMM_db 或仅使用 --BLASTP_db / --protein 时不能使用。
+#
+# 【性能参数】
+#   --chunk_num 50    hmmscan并行分析时，每份数据包含的蛋白数量（蛋白按长度从长到短排序后分份）。
+#                     值越小，分份越多、负载越均衡，但进程启动开销越大。
+#
+# 【diamond比对参数】默认值含有空格，写入 --validate_options 时需要嵌套引号，所以不放在有效行中。
+#   --diamond_options "--sensitive --max-target-seqs 20 --id 10 --block-size 5 --index-chunks 1"
+#   需要修改时，按下面的方式追加到有效行，并先用小数据测试一次，确认引号被正确传递：
+#   --validate_options "... --diamond_options '--sensitive --max-target-seqs 20 --id 10 --block-size 5 --index-chunks 1'"
+#
+# 下面一行给出全部默认值，修改时直接改动其中的数值。
+--validate_options "--hmm_evalue1 1e-5 --hmm_evalue2 1e-3 --hmm_length 80 --hmm_coverage 0.25 --blast_evalue 1e-9 --blast_CIP 0.4 --blast_coverage 0.4 --hmm_evalue_onlyOne 1e-7 --hmm_coverage_onlyOne 0.5 --blast_evalue_onlyOne 1e-12 --blast_CIP_onlyOne 0.6 --blast_coverage_onlyOne 0.6 --chunk_num 50"
+
+
+# ======================================================================
+# 可变剪接分析：--alt_splicing_options（传递给 curateGeneModels.04AlternativeSplicing）
+# ======================================================================
+# 该程序利用 RNA-Seq 的 intron 信息和碱基测序深度信息，为基因模型添加可变剪接转录本，
+# 并在 mRNA 行的第9列给出 Transcript_Ratio。仅在输入了 RNA-Seq 数据，且没有设置
+# geta.pl 的 --no_alternative_splicing_analysis 时运行。
+# intron.txt 和 base_depth.txt 由 geta.pl 自动指定，不在此处设置。
+#
+# 该选项的值必须用英文引号括起来，并写成一整行（见本节最后的有效行）。
+# 下面逐项说明各参数及其默认值：
+#
+# 【可变剪接分析参数】（与 alternative_splicing_analysis 一致）
+#   --min_intron_depth 1
+#       最小intron测序深度。intron.txt第6列小于该值的intron被忽略。测序数据量大、噪音多时可适当调高，例如2。
+#   --min_base_depth_ratio_for_ref_specific_intron 0.3
+#       仅存在于原基因模型中的intron，若 碱基测序深度/基因测序深度 超过该值，则认为存在IR（intron retention）事件。
+#   --min_intron_depth_ratio_for_evidence_specific_intron 0.2
+#       仅存在于RNA-Seq证据中的intron，若 intron测序深度/基因测序深度 超过该值，则认为该intron可信。
+#   --min_base_depth_ratio_for_common_intron 0.2
+#       两者共有的intron，若 碱基测序深度/基因测序深度 超过该值，则认为存在IR事件。
+#   --min_gene_depth 10
+#       基因测序深度低于该值时，按该值计算（避免低表达基因中比例被放大）。
+#   --min_transcript_confidence_for_output 0.05
+#       增加的可变剪接转录本所占比例不低于该值才输出。调高则输出的转录本更少、更可靠。
+#   --transcript_num_for_output_when_all_low_confidence 8
+#       所有可变剪接转录本比例都低于上述阈值时，强制输出比例靠前的转录本，直至mRNA数量达到该值。
+#   --added_mRNA_ID_prefix t
+#       增加的转录本ID格式为 <基因ID>.<前缀><两位数字编号>，如 gene000001.t01。
+#
+# 【并行与分块参数】
+#   --split_cpu            分割intron.txt和base_depth.txt时并行的进程数。
+#                          默认与 geta.pl 的 --cpu 相同；磁盘读取慢时不必调大。
+#   --split_block_mb 32    每个并行分割任务至少处理的文件大小（MB）；文件小于该值的2倍时不并行。
+#   --chunk_gene_num       每个数据块的大致基因数。默认自动计算（20~5000之间，且数据块总数不超过300）。
+#   （--cpu 和 --tmp_dir 由 geta.pl 统一设置，不要写在这里。）
+#
+# 【开关参数】
+#   --keep_tmp   默认在成功后删除自动创建的临时文件夹；
+#                geta.pl 已通过 --tmp_dir 指定临时文件夹，因此一般不需要设置。
+#
+# 下面一行给出可变剪接分析参数的全部默认值（并行与分块参数使用其默认值，不写入），
+# 修改时直接改动其中的数值。
+--alt_splicing_options "--min_intron_depth 1 --min_base_depth_ratio_for_ref_specific_intron 0.3 --min_intron_depth_ratio_for_evidence_specific_intron 0.2 --min_base_depth_ratio_for_common_intron 0.2 --min_gene_depth 10 --min_transcript_confidence_for_output 0.05 --transcript_num_for_output_when_all_low_confidence 8 --added_mRNA_ID_prefix t --split_block_mb 32"
+
+
+########################################################################
+# outputResults：输出结果并统计（geta.pl 的 Step 6）
+########################################################################
+[outputResults]
+
+# outputResults 的全部参数（--cpu --genetic_code --genome --out_prefix --gene_prefix
+# --BUSCO_lineage_dataset --busco_for_all_gff3）均由 geta.pl 统一设置，
+# 无需在此设置额外参数。

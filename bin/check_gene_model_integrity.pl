@@ -4,57 +4,51 @@
 # 功能：检测 GFF3 中基因模型（CDS）的完整性，并在标准输出中给出统计结果
 #       检测类型：5'端缺失、3'端缺失、双端缺失、内部终止密码子、移码
 #       每个问题转录本的详细报告通过 --out 参数输出到文件
+#       完整且无异常的转录本列表通过 --complete_out 参数输出到文件
 #===============================================================================
 use strict;
 use warnings;
 use Getopt::Long;
-use List::Util qw(max min);
+use List::Util qw(max);
 
 ########################################################################
 # 中文用法说明（放在代码最前面；英文用法说明放在文件最末尾的__DATA__部分）
 ########################################################################
 my $usage_cn = <<'USAGE';
-Usage:
+用法：
     perl check_gene_model_integrity.pl [options] genome.fa genes.gff3
 
-    本程序用于检测GFF3文件中基因模型（CDS）的完整性，在标准输出中给出统计结果，并可通过--out参数将每个存在问题的转录本的详细报告输出到文件。检测的问题类型包括：5'端缺失、3'端缺失、双端缺失、内部终止密码子、移码。
+    本程序用于检测GFF3文件中基因模型（CDS）的完整性，在标准输出中给出统计结果（转录本层面和基因层面，并给出异常类型组合分布和基因的最佳转录本状态分布），可通过--out参数将每个存在问题的转录本的详细报告输出到文件，也可通过--complete_out参数将完整且无异常的转录本列表输出到文件。检测的问题类型包括：5'端缺失、3'端缺失、双端缺失、内部终止密码子、移码。
 
     判定规则：
-
-    (1) 程序按Parent将CDS归入各个转录本，按转录方向拼接CDS序列，并按第一个CDS的phase去掉序列开头多余的碱基。
-
+    (1) 程序按Parent将CDS归入各个转录本（完全相同的重复CDS只保留一个），按转录方向拼接CDS序列，并按第一个CDS的phase去掉序列开头多余的碱基；若转录本的CDS缺少phase信息，则按phase为0处理，且不检查phase的连续性。
     (2) 5'端缺失：第一个CDS的phase不为0，或者首密码子不是起始密码子。
-
     (3) 3'端缺失：末密码子不是终止密码子（且CDS之外紧邻的3 bp也不是终止密码子），或者CDS长度（去除phase后）不是3的倍数。若终止密码子位于CDS之外紧邻的3 bp，仍判定为3'端完整，并在统计中单独给出此类转录本的数量。
-
     (4) 双端缺失：同时满足5'端缺失和3'端缺失。
-
     (5) 内部终止密码子：除最后一个完整密码子之外，其它位置出现终止密码子。
-
     (6) 移码：相邻CDS的phase与按长度推算的值不一致，或者CDS长度（去除phase后）不是3的倍数。
-
-    (7) 一个转录本可以同时属于多种类型；基因层面按"任一转录本有该问题"计数。
+    (7) 一个转录本可以同时属于多种类型；基因层面按"任一转录本有该问题"计数。此外，基因层面还按"最佳转录本"的状态给出互斥分布，状态由好到差依次为：完整、两端完整但含内部终止密码子或移码、单端缺失、单端缺失且含内部终止密码子或移码、双端缺失、双端缺失且含内部终止密码子或移码。
 
     使用须知：
-
     (1) 程序需要输入基因组序列和GFF3文件，两者的顺序若写反，程序会根据文件后缀自动交换；输入文件支持.gz压缩格式。
-
     (2) 起始密码子和终止密码子由--genetic_code参数指定的遗传密码自动确定。
+    (3) 基因由沿Parent链向上查找到的、类型以gene结尾的特征（如gene、pseudogene、ncRNA_gene）确定；找不到时以转录本自身作为基因。
+    (4) 下列转录本将被跳过，并在标准错误中给出警告：CDS所在的序列不在基因组FASTA中、同一转录本的CDS分布于不同序列或不同链、链方向不是+或-、CDS坐标非法或超出序列长度、同一转录本的CDS相互重叠。
+    (5) 标准输出为统计结果；若设置了--out参数，则每个问题转录本的详细报告输出到该文件，文件为制表符分隔的文本，第一行为以#开头的表头；若设置了--complete_out参数，则完整且无异常的转录本列表输出到该文件；两个参数都不设置时，不输出明细文件。
 
-    (3) CDS所在的序列不在基因组FASTA中，或者同一转录本的CDS分布于不同序列或不同链的转录本，将被跳过，并在标准错误中给出警告。
+    --genetic_code <int>    默认值：1
+    设置遗传密码，程序据此自动确定起始密码子和终止密码子，用于判断基因模型的完整性以及检测内部终止密码子。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi 。支持的遗传密码编号为：1、2、3、4、5、6、9、10、11、12、13、14、15、16、21、22、23、24、25、26、27、28、29、30、31、32、33。例如：1为标准遗传密码（起始密码子仅取ATG，终止密码子为TAA、TAG、TGA），11为细菌/古菌/植物质体遗传密码，2为脊椎动物线粒体遗传密码，4为支原体/螺旋体等遗传密码（TGA编码色氨酸）。
 
-    (4) 标准输出为统计结果（包含转录本层面和基因层面）；若设置了--out参数，则每个问题转录本的详细报告输出到该文件，文件为制表符分隔的文本，第一行为以#开头的表头；若不设置--out参数，则不输出详细报告。
+    --out <string>    默认值：无（不设置时不输出详细报告）
+    设置一个文件路径，程序会将每个存在问题的转录本的详细报告输出到该文件中。报告各列依次为：基因ID、转录本ID、序列ID、链方向、CDS起始坐标、CDS终止坐标、CDS数量、去除phase后的CDS长度、末端状态（5'缺失/3'缺失/双端缺失/两端完整）、首密码子、末密码子、内部终止密码子数量、内部终止密码子位置（氨基酸序号）、是否移码、异常类型（互斥的类型组合）、异常原因说明。
 
-    --genetic_code <int>    default: 1
-    设置遗传密码，程序据此自动确定起始密码子和终止密码子，用于判断基因模型的完整性以及检测内部终止密码子。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi 。支持的遗传密码编号为：1、2、3、4、5、6、9、10、11、12、13、14、15、16、21、22、23、24、25、26、27、28、29、30、31、32、33。例如：1为标准遗传密码（起始密码子为ATG，终止密码子为TAA、TAG、TGA），11为细菌/古菌/植物质体遗传密码，2为脊椎动物线粒体遗传密码，4为支原体/螺旋体等遗传密码（TGA编码色氨酸）。
+    --complete_out <string>    默认值：无（不设置时不输出完整转录本列表）
+    设置一个文件路径，程序会将完整且无异常的转录本列表输出到该文件中。列表各列依次为：基因ID、转录本ID、序列ID、链方向、CDS起始坐标、CDS终止坐标、CDS数量、去除phase后的CDS长度、蛋白长度（氨基酸数，不含终止密码子）。
 
-    --out <string>    default: 无（不设置时不输出详细报告）
-    设置一个文件路径，程序会将每个存在问题的转录本的详细报告输出到该文件中。报告各列依次为：基因ID、转录本ID、序列ID、链方向、CDS起始坐标、CDS终止坐标、CDS数量、去除phase后的CDS长度、末端状态（5'缺失/3'缺失/双端缺失/两端完整）、首密码子、末密码子、内部终止密码子数量、内部终止密码子位置（氨基酸序号）、是否移码、异常原因说明。
-
-    --help    default: None
+    --help    默认值：无
     Display the English usage and exit.
 
-    --chinese_help    default: None
+    --chinese_help    默认值：无
     显示中文用法说明并退出。
 
 USAGE
@@ -66,17 +60,19 @@ use constant PROG => 'check_gene_model_integrity.pl';
 ########################################################################
 my $usage_en = do { local $/; <DATA> };
 
+# 直接运行（不带任何参数）时，给出英文用法说明
 if ( @ARGV == 0 ) { print STDERR $usage_en; exit 1; }
 
-my ($genetic_code, $out_file, $start_codon_opt, $stop_codon_opt, $help, $chinese_help);
+my ($genetic_code, $out_file, $complete_file, $start_codon_opt, $stop_codon_opt, $help, $chinese_help);
 GetOptions(
-    "genetic_code:i" => \$genetic_code,
-    "out:s"          => \$out_file,
+    "genetic_code=i"  => \$genetic_code,
+    "out=s"           => \$out_file,
+    "complete_out=s"  => \$complete_file,
     # 为与GFF3_merging_and_removing_redundancy保持一致而保留，不在用法说明中给出：若设置，则优先于--genetic_code所确定的密码子。
-    "start_codon:s"  => \$start_codon_opt,
-    "stop_codon:s"   => \$stop_codon_opt,
-    "help"           => \$help,
-    "chinese_help"   => \$chinese_help,
+    "start_codon:s"   => \$start_codon_opt,
+    "stop_codon:s"    => \$stop_codon_opt,
+    "help"            => \$help,
+    "chinese_help"    => \$chinese_help,
 ) or die $usage_en;
 if ( $chinese_help ) { print $usage_cn; exit 0; }
 if ( $help )         { print $usage_en; exit 0; }
@@ -114,10 +110,16 @@ else {
 die "Error: no start codon is available.\n" unless %start_codon;
 die "Error: no stop codon is available.\n"  unless %stop_codon;
 
-# 提前打开 --out 文件，路径有误时尽早报错
-my $out_fh;
+# 提前打开输出文件，路径有误时尽早报错
+if ( defined $out_file && defined $complete_file && $out_file eq $complete_file ) {
+    die "Error: --out and --complete_out can not be the same file.\n";
+}
+my ($out_fh, $complete_fh);
 if ( defined $out_file && $out_file ne "" ) {
     open $out_fh, '>', $out_file or die "Error: Can not create file $out_file, $!\n";
+}
+if ( defined $complete_file && $complete_file ne "" ) {
+    open $complete_fh, '>', $complete_file or die "Error: Can not create file $complete_file, $!\n";
 }
 
 #---------------------------- 读取基因组 --------------------------------------
@@ -130,8 +132,10 @@ my %genome;
         $line =~ s/\r$//;
         if ($line =~ /^>(\S+)/) {
             $id = $1;
+            warn "警告: FASTA 中序列 ID $id 重复，后者将覆盖前者\n" if exists $genome{$id};
             $genome{$id} = '';
         } elsif (defined $id) {
+            $line =~ s/\s+//g;
             $genome{$id} .= uc $line;
         }
     }
@@ -139,7 +143,7 @@ my %genome;
 }
 
 #---------------------------- 解析 GFF3 ---------------------------------------
-my (%type_of, %parents_of, %cds_of);
+my (%type_of, %parents_of, %cds_of, @tx_order);
 {
     my $fh = open_in($gff_file);
     while (my $line = <$fh>) {
@@ -158,6 +162,7 @@ my (%type_of, %parents_of, %cds_of);
         }
         if ($type eq 'CDS' && defined $a{Parent}) {
             for my $p (split /,/, $a{Parent}) {
+                push @tx_order, $p unless exists $cds_of{$p};   # 保持转录本在GFF3中的出现顺序
                 push @{ $cds_of{$p} }, {
                     seqid  => $seqid,
                     start  => $start,
@@ -172,36 +177,76 @@ my (%type_of, %parents_of, %cds_of);
 }
 
 #---------------------------- 逐转录本检测 ------------------------------------
-my ($total_tx, $skipped_noseq, $skipped_incons) = (0, 0, 0);
+my ($total_tx, $skipped_noseq, $skipped_incons, $skipped_bad) = (0, 0, 0, 0);
 my %tx_cnt;          # 转录本层面各类计数
 my %gene_cat;        # gene => { 类别 => 1 }
 my %all_genes;       # 含 CDS 的基因
+my %gene_tx_n;       # gene => 检测的转录本数
 my %gene_has_perfect;
+my %gene_best;       # gene => [得分, 类型组合]，得分越低越好
+my (%combo_n, %combo_score);
 my @detail;
+my @complete;
 my $stop_outside = 0; # 终止密码子位于 CDS 之外的转录本数
 
-for my $tid (sort keys %cds_of) {
+TX: for my $tid (@tx_order) {
     my @segs   = @{ $cds_of{$tid} };
     my $seqid  = $segs[0]{seqid};
-    my $strand = $segs[0]{strand} eq '-' ? '-' : '+';
+    my $strand = $segs[0]{strand};
 
-    if (grep { $_->{seqid} ne $seqid
-               || ($_->{strand} eq '-' ? '-' : '+') ne $strand } @segs) {
+    if (grep { $_->{seqid} ne $seqid || $_->{strand} ne $strand } @segs) {
         warn "警告: 转录本 $tid 的 CDS 分布于不同序列或链，已跳过\n";
         $skipped_incons++;
-        next;
+        next TX;
     }
     unless (exists $genome{$seqid}) {
         warn "警告: 转录本 $tid 所在序列 $seqid 不在 FASTA 中，已跳过\n";
         $skipped_noseq++;
-        next;
+        next TX;
+    }
+    if ($strand ne '+' && $strand ne '-') {
+        warn "警告: 转录本 $tid 的链方向 '$strand' 不是 + 或 -，已跳过\n";
+        $skipped_bad++;
+        next TX;
+    }
+
+    # 去除完全相同的重复 CDS
+    my %seen_cds;
+    @segs = grep { !$seen_cds{ $_->{start} . ':' . $_->{end} }++ } @segs;
+
+    # 坐标合法性检查
+    my $glen = length $genome{$seqid};
+    for my $s (@segs) {
+        if ($s->{start} !~ /^\d+$/ || $s->{end} !~ /^\d+$/ || $s->{start} < 1 || $s->{start} > $s->{end}) {
+            warn "警告: 转录本 $tid 的 CDS 坐标非法($s->{start}-$s->{end})，已跳过\n";
+            $skipped_bad++;
+            next TX;
+        }
+        if ($s->{end} > $glen) {
+            warn "警告: 转录本 $tid 的 CDS 坐标($s->{start}-$s->{end})超出序列 $seqid 的长度($glen)，已跳过\n";
+            $skipped_bad++;
+            next TX;
+        }
+    }
+
+    @segs = sort { $a->{start} <=> $b->{start} || $a->{end} <=> $b->{end} } @segs;
+
+    # CDS 重叠检查
+    my $run_end = $segs[0]{end};
+    for my $k (1 .. $#segs) {
+        if ($segs[$k]{start} <= $run_end) {
+            warn "警告: 转录本 $tid 的 CDS 相互重叠，已跳过\n";
+            $skipped_bad++;
+            next TX;
+        }
+        $run_end = $segs[$k]{end} if $segs[$k]{end} > $run_end;
     }
 
     $total_tx++;
     my $gene = find_gene($tid);
     $all_genes{$gene} = 1;
+    $gene_tx_n{$gene}++;
 
-    @segs = sort { $a->{start} <=> $b->{start} } @segs;
     my @tx = $strand eq '-' ? reverse @segs : @segs;   # 转录方向上的 CDS 顺序
     my $cds_min = $segs[0]{start};
     my $cds_max = max(map { $_->{end} } @segs);
@@ -253,22 +298,21 @@ for my $tid (sort keys %cds_of) {
     # 3' 端
     my $three = 1;
     my $note3 = '';
+    my $stop_out_this = 0;
     if ($remain == 0 && $ncodon > 0) {
         if (exists $stop_codon{$last_codon}) {
             $three = 0;
         } else {
             # 终止密码子可能未包含在 CDS 内，检查 CDS 之外紧邻的 3 bp
-            my $glen = length $genome{$seqid};
             my $d = '';
             if ($strand eq '+') {
-                my $e = $cds_max;
-                $d = substr($genome{$seqid}, $e, 3) if $e + 3 <= $glen;
+                $d = substr($genome{$seqid}, $cds_max, 3) if $cds_max + 3 <= $glen;
             } else {
-                my $s = $cds_min;
-                $d = revcomp(substr($genome{$seqid}, $s - 4, 3)) if $s - 1 >= 3;
+                $d = revcomp(substr($genome{$seqid}, $cds_min - 4, 3)) if $cds_min - 1 >= 3;
             }
             if (length($d) == 3 && exists $stop_codon{$d}) {
                 $three = 0;
+                $stop_out_this = 1;
                 $stop_outside++;
                 $note3 = "终止密码子($d)位于CDS之外";
             }
@@ -285,6 +329,21 @@ for my $tid (sort keys %cds_of) {
                  : $three            ? "3'缺失"
                  :                     "两端完整";
     my $perfect = (!$five && !$three && !@internal && !$fs) ? 1 : 0;
+
+    # 互斥的异常类型组合及得分（得分越低越好：0完整，1两端完整但含内部终止/移码，2单端缺失，3单端缺失且含内部终止/移码，4双端缺失，5双端缺失且含内部终止/移码）
+    my @lab;
+    if    ($five && $three) { push @lab, "双端缺失"; }
+    elsif ($five)           { push @lab, "5'缺失"; }
+    elsif ($three)          { push @lab, "3'缺失"; }
+    my $ends_bad = @lab ? 1 : 0;
+    push @lab, "内部终止" if @internal;
+    push @lab, "移码"     if $fs;
+    my $combo = !@lab ? "完整"
+              : $ends_bad ? join("+", @lab)
+              : "两端完整但含" . join("+", @lab);
+    my $score = 2 * ($five + $three) + ((@internal || $fs) ? 1 : 0);
+    $combo_n{$combo}++;
+    $combo_score{$combo} = $score;
 
     $tx_cnt{five}++       if $five;
     $tx_cnt{three}++      if $three;
@@ -308,8 +367,14 @@ for my $tid (sort keys %cds_of) {
     $gc->{internal} = 1 if @internal;
     $gc->{fs}       = 1 if $fs;
     $gene_has_perfect{$gene} = 1 if $perfect;
+    $gene_best{$gene} = [$score, $combo] if !exists $gene_best{$gene} || $score < $gene_best{$gene}[0];
 
-    unless ($perfect) {
+    if ($perfect) {
+        my $aa = $ncodon - (($last_codon ne '-' && exists $stop_codon{$last_codon}) ? 1 : 0);
+        push @complete, join("\t", $gene, $tid, $seqid, $strand,
+            $cds_min, $cds_max, scalar(@segs), length($seq), $aa);
+    }
+    else {
         my @notes;
         push @notes, "ncodon<1,CDS过短"                          if $ncodon < 1;
         push @notes, "首CDS phase=$p0"                           if $p0 > 0;
@@ -324,26 +389,35 @@ for my $tid (sort keys %cds_of) {
             length($seq), $terminal,
             $first_codon, $last_codon,
             scalar(@internal), (@internal ? join(',', @internal) : '-'),
-            ($fs ? '是' : '否'), (@notes ? join(';', @notes) : '-'));
+            ($fs ? '是' : '否'), $combo, (@notes ? join(';', @notes) : '-'));
     }
 }
 
-#---------------------------- 输出详细报告（--out） ---------------------------
+#---------------------------- 输出明细文件 ------------------------------------
 if ($out_fh) {
     print $out_fh join("\t", '#Gene', qw(Transcript Seqid Strand CDS_start CDS_end CDS_num
                                           CDS_len_after_phase Terminal_status First_codon Last_codon
-                                          N_internal_stops Stop_positions_aa Frameshift Note)), "\n";
+                                          N_internal_stops Stop_positions_aa Frameshift Problem_type Note)), "\n";
     print $out_fh "$_\n" for @detail;
     close $out_fh;
+}
+if ($complete_fh) {
+    print $complete_fh join("\t", '#Gene', qw(Transcript Seqid Strand CDS_start CDS_end CDS_num
+                                               CDS_len_after_phase Protein_len_aa)), "\n";
+    print $complete_fh "$_\n" for @complete;
+    close $complete_fh;
 }
 
 #---------------------------- 输出统计结果 ------------------------------------
 my $n_all = scalar keys %all_genes;
 my $n_perfect_gene = scalar grep { $gene_has_perfect{$_} } keys %all_genes;
+my $n_multi = scalar grep { $gene_tx_n{$_} > 1 } keys %gene_tx_n;
 my %gc_n;
 for my $g (keys %gene_cat) {
     $gc_n{$_}++ for keys %{ $gene_cat{$g} };
 }
+my %gbest_n;
+$gbest_n{ $gene_best{$_}[1] }++ for keys %gene_best;
 my $T = $total_tx;
 
 print "================ 基因模型完整性检测结果 ================\n";
@@ -353,10 +427,14 @@ printf "遗传密码表                     : %d\n", $table;
 printf "起始密码子                     : %s\n", join(',', sort keys %start_codon);
 printf "终止密码子                     : %s\n", join(',', sort keys %stop_codon);
 printf "异常转录本明细文件             : %s\n", $out_fh ? $out_file : '未设置(--out)';
+printf "完整转录本列表文件             : %s\n", $complete_fh ? $complete_file : '未设置(--complete_out)';
 printf "含 CDS 的基因总数              : %d\n", $n_all;
+printf "  其中含多个转录本的基因       : %d\n", $n_multi;
 printf "检测的转录本总数               : %d\n", $T;
+printf "  平均每个基因的转录本数       : %.2f\n", $n_all ? $T / $n_all : 0;
 printf "跳过的转录本(缺少序列)         : %d\n", $skipped_noseq;
 printf "跳过的转录本(CDS链/序列不一致) : %d\n", $skipped_incons;
+printf "跳过的转录本(坐标/链/重叠异常) : %d\n", $skipped_bad;
 print  "\n---------- 转录本层面（类型可重叠）----------\n";
 printf "完整且无异常的转录本           : %d (%.2f%%)\n", $tx_cnt{perfect} // 0, pct($tx_cnt{perfect}, $T);
 printf "存在任一异常的转录本           : %d (%.2f%%)\n", $tx_cnt{bad} // 0,     pct($tx_cnt{bad}, $T);
@@ -371,6 +449,10 @@ printf "  移码(合计)                   : %d (%.2f%%)\n", $tx_cnt{fs} // 0,  
 printf "    其中 phase 不连续          : %d\n", $tx_cnt{fs_phase} // 0;
 printf "    其中 长度非3的倍数         : %d\n", $tx_cnt{fs_len} // 0;
 printf "  (终止密码子位于CDS之外而判为3'完整: %d)\n", $stop_outside;
+print  "\n---------- 转录本层面：异常类型组合（互斥，合计等于检测的转录本总数）----------\n";
+for my $c (sort { $combo_score{$a} <=> $combo_score{$b} || $combo_n{$b} <=> $combo_n{$a} || $a cmp $b } keys %combo_n) {
+    printf "  %s : %d (%.2f%%)\n", $c, $combo_n{$c}, pct($combo_n{$c}, $T);
+}
 print  "\n---------- 基因层面（任一转录本有该问题即计入）----------\n";
 printf "有完整且无异常转录本的基因     : %d (%.2f%%)\n", $n_perfect_gene, pct($n_perfect_gene, $n_all);
 printf "无任何完整转录本的基因         : %d (%.2f%%)\n", $n_all - $n_perfect_gene, pct($n_all - $n_perfect_gene, $n_all);
@@ -381,6 +463,10 @@ printf "  仅3'端缺失                   : %d (%.2f%%)\n", $gc_n{only3} // 0, 
 printf "  双端缺失                     : %d (%.2f%%)\n", $gc_n{both} // 0,     pct($gc_n{both}, $n_all);
 printf "  含内部终止密码子             : %d (%.2f%%)\n", $gc_n{internal} // 0, pct($gc_n{internal}, $n_all);
 printf "  移码                         : %d (%.2f%%)\n", $gc_n{fs} // 0,       pct($gc_n{fs}, $n_all);
+print  "\n---------- 基因层面：最佳转录本状态（互斥，合计等于基因总数）----------\n";
+for my $c (sort { $combo_score{$a} <=> $combo_score{$b} || $gbest_n{$b} <=> $gbest_n{$a} || $a cmp $b } keys %gbest_n) {
+    printf "  %s : %d (%.2f%%)\n", $c, $gbest_n{$c}, pct($gbest_n{$c}, $n_all);
+}
 print  "========================================================\n";
 
 #============================== 子程序 ========================================
@@ -396,9 +482,9 @@ sub open_in {
 }
 
 sub pct {
-    my ($a, $b) = @_;
-    $a //= 0;
-    return $b ? $a / $b * 100 : 0;
+    my ($x, $y) = @_;
+    $x //= 0;
+    return $y ? $x / $y * 100 : 0;
 }
 
 sub parse_attributes {
@@ -413,13 +499,13 @@ sub parse_attributes {
     return %h;
 }
 
-# 沿 Parent 链向上查找 gene；找不到则以转录本自身作为基因
+# 沿 Parent 链向上查找 gene（类型以 gene 结尾，如 gene、pseudogene、ncRNA_gene）；找不到则以转录本自身作为基因
 sub find_gene {
     my ($id) = @_;
     my %seen;
     my $cur = $id;
     while (defined $cur && !$seen{$cur}++) {
-        return $cur if defined $type_of{$cur} && $type_of{$cur} eq 'gene';
+        return $cur if defined $type_of{$cur} && $type_of{$cur} =~ /gene$/i;
         my $p = $parents_of{$cur};
         last unless $p && @$p;
         $cur = $p->[0];
@@ -460,7 +546,7 @@ sub codon_table {
     my %start_table;
     $start_table{"ATG"} = 1;
     if ( $genetic_code == 1 ) {
-        # The Standard Code
+        # The Standard Code（起始密码子仅取ATG）
     }
     elsif ( $genetic_code == 2 ) {
         # The Vertebrate Mitochondrial Code
@@ -468,9 +554,9 @@ sub codon_table {
         $start_table{$_} = 1 foreach qw/ATA ATT ATC GTG/;
     }
     elsif ( $genetic_code == 3 ) {
-        # The Yeast Mitochondrial Code
+        # The Yeast Mitochondrial Code（起始密码子为ATA、ATG，已修正：原程序错误地加入了GTG）
         $code{"ATA"} = "M"; $code{"CTT"} = "T"; $code{"CTC"} = "T"; $code{"CTA"} = "T"; $code{"CTG"} = "T"; $code{"TGA"} = "W";
-        $start_table{$_} = 1 foreach qw/ATA GTG/;
+        $start_table{"ATA"} = 1;
     }
     elsif ( $genetic_code == 4 ) {
         # The Mold, Protozoan, and Coelenterate Mitochondrial Code and the Mycoplasma/Spiroplasma Code
@@ -568,7 +654,7 @@ sub codon_table {
         $code{"TAA"} = "E"; $code{"TAG"} = "E";
     }
     elsif ( $genetic_code == 31 ) {
-        # Blastocrithidia Nuclear Code
+        # Blastocrithidia Nuclear Code（终止密码子按标准遗传密码处理）
     }
     elsif ( $genetic_code == 32 ) {
         # Balanophoraceae Plastid Code
@@ -600,42 +686,36 @@ __DATA__
 Usage:
     perl check_gene_model_integrity.pl [options] genome.fa genes.gff3
 
-    This program checks the integrity of the gene models (CDS) in a GFF3 file, prints summary statistics to STDOUT, and can write a detailed report of every problematic transcript to a file with the --out option. The problem types checked are: 5' end partial, 3' end partial, both ends partial, internal stop codons, and frameshifts.
+    This program checks the integrity of the gene models (CDS) in a GFF3 file and prints summary statistics to STDOUT (transcript level and gene level, including the distribution of problem-type combinations and of the best-transcript status of each gene). It can write a detailed report of every problematic transcript to a file with the --out option, and a list of complete and error-free transcripts to a file with the --complete_out option. The problem types checked are: 5' end partial, 3' end partial, both ends partial, internal stop codons, and frameshifts.
 
     Rules:
-
-    (1) The program assigns CDS features to transcripts by Parent, concatenates the CDS sequence in the transcription direction, and removes the extra bases at the beginning according to the phase of the first CDS.
-
+    (1) The program assigns CDS features to transcripts by Parent (identical duplicated CDS features are kept only once), concatenates the CDS sequence in the transcription direction, and removes the extra bases at the beginning according to the phase of the first CDS; if the CDS features of a transcript lack phase information, the phase is treated as 0 and the phase continuity is not checked.
     (2) 5' partial: the phase of the first CDS is not 0, or the first codon is not a start codon.
-
     (3) 3' partial: the last codon is not a stop codon (and the 3 bp immediately downstream of the CDS is not a stop codon either), or the CDS length (after removing the phase) is not a multiple of 3. If the stop codon lies in the 3 bp immediately outside the CDS, the 3' end is still regarded as complete, and the number of such transcripts is reported separately in the statistics.
-
     (4) Both ends partial: both the 5' partial and the 3' partial conditions are met.
-
     (5) Internal stop codon: a stop codon appears at any position other than the last complete codon.
-
     (6) Frameshift: the phases of adjacent CDS features are inconsistent with the values deduced from their lengths, or the CDS length (after removing the phase) is not a multiple of 3.
-
-    (7) A transcript can belong to several types at the same time; at the gene level a gene is counted if any of its transcripts has the problem.
+    (7) A transcript can belong to several types at the same time; at the gene level a gene is counted if any of its transcripts has the problem. In addition, the gene level gives a mutually exclusive distribution according to the status of the best transcript of each gene; from best to worst the statuses are: complete, both ends complete but with internal stop codons or frameshifts, one end partial, one end partial with internal stop codons or frameshifts, both ends partial, both ends partial with internal stop codons or frameshifts.
 
     Usage instructions:
-
     (1) The genome sequence and the GFF3 file are both required; if their order is reversed the program swaps them automatically according to the file extension; gzip-compressed (.gz) input files are supported.
-
     (2) The start codons and stop codons are determined automatically from the genetic code given by --genetic_code.
-
-    (3) Transcripts whose sequence is absent from the genome FASTA, or whose CDS features lie on different sequences or strands, are skipped, and a warning is printed to STDERR.
-
-    (4) STDOUT contains the summary statistics (transcript level and gene level); if --out is set, the detailed report of every problematic transcript is written to that file as tab-separated text whose first line is a header starting with #; if --out is not set, no detailed report is written.
+    (3) A gene is the first feature found by walking up the Parent chain whose type ends with "gene" (such as gene, pseudogene, ncRNA_gene); if none is found, the transcript itself is treated as the gene.
+    (4) The following transcripts are skipped and a warning is printed to STDERR: the sequence is absent from the genome FASTA, the CDS features lie on different sequences or strands, the strand is neither + nor -, the CDS coordinates are invalid or exceed the sequence length, or the CDS features of the transcript overlap each other.
+    (5) STDOUT contains the summary statistics; if --out is set, the detailed report of every problematic transcript is written to that file as tab-separated text whose first line is a header starting with #; if --complete_out is set, the list of complete and error-free transcripts is written to that file; if neither is set, no detail file is written.
 
     --genetic_code <int>    default: 1
-    Set the genetic code, from which the start codons and stop codons are determined automatically; they are used to judge gene integrity and to detect internal stop codons. For the corresponding values, please refer to NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi . The supported genetic code numbers are: 1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33. For example: 1 is the standard code (start codon ATG; stop codons TAA, TAG, TGA), 11 is the bacterial/archaeal/plant plastid code, 2 is the vertebrate mitochondrial code, and 4 is the Mycoplasma/Spiroplasma code (TGA codes for Trp).
+    Set the genetic code, from which the start codons and stop codons are determined automatically; they are used to judge gene integrity and to detect internal stop codons. For the corresponding values, please refer to NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi . The supported genetic code numbers are: 1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33. For example: 1 is the standard code (only ATG is taken as the start codon; stop codons TAA, TAG, TGA), 11 is the bacterial/archaeal/plant plastid code, 2 is the vertebrate mitochondrial code, and 4 is the Mycoplasma/Spiroplasma code (TGA codes for Trp).
 
     --out <string>    default: none (no detailed report is written)
-    Set a file path; the program writes a detailed report of every problematic transcript to this file. The columns are, in order: gene ID, transcript ID, sequence ID, strand, CDS start, CDS end, number of CDS features, CDS length after removing the phase, terminal status (5' partial / 3' partial / both partial / both complete), first codon, last codon, number of internal stop codons, positions of internal stop codons (amino acid index), whether a frameshift is present, and a note describing the reasons.
+    Set a file path; the program writes a detailed report of every problematic transcript to this file. The columns are, in order: gene ID, transcript ID, sequence ID, strand, CDS start, CDS end, number of CDS features, CDS length after removing the phase, terminal status (5' partial / 3' partial / both partial / both complete), first codon, last codon, number of internal stop codons, positions of internal stop codons (amino acid index), whether a frameshift is present, problem type (a mutually exclusive combination of problems), and a note describing the reasons.
+
+    --complete_out <string>    default: none (no list of complete transcripts is written)
+    Set a file path; the program writes the list of complete and error-free transcripts to this file. The columns are, in order: gene ID, transcript ID, sequence ID, strand, CDS start, CDS end, number of CDS features, CDS length after removing the phase, and protein length (number of amino acids, excluding the stop codon).
 
     --help    default: None
     Display the English usage and exit.
 
     --chinese_help    default: None
     显示中文用法说明并退出。
+

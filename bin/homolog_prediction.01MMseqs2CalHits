@@ -146,7 +146,7 @@ print STDERR scalar(localtime) . ": CMD (Main Program): $0 " . join(" ", @ARGV) 
 print STDERR "\n1. run the command \"mmseqs createdb\", to create homolog protein databases.\n";
 chdir $tmp_dir;
 $pwd = `pwd`; print STDERR "PWD: $pwd";
-my $cmdString = "mmseqs createdb $input_protein homolog &> a.mmseqs_createdb_homolog.log";
+my $cmdString = "mmseqs createdb $input_protein homolog > a.mmseqs_createdb_homolog.log 2>&1";
 unless (-e "a.mmseqs_createdb_homolog.ok") {
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -159,7 +159,7 @@ else {
 # 2 运行 mmseqs createdb 命令，将基因组序列做成数据库。
 print STDERR "\n2. run the command \"mmseqs createdb\", to create genome database.\n";
 $pwd = `pwd`; print STDERR "PWD: $pwd";
-$cmdString = "mmseqs createdb $input_genome genome &> b.mmseqs_createdb_genome.log";
+$cmdString = "mmseqs createdb $input_genome genome > b.mmseqs_createdb_genome.log 2>&1";
 unless (-e "b.mmseqs_createdb_genome.ok") {
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -174,7 +174,7 @@ else {
 # 避免不同版本mmseqs对dbtype自动探测行为不一致导致的比对错误；其余参数使用软件默认值。
 print STDERR "\n3. run the command \"mmseqs search\", to align homolog protein sequences (query) to genome sequences (target).\n";
 $pwd = `pwd`; print STDERR "PWD: $pwd";
-$cmdString = "mmseqs search homolog genome alignment mmseqs_search.tmp --threads $cpu --search-type 2 &> c.mmseqs_search.log";
+$cmdString = "mmseqs search homolog genome alignment mmseqs_search.tmp --threads $cpu --search-type 2 > c.mmseqs_search.log 2>&1";
 unless (-e "c.mmseqs_search.ok") {
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";
@@ -187,7 +187,7 @@ else {
 # 4 运行 mmseqs convertalis 输出BLAST格式比对结果。
 print STDERR "\n4. run the command \"mmseqs convertalis\", and output the alignment results with BLAST format.\n";
 $pwd = `pwd`; print STDERR "PWD: $pwd"; chomp($pwd);
-$cmdString = "mmseqs convertalis homolog genome alignment output.HSP.tab --threads $cpu --format-output query,target,pident,alnlen,qlen,tlen,qstart,qend,tstart,tend,evalue,bits &> d.mmseqs_convertalis.log";
+$cmdString = "mmseqs convertalis homolog genome alignment output.HSP.tab --threads $cpu --format-output query,target,pident,alnlen,qlen,tlen,qstart,qend,tstart,tend,evalue,bits > d.mmseqs_convertalis.log 2>&1";
 unless (-e "d.mmseqs_convertalis.ok") {
     print STDERR (localtime) . ": CMD: $cmdString\n";
     system("$cmdString") == 0 or die "failed to execute: $cmdString\n";

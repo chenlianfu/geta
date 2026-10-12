@@ -397,7 +397,7 @@ run_cmd($cmdString);
 ########## (6) 去冗余、排序并重命名，并输出到标准输出 ##########
 my $final_all = "$tmp_dir/final_all.gff3";
 # 修正：GFF3Clear根据遗传密码修正终止密码子并检测完整性，原命令没有传递--genetic_code（非标准遗传密码时结果错误），也没有传递--cpu。
-$cmdString = sq("$binPath/GFF3Clear") . " --genome " . sq($input_genome) . " --gene_prefix " . sq($gene_prefix) . " --genetic_code $genetic_code --cpu $cpu --no_attr_add "
+$cmdString = sq("$binPath/GFF3Clear") . " --genome " . sq($input_genome) . " --gene_prefix " . sq($gene_prefix) . " --genetic_code $genetic_code --cpu $cpu "
     . sq($filled_gff3) . " > " . sq($final_all) . " 2> " . sq("$tmp_dir/GFF3Clear.log");
 run_cmd($cmdString);
 

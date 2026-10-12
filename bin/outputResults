@@ -2,23 +2,1292 @@
 use strict;
 use warnings;
 use Getopt::Long;
+use File::Basename;
+use File::Spec;
 use Cwd qw/abs_path getcwd cwd/;
+use POSIX ();
 
+########################################################################
+# 中文用法说明（放在代码最前面；英文用法说明放在文件最末尾的__DATA__部分）
+########################################################################
+my $usage_cn = <<'USAGE';
+用法：
+    perl outputResults [options] GETA输出目录
 
-my $dir = abs_path($ARGV[0]);
+本程序是GETA基因预测流程的最后一步（Step 6），用于整理并输出基因预测结果。其中，GETA输出目录是GETA流程各步骤的输出所在目录，程序读取其中1.RepeatMasker、2.homolog_prediction、3.NGSReads_prediction、4.augustus和5.curate_gene_models目录下的结果，整理并输出：最终基因模型（GFF3、GTF格式和各类序列文件）、低质量基因模型、重复序列注释及其统计结果、同源蛋白/转录组/Augustus的原始基因预测结果、BUSCO评估结果（可选），并汇总各步骤的统计信息，输出到${out_prefix}.gene_prediction.summary文件中，用于追踪基因预测结果的可靠性。
+
+使用须知：
+    (1) 程序需要调用与本程序位于同一目录下的GFF3Clear、gff3_to_sequences.pl、gff3ToGtf.pl和check_gene_model_integrity.pl；设置--BUSCO_lineage_dataset时，还需要busco命令位于环境变量PATH中。
+    (2) 由--out_prefix指定的输出文件按该前缀存放；各步骤的.ok文件、BUSCO分析结果、integrity_check目录和summary_parts目录等中间文件存放在GETA输出目录下的6.output_gene_models目录中。
+    (3) 程序支持断点续跑：每个步骤完成后生成.ok文件，再次运行时已完成的步骤会被跳过；基因预测整合过滤统计信息的各个小步骤，其结果保存在summary_parts目录中，输入文件更新后会自动重新统计，也可以删除对应的.ok文件强制重新统计。
+    (4) 某个输入结果文件不存在或为空时，相应的输出会被自动跳过，统计信息中以NA表示。
+
+    --cpu <int>    默认值：4
+    设置线程数，用于GFF3Clear、各GFF3文件的并行蛋白序列转换、基因模型完整性的并行检测以及BUSCO分析。
+
+    --genetic_code <int>    默认值：1
+    设置遗传密码，用于基因序列的提取，以及检测基因模型的完整性（据此确定起始密码子和终止密码子）。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi 。例如：1为标准遗传密码，11为细菌/古菌/植物质体遗传密码，2为脊椎动物线粒体遗传密码。
+
+    --out_prefix <string>    默认值：无（必须设置）
+    设置输出文件的前缀（可包含路径），所有输出文件均以该前缀命名，例如${out_prefix}.geneModels.gff3、${out_prefix}.bestGeneModels.gff3（每个基因只保留一个转录本）、${out_prefix}.geneModels_lowQuality.gff3、${out_prefix}.geneModels.gtf、${out_prefix}.repeat.gff3等。
+
+    --gene_prefix <string>    默认值：无（必须设置）
+    设置最终基因ID的前缀，基因ID由该前缀加6位数字编号组成；低质量基因的ID前缀为该前缀去掉"gene"后加"LqGene"，例如--gene_prefix OsGene时，低质量基因的ID前缀为OsLqGene。
+
+    --genome <string>    默认值：无（必须设置）
+    设置基因组序列文件（FASTA格式）。
+
+    --BUSCO_lineage_dataset <string>    默认值：无（不设置时不进行BUSCO分析）
+    设置BUSCO的谱系数据库路径，多个数据库之间用逗号分隔，程序将以离线模式（--offline）对每个数据库分别运行BUSCO，并将结果汇总到BUSCO_summary.<数据库名>.txt文件中，因此需要预先下载好数据库。
+
+    --busco_for_all_gff3    默认值：无
+    设置该参数后，除了最终基因模型之外，还会将同源预测、转录组预测、Augustus预测以及整合过程中的各个原始预测GFF3文件转换为蛋白序列，并分别进行BUSCO分析，用于比较各种基因预测方法的结果；该参数需要与--BUSCO_lineage_dataset一起使用。
+
+    --help    默认值：无
+    Display the English usage and exit.
+
+    --chinese_help    默认值：无
+    显示中文用法说明并退出。
+USAGE
+
+# 用于整合"不完整"类原因的正则，以及识别"第2类分类原因"小节标题的正则。
+# 若stats文件中的措辞与此不同，只需修改这两个变量。
+my $INCOMPLETE_RE   = qr/不完整|缺失|incomplete|partial|5'|3'|5′|3′|两端|单端|双端/i;
+my $CLASS2_TITLE_RE = qr/第\s*[2二]\s*类.*原因|原因.*第\s*[2二]\s*类/;
+my $CLASS1_TITLE_RE = qr/第\s*[1一]\s*类.*原因|原因.*第\s*[1一]\s*类/;
+my $EXON_TITLE_RE   = qr/单.*两外显子|外显子基因统计/;
+
+# 统计小步骤缓存结果的格式版本。修改输出格式后更改该值，旧的缓存结果会自动失效并重新统计。
+my $PART_FORMAT_VERSION = "format4";
+
+# 读取英文用法说明（位于文件最末尾的__DATA__部分）
+my $usage_en = do { local $/; <DATA> };
+
+# 直接运行（不带任何参数）时，给出英文用法说明
+if ( @ARGV == 0 ) { print STDERR $usage_en; exit 1; }
+
+my ($cpu, $genetic_code, $out_prefix, $gene_prefix, $genome, $BUSCO_lineage_dataset, $busco_for_all_gff3, $help, $chinese_help);
+GetOptions(
+    "cpu=i"                   => \$cpu,
+    "genetic_code=i"          => \$genetic_code,
+    "out_prefix=s"            => \$out_prefix,
+    "gene_prefix=s"           => \$gene_prefix,
+    "genome=s"                => \$genome,
+    "BUSCO_lineage_dataset=s" => \$BUSCO_lineage_dataset,
+    "busco_for_all_gff3"      => \$busco_for_all_gff3,
+    "help"                    => \$help,
+    "chinese_help"            => \$chinese_help,
+) or die $usage_en;
+if ( $chinese_help ) { print $usage_cn; exit 0; }
+if ( $help )         { print $usage_en; exit 0; }
+
+$cpu          = 4 unless defined $cpu && $cpu >= 1;
+$genetic_code = 1 unless defined $genetic_code && $genetic_code > 0;
+die "Error: the GETA output directory is required.\n\n$usage_en"  unless @ARGV == 1;
+die "Error: --out_prefix is required.\n\n$usage_en"              unless defined $out_prefix;
+die "Error: --gene_prefix is required.\n\n$usage_en"             unless defined $gene_prefix;
+die "Error: --genome is required.\n\n$usage_en"                  unless defined $genome;
+die "Error: the GETA output directory $ARGV[0] is not found.\n"  unless -d $ARGV[0];
+die "Error: genome file $genome is not found.\n"                 unless -e $genome;
+
+my $dir          = abs_path($ARGV[0]);
+my $bin_path     = dirname( abs_path($0) );
+my $pwd          = getcwd();
+my @BUSCO_db;
+if ( $BUSCO_lineage_dataset ) {
+    $BUSCO_lineage_dataset =~ s/^[,\s]+//; $BUSCO_lineage_dataset =~ s/[,\s]+$//;
+    @BUSCO_db = split /,/, $BUSCO_lineage_dataset;
+}
+
+# 在chdir之前，将路径转为绝对路径
+$genome     = abs_path($genome);
+$out_prefix = File::Spec->rel2abs($out_prefix);
 
 print STDERR "\n============================================\n";
 print STDERR "Step 6: Output gene models " . "(" . (localtime) . ")" . "\n";
 mkdir "$dir/6.output_gene_models" unless -e "$dir/6.output_gene_models";
+chdir "$dir/6.output_gene_models"; print STDERR "\nPWD: $dir/6.output_gene_models\n";
 
 # 1. 输出GFF3格式文件基因结构注释信息
 my @cmdString = ();
-push @cmdString, "$bin_path/GFF3Clear --GFF3_source GETA --gene_prefix $gene_prefix --gene_code_length 6 --genome $genome $dir/5.curate_gene_models/geneModels.gff3 > $out_prefix.geneModels.gff3 2> /dev/null";
-push @cmdString, "$bin_path/GFF3_extract_bestGeneModels  $out_prefix.geneModels.gff3 > $out_prefix.bestGeneModels.gff3 2> $out_prefix.AS_num_of_codingTranscripts.stats";
+push @cmdString, "$bin_path/GFF3Clear --cpu $cpu --GFF3_source GETA --gene_prefix $gene_prefix --gene_code_length 6 --one_mRNA_by_ID $out_prefix.bestGeneModels.gff3 --genome $genome $dir/5.curate_gene_models/geneModels.gff3 > $out_prefix.geneModels.gff3 2> GFF3Clear.1.log";
+push @cmdString, "$bin_path/gff3_to_sequences.pl --out_prefix $out_prefix --only_gene_sequences --only_coding_gene_sequences --only_first_isoform --gene_id_header --genetic_code $genetic_code $genome $out_prefix.geneModels.gff3 > /dev/null 2>&1";
+my $low_quality_gene_prefix = $gene_prefix; $low_quality_gene_prefix =~ s/gene//i;
+push @cmdString, "$bin_path/GFF3Clear --cpu $cpu --GFF3_source GETA --gene_prefix ${low_quality_gene_prefix}LqGene --gene_code_length 6 --genome $genome $dir/5.curate_gene_models/invalidated.gff3 $dir/5.curate_gene_models/incomplete.gff3 $dir/5.curate_gene_models/genes_in_repeats.gff3 > $out_prefix.geneModels_lowQuality.gff3 2> GFF3Clear.2.log";
+&execute_cmds(@cmdString, "01.output_GFF3.ok");
+
+# 2 输出GTF文件和基因的序列信息
+@cmdString = ();
+push @cmdString, "$bin_path/gff3ToGtf.pl $genome $out_prefix.geneModels.gff3 > $out_prefix.geneModels.gtf 2> /dev/null";
+push @cmdString, "$bin_path/gff3ToGtf.pl $genome $out_prefix.bestGeneModels.gff3 > $out_prefix.bestGeneModels.gtf 2> /dev/null";
+&execute_cmds(@cmdString, "02.output_GTF.ok");
+
+# 3 输出重复序列信息及其统计结果、RepeatModeler软件构建的重复序列数据库和masked genome sequence
+@cmdString = ();
+push @cmdString, "cp $dir/1.RepeatMasker/genome.masked.fasta $out_prefix.maskedGenome.fasta" if -s "$dir/1.RepeatMasker/genome.masked.fasta";
+push @cmdString, "cp $dir/1.RepeatMasker/genome.repeat.stats $out_prefix.repeat.stats" if -s "$dir/1.RepeatMasker/genome.repeat.stats";
+push @cmdString, "cp $dir/1.RepeatMasker/genome.repeat.gff3 $out_prefix.repeat.gff3" if -s "$dir/1.RepeatMasker/genome.repeat.gff3";
+my ($repeat_lib) = glob("$dir/1.RepeatMasker/repeatModeler/RM_*/*.classified");
+push @cmdString, "cp $repeat_lib $out_prefix.repeat.lib" if defined $repeat_lib && -s $repeat_lib;
+&execute_cmds(@cmdString, "03.output_repeat.ok");
+
+# 4 输出转录本、同源蛋白和Augustus的基因预测结果
+@cmdString = ();
+push @cmdString, "cp $dir/2.homolog_prediction/homolog_alignment.gff3 $out_prefix.homolog_alignment.gff3" if -s "$dir/2.homolog_prediction/homolog_alignment.gff3";
+push @cmdString, "cp $dir/2.homolog_prediction/homolog_prediction.raw.gff3 $out_prefix.homolog_prediction.gff3" if -s "$dir/2.homolog_prediction/homolog_prediction.raw.gff3";
+push @cmdString, "cp $dir/2.homolog_prediction/results/mmseqs.raw.gff3 $out_prefix.homolog_mmseqs.gff3" if -s "$dir/2.homolog_prediction/results/mmseqs.raw.gff3";
+push @cmdString, "cp $dir/2.homolog_prediction/results/miniprot.raw.gff3 $out_prefix.homolog_miniprot.gff3" if -s "$dir/2.homolog_prediction/results/miniprot.raw.gff3";
+push @cmdString, "cp $dir/2.homolog_prediction/results/spaln.raw.gff3 $out_prefix.homolog_spaln.gff3" if -s "$dir/2.homolog_prediction/results/spaln.raw.gff3";
+push @cmdString, "cp $dir/3.NGSReads_prediction/NGSReads_alignment.gff3 $out_prefix.NGSReads_alignment.gff3" if -s "$dir/3.NGSReads_prediction/NGSReads_alignment.gff3";
+push @cmdString, "cp $dir/3.NGSReads_prediction/NGSReads_prediction.raw.gff3 $out_prefix.NGSReads_prediction.gff3" if -s "$dir/3.NGSReads_prediction/NGSReads_prediction.raw.gff3";
+push @cmdString, "cp $dir/3.NGSReads_prediction/results/Sam2Transfrag.ORF.gff3 $out_prefix.NGSReads_Sam2Transfrag.gff3" if -s "$dir/3.NGSReads_prediction/results/Sam2Transfrag.ORF.gff3";
+push @cmdString, "cp $dir/3.NGSReads_prediction/results/stringtie.ORF.gff3 $out_prefix.NGSReads_stringtie.gff3" if -s "$dir/3.NGSReads_prediction/results/stringtie.ORF.gff3";
+push @cmdString, "cp $dir/4.augustus/augustus_prediction.gff3 $out_prefix.augustus_prediction.gff3" if -s "$dir/4.augustus/augustus_prediction.gff3";
+push @cmdString, "cp $dir/5.curate_gene_models/geneModels.b.gff3 $out_prefix.evidence_prediction.gff3" if -s "$dir/5.curate_gene_models/geneModels.b.gff3";
+push @cmdString, "cp $dir/5.curate_gene_models/geneModels.f.gff3 $out_prefix.All_prediction.gff3" if -s "$dir/5.curate_gene_models/geneModels.f.gff3";
+&execute_cmds(@cmdString, "04.output_rawPrediction_GFF3.ok");
+
+# 5 进行BUSCO分析，并统计BUSCO结果
+my @gff3_files = ("$out_prefix.homolog_prediction.gff3", "$out_prefix.homolog_mmseqs.gff3", "$out_prefix.homolog_miniprot.gff3", "$out_prefix.homolog_spaln.gff3", "$out_prefix.NGSReads_prediction.gff3", "$out_prefix.NGSReads_Sam2Transfrag.gff3", "$out_prefix.NGSReads_stringtie.gff3", "$out_prefix.augustus_prediction.gff3", "$out_prefix.evidence_prediction.gff3", "$out_prefix.All_prediction.gff3");
+my $cmdString;
+if ( $BUSCO_lineage_dataset ) {
+
+    # 记录需要统计的结果：[名称, GFF3文件]
+    my @summary_items = ( ["GETA", "$out_prefix.geneModels.gff3"] );
+
+    # 5.1 并行运行多个gff3_to_sequences.pl，将各GFF3文件转换为蛋白序列（仅用一个.ok文件断点续跑）
+    if ( $busco_for_all_gff3 ) {
+        my @convert_cmds = ();
+        foreach my $file ( @gff3_files ) {
+            next unless -s $file;
+            my $name = $file;
+            $name =~ s#^\Q$out_prefix\E\.##;   # 去除输出前缀（\Q\E避免路径中的特殊字符干扰）
+            $name =~ s/\.gff3$//;
+            push @convert_cmds, "$bin_path/gff3_to_sequences.pl --out_prefix $name --only_gene_sequences --only_coding_gene_sequences --only_first_isoform --gene_id_header --genetic_code $genetic_code $genome $file > /dev/null 2>&1";
+            push @summary_items, [$name, $file];
+        }
+        # 并行进程数不超过 --cpu
+        &execute_cmds_parallel($cpu, @convert_cmds, "05.gff3_to_protein.ok") if @convert_cmds;
+    }
+
+    # 5.2 并行转换全部完成后，再逐个串行运行BUSCO分析
+    foreach my $BUSCO_db_path ( @BUSCO_db ) {
+        my $BUSCO_db_name = basename($BUSCO_db_path);
+
+        foreach my $item ( @summary_items ) {
+            my ($name, $gff3) = @$item;
+            my $protein_fasta = ( $name eq "GETA" ) ? "$out_prefix.protein.fasta" : "$name.protein.fasta";
+            $cmdString = "busco -i $protein_fasta -o BUSCO_OUT.$name.$BUSCO_db_name -m protein -l $BUSCO_db_path -c $cpu --offline -f > BUSCO_OUT.$name.$BUSCO_db_name.log 2>&1";
+            &execute_cmds($cmdString, "05.BUSCO.$name.$BUSCO_db_name.ok");
+        }
+
+        # 汇总统计：第1列为名称，第2列为GFF3文件中的基因数量，第3列为BUSCO结果
+        my $summary_file = "BUSCO_summary.$BUSCO_db_name.txt";
+        open my $SUM, ">", $summary_file or die "Cannot write $summary_file: $!\n";
+        print $SUM sprintf("%25s  %8s  %s\n", "Gene_Prediction_method", "Gene_num", "BUSCO_Result");
+        print STDERR "\nBUSCO summary ($BUSCO_db_name):\n";
+        foreach my $item ( @summary_items ) {
+            my ($name, $gff3) = @$item;
+            my $busco_line = &get_busco_line("BUSCO_OUT.$name.$BUSCO_db_name");
+            next unless defined $busco_line;
+            my $gene_num = &count_genes($gff3);
+            my $line = sprintf("%25s  %8s  %s\n", $name, $gene_num, $busco_line);
+            print $SUM $line;
+            print STDERR $line;
+        }
+        close $SUM;
+        print STDERR "BUSCO summary saved in: $dir/6.output_gene_models/$summary_file\n";
+    }
+}
+
+# 6. 输出GETA基因基因预测的各项流程统计信息，用于追踪基因预测结果的可靠性
+open OUT, ">", "$out_prefix.gene_prediction.summary" or die "Can not create file $out_prefix.gene_prediction.summary, $!";
+# (1) 获取基因组重复序列统计信息
+if ( -e "$out_prefix.repeat.stats" ) {
+    my $input_file = "$out_prefix.repeat.stats";
+    open IN, $input_file or die "Error: Can not open file $input_file, $!";
+    while (<IN>) {
+        print OUT $_ if m/^Genome Size/;
+        print OUT "$_\n" if m/^Repeat Ratio/;
+    }
+    close IN;
+}
+# (2) 获取转录组二代测序数据和基因组的匹配率
+if ( -e "$dir/3.NGSReads_prediction/results/alignment.stats" ) {
+    print OUT "RNA-Seq Reads mapping statistics:\n";
+    my $input_file = "$dir/3.NGSReads_prediction/results/alignment.stats";
+    open IN, $input_file or die "Error: Can not open file $input_file, $!";
+    while (<IN>) {
+        print OUT "The alignment rate of RNA-Seq reads is: $1 (Hisat2)\n\n" if m/^(\S+) overall alignment rate/;
+        print OUT "% of reads mapped to multiple loci is: $1 (STAR)\n" if m/^\% of reads mapped to multiple loci \|\s*(\S+)/;
+        print OUT "% of reads mapped to too many loci is: $1 (STAR)\n" if m/^\% of reads mapped to too many loci \|\s*(\S+)/;
+        print OUT "% of reads uniquely mapped is: $1 (STAR)\n" if m/^Uniquely mapped \% \|\s*(\S+)/;
+    }
+    close IN;
+    print OUT "\n";
+}
+# (3) 获取AUGUSTUS Training的准确率信息和预测基因数量统计
+if ( -s "$dir/4.augustus/training/accuary_of_AUGUSTUS_HMM_Training.txt" ) {
+    my $input_file = "$dir/4.augustus/training/accuary_of_AUGUSTUS_HMM_Training.txt";
+    open IN, $input_file or die "Error: Can not open file $input_file, $!";
+    print OUT <IN>;
+    close IN;
+    print OUT "\n";
+}
+# (4) 获取BUSCO分析结果
+while (<$dir/6.output_gene_models/BUSCO_summary.*.txt>) {
+    my $input_file = $_; $_ = basename($_); s/BUSCO_summary.//; s/.txt//;
+    print OUT "BUSCO analysis with database $_: \n";
+    open IN, $input_file or die "Error: Can not open file $input_file, $!";
+    print OUT <IN>;
+    close IN;
+    print OUT "\n";
+}
+# (5) 获取基因预测整合过滤的统计信息
+# 数据来源：curateGeneModels程序在 5.curate_gene_models 目录下生成的各中间文件、统计文件和日志文件
+# 其中每个统计小步骤的结果都保存在 6.output_gene_models/summary_parts/ 下，支持断点续跑。
+&output_curate_statistics("$dir/5.curate_gene_models");
+
+close OUT;
+print STDERR "\nGene prediction summary saved in: $out_prefix.gene_prediction.summary\n";
 
 
+########################################################################
+# 子程序
+########################################################################
 
+# 子程序，整合并输出curateGeneModels（基因预测整合过滤）步骤的统计信息，输出到文件句柄OUT。
+# 该部分分为多个小步骤，每个小步骤的输出文本保存在 summary_parts/<步骤名>.txt，并生成 <步骤名>.ok：
+#   - 再次运行时，若.ok文件存在、且该步骤依赖的输入文件都没有比.ok文件更新，则直接复用保存的结果（断点续跑）；
+#   - 否则重新计算该步骤。想强制重算某一步，删除对应的.ok文件即可；全部重算则删除summary_parts目录。
+sub output_curate_statistics {
+    my $cdir = shift;
 
+    print OUT "Gene models integration and filtering statistics (generated by curateGeneModels, directory: $cdir):\n\n";
+    unless ( -d $cdir ) {
+        print OUT "    Directory $cdir is not found, the statistics are skipped.\n\n";
+        return 1;
+    }
+
+    my $pdir = "$dir/6.output_gene_models/summary_parts";
+    mkdir $pdir unless -d $pdir;
+    mkdir "$pdir/counts" unless -d "$pdir/counts";
+
+    # 各步骤基因模型数量统计表所涉及的文件
+    my @steps = (
+        ["Input: NGSReads prediction",             "$dir/3.NGSReads_prediction/NGSReads_prediction.raw.gff3"],
+        ["Input: homolog prediction",              "$dir/2.homolog_prediction/homolog_prediction.raw.gff3"],
+        ["Input: augustus prediction",             "$dir/4.augustus/augustus_prediction.gff3"],
+        ["a. NGSReads filled by homolog",          "$cdir/geneModels.a.gff3"],
+        ["b. merged with homolog",                 "$cdir/geneModels.b.gff3"],
+        ["c. filled by augustus",                  "$cdir/geneModels.c.gff3"],
+        ["d. ends force-filled",                   "$cdir/geneModels.d.gff3"],
+        ["e. merged with augustus",                "$cdir/geneModels.e.gff3"],
+        ["f. tidied by GFF3Clear (all models)",    "$cdir/geneModels.f.gff3"],
+        ["g. genes in repeats removed",            "$cdir/geneModels.g.gff3"],
+        ["h. reliable gene models",                "$cdir/geneModels.h.gff3"],
+        ["i. gene models to be verified",          "$cdir/geneModels.i.gff3"],
+        ["j. validated (HMM/BLASTP)",              "$cdir/geneModels.j.gff3"],
+        ["k. reliable + validated merged",         "$cdir/geneModels.k.gff3"],
+        ["l. alternative splicing added",          "$cdir/geneModels.l.gff3"],
+        ["m. ORF analysis of AS transcripts",      "$cdir/geneModels.m.gff3"],
+        ["FINAL geneModels.gff3",                  "$cdir/geneModels.gff3"],
+        ["Removed: genes in repeats",              "$cdir/genes_in_repeats.gff3"],
+        ["Removed: failed HMM/BLASTP validation",  "$cdir/invalidated.gff3"],
+        ["Removed: incomplete / no CDS",           "$cdir/incomplete.gff3"],
+    );
+    my @step_files = map { $_->[1] } @steps;
+
+    # ---------------------------------------------------------------
+    # 小步骤1：各步骤基因模型数量统计表
+    # ---------------------------------------------------------------
+    &run_part($pdir, "01.gene_model_counts", [ @step_files, $genome ], sub {
+        # 调用check_gene_model_integrity.pl，并行检测各GFF3文件中基因模型的完整性
+        my %integ = &run_integrity_checks(@step_files);
+
+        print OUT "1. Number of gene models at each step:\n";
+        print OUT sprintf("    %-40s %9s %9s %13s %13s %9s\n", "Step", "Genes", "mRNAs", "Complete_gene", "Complete_mRNA", "Genes_AS");
+        foreach my $s ( @steps ) {
+            my ($name, $file) = @$s;
+            my $st = &count_gff3_cached($file);
+            if ( ! defined $st ) {
+                print OUT sprintf("    %-40s %9s %9s %13s %13s %9s\n", $name, "NA", "NA", "NA", "NA", "NA");
+            }
+            else {
+                my $ig = $integ{$file};
+                my $cg = ( defined $ig && defined $ig->{gene} ) ? $ig->{gene} : "NA";
+                my $cm = ( defined $ig && defined $ig->{mRNA} ) ? $ig->{mRNA} : "NA";
+                print OUT sprintf("    %-40s %9d %9d %13s %13s %9d\n", $name, $st->{gene}, $st->{mRNA}, $cg, $cm, $st->{gene_as});
+            }
+        }
+        print OUT "    (Genes: number of genes; mRNAs: number of mRNA/transcript lines; Complete_gene: genes having at least one complete and error-free mRNA; Complete_mRNA: mRNAs that are complete and error-free, i.e. with start codon, stop codon, no internal stop codon and no frameshift; both are detected by check_gene_model_integrity.pl; Genes_AS: genes with more than one mRNA; NA: file is empty or the check failed)\n\n";
+    });
+
+    # ---------------------------------------------------------------
+    # 小步骤2：利用同源蛋白/Augustus结果填补基因模型的统计
+    # ---------------------------------------------------------------
+    &run_part($pdir, "02.filling", [
+            "$cdir/FillingGeneModelsByHomolog.tab", "$cdir/GFF3_filling_gene_models.1.log",
+            "$cdir/FillingGeneModelsByAugustus.tab", "$cdir/GFF3_filling_gene_models.2.log",
+            "$cdir/fillingEndsOfGeneModels.log" ], sub {
+        print OUT "2. Filling of the gene models:\n";
+        foreach my $f ( ["FillingGeneModelsByHomolog.tab", "GFF3_filling_gene_models.1.log", "filling transcript-based gene models with homolog-based gene models"],
+                        ["FillingGeneModelsByAugustus.tab", "GFF3_filling_gene_models.2.log", "filling gene models with augustus-based gene models"] ) {
+            my ($tab, $log, $desc) = @$f;
+            print OUT "    [$desc]\n";
+            my $ts = &fill_tab_stats("$cdir/$tab");
+            if ( defined $ts ) {
+                print OUT "        filling events: $ts->{events}; genes filled: $ts->{genes}; mRNAs filled: $ts->{mRNA}; mRNAs complete after filling: $ts->{complete}\n";
+                print OUT "        filled 5' ends: $ts->{p5}; filled 3' ends: $ts->{p3}; multi-CDS events: $ts->{multi}; single-CDS events: $ts->{single}\n";
+            }
+            else {
+                print OUT "        $tab: not found or empty\n";
+            }
+            foreach my $l ( &grep_file("$cdir/$log", qr/^(?:Genetic code|Target mRNAs|Filled|Multi-CDS|Single-CDS)/) ) {
+                print OUT "        $l\n";
+            }
+        }
+        print OUT "    [forced filling of the gene model ends (fillingEndsOfGeneModels)]\n";
+        my @fe = &grep_file("$cdir/fillingEndsOfGeneModels.log", qr/共有\s*\d+|对其中\s*\d+/);
+        if (@fe) { print OUT "        $_\n" foreach @fe; }
+        else     { print OUT "        fillingEndsOfGeneModels.log: not found or no statistics\n"; }
+        print OUT "\n";
+    });
+
+    # ---------------------------------------------------------------
+    # 小步骤3：转座子上基因模型的去除
+    # 数据来源（curateGeneModels第2步，curateGeneModels.01RemoveGenesInRepeats）：
+    #   RemoveGenesInRepeats.log   程序的统计信息（Repeats:/Gene models:两行）
+    #   genes_in_repeat.txt        被移除基因的列表（基因ID、CDS与重复序列重叠碱基数、CDS总碱基数）
+    #   genes_in_repeats.gff3      被移除的基因模型
+    #   geneModels.f.gff3 / geneModels.g.gff3  去除前 / 去除后的基因模型
+    # 未设置--repeat时，curateGeneModels跳过该步骤（geneModels.g.gff3 = geneModels.f.gff3）。
+    # ---------------------------------------------------------------
+    &run_part($pdir, "03.genes_in_repeats", [
+            "$cdir/RemoveGenesInRepeats.log", "$cdir/genes_in_repeat.txt", "$cdir/genes_in_repeats.gff3",
+            "$cdir/geneModels.f.gff3", "$cdir/geneModels.g.gff3" ], sub {
+        &print_repeat_removal_stats($cdir);
+    });
+
+    # ---------------------------------------------------------------
+    # 小步骤4：可信基因与待验证基因的分类统计
+    # ---------------------------------------------------------------
+    &run_part($pdir, "04.pickout_reliable", [ "$cdir/pickout_reliable_geneModels.stats" ], sub {
+        print OUT "4. Classification into reliable and to-be-verified gene models (curateGeneModels.02PickReliableGenes):\n";
+        &print_pickout_stats("$cdir/pickout_reliable_geneModels.stats");
+    });
+
+    # ---------------------------------------------------------------
+    # 小步骤5：HMM / BLASTP 验证统计
+    # ---------------------------------------------------------------
+    &run_part($pdir, "05.validate", [ "$cdir/validate_geneModels.stats" ], sub {
+        print OUT "5. Validation of the to-be-verified gene models with HMM and/or BLASTP (curateGeneModels.03ValidateGenes):\n";
+        &print_stats_file("$cdir/validate_geneModels.stats", undef);
+    });
+
+    # ---------------------------------------------------------------
+    # 小步骤6：可变剪接统计
+    # ---------------------------------------------------------------
+    &run_part($pdir, "06.alternative_splicing", [ "$cdir/alternative_splicing.stats", "$cdir/geneModels.k.gff3", "$cdir/geneModels.l.gff3" ], sub {
+        print OUT "6. Alternative splicing (curateGeneModels.04AlternativeSplicing):\n";
+        my @as = &grep_file("$cdir/alternative_splicing.stats", qr/^(?:Read .*feature groups|Feature groups|Transcripts of the analysed genes|The genes are divided)/);
+        if (@as) { print OUT "    $_\n" foreach @as; }
+        else     { print OUT "    No statistics (--intron and --base_depth were not both set, or alternative_splicing.stats is not found)\n"; }
+        my ($gk, $gl) = ( &count_gff3_cached("$cdir/geneModels.k.gff3"), &count_gff3_cached("$cdir/geneModels.l.gff3") );
+        if ( defined $gk && defined $gl ) {
+            print OUT "    mRNAs before alternative splicing (geneModels.k): $gk->{mRNA}; after (geneModels.l): $gl->{mRNA}; added: " . ( $gl->{mRNA} - $gk->{mRNA} ) . "\n";
+        }
+        print OUT "\n";
+    });
+
+    # ---------------------------------------------------------------
+    # 小步骤7：ORF分析统计
+    # ---------------------------------------------------------------
+    &run_part($pdir, "07.ORF_analysis", [ "$cdir/ORFAnalysis.log" ], sub {
+        print OUT "7. ORF analysis of the alternative splicing transcripts (curateGeneModels.05ORFAnalysis):\n";
+        my @orf = &extract_block("$cdir/ORFAnalysis.log", qr/^=+ ORF analysis statistics =+/, qr/^=+\s*$/);
+        if (@orf) { print OUT "    $_\n" foreach @orf; }
+        else      { print OUT "    ORFAnalysis.log: not found or no statistics\n"; }
+        print OUT "\n";
+    });
+
+    # ---------------------------------------------------------------
+    # 小步骤8：基因模型过滤统计信息
+    # ---------------------------------------------------------------
+    &run_part($pdir, "08.filtering_summary", [
+            "$cdir/geneModels.f.gff3", "$cdir/genes_in_repeats.gff3",
+            "$cdir/invalidated.gff3", "$cdir/incomplete.gff3" ], sub {
+        print OUT "8. Summary of the final filtering:\n";
+        my $inc  = &count_gff3_cached("$cdir/incomplete.gff3");
+        my $inv  = &count_gff3_cached("$cdir/invalidated.gff3");
+        my $allm = &count_gff3_cached("$cdir/geneModels.f.gff3");
+        my $rep  = &count_gff3_cached("$cdir/genes_in_repeats.gff3");
+        print OUT "    Genes after combining NGSReads/homolog/augustus predictions (geneModels.f): " . ( defined $allm ? $allm->{gene} : "NA" ) . "\n";
+        print OUT "    Genes removed because they are located in repeats: " . ( defined $rep ? $rep->{gene} : "NA" ) . "\n";
+        print OUT "    Genes removed because they failed HMM/BLASTP validation: " . ( defined $inv ? $inv->{gene} : "NA" ) . "\n";
+        print OUT "    Gene records with incomplete (5'/3') or no-CDS transcripts removed (incomplete.gff3): genes " . ( defined $inc ? $inc->{gene} : "NA" ) . ", transcripts " . ( defined $inc ? $inc->{mRNA} : "NA" ) . "\n";
+        print OUT "\n";
+    });
+
+    # ---------------------------------------------------------------
+    # 小步骤9：最终基因模型信息（含完整性统计和各预测来源的数量）
+    # ---------------------------------------------------------------
+    # 按预测来源统计时使用 ${out_prefix}.geneModels.gff3（经GFF3Clear整理，第9列含有Original_ID和Original_source）；
+    # 5.curate_gene_models/geneModels.gff3 中没有Original_source信息，仅在前者不存在时作为备用。
+    my $final_gff3 = "$out_prefix.geneModels.gff3";
+    my $src_file   = ( -s $final_gff3 ) ? $final_gff3 : "$cdir/geneModels.gff3";
+    &run_part($pdir, "09.final_gene_models", [ "$cdir/geneModels.gff3", $final_gff3, $genome ], sub {
+        print OUT "9. Final gene models:\n";
+        my $fin = &count_gff3_cached("$cdir/geneModels.gff3");
+        if ( defined $fin ) {
+            my $ratio = $fin->{gene} ? sprintf("%.2f", $fin->{mRNA} / $fin->{gene}) : "NA";
+            print OUT "    FINAL gene models: genes $fin->{gene}, mRNAs $fin->{mRNA}, mRNAs with CDS $fin->{mRNA_cds}, genes with alternative splicing $fin->{gene_as}, average mRNAs per gene $ratio\n";
+
+            # 最终基因模型的完整性统计（来自check_gene_model_integrity.pl的结果）
+            my %integ = &run_integrity_checks("$cdir/geneModels.gff3");
+            my $fi = $integ{"$cdir/geneModels.gff3"};
+            if ( defined $fi && defined $fi->{gene} && defined $fi->{mRNA} ) {
+                my $nc_gene = $fin->{gene} - $fi->{gene};
+                my $nc_mrna = $fin->{mRNA} - $fi->{mRNA};
+                print OUT "    FINAL complete genes (Complete_gene): $fi->{gene} (" . &pct_str($fi->{gene}, $fin->{gene}) . "%); FINAL non-complete genes: $nc_gene (" . &pct_str($nc_gene, $fin->{gene}) . "%)\n";
+                print OUT "    FINAL complete mRNAs (Complete_mRNA): $fi->{mRNA} (" . &pct_str($fi->{mRNA}, $fin->{mRNA}) . "%); FINAL non-complete mRNAs: $nc_mrna (" . &pct_str($nc_mrna, $fin->{mRNA}) . "%)\n";
+                &print_incomplete_mrna_details($fi->{tx}, $fin->{mRNA}, "    ");
+            }
+            else {
+                print OUT "    FINAL complete genes / mRNAs: NA (integrity check failed)\n";
+            }
+            print OUT "    FINAL lncRNA transcripts: $fin->{lnc}\n" if $fin->{lnc};
+
+            # 各基因预测算法来源的基因模型数量
+            &print_source_stats($src_file, "    ");
+        }
+        else {
+            print OUT "    geneModels.gff3: not found or empty\n";
+        }
+        print OUT "\n";
+    });
+
+    return 1;
+}
+
+# 子程序，运行统计的一个小步骤，并支持断点续跑。
+# 参数：缓存目录、步骤名、该步骤依赖的输入文件列表（数组引用）、生成该步骤输出的代码块（匿名子程序，向OUT打印）。
+# 代码块的输出先暂存到内存，运行成功后写入 <缓存目录>/<步骤名>.txt 并生成 <步骤名>.ok，最后再输出到真正的OUT。
+# 已有.ok文件且没有输入文件比它更新时，直接输出保存的结果。
+sub run_part {
+    my ($pdir, $name, $inputs, $code) = @_;
+    my $txt = "$pdir/$name.txt";
+    my $ok  = "$pdir/$name.ok";
+
+    my $fresh = 0;
+    if ( -e $ok && -s $txt && &read_first_line($ok) eq $PART_FORMAT_VERSION ) {
+        $fresh = 1;
+        my $ok_time = (stat($ok))[9];
+        foreach my $f ( @$inputs ) {
+            next unless defined $f && -e $f;
+            if ( (stat($f))[9] > $ok_time ) { $fresh = 0; last; }
+        }
+    }
+
+    if ( $fresh ) {
+        print STDERR "CMD(Skipped): summary part $name\n";
+        open my $IN, "<", $txt or die "Can not open $txt, $!\n";
+        my $content = do { local $/; <$IN> };
+        close $IN;
+        print OUT $content;
+        return 1;
+    }
+
+    print STDERR (localtime) . ": Summary part: $name\n";
+    unlink $ok if -e $ok;
+    my $buf = '';
+    {
+        local *OUT;   # 临时把OUT重定向到内存，子程序中的 print OUT 都会写入$buf
+        open OUT, ">", \$buf or die "Can not open in-memory filehandle, $!\n";
+        $code->();
+        close OUT;
+    }
+    open my $T, ">", $txt or die "Can not write $txt, $!\n";
+    print $T $buf;
+    close $T;
+    open my $K, ">", $ok or die "Can not write $ok, $!\n";
+    print $K "$PART_FORMAT_VERSION\n";
+    close $K;
+    print OUT $buf;
+    return 1;
+}
+
+# 子程序，读取文件的第一行（去除换行符）；文件不存在或为空时返回空字符串。
+sub read_first_line {
+    my $file = shift;
+    open my $IN, "<", $file or return "";
+    my $l = <$IN>;
+    close $IN;
+    return "" unless defined $l;
+    chomp $l;
+    return $l;
+}
+
+# 子程序，计算百分比字符串（保留两位小数）；分母为0时返回"NA"。
+sub pct_str {
+    my ($n, $t) = @_;
+    return "NA" unless defined $n && $t;
+    return sprintf("%.2f", 100 * $n / $t);
+}
+
+# 子程序，输出一行"名称 ... 数值"（名称左对齐、数值右对齐），用于小步骤3的统计输出。
+sub print_kv_line {
+    my ($label, $value, $indent) = @_;
+    $indent = "        " unless defined $indent;
+    print OUT sprintf("%s%-66s %12s\n", $indent, $label, defined $value ? $value : "NA");
+}
+
+# 子程序，读取genes_in_repeat.txt（curateGeneModels.01RemoveGenesInRepeats --out_removed_list的输出），
+# 三列：基因ID、CDS与重复序列重叠碱基数、CDS总碱基数。
+# 返回 { n => 基因数, overlap => 重叠碱基总数, total => CDS碱基总数, ratios => [各基因的重叠比例] }；文件不存在或为空时返回undef。
+sub read_removed_list {
+    my $file = shift;
+    return undef unless defined $file && -s $file;
+    open my $IN, "<", $file or return undef;
+    my %r = ( n => 0, overlap => 0, total => 0, ratios => [] );
+    while (<$IN>) {
+        chomp; s/\r$//;
+        next if /^#/ || /^\s*$/;
+        my @f = split /\t/;
+        next if @f < 3;
+        next unless $f[1] =~ /^\d+$/ && $f[2] =~ /^\d+$/;
+        $r{n}++;
+        $r{overlap} += $f[1];
+        $r{total}   += $f[2];
+        push @{ $r{ratios} }, $f[2] ? $f[1] / $f[2] : 0;
+    }
+    close $IN;
+    return $r{n} ? \%r : undef;
+}
+
+# 子程序，输出小步骤3的统计：转座子（重复序列）上基因模型的去除情况。
+sub print_repeat_removal_stats {
+    my $cdir = shift;
+    print OUT "3. Removal of gene models located in repeats (curateGeneModels.01RemoveGenesInRepeats):\n";
+
+    my $log_file = "$cdir/RemoveGenesInRepeats.log";
+
+    # (a) 解析RemoveGenesInRepeats.log中的两行统计信息
+    my (%rp, %gm, @unparsed);
+    foreach my $line ( &grep_file($log_file, qr/^(?:Repeats:|Gene models:)/) ) {
+        if ( $line =~ /^Repeats: total (\d+); ignored as simple repeats (\d+); ignored as unknown repeats (\d+); ignored for Ratio < ([\d.eE+\-]+) (\d+); used (\d+)\./ ) {
+            %rp = ( total => $1, simple => $2, unknown => $3, min_cov => $4, low_ratio => $5, used => $6 );
+        }
+        elsif ( $line =~ /^Gene models: total (\d+); removed \(overlap ratio >= ([\d.eE+\-]+)\) (\d+); kept (\d+) \(including (\d+) without CDS\/exon\)\./ ) {
+            %gm = ( total => $1, ratio => $2, removed => $3, kept => $4, no_feature => $5 );
+        }
+        else {
+            push @unparsed, $line;
+        }
+    }
+
+    my $gf = &count_gff3_cached("$cdir/geneModels.f.gff3");
+    my $gg = &count_gff3_cached("$cdir/geneModels.g.gff3");
+    my $gr = &count_gff3_cached("$cdir/genes_in_repeats.gff3");
+    my $rl = &read_removed_list("$cdir/genes_in_repeat.txt");
+
+    # 没有日志、没有被移除的基因：说明该步骤被跳过（未设置--repeat）
+    unless ( %rp || %gm || @unparsed || $rl || ( defined $gr && $gr->{gene} ) ) {
+        print OUT "    Skipped: --repeat was not set in curateGeneModels (or RemoveGenesInRepeats.log is not found), so no gene models were removed (geneModels.g = geneModels.f).\n\n";
+        return 1;
+    }
+
+    # (b) 重复序列注释的使用情况
+    if ( %rp ) {
+        print OUT "    [Repeat annotation records used for the filtering]\n";
+        &print_kv_line("Total repeat records", $rp{total});
+        &print_kv_line("Ignored: simple repeats (Simple_repeat/Low_complexity/Satellite/Tandem_repeat; --ignore_Simple_repeat)", $rp{simple});
+        &print_kv_line("Ignored: unknown repeats (Unknown/Unspecified/Other; --ignore_Unknown)", $rp{unknown});
+        &print_kv_line("Ignored: Ratio < $rp{min_cov} (--min_coverage_ratio)", $rp{low_ratio});
+        &print_kv_line("Repeat records used", $rp{used});
+        print OUT "\n";
+    }
+
+    # (c) 基因模型的去除情况
+    print OUT "    [Gene models]\n";
+    if ( %gm ) {
+        &print_kv_line("Removal criterion: CDS bases overlapping repeats / CDS bases >=", $gm{ratio});
+    }
+    my $n_before = %gm ? $gm{total}   : ( defined $gf ? $gf->{gene} : undef );
+    my $n_rm     = %gm ? $gm{removed} : ( defined $gr ? $gr->{gene} : undef );
+    my $n_after  = %gm ? $gm{kept}    : ( defined $gg ? $gg->{gene} : undef );
+    &print_kv_line("Genes before removal (geneModels.f)", $n_before);
+    &print_kv_line("Genes removed (genes_in_repeats.gff3)" . ( defined $n_rm && defined $n_before ? " (" . &pct_str($n_rm, $n_before) . "%)" : "" ), $n_rm);
+    &print_kv_line("Genes kept (geneModels.g)", $n_after);
+    &print_kv_line("  of which genes without CDS/exon (cannot be evaluated, kept)", $gm{no_feature}) if %gm;
+    if ( defined $gf && defined $gr && defined $gg ) {
+        &print_kv_line("mRNAs before removal (geneModels.f)", $gf->{mRNA});
+        &print_kv_line("mRNAs removed (genes_in_repeats.gff3)", $gr->{mRNA});
+        &print_kv_line("mRNAs kept (geneModels.g)", $gg->{mRNA});
+    }
+    print OUT "\n";
+
+    # (d) 被移除基因与重复序列的重叠情况（来自genes_in_repeat.txt）
+    if ( $rl ) {
+        my @s = sort { $a <=> $b } @{ $rl->{ratios} };
+        my $n = scalar @s;
+        my $mean = 0; $mean += $_ foreach @s; $mean /= $n;
+        my $median = ( $n % 2 ) ? $s[ ($n - 1) / 2 ] : ( $s[ $n / 2 - 1 ] + $s[ $n / 2 ] ) / 2;
+
+        print OUT "    [Overlap between the CDS of the removed genes and repeats (genes_in_repeat.txt)]\n";
+        &print_kv_line("Removed genes in the list", $n);
+        &print_kv_line("CDS bases overlapping repeats (total of removed genes)", $rl->{overlap});
+        &print_kv_line("CDS bases (total of removed genes)", $rl->{total});
+        &print_kv_line("Overlap ratio of the removed genes: mean / median (%)", sprintf("%.2f / %.2f", 100 * $mean, 100 * $median));
+        &print_kv_line("Overlap ratio of the removed genes: min / max (%)", sprintf("%.2f / %.2f", 100 * $s[0], 100 * $s[-1]));
+
+        my @labels = ("< 20%", "20% - <40%", "40% - <60%", "60% - <80%", "80% - <100%", "100%");
+        my @bin = (0) x scalar(@labels);
+        foreach my $r ( @s ) {
+            my $b = ( $r >= 1 - 1e-9 ) ? 5 : int( $r / 0.2 + 1e-9 );
+            $b = 4 if $b > 4 && $r < 1 - 1e-9;
+            $bin[$b]++;
+        }
+        print OUT "        Distribution of the overlap ratio:\n";
+        foreach my $i ( 0 .. $#labels ) {
+            print OUT sprintf("            %-14s %9d  %7s%%\n", $labels[$i], $bin[$i], &pct_str($bin[$i], $n));
+        }
+        print OUT "\n";
+    }
+
+    # (e) 无法识别的日志行原样输出，避免信息丢失
+    if (@unparsed) {
+        print OUT "    [Other messages in RemoveGenesInRepeats.log]\n";
+        print OUT "        $_\n" foreach @unparsed;
+        print OUT "\n";
+    }
+    return 1;
+}
+
+# 子程序，输出最终基因模型中mRNA不完整情况的详细统计（来自check_gene_model_integrity.pl转录本层面的结果）。
+# $tx为run_integrity_checks返回的 { 类别 => [数量, 百分比] }；$total为最终基因模型的mRNA总数，用于计算百分比。
+sub print_incomplete_mrna_details {
+    my ($tx, $total, $indent) = @_;
+    return unless $tx;
+    # [显示名称, check_gene_model_integrity.pl报告中的名称]
+    my @items = (
+        ["5'端缺失(含双端)", "5'端缺失(含双端)"],
+        ["3'端缺失(含双端)", "3'端缺失(含双端)"],
+        ["仅5'端缺失",       "仅5'端缺失"],
+        ["仅3'端缺失",       "仅3'端缺失"],
+        ["双端缺失",         "双端缺失"],
+        ["含内部终止密码子", "含内部终止密码子"],
+        ["移码",             "移码(合计)"],
+    );
+    my $maxw = 0;
+    foreach my $it ( @items ) {
+        my $w = &disp_width($it->[0]);
+        $maxw = $w if $w > $maxw;
+    }
+    print OUT "${indent}Details of the non-complete mRNAs (from check_gene_model_integrity.pl; percentages are relative to all FINAL mRNAs; categories may overlap):\n";
+    foreach my $it ( @items ) {
+        my ($label, $key) = @$it;
+        my $pad = " " x ( $maxw - &disp_width($label) );
+        if ( exists $tx->{$key} ) {
+            my $n = $tx->{$key}[0];
+            print OUT sprintf("%s    %s%s : %d (%s%%)\n", $indent, $label, $pad, $n, &pct_str($n, $total));
+        }
+        else {
+            print OUT sprintf("%s    %s%s : NA\n", $indent, $label, $pad);
+        }
+    }
+}
+
+# 子程序，根据GFF3第9列的Original_source，统计来自各基因预测算法的基因模型数量并输出到OUT。
+# 基因的来源取gene行的Original_source；gene行没有时，取其第一个mRNA的Original_source。
+# mRNA的来源取mRNA行自身的Original_source，没有时继承所属基因的来源。
+sub print_source_stats {
+    my ($file, $indent) = @_;
+    my $ss = &source_stats($file);
+    print OUT "${indent}FINAL gene models by prediction source (Original_source in column 9 of " . basename($file) . "):\n";
+    unless ( defined $ss && $ss->{total_gene} ) {
+        print OUT "${indent}    NA (file is empty or has no gene)\n";
+        return;
+    }
+    my @srcs = sort { ( $ss->{gene}{$b} || 0 ) <=> ( $ss->{gene}{$a} || 0 ) || $a cmp $b }
+               keys %{ { %{ $ss->{gene} }, %{ $ss->{mRNA} } } };
+    my $maxw = length("Source");
+    foreach my $s ( @srcs ) { $maxw = length($s) if length($s) > $maxw; }
+    print OUT sprintf("%s    %-${maxw}s %9s %8s %9s %8s\n", $indent, "Source", "Genes", "Genes(%)", "mRNAs", "mRNAs(%)");
+    foreach my $s ( @srcs ) {
+        my $g = $ss->{gene}{$s} || 0;
+        my $m = $ss->{mRNA}{$s} || 0;
+        my $gp = $ss->{total_gene} ? sprintf("%.2f", 100 * $g / $ss->{total_gene}) : "NA";
+        my $mp = $ss->{total_mRNA} ? sprintf("%.2f", 100 * $m / $ss->{total_mRNA}) : "NA";
+        print OUT sprintf("%s    %-${maxw}s %9d %7s%% %9d %7s%%\n", $indent, $s, $g, $gp, $m, $mp);
+    }
+    print OUT sprintf("%s    %-${maxw}s %9d %8s %9d %8s\n", $indent, "Total", $ss->{total_gene}, "", $ss->{total_mRNA}, "");
+    print OUT "${indent}    (Source values are taken as-is from Original_source; a gene or mRNA without Original_source is counted as \"No_Original_source\")\n";
+}
+
+# 子程序，读取GFF3文件，按Original_source统计基因和mRNA的数量。
+# 返回 { gene => {来源=>数量}, mRNA => {来源=>数量}, total_gene => N, total_mRNA => N }，文件不存在或为空时返回undef。
+sub source_stats {
+    my $file = shift;
+    return undef unless defined $file && -s $file;
+    open my $IN, "<", $file or return undef;
+    my (%gene_src, %gene_order, %mrna_src, %mrna_parent, @gene_ids, @mrna_ids);
+    while (<$IN>) {
+        next if /^#/;
+        chomp;
+        my @f = split /\t/, $_, 9;
+        next if @f < 9;
+        my $type = lc $f[2];
+        my ($id)  = $f[8] =~ /(?:^|;)\s*ID=([^;]+)/;
+        my ($src) = $f[8] =~ /(?:^|;)\s*Original_source=([^;]+)/;
+        if ( defined $src ) { $src =~ s/^\s+|\s+$//g; undef $src if $src eq ''; }
+        # 没有Original_source属性时（如curateGeneModels的原始输出），退而使用第2列的来源（GETA/.除外）
+        $src = $f[1] if !defined $src && $f[1] ne 'GETA' && $f[1] ne '.' && $f[1] ne '';
+        if ( $type eq 'gene' ) {
+            next unless defined $id;
+            push @gene_ids, $id unless exists $gene_src{$id};
+            $gene_src{$id} = $src;
+        }
+        elsif ( $type eq 'mrna' || $type eq 'transcript' ) {
+            next unless defined $id;
+            my ($par) = $f[8] =~ /(?:^|;)\s*Parent=([^;,]+)/;
+            push @mrna_ids, $id;
+            $mrna_src{$id}    = $src;
+            $mrna_parent{$id} = $par;
+        }
+    }
+    close $IN;
+
+    # 没有gene行的GFF3：用mRNA的Parent作为基因
+    unless ( @gene_ids ) {
+        my %seen;
+        foreach my $m ( @mrna_ids ) {
+            my $p = $mrna_parent{$m};
+            next unless defined $p && !$seen{$p}++;
+            push @gene_ids, $p;
+            $gene_src{$p} = undef;
+        }
+    }
+
+    # gene行没有Original_source时，取第一个mRNA的来源
+    foreach my $m ( @mrna_ids ) {
+        my $p = $mrna_parent{$m};
+        next unless defined $p && exists $gene_src{$p};
+        $gene_src{$p} = $mrna_src{$m} if !defined $gene_src{$p} && defined $mrna_src{$m};
+    }
+
+    my (%gc, %mc);
+    foreach my $g ( @gene_ids ) {
+        my $s = defined $gene_src{$g} ? $gene_src{$g} : "No_Original_source";
+        $gc{$s}++;
+    }
+    foreach my $m ( @mrna_ids ) {
+        my $s = $mrna_src{$m};
+        if ( !defined $s ) {
+            my $p = $mrna_parent{$m};
+            $s = ( defined $p && defined $gene_src{$p} ) ? $gene_src{$p} : "No_Original_source";
+        }
+        $mc{$s}++;
+    }
+    return { gene => \%gc, mRNA => \%mc, total_gene => scalar(@gene_ids), total_mRNA => scalar(@mrna_ids) };
+}
+
+# 子程序，并行调用check_gene_model_integrity.pl检测多个GFF3文件的基因模型完整性（fork方式，
+# 同时运行的进程数不超过--cpu）。每个文件的检测结果保存在 6.output_gene_models/integrity_check/ 下，
+# 已存在且比GFF3文件新的结果会被直接复用（支持断点续跑）。
+# 返回哈希：文件路径 => { gene => 完整基因数, mRNA => 完整mRNA数, total_gene => 基因总数, total_mRNA => 转录本总数,
+#                         tx => { 类别 => [数量, 百分比] } }；
+# tx为check_gene_model_integrity.pl报告中"转录本层面（类型可重叠）"小节的各行（如"5'端缺失(含双端)"、"含内部终止密码子"、"移码(合计)"等）；
+# 检测失败的文件不在哈希中。
+sub run_integrity_checks {
+    my @files = grep { defined $_ && -s $_ } @_;
+    my %seen; @files = grep { !$seen{$_}++ } @files;
+    my %result;
+    return %result unless @files;
+
+    my $odir = "$dir/6.output_gene_models/integrity_check";
+    mkdir $odir unless -d $odir;
+    my $gc  = ( defined $genetic_code && $genetic_code > 0 ) ? $genetic_code : 1;
+    my $max = ( defined $cpu && $cpu >= 1 ) ? $cpu : 1;
+
+    my (%stat_file, @todo);
+    foreach my $file ( @files ) {
+        my $sf = "$odir/" . basename($file) . ".integrity.txt";
+        $stat_file{$file} = $sf;
+        if ( -s $sf && (stat($sf))[9] >= (stat($file))[9] ) {
+            print STDERR "CMD(Skipped): integrity check of $file\n";
+            next;
+        }
+        push @todo, [$file, $sf];
+    }
+
+    my (%running, @failed);
+    my $reap_one = sub {
+        my $pid = wait();
+        return if $pid <= 0;
+        my $status = $?;
+        my $file = delete $running{$pid};
+        if ( defined $file && $status != 0 ) {
+            push @failed, $file;
+            print STDERR (localtime) . ": FAILED integrity check: $file (see $stat_file{$file}.log)\n";
+        }
+    };
+
+    foreach my $t ( @todo ) {
+        my ($file, $sf) = @$t;
+        while ( scalar(keys %running) >= $max ) {
+            $reap_one->();
+        }
+        my $cmd = "perl $bin_path/check_gene_model_integrity.pl --genetic_code $gc $genome $file > $sf.tmp 2> $sf.log";
+        print STDERR (localtime) . ": CMD(parallel): $cmd\n";
+        my $pid = fork();
+        die "failed to fork: $!\n" unless defined $pid;
+        if ( $pid == 0 ) {
+            my $ret = system($cmd);
+            if ( $ret == 0 ) { rename "$sf.tmp", $sf; POSIX::_exit(0); }
+            POSIX::_exit(1);   # 不使用exit，避免子进程刷新继承自父进程的OUT缓冲区
+        }
+        $running{$pid} = $file;
+    }
+    while ( scalar(keys %running) > 0 ) {
+        $reap_one->();
+    }
+
+    # 解析各文件的检测结果
+    foreach my $file ( @files ) {
+        my $sf = $stat_file{$file};
+        next unless -s $sf;
+        open my $IN, "<", $sf or next;
+        my ($g, $m, $section, %hdr, %tx);
+        while (<$IN>) {
+            chomp; s/\r$//;
+            # 小节标题行（以"-"开头）：区分转录本层面（类型可重叠）、转录本层面的类型组合、基因层面
+            if    ( /^-+\s*转录本层面.*类型可重叠/ ) { $section = 'tx';       next; }
+            elsif ( /^-+\s*转录本层面.*异常类型组合/ ) { $section = 'txcombo'; next; }
+            elsif ( /^-+\s*基因层面/ )                  { $section = 'gene';    next; }
+            elsif ( /^=+\s*$/ )                         { $section = undef;     next; }
+
+            if    ( /^完整且无异常的转录本\s*(?::|：)\s*(\d+)/ )       { $m = $1; next; }
+            elsif ( /^有完整且无异常转录本的基因\s*(?::|：)\s*(\d+)/ ) { $g = $1; next; }
+            elsif ( /^含 CDS 的基因总数\s*(?::|：)\s*(\d+)/ )          { $hdr{gene} = $1; next; }
+            elsif ( /^检测的转录本总数\s*(?::|：)\s*(\d+)/ )           { $hdr{mRNA} = $1; next; }
+
+            # 转录本层面（类型可重叠）小节中的"类别 : 数量 (百分比%)"行
+            if ( defined $section && $section eq 'tx'
+                 && /^\s*(\S.*?)\s*(?::|：)\s*(\d+)(?:\s*\(\s*([\d.]+)\s*%\s*\))?\s*$/ ) {
+                $tx{$1} = [ $2, $3 ];
+            }
+        }
+        close $IN;
+        $result{$file} = { gene => $g, mRNA => $m, total_gene => $hdr{gene}, total_mRNA => $hdr{mRNA}, tx => \%tx }
+            if defined $g && defined $m;
+    }
+    return %result;
+}
+
+# 子程序，统计一个GFF3文件中的基因/转录本信息。文件不存在或为空时返回undef。
+sub count_gff3 {
+    my $file = shift;
+    return undef unless defined $file && -s $file;
+    open my $IN, "<", $file or return undef;
+    my ($gene_lines, $lnc) = (0, 0);
+    my (%mrna_ids, %cds_parent, %per_gene);
+    while (<$IN>) {
+        next if /^#/;
+        chomp;
+        my @f = split /\t/, $_, 9;
+        next if @f < 9;
+        my $type = lc $f[2];
+        if ( $type eq 'gene' ) {
+            $gene_lines++;
+        }
+        elsif ( $type eq 'mrna' || $type eq 'transcript' ) {
+            my ($id)  = $f[8] =~ /(?:^|;)\s*ID=([^;]+)/;
+            my ($par) = $f[8] =~ /(?:^|;)\s*Parent=([^;]+)/;
+            $mrna_ids{$id} = 1 if defined $id;
+            $per_gene{$par}++ if defined $par;
+        }
+        elsif ( $type eq 'lnc_rna' || $type eq 'lncrna' ) {
+            $lnc++;
+        }
+        elsif ( $type eq 'cds' ) {
+            my ($par) = $f[8] =~ /(?:^|;)\s*Parent=([^;]+)/;
+            next unless defined $par;
+            $cds_parent{$_} = 1 foreach split /,/, $par;
+        }
+    }
+    close $IN;
+
+    my %r;
+    $r{gene}     = $gene_lines || scalar( keys %per_gene );
+    $r{mRNA}     = scalar( keys %mrna_ids );
+    $r{mRNA_cds} = scalar( grep { $cds_parent{$_} } keys %mrna_ids );
+    $r{gene_as}  = scalar( grep { $per_gene{$_} > 1 } keys %per_gene );
+    $r{lnc}      = $lnc;
+    return \%r;
+}
+
+# 子程序，带缓存的count_gff3。统计结果保存在 summary_parts/counts/<文件名>.count.txt，
+# 缓存文件不比GFF3文件旧时直接读取，避免重复解析大文件（支持断点续跑）。
+sub count_gff3_cached {
+    my $file = shift;
+    return undef unless defined $file && -s $file;
+    my $cdir = "$dir/6.output_gene_models/summary_parts/counts";
+    mkdir "$dir/6.output_gene_models/summary_parts" unless -d "$dir/6.output_gene_models/summary_parts";
+    mkdir $cdir unless -d $cdir;
+    my $cf = "$cdir/" . basename($file) . ".count.txt";
+
+    if ( -s $cf && (stat($cf))[9] >= (stat($file))[9] ) {
+        if ( open my $IN, "<", $cf ) {
+            my %r;
+            while (<$IN>) {
+                chomp;
+                my ($k, $v) = split /\t/;
+                $r{$k} = $v if defined $k && defined $v;
+            }
+            close $IN;
+            return \%r if exists $r{gene} && exists $r{mRNA} && exists $r{mRNA_cds} && exists $r{gene_as} && exists $r{lnc};
+        }
+    }
+
+    my $r = &count_gff3($file);
+    return undef unless defined $r;
+    if ( open my $OUTC, ">", "$cf.tmp" ) {
+        print $OUTC "$_\t$r->{$_}\n" foreach qw/gene mRNA mRNA_cds gene_as lnc/;
+        close $OUTC;
+        rename "$cf.tmp", $cf;
+    }
+    return $r;
+}
+
+# 子程序，统计填补明细表（GFF3_filling_gene_models --output_filling_detail_tab 的输出）。
+# 列：基因ID、mRNA ID、Multi_CDS/Single_CDS、填补前完整性、Filled_5p/Filled_3p、填补用mRNA ID、填补后是否完整
+sub fill_tab_stats {
+    my $file = shift;
+    return undef unless -s $file;
+    open my $IN, "<", $file or return undef;
+    my (%genes, %mrna, %complete_mrna);
+    my %r = ( events => 0, p5 => 0, p3 => 0, multi => 0, single => 0 );
+    while (<$IN>) {
+        chomp;
+        next if /^#/ || /^\s*$/;
+        my @f = split /\t/;
+        next if @f < 7;
+        $r{events}++;
+        $genes{$f[0]} = 1;
+        $mrna{$f[1]}  = 1;
+        $r{multi}++  if $f[2] eq 'Multi_CDS';
+        $r{single}++ if $f[2] eq 'Single_CDS';
+        $r{p5}++     if $f[4] eq 'Filled_5p';
+        $r{p3}++     if $f[4] eq 'Filled_3p';
+        $complete_mrna{$f[1]} = 1 if $f[6] eq 'Yes';
+    }
+    close $IN;
+    $r{genes}    = scalar keys %genes;
+    $r{mRNA}     = scalar keys %mrna;
+    $r{complete} = scalar keys %complete_mrna;
+    return \%r;
+}
+
+# 子程序，返回文件中匹配正则的所有行（去除换行符）；文件不存在则返回空列表。
+sub grep_file {
+    my ($file, $re) = @_;
+    return () unless -s $file;
+    open my $IN, "<", $file or return ();
+    my @out;
+    while (<$IN>) {
+        chomp;
+        push @out, $_ if $_ =~ $re;
+    }
+    close $IN;
+    return @out;
+}
+
+# 子程序，提取文件中从匹配$start_re的行开始到匹配$end_re的行（不含）之间的内容（含起始行）。
+sub extract_block {
+    my ($file, $start_re, $end_re) = @_;
+    return () unless -s $file;
+    open my $IN, "<", $file or return ();
+    my (@out, $in_block);
+    while (<$IN>) {
+        chomp;
+        if ( !$in_block ) {
+            if ( $_ =~ $start_re ) { $in_block = 1; push @out, $_; }
+        }
+        else {
+            last if $_ =~ $end_re;
+            push @out, $_;
+        }
+    }
+    close $IN;
+    return @out;
+}
+
+# 子程序，将一个统计文件的内容缩进后输出到OUT。若给定$start_re，则从第一个匹配该正则的行开始输出（跳过前面的输入文件、参数等信息）。
+sub print_stats_file {
+    my ($file, $start_re) = @_;
+    unless ( -s $file ) {
+        print OUT "    " . basename($file) . ": not found or empty\n\n";
+        return 0;
+    }
+    open my $IN, "<", $file or do { print OUT "    Can not open $file\n\n"; return 0; };
+    my $started = defined $start_re ? 0 : 1;
+    while (<$IN>) {
+        chomp;
+        $started = 1 if !$started && $_ =~ $start_re;
+        next unless $started;
+        next if /^\s*$/;
+        print OUT "    $_\n";
+    }
+    close $IN;
+    print OUT "\n";
+    return 1;
+}
+
+# 子程序，计算字符串的显示宽度（中文等全角字符按2列计算），用于中英文混排时的表格对齐。
+sub disp_width {
+    my $s = shift;
+    my $t = $s;
+    utf8::decode($t);
+    my $w = 0;
+    foreach my $c ( split //, $t ) {
+        $w += ( ord($c) >= 0x2E80 ) ? 2 : 1;
+    }
+    return $w;
+}
+
+# 子程序，整理并输出pickout_reliable_geneModels.stats（可信基因与待验证基因分类统计）。
+# 从"## 总体分类"开始，按"##"小节整理成对齐的表格。各小节的排版方式：
+#   - [总体分类]、[第1类分类原因]、[第2类分类原因]：三个小节的名称列和数量/百分比列一起对齐；
+#   - 其它"名称 数量 [百分比]"小节：小节内单独对齐；
+#   - [单/两外显子基因统计]，以及[证据支持组合]等含有多列（制表符分隔的表格，有表头）的小节：
+#     按列切分后，每一列都对齐（名称列左对齐，数值列右对齐）。
+# 在"第2类分类原因"小节中，所有与"不完整"相关的类型合并为一行，不再细分。
+sub print_pickout_stats {
+    my $file = shift;
+    unless ( -s $file ) {
+        print OUT "    " . basename($file) . ": not found or empty\n\n";
+        return 0;
+    }
+    open my $IN, "<", $file or do { print OUT "    Can not open $file\n\n"; return 0; };
+
+    # 1. 按"##"标题切分小节
+    my (@sections, $started);
+    while (<$IN>) {
+        chomp; s/\r$//;
+        $started = 1 if !$started && /^##\s*总体分类/;
+        next unless $started;
+        next if /^\s*$/;
+        if ( /^#+\s*(.*?)\s*$/ ) {
+            push @sections, { title => $1, rows => [] };
+            next;
+        }
+        push @{ $sections[-1]{rows} }, $_ if @sections;
+    }
+    close $IN;
+    unless ( @sections ) {
+        print OUT "    No classification statistics found in " . basename($file) . "\n\n";
+        return 0;
+    }
+
+    # 2. 逐个小节解析、整合，并确定排版方式
+    foreach my $sec ( @sections ) {
+        my $t = $sec->{title};
+        if ( $t =~ $EXON_TITLE_RE ) { $sec->{kind} = 'cols'; next; }
+        $sec->{kind} = ( $t =~ /总体分类/ || $t =~ $CLASS1_TITLE_RE || $t =~ $CLASS2_TITLE_RE ) ? 'group' : 'own';
+
+        # 解析每一行："名称  数量  [百分比]"
+        my @items;
+        foreach my $line ( @{ $sec->{rows} } ) {
+            my $l = $line; $l =~ s/^\s+//; $l =~ s/\s+$//;
+            if ( $l =~ /^(.+?)(?:\s|:|：|=)+(\d+)(?:\s*(?:\(|（)\s*([\d.]+)\s*%\s*(?:\)|）)|\s+([\d.]+)\s*%)?$/ ) {
+                my $pct = defined $3 ? $3 : $4;
+                push @items, { label => $1, count => $2, pct => $pct };
+            }
+            else {
+                push @items, { raw => $l };
+            }
+        }
+
+        # 不是"名称 数量 [百分比]"格式的小节（如"证据组合 第一类 第二类 合计"这种带表头的多列表格），按多列表格对齐
+        if ( $sec->{kind} eq 'own' && grep { !defined $_->{label} } @items ) {
+            $sec->{kind} = 'cols';
+            next;
+        }
+
+        # 第2类分类原因：把所有"不完整"相关的类型合并成一行
+        if ( $t =~ $CLASS2_TITLE_RE ) {
+            my (@out, $merged, $n_merged, $sum_cnt, $sum_pct, $all_pct);
+            $sum_cnt = 0; $sum_pct = 0; $all_pct = 1; $n_merged = 0;
+            foreach my $it ( @items ) {
+                if ( defined $it->{label} && $it->{label} =~ $INCOMPLETE_RE ) {
+                    $sum_cnt += $it->{count};
+                    if ( defined $it->{pct} ) { $sum_pct += $it->{pct}; } else { $all_pct = 0; }
+                    $n_merged++;
+                    unless ( $merged ) {
+                        $merged = { label => $it->{label}, count => 0 };
+                        push @out, $merged;
+                    }
+                }
+                else {
+                    push @out, $it;
+                }
+            }
+            if ( $merged ) {
+                $merged->{label} = "不完整（各类型合计）" if $n_merged >= 2;
+                $merged->{count} = $sum_cnt;
+                $merged->{pct}   = $all_pct ? sprintf("%.2f", $sum_pct) : undef;
+            }
+            @items = @out;
+        }
+        $sec->{items} = \@items;
+    }
+
+    # 3. 计算需要一起对齐的小节（总体分类、第1类、第2类分类原因）的公共列宽
+    my ($gmaxw, $ghas_pct) = (0, 0);
+    foreach my $sec ( grep { $_->{kind} eq 'group' } @sections ) {
+        my ($w, $hp) = &items_layout($sec->{items});
+        $gmaxw    = $w if $w > $gmaxw;
+        $ghas_pct = 1 if $hp;
+    }
+
+    # 4. 输出各小节
+    foreach my $sec ( @sections ) {
+        print OUT "    [$sec->{title}]\n";
+        if ( $sec->{kind} eq 'cols' ) {
+            &print_column_table($sec->{rows});
+        }
+        elsif ( $sec->{kind} eq 'group' ) {
+            &print_items($sec->{items}, $gmaxw, $ghas_pct);
+        }
+        else {
+            my ($w, $hp) = &items_layout($sec->{items});
+            &print_items($sec->{items}, $w, $hp);
+        }
+        print OUT "\n";
+    }
+    return 1;
+}
+
+# 子程序，计算"名称 数量 [百分比]"各行的名称列最大显示宽度，以及是否存在百分比列。
+sub items_layout {
+    my $items = shift;
+    my ($maxw, $has_pct) = (0, 0);
+    foreach my $it ( @$items ) {
+        next unless defined $it->{label};
+        my $w = &disp_width($it->{label});
+        $maxw = $w if $w > $maxw;
+        $has_pct = 1 if defined $it->{pct};
+    }
+    return ($maxw, $has_pct);
+}
+
+# 子程序，按给定的名称列宽，输出"名称 数量 [百分比]"各行（数量列和百分比列对齐）。
+sub print_items {
+    my ($items, $maxw, $has_pct) = @_;
+    foreach my $it ( @$items ) {
+        if ( defined $it->{label} ) {
+            my $pad = " " x ( $maxw - &disp_width($it->{label}) );
+            my $pct_str = defined $it->{pct} ? sprintf("%7s%%", $it->{pct}) : "";
+            print OUT sprintf("        %s%s  %9d", $it->{label}, $pad, $it->{count});
+            print OUT "  $pct_str" if $has_pct;
+            print OUT "\n";
+        }
+        else {
+            print OUT "        $it->{raw}\n";
+        }
+    }
+}
+
+# 子程序，把一行文本切分成多列：含制表符时按制表符切分；含"名称: 数值..."时，冒号前为第一列，其后按空白切分；
+# 含连续2个以上空格时按连续空格切分；否则按空白切分。
+sub split_columns {
+    my $l = shift;
+    $l =~ s/^\s+//; $l =~ s/\s+$//;
+    my @c;
+    if    ( $l =~ /\t/ )                         { @c = split /\t+/, $l; }
+    elsif ( $l =~ /^(.+?)\s*(?::|：)\s*(.+)$/ ) { @c = ( $1, split /\s+/, $2 ); }
+    elsif ( $l =~ /\s{2,}/ )                     { @c = split /\s{2,}/, $l; }
+    else                                         { @c = split /\s+/, $l; }
+    s/^\s+|\s+$//g foreach @c;
+    @c = grep { $_ ne '' } @c;
+    return @c;
+}
+
+# 子程序，判断一个单元格是否为数值（可带括号、百分号）。
+sub is_numeric_cell {
+    my $c = shift;
+    return ( defined $c && $c =~ /^\(?[-+]?[\d.,]+\s*%?\)?$/ ) ? 1 : 0;
+}
+
+# 子程序，把多列文本整理成每一列都对齐的表格：第一列左对齐，数值列（包括其表头）右对齐，其余列左对齐；
+# 只有一列的行（标题、说明等）原样输出。
+sub print_column_table {
+    my $rows = shift;
+    my @tab = map { [ &split_columns($_) ] } @$rows;
+    my @multi = grep { @$_ >= 2 } @tab;
+    my $ncol = 0;
+    foreach my $c ( @multi ) { $ncol = scalar(@$c) if @$c > $ncol; }
+
+    my (@w, @is_num);
+    foreach my $j ( 0 .. $ncol - 1 ) {
+        $w[$j] = 0;
+        my @cells;
+        foreach my $c ( @multi ) {
+            next unless defined $c->[$j];
+            my $dw = &disp_width($c->[$j]);
+            $w[$j] = $dw if $dw > $w[$j];
+            push @cells, $c->[$j];
+        }
+        # 第一行可能是表头，不参与数值列的判断
+        my @body = @cells > 1 ? @cells[ 1 .. $#cells ] : @cells;
+        $is_num[$j] = ( $j > 0 && @body && !grep { !&is_numeric_cell($_) } @body ) ? 1 : 0;
+    }
+
+    foreach my $c ( @tab ) {
+        if ( @$c < 2 ) {
+            print OUT "        " . ( defined $c->[0] ? $c->[0] : "" ) . "\n";
+            next;
+        }
+        my @cells;
+        foreach my $j ( 0 .. $#{$c} ) {
+            my $pad = " " x ( $w[$j] - &disp_width($c->[$j]) );
+            push @cells, $is_num[$j] ? $pad . $c->[$j] : $c->[$j] . $pad;
+        }
+        my $line = join("   ", @cells);
+        $line =~ s/\s+$//;
+        print OUT "        $line\n";
+    }
+}
+
+# 子程序，用于统计GFF3文件中的基因数量（第3列为gene的行）
+sub count_genes {
+    my $file = shift;
+    return "NA" unless defined $file && -s $file;
+    my $num = 0;
+    open my $IN, "<", $file or return "NA";
+    while (<$IN>) {
+        next if /^#/;
+        my @f = split /\t/;
+        $num++ if @f >= 3 && $f[2] eq "gene";
+    }
+    close $IN;
+    return $num;
+}
+
+# 子程序，用于从BUSCO结果目录的short_summary文件中提取"C:..."统计行
+sub get_busco_line {
+    my $busco_dir = shift;
+    my ($summary) = glob("$busco_dir/short_summary*.txt");
+    return undef unless defined $summary && -s $summary;
+    my $result;
+    open my $IN, "<", $summary or return undef;
+    while (<$IN>) {
+        if ( /(C:\S+)/ ) { $result = $1; last; }
+    }
+    close $IN;
+    return $result;
+}
 
 # 子程序，用于执行调用的Linux命令。程序运行完毕后，生成.ok文件。
 sub execute_cmds {
@@ -34,9 +1303,109 @@ sub execute_cmds {
             print STDERR (localtime) . ": CMD: $_\n";
             system($_) == 0 or die "failed to execute: $_\n";
         }
-        open OUT, ">", "$ok_file" or die $!; close OUT;
+        open my $OK, ">", "$ok_file" or die $!; close $OK;   # 使用局部句柄，避免覆盖全局OUT
     }
 
     return 1;
 }
 
+# 子程序，用于并行执行多个单线程Linux命令（fork方式，同时运行的进程数不超过max_procs）。
+# 调用方式：&execute_cmds_parallel($max_procs, @cmds, $ok_file);
+# 所有命令都成功完成后才生成.ok文件；如有命令失败，等待其余命令结束后报错退出。
+sub execute_cmds_parallel {
+    my $ok_file   = pop @_;
+    my $max_procs = shift @_;
+    my @cmds      = @_;
+
+    $max_procs = 1 unless defined $max_procs && $max_procs >= 1;
+
+    if ( -e $ok_file ) {
+        foreach ( @cmds ) {
+            print STDERR "CMD(Skipped): $_\n";
+        }
+        return 1;
+    }
+
+    my %running;   # pid => cmd
+    my @failed;
+
+    my $reap_one = sub {
+        my $pid = wait();
+        return if $pid <= 0;
+        my $status = $?;
+        my $cmd = delete $running{$pid};
+        if ( defined $cmd && $status != 0 ) {
+            push @failed, $cmd;
+            print STDERR (localtime) . ": FAILED: $cmd\n";
+        }
+    };
+
+    foreach my $cmd ( @cmds ) {
+        # 达到并行上限时，等待任意一个子进程结束
+        while ( scalar(keys %running) >= $max_procs ) {
+            $reap_one->();
+        }
+        print STDERR (localtime) . ": CMD(parallel): $cmd\n";
+        my $pid = fork();
+        die "failed to fork: $!\n" unless defined $pid;
+        if ( $pid == 0 ) {
+            my $ret = system($cmd);
+            POSIX::_exit( $ret == 0 ? 0 : 1 );
+        }
+        $running{$pid} = $cmd;
+    }
+
+    # 等待所有剩余子进程结束
+    while ( scalar(keys %running) > 0 ) {
+        $reap_one->();
+    }
+
+    if ( @failed ) {
+        die "failed to execute " . scalar(@failed) . " parallel command(s):\n" . join("\n", @failed) . "\n";
+    }
+
+    open my $OK, ">", "$ok_file" or die $!; close $OK;
+    return 1;
+}
+
+########################################################################
+# 英文用法说明（放在文件最末尾，运行时通过DATA文件句柄读取）
+########################################################################
+__DATA__
+Usage:
+    perl outputResults [options] GETA_output_directory
+
+This program is the last step (Step 6) of the GETA gene prediction pipeline and is used to organize and output the gene prediction results. GETA_output_directory is the directory holding the outputs of all the GETA steps; the program reads the results in the 1.RepeatMasker, 2.homolog_prediction, 3.NGSReads_prediction, 4.augustus and 5.curate_gene_models sub-directories, and outputs: the final gene models (GFF3, GTF and various sequence files), the low-quality gene models, the repeat annotation and its statistics, the raw gene predictions based on homologous proteins / transcriptome reads / Augustus, and (optionally) the BUSCO assessment results. It also collects the statistics of every step into the ${out_prefix}.gene_prediction.summary file, which is used to trace the reliability of the gene prediction results.
+
+Usage instructions:
+    (1) The program calls GFF3Clear, gff3_to_sequences.pl, gff3ToGtf.pl and check_gene_model_integrity.pl, which must be located in the same directory as this program; when --BUSCO_lineage_dataset is set, the busco command must also be available in the environment variable PATH.
+    (2) The output files specified by --out_prefix are stored according to that prefix; the .ok files of the steps, the BUSCO results, and the intermediate files such as the integrity_check and summary_parts directories are stored in the 6.output_gene_models directory under the GETA output directory.
+    (3) The program supports resuming from breakpoints: an .ok file is generated when a step is finished, and finished steps are skipped when the program is run again; for the sub-steps of the gene models integration and filtering statistics, the results are saved in the summary_parts directory, and they are recomputed automatically when their input files are updated, or you can delete the corresponding .ok file to force a recomputation.
+    (4) When an input result file is absent or empty, the corresponding output is skipped automatically and is shown as NA in the statistics.
+
+    --cpu <int>    default: 4
+    Set the number of threads, used by GFF3Clear, by the parallel conversion of GFF3 files into protein sequences, by the parallel integrity checks of the gene models, and by BUSCO.
+
+    --genetic_code <int>    default: 1
+    Set the genetic code, used to extract the gene sequences and to check the integrity of the gene models (the start codons and stop codons are determined from it). For the corresponding values, please refer to NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi . For example: 1 is the standard code, 11 is the bacterial/archaeal/plant plastid code, and 2 is the vertebrate mitochondrial code.
+
+    --out_prefix <string>    default: None (required)
+    Set the prefix (which may contain a path) of the output files; all output files are named with this prefix, such as ${out_prefix}.geneModels.gff3, ${out_prefix}.bestGeneModels.gff3 (only one transcript is kept for each gene), ${out_prefix}.geneModels_lowQuality.gff3, ${out_prefix}.geneModels.gtf and ${out_prefix}.repeat.gff3.
+
+    --gene_prefix <string>    default: None (required)
+    Set the prefix of the final gene IDs; a gene ID consists of this prefix followed by a 6-digit number. The prefix of the low-quality gene IDs is this prefix with "gene" removed and "LqGene" appended; for example, with --gene_prefix OsGene the prefix of the low-quality genes is OsLqGene.
+
+    --genome <string>    default: None (required)
+    Set the genome sequence file (FASTA format).
+
+    --BUSCO_lineage_dataset <string>    default: None (BUSCO analysis is skipped if not set)
+    Set the path of the BUSCO lineage dataset; multiple datasets are separated by commas. BUSCO is run in offline mode (--offline) for each dataset, and the results are collected into the BUSCO_summary.<dataset name>.txt file, so the datasets must be downloaded in advance.
+
+    --busco_for_all_gff3    default: None
+    If set, besides the final gene models, the raw prediction GFF3 files (homolog-based, transcriptome-based, Augustus-based, and those produced during the integration) are also converted into protein sequences and analysed with BUSCO, so that the gene prediction methods can be compared; it should be used together with --BUSCO_lineage_dataset.
+
+    --help    default: None
+    Display the English usage and exit.
+
+    --chinese_help    default: None
+    显示中文用法说明并退出。

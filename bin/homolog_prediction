@@ -41,7 +41,7 @@ my $usage_cn = <<'USAGE';
        (c) 过滤：A和B类基因模型不过滤。C和D类基因模型满足下列任一条件则保留：gene行的Supported_times >= 阈值1；至少有一个intron的Supported_times >= 阈值2；gene行和intron行都没有Supported_times信息。其余的C和D类基因模型被过滤；
        (d) 标记：对过滤后保留的所有类型（A、B、C、D）的基因模型，若不满足"gene行的Supported_times >= 阈值1 且 至少有一个intron的Supported_times >= 阈值2"，则在gene行（GFF3第9列）添加标签 Low_support=原因，表示该基因模型的支持度不足（含没有Supported_times信息的基因模型），需要进一步验证是否为真正的基因。原因取值：gene（仅gene行低于阈值1）、intron（仅intron不满足阈值2，包括没有intron的基因模型）、gene_intron（gene行和intron都不满足）、no_info（gene行和intron行都没有Supported_times信息）。
        过滤并标记后的结果保存在 results/merge_filtered_classified_filtered.gff3，基因模型保持原有顺序。
-    5. 若指定--output_raw_GFF3，则直接将 results/merge_filtered_classified_filtered.gff3（整合去冗余、已分类、已按Supported_times过滤C和D类基因模型并已标记Low_support、未强制补齐，基因模型保持原有顺序）硬链接到--output_raw_GFF3指定的路径，不经过GFF3Clear处理，也不重新命名基因ID（目标路径已存在时会先删除；若硬链接失败，例如目标路径与临时文件夹不在同一文件系统，则退而复制该文件）。
+    5. 若指定--output_raw_GFF3，则调用GFF3Clear（--genome、--genetic_code、--cpu传递给该程序）对 results/merge_filtered_classified_filtered.gff3（整合去冗余、已分类、已按Supported_times过滤C和D类基因模型并已标记Low_support、未强制补齐）进行整理：检查和修正GFF3格式、按基因组位置排序，并根据基因组序列在mRNA行和gene行添加准确的Integrity信息（complete、5prime_partial、3prime_partial、internal；有内部终止密码子或移码时追加internal_stop、frameshift）。该步骤不重新命名基因ID（不使用--gene_prefix，基因ID为整合去冗余步骤给出的ID），不去冗余，不强制补齐末端。结果保存在 results/merge_filtered_classified_filtered.clear.gff3，并复制到--output_raw_GFF3指定的路径（目标路径已存在时先删除）；复制后程序按步骤4的阈值再检查一次Low_support标签（标签已存在时不变，缺失时补上）。
     6. 调用fillingEndsOfGeneModels对步骤4过滤并标记后保留的基因模型强制补齐（--genetic_code传递给该程序），得到 results/merge_filtered_classified_filtered_filled.gff3（强制补齐不改变基因模型的类型）；再调用GFF3Clear检查和修正GFF3格式、按基因组位置排序并重新编号（--genome、--gene_prefix、--genetic_code、--cpu传递给该程序；GFF3Clear不对重叠的基因模型去冗余，去冗余已在步骤2完成），得到 results/final.clear.gff3。为保证Low_support标签不因下游程序改写gene行而丢失，程序随后按步骤4的阈值对最终结果再检查一次该标签（标签已存在时不变，缺失时补上）。结果输出到标准输出。
     7. 若指定--output_alignment_GFF3，则输出各来源比对结果去重后按基因组位置排序的合并。
     8. 程序结束时在标准错误输出中给出最终基因模型的统计信息，包括四类基因模型的数量、各来源（预测方法，GFF3第2列）的基因模型数量，以及各预测方法在A、B、C、D四类基因模型中的数量矩阵；同时给出Supported_times过滤与标记的统计信息：两个阈值、C和D类基因模型的保留和过滤数量、被标记Low_support的基因模型数量（按类别、按原因、按预测方法统计）。
@@ -49,7 +49,7 @@ my $usage_cn = <<'USAGE';
 断点续跑（--tmp_dir）说明:
     程序在临时文件夹中为每个步骤记录"输入文件内容指纹 + 相关参数"（*.sig）和完成标记（*.ok）。程序被中断（Ctrl-C、kill、断电、命令报错）后，使用相同的 --tmp_dir 重新输入命令即可继续运行，已经完成的步骤会被跳过，未完成的步骤从其内部可续跑的位置继续。
     (1) 输入文件的指纹由文件大小和分布在全文件的多个数据块的MD5值组成，不依赖文件修改时间，复制或touch文件不会导致重算；
-    (2) 再次运行时修改--method：已经完成的来源（mmseqs、miniprot、spaln）及其结果被直接复用，只运行新增的来源，例如先运行--method exonerate，再运行--method exonerate,miniprot,spaln，则exonerate部分全部跳过，只运行miniprot和spaln；同一个mmseqs来源内新增或减少 exonerate/genewise/gth 时，MMseqs2比对和已经完成的"基因区域块 x 预测方法"结果被复用，只计算新增的方法，然后重新挑选最优基因模型；去掉某个来源后，其结果保留在临时文件夹中，之后再加回来仍可复用；最终整合、分类、过滤与标记、补齐总是按当前--method重新进行（整合步骤的输入文件内容变化时才会重算耗时的整合；过滤并标记后的基因模型文件内容变化时才会重算耗时的补齐；分类、过滤和标记很快，每次都会重做）；
+    (2) 再次运行时修改--method：已经完成的来源（mmseqs、miniprot、spaln）及其结果被直接复用，只运行新增的来源，例如先运行--method exonerate，再运行--method exonerate,miniprot,spaln，则exonerate部分全部跳过，只运行miniprot和spaln；同一个mmseqs来源内新增或减少 exonerate/genewise/gth 时，MMseqs2比对和已经完成的"基因区域块 x 预测方法"结果被复用，只计算新增的方法，然后重新挑选最优基因模型；去掉某个来源后，其结果保留在临时文件夹中，之后再加回来仍可复用；最终整合、分类、过滤与标记、补齐总是按当前--method重新进行（整合步骤的输入文件内容变化时才会重算耗时的整合；过滤并标记后的基因模型文件内容变化时才会重算耗时的补齐和--output_raw_GFF3的整理；分类、过滤和标记很快，每次都会重做）；
     (3) 修改其它参数时，只重算受该参数影响的步骤：例如修改--identity/--evalue/--homolog_coverage/--HSP_*只重做MMseqs2 Hit过滤而不重做耗时的mmseqs search；修改--overlap_coverage只重做miniprot/spaln比对之后的步骤，而不重新比对；修改--threshold_ratio_of_gene_Supported_times或--threshold_ratio_of_intron_Supported_times会重做很快的过滤和标记，仅当过滤并标记后的基因模型文件内容发生变化（保留的基因模型或Low_support标签发生变化）时才会重做耗时的补齐；--cpu不影响中间结果，不会触发重算；--gene_prefix只会触发很快的GFF3Clear重命名步骤，不会重做整合和补齐；显式设置为默认值的参数（如--overlap_coverage 0.3）与不设置该参数等价，不会触发重算；
     (4) 同一个--tmp_dir同一时间只允许一个程序使用（文件锁）；程序被中断或失败时，会在末尾提示续跑所需的--tmp_dir；
     (5) 若--tmp_dir由旧版本程序生成，旧版本的完成标记格式或整合流程不同，无法确认其参数，相应的步骤会被重新计算一次；
@@ -66,7 +66,7 @@ my $usage_cn = <<'USAGE';
     设置基因预测的方法，可选exonerate、genewise、gth、miniprot、spaln或all（使用全部五种）。使用多种方法时用逗号分割，例如 exonerate,miniprot,spaln。使用相同的--tmp_dir重新运行并修改该参数时，已完成的方法结果会被复用（见上文"断点续跑"说明）。
 
     --cpu <int>    默认值: 8
-    设置各个软件使用的线程数或并行进程数。
+    设置各个软件使用的线程数或并行进程数（包括所有对GFF3Clear的调用）。
 
     --genetic_code <int>    默认值: 1
     设置遗传密码，起始密码子和终止密码子由遗传密码自动确定（该参数同时传递给各个预测流程、fillingEndsOfGeneModels、GFF3_merging_and_removing_redundancy和GFF3Clear，也用于本程序的分类步骤），参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi 。支持的遗传密码表编号为：1~6、9~16、21~33。
@@ -79,10 +79,10 @@ my $usage_cn = <<'USAGE';
 
     [二、输出参数]
     --gene_prefix <string>    默认值: homolog
-    设置最终基因ID的前缀。
+    设置最终基因ID的前缀（不影响--output_raw_GFF3的基因ID）。
 
     --output_raw_GFF3 <string>    默认值: 无
-    输出多个来源整合去冗余、已分类、已按Supported_times过滤C和D类基因模型并已标记Low_support、未对末端强制填补的GFF3文件，是同源蛋白预测的原始结果。该文件是 results/merge_filtered_classified_filtered.gff3 的硬链接（不经过GFF3Clear处理，基因模型保持原有顺序，基因ID为整合去冗余步骤给出的ID）；硬链接失败时（例如跨文件系统）改为复制。
+    输出多个来源整合去冗余、已分类、已按Supported_times过滤C和D类基因模型并已标记Low_support、未对末端强制填补的GFF3文件，是同源蛋白预测的原始结果。该文件由GFF3Clear对 results/merge_filtered_classified_filtered.gff3 整理得到：修正GFF3格式、按基因组位置排序，并添加准确的Integrity信息；不重新命名基因ID（基因ID为整合去冗余步骤给出的ID）。
 
     --output_alignment_GFF3 <string>    默认值: 无
     输出多个来源整合后的同源蛋白比对GFF3文件，包含同源蛋白对基因组序列的比对信息（一个基因区域输出每个同源蛋白的最优比对）。
@@ -461,13 +461,14 @@ die "Error: can not create the temporary directory $tmp_dir.\n" unless -d $tmp_d
 my $res_dir = "$tmp_dir/results";
 make_path($res_dir) unless -d $res_dir;
 
-# 分类结果和过滤（并标记）结果的路径
+# 分类结果、过滤（并标记）结果以及--output_raw_GFF3经GFF3Clear整理后的结果的路径
 my $classified_gff3 = "$res_dir/merge_filtered_classified.gff3";
 my $filtered_gff3   = "$res_dir/merge_filtered_classified_filtered.gff3";
+my $raw_clear_gff3  = "$res_dir/merge_filtered_classified_filtered.clear.gff3";
 
-# --output_raw_GFF3不能指向临时文件夹中的内部文件本身（会在硬链接前被删除）
+# --output_raw_GFF3不能指向临时文件夹中的内部文件本身（会在复制前被删除）
 if (defined $o{output_raw_GFF3}) {
-    foreach my $internal ($classified_gff3, $filtered_gff3) {
+    foreach my $internal ($classified_gff3, $filtered_gff3, $raw_clear_gff3) {
         die "Error: --output_raw_GFF3 must not be the internal file $internal .\n"
             if $o{output_raw_GFF3} eq $internal;
     }
@@ -688,6 +689,8 @@ die "Error: no gene model was predicted by any method, please check the logs in 
 
 # GFF3Clear不再提供--coverage参数（不对重叠的基因模型去冗余），这里只传递基因组、基因ID前缀、遗传密码和线程数
 my $clear_extra = "--genome $input_genome --gene_prefix $o{gene_prefix} --genetic_code $o{genetic_code} --cpu $o{cpu}";
+# --output_raw_GFF3的整理：不重命名基因ID（不传--gene_prefix），不加--no_attr_add（添加Integrity信息）
+my $raw_clear_extra = "--genome $input_genome --genetic_code $o{genetic_code} --cpu $o{cpu}";
 
 ########################################################################
 # 6. 整合各来源最原始的基因模型并去冗余
@@ -785,21 +788,30 @@ print STDERR "$n_tagged gene models were marked with $LOW_SUPPORT_TAG in column 
 
 ########################################################################
 # 9. 输出raw GFF3（Supported_times过滤并标记Low_support之后、强制补齐之前）
+#    调用GFF3Clear整理（修正格式、按基因组位置排序、添加准确的Integrity信息，不重命名基因ID）
 ########################################################################
 if (defined $o{output_raw_GFF3}) {
-    print STDERR "\n9. linking the raw GFF3 (merged, classified, filtered by Supported_times and marked with $LOW_SUPPORT_TAG, without filling the ends of gene models, not processed by GFF3Clear).\n";
+    print STDERR "\n9. processing the raw GFF3 (merged, classified, filtered by Supported_times and marked with $LOW_SUPPORT_TAG, without filling the ends of gene models) with GFF3Clear to add the Integrity information.\n";
     my $target = $o{output_raw_GFF3};
-    # 目标路径已存在时先删除（包括上次运行留下的硬链接），再建立硬链接
-    unlink $target if -e $target || -l $target;
-    if (link($filtered_gff3, $target)) {
-        print STDERR "Raw GFF3 ($filtered_gff3) was hard-linked to $target.\n";
+    if ($n_after > 0) {
+        &run_stage(
+            name => "g.rawclear",
+            levels => [ { desc => "the filtered (and marked) gene models, the genome or the genetic code",
+                          sig  => join("|", "filtered=" . &file_fp($filtered_gff3), "genome=$genome_fp", "genetic_code=$o{genetic_code}") } ],
+            outputs => [$raw_clear_gff3],
+            cmds => [ "$bin_path/GFF3Clear $raw_clear_extra $filtered_gff3 > $raw_clear_gff3 2> $tmp_dir/g.rawclear.log" ],
+        );
     }
     else {
-        my $link_err = $!;
-        print STDERR "Warning: can not create a hard link ($link_err), the file is copied instead.\n";
-        copy($filtered_gff3, $target) or die "Error: can not copy $filtered_gff3 to $target, $!\n";
-        print STDERR "Raw GFF3 ($filtered_gff3) was copied to $target.\n";
+        print STDERR "Warning: no gene model is left after filtering, the raw GFF3 contains no gene model.\n";
+        &write_text($raw_clear_gff3, "##gff-version 3\n");
     }
+    # 目标路径已存在时先删除（包括旧版本留下的硬链接），再复制
+    unlink $target if -e $target || -l $target;
+    copy($raw_clear_gff3, $target) or die "Error: can not copy $raw_clear_gff3 to $target, $!\n";
+    # 保险：GFF3Clear可能改写gene行的属性，这里按同样的阈值再检查一次Low_support标签（标签已存在时不变，缺失时补上）
+    &tag_low_support($target, $thr_gene, $thr_intron) if $n_after > 0;
+    print STDERR "Raw GFF3 ($raw_clear_gff3) was copied to $target.\n";
 }
 
 ########################################################################
@@ -824,7 +836,7 @@ if ($n_after > 0) {
         levels => [ { desc => "the filled gene models or the GFF3Clear renaming parameters",
                       sig  => join("|", "filled=" . &file_fp($filled_gff3), "genome=$genome_fp", "genetic_code=$o{genetic_code}", "prefix=$o{gene_prefix}") } ],
         outputs => [$clear_gff3],
-        cmds => [ "$bin_path/GFF3Clear --no_attr_add $clear_extra $filled_gff3 > $clear_gff3 2> $tmp_dir/g.clear.log" ],
+        cmds => [ "$bin_path/GFF3Clear $clear_extra $filled_gff3 > $clear_gff3 2> $tmp_dir/g.clear.log" ],
     );
     copy($clear_gff3, $final_gff3) or die "Error: can not copy $clear_gff3 to $final_gff3, $!\n";
     # 保险：补齐和GFF3Clear可能改写gene行的属性，这里按同样的阈值对最终结果再检查一次Low_support标签
@@ -1317,7 +1329,7 @@ sub evaluate_support {
 # 过滤C和D类基因模型：满足下列任一条件则保留：
 #   gene行的Supported_times >= 阈值1；至少一个intron的Supported_times >= 阈值2；gene行和intron行都没有Supported_times信息。
 # A和B类基因模型不过滤。基因模型保持输入文件中的原有顺序。
-# 结果先写到临时文件再rename：若$out已被硬链接到--output_raw_GFF3，rename使旧的硬链接与新文件脱离，不会在写入过程中改动用户的输出文件。
+# 结果先写到临时文件再rename，不会在写入过程中改动已有的文件。
 sub filter_gff3_by_support {
     my ($in, $out, $t1, $t2) = @_;
     my @genes = &read_gff3_genes($in);
@@ -1341,7 +1353,7 @@ sub filter_gff3_by_support {
 # 对不满足"gene行的Supported_times >= 阈值1 且 至少一个intron的Supported_times >= 阈值2"的基因模型（所有类型），
 # 在gene行第9列添加标签 Low_support=原因，原因为 gene / intron / gene_intron / no_info。原地改写文件，返回被标记的基因模型数量。
 # 该函数是幂等的：标签已存在时会被同样的值替换（set_attr替换同名标签）。
-# 同样先写临时文件再rename，不会改动已硬链接到其它路径的旧文件。
+# 同样先写临时文件再rename。
 sub tag_low_support {
     my ($file, $t1, $t2) = @_;
     my @genes = &read_gff3_genes($file);
@@ -1803,7 +1815,7 @@ Workflow:
        (c) Filtering: class A and B gene models are never filtered. A class C or D gene model is kept if any of the following holds: the Supported_times of its gene line >= threshold 1; at least one of its introns has Supported_times >= threshold 2; neither its gene line nor its intron lines have Supported_times information. All other class C and D gene models are removed;
        (d) Marking: for all the gene models kept after the filtering (classes A, B, C and D), if the condition "Supported_times of the gene line >= threshold 1 AND at least one intron with Supported_times >= threshold 2" is not met, the tag Low_support=reason is added to the gene line (column 9 of the GFF3), indicating that the gene model has insufficient support (this includes gene models without any Supported_times information) and needs further validation to decide whether it is a real gene. The reason is one of: gene (only the gene line is lower than threshold 1), intron (only the introns fail threshold 2, including gene models without introns), gene_intron (both fail), no_info (neither the gene line nor the intron lines have Supported_times).
        The filtered and marked result is saved in results/merge_filtered_classified_filtered.gff3, keeping the original order of the gene models.
-    5. If --output_raw_GFF3 is specified, results/merge_filtered_classified_filtered.gff3 (merged, classified, class C/D gene models filtered by Supported_times and marked with Low_support, ends not filled, gene models in their original order) is directly hard-linked to the path given by --output_raw_GFF3, without any GFF3Clear processing and without renaming the gene IDs (an existing file at the target path is removed first; if the hard link can not be created, e.g. the target is on a different file system from the temporary directory, the file is copied instead).
+    5. If --output_raw_GFF3 is specified, GFF3Clear (with --genome, --genetic_code and --cpu passed to it) processes results/merge_filtered_classified_filtered.gff3 (merged, classified, class C/D gene models filtered by Supported_times and marked with Low_support, ends not filled): it checks and corrects the GFF3 format, sorts the genes by genome position, and adds accurate Integrity information to the mRNA lines and the gene lines according to the genome sequence (complete, 5prime_partial, 3prime_partial, internal; internal_stop and frameshift are appended if present). This step does not rename the gene IDs (--gene_prefix is not used; the gene IDs are those given by the merging step), does not remove redundancy and does not fill the ends of the gene models. The result is saved in results/merge_filtered_classified_filtered.clear.gff3 and copied to the path given by --output_raw_GFF3 (an existing file at the target path is removed first); after copying, the program checks the Low_support tag once more with the thresholds of step 4 (an existing tag is unchanged, a missing one is added).
     6. fillingEndsOfGeneModels force-fills the ends of the gene models kept (and marked) in step 4 (--genetic_code is passed to it), giving results/merge_filtered_classified_filtered_filled.gff3 (filling does not change the class); GFF3Clear then checks and corrects the GFF3 format, sorts the genes by genome position and renames them (--genome, --gene_prefix, --genetic_code and --cpu are passed to it; GFF3Clear does not remove redundant overlapping gene models, the redundancy has already been removed in step 2), giving results/final.clear.gff3. To make sure that the Low_support tag is not lost when the downstream programs rewrite the gene lines, the program then checks the tag once more on the final result with the thresholds of step 4 (an existing tag is unchanged, a missing one is added). The result is written to STDOUT.
     7. If --output_alignment_GFF3 is specified, the alignment GFF3 is the combination of the alignment results of all sources, de-duplicated and sorted by genome position.
     8. At the end, the program prints the statistics of the final gene models to STDERR: the number of gene models in each of the four classes, the number of gene models of each source (prediction method, column 2 of the GFF3), and a matrix of the number of gene models of each method in each of the classes A, B, C and D; it also prints the statistics of the Supported_times filtering and marking: the two thresholds, the number of class C and D gene models kept and removed, and the number of gene models marked with Low_support (by class, by reason and by method).
@@ -1811,7 +1823,7 @@ Workflow:
 Resuming an interrupted run (--tmp_dir):
     For each step the program records in the temporary directory a signature (content fingerprints of the input files + the relevant parameters, *.sig) and a completion mark (*.ok). After the program is interrupted (Ctrl-C, kill, power failure, or a failed command), run the same command again with the same --tmp_dir to continue: the finished steps are skipped, and an unfinished step continues from the position where its own program can resume.
     (1) The fingerprint of an input file consists of its size and the MD5 values of several data blocks spread over the whole file. It does not depend on the modification time, so copying or touching a file does not cause recomputation;
-    (2) When --method is changed in a re-run: the finished sources (mmseqs, miniprot, spaln) and their results are reused directly and only the newly added sources are run, for example, after running --method exonerate, running --method exonerate,miniprot,spaln skips the whole exonerate part and only runs miniprot and spaln; when exonerate/genewise/gth is added to or removed from the mmseqs source, the MMseqs2 alignment and the finished "gene region chunk x prediction method" results are reused, only the newly added method is calculated, and then the best gene model of each region is picked out again; after a source is removed, its results stay in the temporary directory and can still be reused if it is added back later; the final merging, classification, filtering and marking, and filling are always redone for the current --method (the time-consuming merging is recomputed only if its input changed; the time-consuming filling is recomputed only if the content of the filtered and marked gene model file changed; classification, filtering and marking are fast and are redone in every run);
+    (2) When --method is changed in a re-run: the finished sources (mmseqs, miniprot, spaln) and their results are reused directly and only the newly added sources are run, for example, after running --method exonerate, running --method exonerate,miniprot,spaln skips the whole exonerate part and only runs miniprot and spaln; when exonerate/genewise/gth is added to or removed from the mmseqs source, the MMseqs2 alignment and the finished "gene region chunk x prediction method" results are reused, only the newly added method is calculated, and then the best gene model of each region is picked out again; after a source is removed, its results stay in the temporary directory and can still be reused if it is added back later; the final merging, classification, filtering and marking, and filling are always redone for the current --method (the time-consuming merging is recomputed only if its input changed; the time-consuming filling and the GFF3Clear processing of --output_raw_GFF3 are recomputed only if the content of the filtered and marked gene model file changed; classification, filtering and marking are fast and are redone in every run);
     (3) When other parameters are changed, only the steps affected by them are recomputed: for example, changing --identity/--evalue/--homolog_coverage/--HSP_* only redoes the MMseqs2 Hit filtering and not the time-consuming mmseqs search; changing --overlap_coverage only redoes the steps after the miniprot/spaln alignment without realigning; changing --threshold_ratio_of_gene_Supported_times or --threshold_ratio_of_intron_Supported_times redoes the fast filtering and marking, and the time-consuming filling is redone only if the content of the filtered and marked file changes (i.e. the kept gene models or the Low_support tags change); --cpu does not affect the intermediate results and never triggers recomputation; --gene_prefix only triggers the fast GFF3Clear renaming step and does not redo the merging or the filling; a parameter explicitly set to its default value (e.g. --overlap_coverage 0.3) is equivalent to not setting it and does not trigger recomputation;
     (4) Only one program may use the same --tmp_dir at a time (file lock); when the program is interrupted or fails, it prints the --tmp_dir needed for resuming at the end;
     (5) If the --tmp_dir was generated by an older version of the program, the completion records and the workflow differ and their parameters can not be verified, so the corresponding steps are recomputed once;
@@ -1828,7 +1840,7 @@ Options:
     Set the gene prediction methods. The value can be exonerate, genewise, gth, miniprot, spaln or all (use all five methods). Use commas to separate multiple methods, e.g. exonerate,miniprot,spaln. When the program is re-run with the same --tmp_dir and this parameter is changed, the results of the finished methods are reused (see "Resuming an interrupted run" above).
 
     --cpu <int>    default: 8
-    Set the number of threads or parallel processes used by each software.
+    Set the number of threads or parallel processes used by each software (including every call of GFF3Clear).
 
     --genetic_code <int>    default: 1
     Set the genetic code. The start codons and stop codons are determined automatically from the genetic code (this parameter is passed to the prediction pipelines, fillingEndsOfGeneModels, GFF3_merging_and_removing_redundancy and GFF3Clear, and is also used by the classification step of this program). Please refer to NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi. The supported genetic code numbers are: 1-6, 9-16, 21-33.
@@ -1841,10 +1853,10 @@ Options:
 
     [2. Output options]
     --gene_prefix <string>    default: homolog
-    Set the prefix of the final gene IDs.
+    Set the prefix of the final gene IDs (it does not affect the gene IDs of --output_raw_GFF3).
 
     --output_raw_GFF3 <string>    default: None
-    Output the merged, redundancy-removed and classified GFF3 file of all sources, in which class C and D gene models have been filtered by Supported_times, the gene models with low support have been marked with Low_support, and the ends of the gene models are not forcibly filled. It is the raw result of the homology-based prediction. The file is a hard link to results/merge_filtered_classified_filtered.gff3 (not processed by GFF3Clear; the gene models keep their original order and the gene IDs given by the merging step); if the hard link can not be created (e.g. across file systems), the file is copied instead.
+    Output the merged, redundancy-removed and classified GFF3 file of all sources, in which class C and D gene models have been filtered by Supported_times, the gene models with low support have been marked with Low_support, and the ends of the gene models are not forcibly filled. It is the raw result of the homology-based prediction. The file is obtained by processing results/merge_filtered_classified_filtered.gff3 with GFF3Clear: the GFF3 format is checked and corrected, the genes are sorted by genome position, and accurate Integrity information is added; the gene IDs are not renamed (they are the IDs given by the merging step).
 
     --output_alignment_GFF3 <string>    default: None
     Output the merged homolog alignment GFF3 file of all sources, containing the alignments of the homologous proteins to the genome (the best alignment of each homologous protein is output for each gene region).

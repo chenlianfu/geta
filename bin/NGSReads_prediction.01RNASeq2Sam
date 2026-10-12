@@ -384,7 +384,7 @@ if ( $need_alignment ) {
                 $number ++;
                 my $code = ("0" x (length($lib_num) - length($number))) . $number;
                 push @prefix, "reads$code";
-                push @cmds, "java -jar $software_dir/Trimmomatic-0.38/trimmomatic-0.38.jar PE -threads 16 $pair->[0] $pair->[1] $trim_dir/reads$code.1.fastq $trim_dir/reads$code.1.unpaired.fastq $trim_dir/reads$code.2.fastq $trim_dir/reads$code.2.unpaired.fastq$illumina_clip $trimmomatic_opts &> $trim_dir/reads$code.trimmomatic.log";
+                push @cmds, "java -jar $software_dir/Trimmomatic-0.38/trimmomatic-0.38.jar PE -threads 16 $pair->[0] $pair->[1] $trim_dir/reads$code.1.fastq $trim_dir/reads$code.1.unpaired.fastq $trim_dir/reads$code.2.fastq $trim_dir/reads$code.2.unpaired.fastq$illumina_clip $trimmomatic_opts > $trim_dir/reads$code.trimmomatic.log 2>&1";
             }
             open my $cmdfh, ">", "$trim_dir/command.trimmomatic_pe.list" or die "Can not create file $trim_dir/command.trimmomatic_pe.list, $!\n";
             print $cmdfh "$_\n" foreach @cmds;
@@ -420,7 +420,7 @@ if ( $need_alignment ) {
                 $number ++;
                 my $code = ("0" x (length($lib_num) - length($number))) . $number;
                 push @prefix, "reads_se$code";
-                push @cmds, "java -jar $software_dir/Trimmomatic-0.38/trimmomatic-0.38.jar SE -threads 16 $file $trim_dir/reads_se$code.fastq$illumina_clip $trimmomatic_opts &> $trim_dir/reads_se$code.trimmomatic.log";
+                push @cmds, "java -jar $software_dir/Trimmomatic-0.38/trimmomatic-0.38.jar SE -threads 16 $file $trim_dir/reads_se$code.fastq$illumina_clip $trimmomatic_opts > $trim_dir/reads_se$code.trimmomatic.log 2>&1";
             }
             open my $cmdfh, ">", "$trim_dir/command.trimmomatic_se.list" or die "Can not create file $trim_dir/command.trimmomatic_se.list, $!\n";
             print $cmdfh "$_\n" foreach @cmds;
@@ -523,12 +523,12 @@ if ( $need_alignment ) {
             my @cmds;
             for my $i ( 1 .. scalar(@pe1_chunks) ) {
                 my $code = ("0" x (length($o{chunk_num}) - length($i))) . $i;
-                push @cmds, "STAR --genomeDir $align_dir --readFilesIn $pe1_chunks[$i-1] $pe2_chunks[$i-1] --runThreadN $cpu_per_chunk --outSAMtype BAM Unsorted --outFileNamePrefix $align_dir/pe_chunk${code}_ $star_opts$extra_star_opt &> $align_dir/star_pe.chunk$code.log";
+                push @cmds, "STAR --genomeDir $align_dir --readFilesIn $pe1_chunks[$i-1] $pe2_chunks[$i-1] --runThreadN $cpu_per_chunk --outSAMtype BAM Unsorted --outFileNamePrefix $align_dir/pe_chunk${code}_ $star_opts$extra_star_opt > $align_dir/star_pe.chunk$code.log 2>&1";
                 push @aligner_outputs, "$align_dir/pe_chunk${code}_Aligned.out.bam";
             }
             for my $i ( 1 .. scalar(@se_chunks) ) {
                 my $code = ("0" x (length($o{chunk_num}) - length($i))) . $i;
-                push @cmds, "STAR --genomeDir $align_dir --readFilesIn $se_chunks[$i-1] --runThreadN $cpu_per_chunk --outSAMtype BAM Unsorted --outFileNamePrefix $align_dir/se_chunk${code}_ $star_opts$extra_star_opt &> $align_dir/star_se.chunk$code.log";
+                push @cmds, "STAR --genomeDir $align_dir --readFilesIn $se_chunks[$i-1] --runThreadN $cpu_per_chunk --outSAMtype BAM Unsorted --outFileNamePrefix $align_dir/se_chunk${code}_ $star_opts$extra_star_opt > $align_dir/star_se.chunk$code.log 2>&1";
                 push @aligner_outputs, "$align_dir/se_chunk${code}_Aligned.out.bam";
             }
             die "Error: no clean read is available for STAR alignment.\n" unless @cmds;
@@ -726,7 +726,7 @@ sub build_index {
     }
     my $build_cpu = $o{cpu} > 80 ? 80 : $o{cpu};
     if ( $o{aligner} eq 'hisat2' ) {
-        &run_cmd("hisat2-build -p $build_cpu $hisat2_index_opts $input_genome $dir/genome &> $dir/hisat2-build.log");
+        &run_cmd("hisat2-build -p $build_cpu $hisat2_index_opts $input_genome $dir/genome > $dir/hisat2-build.log 2>&1");
     }
     else {
         my ($genome_len, $seq_num) = &get_genome_length_and_seq_num($input_genome);
@@ -748,7 +748,7 @@ sub build_index {
             $star_ram = 4000000000 if $star_ram < 4000000000;
             $auto_opts .= " --limitGenomeGenerateRAM $star_ram";
         }
-        &run_cmd("STAR --runMode genomeGenerate --genomeDir $dir --genomeFastaFiles $input_genome --runThreadN $build_cpu$auto_opts $star_index_opts --outFileNamePrefix $dir/star-build_ &> $dir/star-build.log");
+        &run_cmd("STAR --runMode genomeGenerate --genomeDir $dir --genomeFastaFiles $input_genome --runThreadN $build_cpu$auto_opts $star_index_opts --outFileNamePrefix $dir/star-build_ > $dir/star-build.log 2>&1");
     }
     open my $ok, ">", $ok_file or die "Error: can not create file $ok_file, $!\n";
     close $ok;

@@ -10,7 +10,7 @@ use POSIX ();
 ########################################################################
 my $usage_cn = <<'USAGE';
 名称:
-    __PROG__ - 对带可变剪接的基因模型进行ORF分析，为没有CDS的转录本添加CDS和UTR信息；找不到合格ORF的转录本改为lncRNA。
+    __PROG__ - 对带可变剪接的基因模型进行ORF分析，为没有CDS的转录本添加CDS和UTR信息；找不到合格ORF的转录本改为lnc_RNA。
 
 用法:
     __PROG__ [参数] --genome genome.fasta geneModels.l.gff3 > geneModels.m.gff3
@@ -23,11 +23,11 @@ my $usage_cn = <<'USAGE';
     (2) 没有CDS的mRNA转录本(通常是新增的可变剪接转录本)根据exon提取转录本序列(负链自动反向互补)，并枚举3个读码框中的所有ORF：完整ORF(起始密码子到终止密码子)、3'端不完整ORF(有起始密码子无终止密码子)、5'端不完整ORF(位于序列起始处，无起始密码子)。
     (3) 将每个候选ORF映射回基因组，计算其与参考转录本CDS在"相同密码子相位"上的重叠碱基数。候选ORF依次按"与参考CDS同相位重叠碱基数、完整性、ORF长度"从高到低排序，并从前往后选取第一个合格的ORF：完整、蛋白长度不低于--min_protein_length、CDS长度不低于--min_cds_ratio乘以参考转录本最长CDS(基因没有参考转录本时不检查该项)。因此可变剪接转录本会优先沿用参考蛋白的阅读框，而不会被偶然出现的更长ORF取代。
     (4) 找到合格ORF的转录本重新生成CDS、exon、five_prime_UTR、three_prime_UTR和intron(ID命名规则与GFF3Clear一致)，并更新mRNA第九列的Integrity标签。
-    (5) 没有找到合格ORF的转录本，其feature name(第三列)修改为lncRNA，不给出CDS和UTR信息，仅重新生成exon和intron，并删除第九列的Integrity标签；这些转录本仍保留在标准输出的原基因中，基因范围不变。
+    (5) 没有找到合格ORF的转录本，其feature name(第三列)修改为lnc_RNA(GFF3标准中lncRNA的名称)，不给出CDS和UTR信息，仅重新生成exon和intron，并删除第九列的Integrity标签；这些转录本仍保留在标准输出的原基因中，基因范围不变。
     (6) lnc_RNA等非mRNA/transcript类型的转录本以及已带CDS的转录本不做分析，原样输出。
 
 输入输出:
-    输入的GFF3文件(支持.gz压缩文件)放在命令行最后；标准输出为结果GFF3文件；统计信息(包括转为lncRNA的转录本数量及原因分类)输出到标准错误输出。
+    输入的GFF3文件(支持.gz压缩文件)放在命令行最后；标准输出为结果GFF3文件；统计信息(包括转为lnc_RNA的转录本数量及原因分类)输出到标准错误输出。
 
 参数:
     --genome <文件>
@@ -219,14 +219,14 @@ foreach my $b ( 0 .. $#batches ) {
     print STDERR "  with CDS in the input (reference, unchanged):               " . ( $total{with_cds} || 0 ) . "\n";
     print STDERR "  mRNA without CDS (analysed):                                $an\n";
     print STDERR "    qualified ORF found, CDS/UTR added:                       $ps (" . $pct->($ps) . ")\n";
-    print STDERR "    no qualified ORF, changed to lncRNA (no CDS):             $lnc (" . $pct->($lnc) . ")\n";
+    print STDERR "    no qualified ORF, changed to lnc_RNA (no CDS):            $lnc (" . $pct->($lnc) . ")\n";
     print STDERR "      reason: no ORF found:                                   " . ( $total{'lnc_no_ORF'} || 0 ) . "\n";
     print STDERR "      reason: only incomplete ORF (no start/stop codon):      " . ( $total{'lnc_incomplete_ORF'} || 0 ) . "\n";
     print STDERR "      reason: ORF shorter than --min_protein_length:          " . ( $total{'lnc_ORF_too_short'} || 0 ) . "\n";
     print STDERR "      reason: not in the reference reading frame:             " . ( $total{'lnc_not_in_reference_frame'} || 0 ) . "\n";
     print STDERR "      reason: CDS shorter than --min_cds_ratio * reference:   " . ( $total{'lnc_CDS_shorter_than_reference'} || 0 ) . "\n";
-    print STDERR "Genes with transcripts changed to lncRNA:                     " . ( $total{genes_with_lnc} || 0 ) . "\n";
-    print STDERR "Genes without any coding transcript left (all lncRNA):        " . ( $total{genes_all_lnc}  || 0 ) . "\n";
+    print STDERR "Genes with transcripts changed to lnc_RNA:                    " . ( $total{genes_with_lnc} || 0 ) . "\n";
+    print STDERR "Genes without any coding transcript left (all lnc_RNA):       " . ( $total{genes_all_lnc}  || 0 ) . "\n";
     print STDERR "=============================================\n";
 }
 exit 0;
@@ -298,12 +298,12 @@ sub set_line_attr {
     $f[8] = set_attr( $f[8], $tag, $val );
     return join( "\t", @f );
 }
-# 将转录本行改为lncRNA类型，并删除Integrity标签
+# 将转录本行改为lnc_RNA类型(GFF3标准名称)，并删除Integrity标签
 sub to_lnc_line {
     my ($line) = @_;
     my @f = split /\t/, $line, 9;
     return $line if @f < 9;
-    $f[2] = 'lncRNA';
+    $f[2] = 'lnc_RNA';
     $f[8] = del_attr( $f[8], 'Integrity' );
     return join( "\t", @f );
 }
@@ -382,7 +382,7 @@ sub process_group {
         $st{genes_all_lnc} = 1 if $st{with_cds} + $st{passed} == 0;
     }
 
-    # 所有转录本(包括改为lncRNA的)都保留在原基因中，基因范围不变
+    # 所有转录本(包括改为lnc_RNA的)都保留在原基因中，基因范围不变
     my $main = "$root->{line}\n";
     $main .= tx_text($_) foreach @tx_order;
     $main .= "$_\n" foreach @other;
@@ -477,7 +477,7 @@ sub find_orfs {
 }
 
 # 分析一个没有CDS的转录本；无法分析(缺少序列等)时返回undef
-# 返回 { pass, reason, line, children }；不合格时 line 的类型已改为lncRNA，children只含exon和intron
+# 返回 { pass, reason, line, children }；不合格时 line 的类型已改为lnc_RNA，children只含exon和intron
 sub analyze_tx {
     my ( $t, $root, $strand, $refs, $ref_len ) = @_;
     my $r = $t->{rec};
@@ -615,7 +615,7 @@ sub analyze_tx {
 
     my $line = $r->{line};
     if ($pass) { $line = set_line_attr( $line, 'Integrity', $integrity ); }
-    else       { $line = to_lnc_line($line); }    # 没有合格ORF：改为lncRNA，不给CDS/UTR
+    else       { $line = to_lnc_line($line); }    # 没有合格ORF：改为lnc_RNA，不给CDS/UTR
     return { pass => $pass, reason => $reason, line => $line, children => [ map { $_->[2] } @feat ] };
 }
 
@@ -681,7 +681,7 @@ sub codon_table {
 ########################################################################
 __DATA__
 Name:
-    __PROG__ - Perform ORF analysis on gene models with alternative splicing, add CDS and UTR features to transcripts without CDS; transcripts without a qualified ORF are changed to lncRNA.
+    __PROG__ - Perform ORF analysis on gene models with alternative splicing, add CDS and UTR features to transcripts without CDS; transcripts without a qualified ORF are changed to lnc_RNA.
 
 Usage:
     __PROG__ [options] --genome genome.fasta geneModels.l.gff3 > geneModels.m.gff3
@@ -694,11 +694,11 @@ Function:
     (2) For each mRNA transcript without CDS (usually an added alternative splicing transcript), the transcript sequence is built from its exons (reverse-complemented on the minus strand) and all ORFs in the 3 reading frames are enumerated: complete ORFs (start codon to stop codon), 3'-partial ORFs (start codon but no stop codon) and 5'-partial ORFs (located at the beginning of the sequence, no start codon).
     (3) Every candidate ORF is mapped back to the genome, and the number of bases overlapping the CDS of the reference transcripts in the same codon phase is calculated. The candidate ORFs are sorted from high to low by the in-phase overlap with the reference CDS, then by completeness, then by ORF length, and the first qualified ORF is chosen: it must be complete, its protein length must be not lower than --min_protein_length, and its CDS length must be not lower than --min_cds_ratio times the longest reference CDS (not checked if the gene has no reference transcript). Alternative splicing transcripts therefore inherit the reading frame of the reference protein instead of being replaced by an accidental longer ORF.
     (4) For transcripts with a qualified ORF, the CDS, exon, five_prime_UTR, three_prime_UTR and intron features are regenerated (IDs are named in the same way as GFF3Clear) and the Integrity tag in column 9 of the mRNA is updated.
-    (5) For transcripts without a qualified ORF, the feature name (column 3) is changed to lncRNA and no CDS/UTR is given; only the exon and intron features are regenerated and the Integrity tag in column 9 is removed. These transcripts stay in their original genes in STDOUT and the gene ranges are not changed.
+    (5) For transcripts without a qualified ORF, the feature name (column 3) is changed to lnc_RNA (the standard GFF3 name for lncRNA) and no CDS/UTR is given; only the exon and intron features are regenerated and the Integrity tag in column 9 is removed. These transcripts stay in their original genes in STDOUT and the gene ranges are not changed.
     (6) Transcripts that are not of the mRNA/transcript type (such as lnc_RNA) and transcripts that already have CDS are not analysed and are output unchanged.
 
 Input and output:
-    The input GFF3 file (.gz compressed file is supported) is placed at the end of the command line; STDOUT is the result GFF3 file; statistics (including the number of transcripts changed to lncRNA and the breakdown of reasons) are written to STDERR.
+    The input GFF3 file (.gz compressed file is supported) is placed at the end of the command line; STDOUT is the result GFF3 file; statistics (including the number of transcripts changed to lnc_RNA and the breakdown of reasons) are written to STDERR.
 
 Options:
     --genome <file>

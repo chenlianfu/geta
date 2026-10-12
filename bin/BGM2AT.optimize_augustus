@@ -1027,7 +1027,7 @@ sub analysis {
                 print OUT $info;
                 close OUT;
 
-                # 给出命令行。使用 > /dev/null 2>&1 而非 &>，避免 /bin/sh 为 dash 时 etraining 被放入后台运行。
+                # 给出命令行。使用 > /dev/null 2>&1 而非 > ，避免 2>&1 /bin/sh 为 dash 时 etraining 被放入后台运行。
                 open OUT, ">>", "command.list" or die $!;
                 print OUT "etraining --min_intron_len=$min_intron_len --species=$species_name --AUGUSTUS_CONFIG_PATH=${par_name}_$value/$para_num ${par_name}_$value/$para_num/train.gb > /dev/null 2>&1; augustus --min_intron_len=$min_intron_len --species=$species_name --AUGUSTUS_CONFIG_PATH=${par_name}_$value/$para_num ${par_name}_$value/$para_num/test.gb > ${par_name}_$value/$para_num.out\n";
                 close OUT;

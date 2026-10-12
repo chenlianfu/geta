@@ -27,8 +27,8 @@ my %gene_type_name = (
 );
 my %type_name_to_class = reverse %gene_type_name;
 
-# GFF3_merging_and_removing_redundancy（第5步）和fillingEndsOfGeneModels（第7步）支持的NCBI遗传密码表编号。
-# 这两个程序通过--genetic_code自动确定起始密码子和终止密码子，本程序只需把遗传密码编号传给它们，
+# GFF3_merging_and_removing_redundancy（第5步）、fillingEndsOfGeneModels（第7步）和GFF3Clear（整理输出结果）支持的NCBI遗传密码表编号。
+# 这几个程序通过--genetic_code自动确定起始密码子和终止密码子，本程序只需把遗传密码编号传给它们，
 # 它们所用的密码子与NGSReads_prediction.04Transfrag2ORF判断基因模型完整性(Integrity)时使用的密码子一致。
 my %supported_genetic_code = map { $_ => 1 } ( 1 .. 6, 9 .. 16, 21 .. 33 );
 
@@ -45,6 +45,7 @@ my @s2t_num_opts = qw/
 #   04Transfrag2ORF的其它参数（如TIdeS的可执行程序、训练模型的聚类相似度等）使用子程序自身的默认值。
 # 传给GFF3_merging_and_removing_redundancy的关键参数：--overlap_coverage、--genetic_code。
 # 传给fillingEndsOfGeneModels的关键参数：--genetic_code。
+# 传给GFF3Clear的关键参数：--genome、--genetic_code、--cpu（用于整理--output_raw_GFF3的结果和最终结果，添加准确的Integrity信息）。
 
 
 
@@ -64,8 +65,8 @@ sub usage_cn {
     (3) 调用NGSReads_prediction.03Stringtie，基于同一BAM文件，采用StringTie算法组装转录本，生成GFF3。
     (4) 调用NGSReads_prediction.04Transfrag2ORF，分别对Sam2Transfrag和StringTie两种方法得到的转录本进行ORF分析，预测基因模型。这两个分析并行运行，线程数平分，总线程数不超过--cpu；ORF预测软件由--ORF_predictor指定（TransDecoder或TIdeS）；TIdeS必须使用同源蛋白序列作为数据库；使用TIdeS时默认同时预测完整和不完整（5'或3'端缺失）的ORF。
     (5) 调用GFF3_merging_and_removing_redundancy，整合上述两种方法预测的基因模型并去除冗余（可用--overlap_coverage调节；判断基因完整性和内部终止密码子所用的遗传密码由--genetic_code指定），结果保存为results/merged.ORF.gff3。
-    (6) 根据基因完整性、CDS长度、CDS之间的intron数量和CDS占exon的碱基比例（取自GFF3第9列Form信息），将第5步得到的基因模型按准确性分为A/B/C/D四类，并在GFF3第9列以Type=标记（gene行中Type=紧跟在ID=之后；mRNA行中Type=紧跟在Parent=之后，其后依次为Integrity=、CDS_Length=、CDS_intron_Num=、CDS_exon_Ratio=），结果保存为results/merged_classified.ORF.gff3。
-    (7) 调用fillingEndsOfGeneModels，对第6步分类结果中不完整基因模型的5'端或3'端进行强制补齐（可用--no_filling_ends跳过；补齐所用的遗传密码由--genetic_code指定），补齐后的结果保存为results/merged_classified.ORF.fillEnd.gff3；然后将最终的基因模型以GFF3格式输出到标准输出（以##gff-version 3开头，基因ID统一重命名，默认前缀为RNASeqORF），并在标准错误输出中给出基因模型数量、完整性、填补情况、分类结果等统计。
+    (6) 根据基因完整性、CDS长度、CDS之间的intron数量和CDS占exon的碱基比例（取自GFF3第9列Form信息），将第5步得到的基因模型按准确性分为A/B/C/D四类，并在GFF3第9列以Type=标记（gene行中Type=紧跟在ID=之后；mRNA行中Type=紧跟在Parent=之后，其后依次为Integrity=、CDS_Length=、CDS_intron_Num=、CDS_exon_Ratio=），结果保存为results/merged_classified.ORF.gff3。若使用了--output_raw_GFF3，则进一步调用GFF3Clear（使用--genetic_code、--cpu等参数）对该结果进行整理，重新检测并添加准确的Integrity信息，整理后的结果保存为results/merged_classified.ORF.cleaned.gff3，并输出到--output_raw_GFF3指定的文件。
+    (7) 调用fillingEndsOfGeneModels，对第6步分类结果中不完整基因模型的5'端或3'端进行强制补齐（可用--no_filling_ends跳过；补齐所用的遗传密码由--genetic_code指定），补齐后的结果保存为results/merged_classified.ORF.fillEnd.gff3；然后调用GFF3Clear（使用--genetic_code、--cpu等参数）对最终的基因模型（补齐后的结果；使用--no_filling_ends时为第6步的分类结果）进行整理，添加准确的Integrity信息，整理后的结果保存为results/final.ORF.gff3；最后将整理后的基因模型以GFF3格式输出到标准输出（以##gff-version 3开头，基因ID统一重命名，默认前缀为RNASeqORF），并在标准错误输出中给出基因模型数量、完整性、填补情况、分类结果等统计。
 
     使用说明：
     (1) 各类RNA-Seq输入数据的质控、比对、排序与合并均由NGSReads_prediction.01RNASeq2Sam完成，本程序仅将相关参数透传给它。同一类型的数据可输入多个文库，文库之间以逗号分隔。--sam输入的文件必须以.sam、.bam或.cram结尾。
@@ -77,22 +78,23 @@ sub usage_cn {
         传递给NGSReads_prediction.04Transfrag2ORF：--ORF_predictor、--min_protein_length、--genetic_code、--TIdeS_partial/--noTIdeS_partial。04Transfrag2ORF的其它参数（例如TIdeS可执行程序、训练模型所用的聚类相似度等）使用该子程序自身的默认值。
         传递给GFF3_merging_and_removing_redundancy：--overlap_coverage（未设置时使用该子程序自身的默认值）、--genetic_code（与04Transfrag2ORF所用的遗传密码一致，见使用说明第14条）。
         传递给fillingEndsOfGeneModels：--genetic_code（同上）。
+        传递给GFF3Clear：--genetic_code（同上）、--cpu，以及基因组序列（--genome）。GFF3Clear用于整理--output_raw_GFF3的结果和最终结果（见使用说明第15条），GFF3Clear的其它参数使用该程序自身的默认值。
         除上述参数外，子程序的其它参数不再通过本程序传递，均使用各子程序自身的默认值；NGSReads_prediction.03Stringtie不接收任何来自本程序的关键参数，stringtie从系统PATH中调用。
         以下参数由本程序统一设置：--input_single_sorted_BAM_file、--tmp_dir、--cpu、--strand_specific（02）、--strand_specific_library（03）、--intron_info_out、--base_depth_out、--gene_prefix（03、04）、--source（04）、--keep_tmp_files。其它子程序的详细参数请参见各子程序的--help输出。
     (5) 在第4步中，每个ORF对应一个基因模型，因此同一基因的可变剪接转录本会产生冗余的基因模型；这些冗余将在第5步中去除。为避免合并时基因ID冲突，两个ORF分析使用不同的基因前缀（Sam2Transfrag_ORF、stringtie_ORF）；最终结果的基因ID默认统一重命名为RNASeqORF000001、RNASeqORF000002 ...，可用--gene_prefix修改前缀。
-    (6) 使用--output_raw_GFF3可获得第6步分类之后、第7步末端强制填补之前的结果（内容与results/merged_classified.ORF.gff3相同，含Type分类标记）。该结果准确度较高，但包含较多不完整的基因模型。第7步强制填补得到的基因模型不一定准确，使用时请注意甄别。
-    (7) TIdeS软件做ORF分析必须输入同源蛋白序列作为数据库。因此，若未提供--homolog_protein参数，则--ORF_predictor会被自动设置为TransDecoder（即使用户指定了TIdeS，也会被改为TransDecoder，并给出警告）。提供了--homolog_protein且未设置--ORF_predictor时，默认使用TIdeS。--min_protein_length对两种软件均有效（TransDecoder：传给-m；TIdeS：乘以3后传给--min-orf）；--genetic_code的遗传密码编号仅对TIdeS的ORF预测有效（但它同时作为--genetic_code传给第5步的GFF3_merging_and_removing_redundancy和第7步的fillingEndsOfGeneModels），--TIdeS_partial/--noTIdeS_partial仅对TIdeS有效。
+    (6) 使用--output_raw_GFF3可获得第6步分类之后、第7步末端强制填补之前的结果（内容与results/merged_classified.ORF.gff3相同的基因模型，含Type分类标记，但已由GFF3Clear整理，Integrity信息已重新检测，见使用说明第15条）。该结果准确度较高，但包含较多不完整的基因模型。第7步强制填补得到的基因模型不一定准确，使用时请注意甄别。
+    (7) TIdeS软件做ORF分析必须输入同源蛋白序列作为数据库。因此，若未提供--homolog_protein参数，则--ORF_predictor会被自动设置为TransDecoder（即使用户指定了TIdeS，也会被改为TransDecoder，并给出警告）。提供了--homolog_protein且未设置--ORF_predictor时，默认使用TIdeS。--min_protein_length对两种软件均有效（TransDecoder：传给-m；TIdeS：乘以3后传给--min-orf）；--genetic_code的遗传密码编号仅对TIdeS的ORF预测有效（但它同时作为--genetic_code传给第5步的GFF3_merging_and_removing_redundancy、第7步的fillingEndsOfGeneModels以及GFF3Clear），--TIdeS_partial/--noTIdeS_partial仅对TIdeS有效。
         使用TIdeS时，本程序默认给04Transfrag2ORF添加--TIdeS_partial，即tides除了预测完整ORF（有起始和终止密码子）外，还预测5'或3'不完整的ORF（partial ORF）。此时Integrity按基因组序列上的起始/终止密码子判断，基因模型的完整性可以是complete、5prime_partial、3prime_partial、internal，分类时A类与B类的区分同时取决于基因完整性和CDS/exon比例。若只需要完整ORF，请添加--noTIdeS_partial：此时所有基因模型的Integrity都被标注为complete，"基因完整"这一条件对所有模型都成立，A类与B类的区分将只取决于CDS/exon比例。
-    (8) 【断点续跑】每个步骤完成后会在临时文件夹中生成.ok标记文件和记录命令与输入文件信息的.sig签名文件。使用相同的--tmp_dir重新运行时：已完成且参数、输入均未改变的步骤会被跳过；程序中途中断的步骤会由子程序断点续跑；若修改了某步骤的参数或输入（包括是否使用--keep_tmp_files），该步骤及其下游步骤会自动清理后重新运行。基因模型分类在第6步完成，每次运行都会重新计算（耗时很短），修改分类参数无需重跑第1至第5步；分类结果若发生改变，第7步会自动重新运行。
-        【不检查签名】添加--ignore_signature后，不再用.sig签名文件判断参数或输入文件是否改变：只要某步骤已有.ok标记且其输出文件非空，就直接跳过，即使命令行参数、输入文件的路径/大小/修改时间已经改变（例如移动了临时文件夹或输入文件、touch过文件、或只修改了无关紧要的参数）。此时：(a) 中途中断的步骤仍由子程序断点续跑，不会被清理；(b) 若某上游步骤在本次运行中实际重新执行了（如.ok缺失或输出缺失），其下游步骤仍会自动重新运行，以免结果与上游不一致；(c) 第7步仍会检查第6步的分类结果是否改变，改变则重新运行；(d) 已完成步骤不会因参数改变而重跑，若确实需要重跑某一步，请手动删除临时文件夹中对应的.ok文件（或整个步骤的输出），再运行。该参数仅在重新使用已有的--tmp_dir时有意义。
+    (8) 【断点续跑】每个步骤完成后会在临时文件夹中生成.ok标记文件和记录命令与输入文件信息的.sig签名文件。使用相同的--tmp_dir重新运行时：已完成且参数、输入均未改变的步骤会被跳过；程序中途中断的步骤会由子程序断点续跑；若修改了某步骤的参数或输入（包括是否使用--keep_tmp_files），该步骤及其下游步骤会自动清理后重新运行。基因模型分类在第6步完成，每次运行都会重新计算（耗时很短），修改分类参数无需重跑第1至第5步；分类结果若发生改变，第7步以及GFF3Clear整理步骤会自动重新运行。
+        【不检查签名】添加--ignore_signature后，不再用.sig签名文件判断参数或输入文件是否改变：只要某步骤已有.ok标记且其输出文件非空，就直接跳过，即使命令行参数、输入文件的路径/大小/修改时间已经改变（例如移动了临时文件夹或输入文件、touch过文件、或只修改了无关紧要的参数）。此时：(a) 中途中断的步骤仍由子程序断点续跑，不会被清理；(b) 若某上游步骤在本次运行中实际重新执行了（如.ok缺失或输出缺失），其下游步骤仍会自动重新运行，以免结果与上游不一致；(c) 第7步以及GFF3Clear整理步骤仍会检查其输入（第6步的分类结果、补齐结果）是否改变，改变则重新运行；(d) 已完成步骤不会因参数改变而重跑，若确实需要重跑某一步，请手动删除临时文件夹中对应的.ok文件（或整个步骤的输出），再运行。该参数仅在重新使用已有的--tmp_dir时有意义。
     (9) 【临时文件】本程序的临时文件夹（--tmp_dir，其中含results目录、日志和.ok/.sig文件）始终保留，主程序不会删除它。NGSReads_prediction.01RNASeq2Sam、02Sam2Transfrag、03Stringtie和04Transfrag2ORF这四个子程序各自的临时文件夹（位于该临时文件夹下）默认由子程序在成功结束后自行删除；添加--keep_tmp_files则这四个子程序都会保留各自的临时文件。results目录中的文件（含体积较大的alignment.bam）不受影响，如不再需要，请在运行结束后手动删除整个临时文件夹（建议先用--alignment_bam_out等参数保存需要的结果）。
     (10) 由于各子程序拼接命令时不对路径加引号，所有输入、输出和--tmp_dir的路径中不能含空白或shell特殊字符（如 ; & | $ ( ) * ? < > ' " \ 等）。中文等非ASCII字符是允许的。
     (11) 输出GFF3文件第9列中的常见标签含义：
         Type：基因模型的准确性类别（见使用说明第13条），标记在gene和mRNA行（gene行中紧跟在ID=之后，mRNA行中紧跟在Parent=之后）；
         Form：对应转录本上预测到的ORF数量，以及ORF占转录本序列的比例，例如 Form=one_transcript_get_1_gene_model_num1_62.40%，其末尾的百分数即为该比例，分类时用作CDS占exon的比例；
-        Integrity：ORF的完整性（complete、5prime_partial、3prime_partial、internal）；mRNA行中该标签紧跟在Type之后。该标签反映原始预测结果，强制填补不会修改它；
-        CDS_Length：mRNA行的CDS总长度（bp）；
-        CDS_intron_Num：mRNA行的CDS之间的intron数量；
+        Integrity：由GFF3Clear根据基因组序列和--genetic_code重新检测得到的基因模型完整性。mRNA行的值为complete、5prime_partial、3prime_partial、internal（5'端和3'端均不完整），若CDS阅读框内存在终止密码子，则在其后用逗号追加internal_stop，若CDS长度不是3的倍数，则追加frameshift（例如 Integrity=complete,internal_stop）；gene行的值为complete（至少有一个mRNA完整）或incomplete（其它情况）。最终结果中的Integrity是对强制填补之后的基因模型检测的结果，--output_raw_GFF3结果中的Integrity则是对填补之前的基因模型检测的结果；
+        CDS_Length：mRNA行的CDS总长度（bp，分类时的值，强制填补不会修改它）；
+        CDS_intron_Num：mRNA行的CDS之间的intron数量（分类时的值）；
         CDS_exon_Ratio：mRNA行的CDS占exon的长度比例（0-1，取自Form，与分类所用值一致）；
         Filling2Complete=True：（标记在mRNA行）ORF原本不完整，经强制末端填补后完整；
         Filling2Uncomplete=True：（标记在mRNA行）ORF原本不完整，经强制末端填补后仍不完整；
@@ -107,8 +109,9 @@ sub usage_cn {
         NGSReads_prediction.03Stringtie：stringtie.raw.gff3；
         NGSReads_prediction.04Transfrag2ORF：Sam2Transfrag.ORF.gff3、stringtie.ORF.gff3；使用--output_alignment_GFF3时，还会产生Sam2Transfrag.alignment.gff3和stringtie.alignment.gff3（保存在results目录中，并合并、按染色体名称/每份数据的起始-结束坐标/正负链排序后输出到--output_alignment_GFF3指定的文件）；
         第5步：merged.ORF.gff3（整合并去冗余后的基因模型）；
-        第6步：merged_classified.ORF.gff3（加入Type分类标记后的基因模型）；
-        第7步：merged_classified.ORF.fillEnd.gff3（末端强制填补后的基因模型，基因ID仍为流程内部ID；使用--no_filling_ends时不产生）。
+        第6步：merged_classified.ORF.gff3（加入Type分类标记后的基因模型）；使用--output_raw_GFF3时，还会产生merged_classified.ORF.cleaned.gff3（由GFF3Clear整理、重新检测Integrity后的结果，内容与--output_raw_GFF3指定的文件相同）；
+        第7步：merged_classified.ORF.fillEnd.gff3（末端强制填补后的基因模型，基因ID仍为流程内部ID；使用--no_filling_ends时不产生）；
+        最终整理：final.ORF.gff3（由GFF3Clear整理、重新检测Integrity后的最终基因模型，基因ID仍为流程内部ID，标准输出的内容即由它重命名基因ID得到）。
         若通过--intron_info_out、--base_depth_out指定了其它输出路径，results目录中会同时保留一份硬链接。compare_2gff3_stats.txt及日志文件位于临时文件夹根目录。使用旧版本程序产生的临时文件夹续跑时，由于文件路径已改变，相关步骤会被判定为参数改变而重新运行，旧版本遗留在临时文件夹根目录的merged.ORF.gff3、merged_classified.ORF.fillEnd.gff3等文件会被自动清理。
     (13) 【基因模型分类】第6步根据以下四个指标，将基因模型按准确性分为四类，并在GFF3第9列的gene和mRNA行以Type=标记（gene行中Type=紧跟在ID=之后；mRNA行中Type=紧跟在Parent=之后，其后依次添加Integrity=、CDS_Length=、CDS_intron_Num=、CDS_exon_Ratio=四个标签，分别表示该mRNA的完整性、CDS长度、CDS之间的intron数量、CDS占exon的长度比例）：
         指标：基因是否完整（即Integrity=complete；分类在末端强制填补之前进行，因此完整性指原始预测结果的完整性）；CDS长度（bp）；CDS之间的intron数量（相邻CDS片段之间的间隔数，不是exon之间的间隔数）；CDS占exon的比例（取自GFF3第9列Form值末尾的百分数，例如62.40%对应0.6240；mRNA行没有可解析的Form时改用gene行的Form；两处均没有时，退回使用CDS碱基数与exon碱基数计算，并给出警告）。若一个基因含多个mRNA，则取CDS最长的mRNA计算指标。
@@ -117,7 +120,8 @@ sub usage_cn {
         C类 Type=fair_gene_models_predicted_by_NGSReads：不要求完整性；CDS长度>=较短阈值、CDS间intron数>=较小阈值、CDS占exon比例>=较小阈值，三个条件同时满足（且不属于A、B类）。
         D类 Type=poor_gene_models_predicted_by_NGSReads：除A、B、C类以外的其它基因模型。
         阈值的确定：未用--cds_length_high等参数手动指定时，CDS长度和CDS间intron数的阈值根据--quantile_high、--quantile_low自动计算。计算所用的参考基因模型，来自临时文件夹中的compare_2gff3_stats.txt（第5步产生）：选取Sam2Transfrag和StringTie两种算法的基因模型有重叠、且在去冗余后被保留下来的基因模型（这些基因模型有两种方法相互印证，可信度较高），使用其在第5步整合去冗余之后的CDS长度和CDS间intron数，按分位数计算阈值。自动计算出的全部阈值及参考基因模型数量会输出到日志（标准错误输出）中。若compare_2gff3_stats.txt不存在或未能提取到参考基因模型，则改用第5步结果中的全部基因模型作为参考，并给出警告。CDS占exon比例的阈值不自动计算，由--cds_ratio_high（仅用于A类）和--cds_ratio_low（用于B、C类）指定。
-    (14) 【遗传密码】第5步（合并去冗余时判断基因完整性、检测内部终止密码子并计分）和第7步（末端强制填补）所用的遗传密码，由--genetic_code指定。本程序直接把遗传密码编号作为--genetic_code参数传给GFF3_merging_and_removing_redundancy和fillingEndsOfGeneModels，这两个程序据此自动确定起始密码子和终止密码子，与第4步（04Transfrag2ORF判断Integrity）所用的遗传密码一致，因此不再需要（也不提供）--start_codon、--stop_codon参数。使用TIdeS时按--genetic_code选择NCBI遗传密码表；使用TransDecoder时只支持标准遗传密码（表1），此时无论--genetic_code为何值，传给第5、7步的均为1（起始密码子ATG，终止密码子TAA、TAG、TGA）。第5、7步支持的遗传密码编号为：1-6、9-16、21-33，使用其它编号时程序在启动时报错退出。实际使用的遗传密码编号会输出到日志（标准错误输出）。注意：部分非标准遗传密码表含有多个起始密码子，此时第7步补齐5'端时，会定位到上游终止密码子之后的第一个起始密码子。
+    (14) 【遗传密码】第5步（合并去冗余时判断基因完整性、检测内部终止密码子并计分）、第7步（末端强制填补）以及GFF3Clear整理步骤（检测Integrity、修正终止密码子）所用的遗传密码，由--genetic_code指定。本程序直接把遗传密码编号作为--genetic_code参数传给GFF3_merging_and_removing_redundancy、fillingEndsOfGeneModels和GFF3Clear，这几个程序据此自动确定起始密码子和终止密码子，与第4步（04Transfrag2ORF判断Integrity）所用的遗传密码一致，因此不再需要（也不提供）--start_codon、--stop_codon参数。使用TIdeS时按--genetic_code选择NCBI遗传密码表；使用TransDecoder时只支持标准遗传密码（表1），此时无论--genetic_code为何值，传给第5、7步和GFF3Clear的均为1（起始密码子ATG，终止密码子TAA、TAG、TGA）。上述程序支持的遗传密码编号为：1-6、9-16、21-33，使用其它编号时程序在启动时报错退出。实际使用的遗传密码编号会输出到日志（标准错误输出）。注意：部分非标准遗传密码表含有多个起始密码子，此时第7步补齐5'端时，会定位到上游终止密码子之后的第一个起始密码子。
+    (15) 【GFF3Clear整理】--output_raw_GFF3的结果和最终结果都会调用GFF3Clear整理一次，命令形如：GFF3Clear --genome genome_seq.fasta --genetic_code <遗传密码编号> --cpu <--cpu值> input.gff3 > output.gff3。整理内容包括：检查并修正GFF3格式、根据基因组序列修正尾部终止密码子和phase、重新生成exon/UTR/intron、按基因组序列顺序和位置对基因模型排序，并根据起始密码子和终止密码子重新检测准确的Integrity信息（见使用说明第11条）。整理不过滤任何基因模型，也不重命名基因ID（最终结果的基因ID在整理之后再统一重命名）；gene和mRNA行第9列中原有的Type、Form、Filling2Complete等标签均被保留。GFF3Clear的日志保存在临时文件夹中的f.GFF3Clear_raw.log和h.GFF3Clear_final.log。
 
 参数:
 [输入参数]
@@ -157,7 +161,7 @@ sub usage_cn {
     输出转录本与参考基因组的比对结果（非标准GFF3格式）。Sam2Transfrag和StringTie两种方法的比对结果会整合到这一个文件中。每个转录本的比对结果是一份数据（同一份数据内各行第9列的ID相同），各份数据之间以空行分隔；所有数据按染色体名称（自然排序）、该份数据cDNA_match的起始-结束坐标（最小起始坐标、最大结束坐标）、正负链（+在前，-其次，.最后）排序，同一份数据内部各行保持原有顺序。
 
     --output_raw_GFF3 <string>    默认值: 无
-    输出第6步分类之后、第7步末端强制填补之前的基因预测结果（内容与results/merged_classified.ORF.gff3相同）。该文件含Type分类标记，基因ID为流程内部ID。
+    输出第6步分类之后、第7步末端强制填补之前的基因预测结果。该结果由GFF3Clear整理（使用--genetic_code、--cpu等参数），含准确的Integrity信息和Type分类标记，基因ID为流程内部ID。整理前的结果保存在results/merged_classified.ORF.gff3，整理后的结果保存在results/merged_classified.ORF.cleaned.gff3（与本参数指定的文件相同）。
 
     --intron_info_out <string>    默认值: results/intron.txt (位于临时文件夹中)
     指定可信intron信息文件的输出路径（由Sam2Transfrag产生，第一列与GFF3中Sam2Transfrag的基因区域对应）。指定后，results目录中也会保留一份硬链接。
@@ -215,12 +219,12 @@ sub usage_cn {
     设置鉴定ORF时蛋白质序列的最小长度（氨基酸数）。TransDecoder：传给TransDecoder.LongOrfs的-m；TIdeS：乘以3后传给tides的--min-orf。
 
     --genetic_code <int>    默认值: 1
-    设置遗传密码，编号参见NCBI遗传密码表: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi 。该参数有两方面作用：(a) 传递给04Transfrag2ORF的--TIdeS_genetic_code，用于TIdeS的ORF预测（TransDecoder目前不支持，只使用标准遗传密码）；(b) 同时作为--genetic_code传给第5步的GFF3_merging_and_removing_redundancy和第7步的fillingEndsOfGeneModels，由这两个程序自动确定起始密码子和终止密码子（详见使用说明第14条）。使用TransDecoder时，传给第5、7步的遗传密码固定为1（标准密码：起始密码子ATG；终止密码子TAA,TAG,TGA）。支持的编号：1-6、9-16、21-33。
+    设置遗传密码，编号参见NCBI遗传密码表: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi 。该参数有两方面作用：(a) 传递给04Transfrag2ORF的--TIdeS_genetic_code，用于TIdeS的ORF预测（TransDecoder目前不支持，只使用标准遗传密码）；(b) 同时作为--genetic_code传给第5步的GFF3_merging_and_removing_redundancy、第7步的fillingEndsOfGeneModels以及整理结果所用的GFF3Clear，由这几个程序自动确定起始密码子和终止密码子（详见使用说明第14条）。使用TransDecoder时，传给第5、7步和GFF3Clear的遗传密码固定为1（标准密码：起始密码子ATG；终止密码子TAA,TAG,TGA）。支持的编号：1-6、9-16、21-33。
 
     --TIdeS_partial / --noTIdeS_partial    默认值: 启用--TIdeS_partial
     默认情况下，本程序给04Transfrag2ORF添加--TIdeS_partial，即使用TIdeS时同时预测完整ORF和5'或3'不完整的ORF（Integrity按基因组序列上的起始/终止密码子判断）。添加--noTIdeS_partial可关闭该功能，此时TIdeS只报告完整ORF，所有基因模型的Integrity均为complete（详见使用说明第7条）。仅在使用TIdeS时生效。
 
-传递给GFF3_merging_and_removing_redundancy的关键参数（另外，--genetic_code见上，也会传给该程序和fillingEndsOfGeneModels）：
+传递给GFF3_merging_and_removing_redundancy的关键参数（另外，--genetic_code见上，也会传给该程序、fillingEndsOfGeneModels和GFF3Clear）：
     --overlap_coverage <float>    默认值: 0.30
     第5步中，两个基因模型CDS重叠碱基数占较小基因模型CDS碱基数的比例超过该阈值时，去除得分较低者。取值范围(0, 1]。
 
@@ -251,7 +255,7 @@ sub usage_cn {
 
 [高级参数]
     --no_filling_ends    默认值: 无
-    跳过第7步中的末端强制填补，以第6步分类后的结果作为最终结果。
+    跳过第7步中的末端强制填补，以第6步分类后的结果作为最终结果（仍会由GFF3Clear整理）。
 
     --ignore_signature    默认值: 无
     断点续跑时不检查.sig签名文件：已有.ok标记且输出文件非空的步骤，即使参数或输入文件信息（路径、大小、修改时间）已改变也直接跳过。仅在重新使用已有的--tmp_dir时有意义，详见"使用说明"第8条。
@@ -264,7 +268,8 @@ sub usage_cn {
       第3步 NGSReads_prediction.03Stringtie：传入--cpu值，作为并行运行stringtie的worker子进程数（每个stringtie使用1个线程）；
       第4步 NGSReads_prediction.04Transfrag2ORF：Sam2Transfrag和StringTie两个转录本文件的ORF分析同时并行运行，因此--cpu由两者平分（各约一半，至少为1），保证总线程数不超过--cpu；只有TIdeS使用该线程数（TransDecoder为单线程），且每个TIdeS最多使用24个线程；
       第5步 GFF3_merging_and_removing_redundancy：传入--cpu值，作为按染色体和正负链分区并行去冗余的worker进程数；
-      第7步 fillingEndsOfGeneModels：传入--cpu值，基因模型被平均切分为--cpu份并行填补。
+      第7步 fillingEndsOfGeneModels：传入--cpu值，基因模型被平均切分为--cpu份并行填补；
+      GFF3Clear整理步骤（--output_raw_GFF3的结果和最终结果）：GFF3Clear传入--cpu值，作为并行修正基因模型和生成输出的worker进程数。
     各步骤是依次运行的（仅第4步内部的两个分析同时运行），所以整个流程同一时刻占用的线程数不会超过--cpu（第1步索引构建与质控并行的阶段除外）。
 
     --chunk_num <int>    默认值: min(--cpu, 10)
@@ -278,7 +283,7 @@ sub usage_cn {
     显示中文用法并退出。
 
 依赖:
-    需要__BIN__目录下的NGSReads_prediction.01RNASeq2Sam、NGSReads_prediction.02Sam2Transfrag、NGSReads_prediction.03Stringtie、NGSReads_prediction.04Transfrag2ORF、GFF3_merging_and_removing_redundancy和fillingEndsOfGeneModels可执行；系统PATH中需有samtools和stringtie；有FASTQ输入时还需java、比对软件（STAR或hisat2/hisat2-build）以及__SW__/Trimmomatic-0.38；使用TransDecoder时需__SW__/TransDecoder-v5.5.0（修改过的版本），使用TIdeS时需tides命令（tides.py或tides，及其依赖DIAMOND、CD-HIT等）。程序启动时会检查这些依赖。
+    需要__BIN__目录下的NGSReads_prediction.01RNASeq2Sam、NGSReads_prediction.02Sam2Transfrag、NGSReads_prediction.03Stringtie、NGSReads_prediction.04Transfrag2ORF、GFF3_merging_and_removing_redundancy、fillingEndsOfGeneModels和GFF3Clear可执行；系统PATH中需有samtools和stringtie；有FASTQ输入时还需java、比对软件（STAR或hisat2/hisat2-build）以及__SW__/Trimmomatic-0.38；使用TransDecoder时需__SW__/TransDecoder-v5.5.0（修改过的版本），使用TIdeS时需tides命令（tides.py或tides，及其依赖DIAMOND、CD-HIT等）。程序启动时会检查这些依赖。
 
 USAGE_CN
     $t =~ s/__SW__/$software_dir/g;
@@ -308,7 +313,7 @@ GetOptions(\%o,
     'fraction=f', 'min_expressed_base_depth=i', 'max_expressed_base_depth=i',
     'min_junction_depth=i', 'max_junction_depth=i',
     'min_fragment_count_per_transfrag=i',
-    # 关键子程序参数：传给04Transfrag2ORF（--genetic_code同时传给GFF3_merging_and_removing_redundancy和fillingEndsOfGeneModels）
+    # 关键子程序参数：传给04Transfrag2ORF（--genetic_code同时传给GFF3_merging_and_removing_redundancy、fillingEndsOfGeneModels和GFF3Clear）
     'ORF_predictor=s', 'min_protein_length=i', 'genetic_code=i', 'TIdeS_partial!',
     # 关键子程序参数：传给GFF3_merging_and_removing_redundancy
     'overlap_coverage=f',
@@ -428,7 +433,7 @@ else {
     $ORF_predictor = 'TransDecoder';
 }
 if ( $ORF_predictor eq 'TransDecoder' ) {
-    print STDERR "Warning: --genetic_code only takes effect when the ORF predictor is TIdeS; TransDecoder uses the standard genetic code, so the standard genetic code (table 1) is also passed to step 5 and step 7.\n" if $o{genetic_code} != 1;
+    print STDERR "Warning: --genetic_code only takes effect when the ORF predictor is TIdeS; TransDecoder uses the standard genetic code, so the standard genetic code (table 1) is also passed to step 5, step 7 and GFF3Clear.\n" if $o{genetic_code} != 1;
     print STDERR "Warning: --TIdeS_partial/--noTIdeS_partial only takes effect when the ORF predictor is TIdeS; it is ignored.\n" if $user_set{TIdeS_partial};
 }
 else {
@@ -437,12 +442,12 @@ else {
         unless $o{TIdeS_partial};
 }
 
-# ---- 确定传给第5步（合并去冗余）和第7步（末端强制填补）的遗传密码编号 ----
+# ---- 确定传给第5步（合并去冗余）、第7步（末端强制填补）和GFF3Clear（整理结果）的遗传密码编号 ----
 # 使用TransDecoder时只支持标准遗传密码（表1）；使用TIdeS时按--genetic_code。
-# GFF3_merging_and_removing_redundancy和fillingEndsOfGeneModels根据--genetic_code自动确定起始/终止密码子，
+# GFF3_merging_and_removing_redundancy、fillingEndsOfGeneModels和GFF3Clear根据--genetic_code自动确定起始/终止密码子，
 # 与04Transfrag2ORF判断Integrity时所用的密码子一致。
 my $codon_table_id = ( $ORF_predictor eq 'TIdeS' ) ? $o{genetic_code} : 1;
-die "Error: genetic code table $codon_table_id is not supported by GFF3_merging_and_removing_redundancy and fillingEndsOfGeneModels (supported: 1-6, 9-16, 21-33).\n"
+die "Error: genetic code table $codon_table_id is not supported by GFF3_merging_and_removing_redundancy, fillingEndsOfGeneModels and GFF3Clear (supported: 1-6, 9-16, 21-33).\n"
     unless $supported_genetic_code{$codon_table_id};
 
 print STDERR "Warning: --chunk_num ($o{chunk_num}) is larger than --cpu ($o{cpu}); all chunks are aligned at the same time, so CPU (and, for STAR, memory) may be oversubscribed.\n"
@@ -584,7 +589,7 @@ print STDERR "To resume after an interruption, run the same command with: --tmp_
 print STDERR "--keep_tmp_files is set: the sub-programs will keep their own temporary directories.\n" if $o{keep_tmp_files};
 print STDERR "--ignore_signature is set: the .sig signature files are NOT checked; finished steps (.ok present and outputs non-empty) are skipped even if their parameters or inputs changed.\n" if $o{ignore_signature};
 print STDERR "ORF predictor: $ORF_predictor" . ( $ORF_predictor eq 'TIdeS' ? " (" . ( $o{TIdeS_partial} ? "with" : "without" ) . " --TIdeS_partial)" : "" ) . "; aligner: " . uc($o{aligner}) . "; cpu: $o{cpu} (passed to every sub-program)\n";
-print STDERR "Genetic code table: $codon_table_id (passed as --genetic_code to step 5 and step 7" . ( $ORF_predictor eq 'TIdeS' ? " and to the TIdeS ORF prediction of step 4" : "" ) . ")\n";
+print STDERR "Genetic code table: $codon_table_id (passed as --genetic_code to step 5, step 7 and GFF3Clear" . ( $ORF_predictor eq 'TIdeS' ? " and to the TIdeS ORF prediction of step 4" : "" ) . ")\n";
 print STDERR "01RNASeq2Sam options set by the user: " . ( $align_params ne '' ? $align_params : "(none; built-in defaults are used)" ) . "\n" if $need_alignment;
 print STDERR "02Sam2Transfrag options: $sam2transfrag_params\n";
 print STDERR "03Stringtie options: (none; the defaults of the sub-program are used)\n";
@@ -800,15 +805,30 @@ my $classified = "$results_dir/merged_classified.ORF.gff3";
     }
     print STDERR "  The classified gene models were saved to $classified\n";
 
-    # 6.4 按需输出分类之后、末端强制填补之前的结果（拷贝自results/merged_classified.ORF.gff3）
+    # 6.4 按需输出分类之后、末端强制填补之前的结果：
+    # 调用GFF3Clear整理（使用--genetic_code、--cpu等参数），重新检测并添加准确的Integrity信息，
+    # 整理后的结果保存为results/merged_classified.ORF.cleaned.gff3，并复制到--output_raw_GFF3指定的文件。
     if ( defined $out_path{output_raw_GFF3} ) {
-        copy($classified, $out_path{output_raw_GFF3}) or die "Error: can not create file $out_path{output_raw_GFF3}, $!\n";
-        print STDERR "The classified result before forced end filling was saved to $out_path{output_raw_GFF3} .\n";
+        my $name      = 'f.GFF3Clear_raw';
+        my $log       = "$tmp_dir/f.GFF3Clear_raw.log";
+        my $raw_clean = "$results_dir/merged_classified.ORF.cleaned.gff3";
+        my $cmd       = &gff3clear_cmd($classified, $raw_clean, $log);
+        # 分类结果每次运行都会重新生成（修改时间改变），因此用其内容的md5作为"硬签名"：
+        # 分类结果改变时，即使使用了--ignore_signature，本步骤也会重新运行。
+        my $in_md5    = "input_md5=" . &file_md5($classified);
+        my $sig       = md5_hex(join("\n", $cmd, &file_sig($input_genome), $in_md5));
+        print STDERR "  Tidying the classified gene models with GFF3Clear (genetic code table $codon_table_id, --cpu $o{cpu}); the Integrity information is detected again (" . &now() . ")\n";
+        if ( &prepare_step($name, $sig, [], [], [$raw_clean], $in_md5) ) {
+            &run_cmds($name, [$cmd], [$raw_clean], $log);
+        }
+        else { print STDERR "  GFF3Clear (before end filling): already finished, skipped.\n"; }
+        copy($raw_clean, $out_path{output_raw_GFF3}) or die "Error: can not create file $out_path{output_raw_GFF3}, $!\n";
+        print STDERR "The classified result before forced end filling (tidied by GFF3Clear, with accurate Integrity) was saved to $out_path{output_raw_GFF3} .\n";
     }
 }
 
 ########################################################################
-# Step 7. 强制补齐不完整基因模型的末端，统一重命名基因ID，输出最终结果并统计
+# Step 7. 强制补齐不完整基因模型的末端；调用GFF3Clear整理（添加准确的Integrity信息）；统一重命名基因ID，输出最终结果并统计
 ########################################################################
 my $final_gff3 = $classified;
 if ( $o{no_filling_ends} ) {
@@ -835,25 +855,45 @@ else {
     else { print STDERR "Step 7: already finished, skipped.\n"; }
 }
 
+# 调用GFF3Clear整理最终的基因模型（补齐之后的结果；使用--no_filling_ends时为分类结果），
+# 使用--genetic_code、--cpu等参数，重新检测并添加准确的Integrity信息。基因ID不重命名（在随后的输出步骤中统一重命名）。
+my $final_clean = "$results_dir/final.ORF.gff3";
+{
+    my $name = 'h.GFF3Clear_final';
+    my $log  = "$tmp_dir/h.GFF3Clear_final.log";
+    my $cmd  = &gff3clear_cmd($final_gff3, $final_clean, $log);
+    # 输入文件的内容（md5）改变时，本步骤必须重新运行（硬签名，不受--ignore_signature影响）
+    my $in_md5 = "input_md5=" . &file_md5($final_gff3);
+    my $sig    = md5_hex(join("\n", $cmd, &file_sig($input_genome), $in_md5));
+    print STDERR "\nTidying the final gene models with GFF3Clear (genetic code table $codon_table_id, --cpu $o{cpu}); the Integrity information is detected again (" . &now() . ")\n";
+    if ( &prepare_step($name, $sig, ['g.fillingEndsOfGeneModels'], [], [$final_clean], $in_md5) ) {
+        &run_cmds($name, [$cmd], [$final_clean], $log);
+    }
+    else { print STDERR "GFF3Clear (final result): already finished, skipped.\n"; }
+}
+
 {
     print STDERR "Writing the final gene models to standard output (gene IDs are renamed) ...\n";
-    # 分类结果：若填补程序输出的基因行中没有Type标签，则按基因ID从分类文件中补上
+    # 分类结果：若整理后的基因行中没有Type标签，则按基因ID从分类文件中补上
     my %type_of = &read_gene_types($classified);
+    # 强制填补之前的基因完整性（取自分类结果的gene行，即第5步合并结果的Integrity）
+    my %integrity_before = &read_gene_integrity($classified);
 
-    my ($n_gene, %integrity, %class_count, %fill_mrna, %fill_gene) = (0);
+    my ($n_gene, %integrity_after, %class_count, %fill_mrna, %fill_gene) = (0);
     my $n_final_complete = 0;
     my ($old_id, $new_id, $cur_type, $in_gene, $cur_integrity, $cur_fc, $cur_fu);
     # 每个基因结束时统计其填补情况（fillingEndsOfGeneModels把Filling2Complete/Filling2Uncomplete标记在mRNA行上，
-    # 基因中任意一个转录本成功填补即认为该基因填补成功）
+    # 基因中任意一个转录本成功填补即认为该基因填补成功）；
+    # 整理后gene行的Integrity为GFF3Clear重新检测的结果：只要有一个mRNA完整，即为complete，否则为incomplete
     my $flush_gene = sub {
         return unless $in_gene;
         if    ($cur_fc) { $fill_gene{Filling2Complete} ++; }
         elsif ($cur_fu) { $fill_gene{Filling2Uncomplete} ++; }
-        $n_final_complete ++ if ( ( $cur_integrity // '' ) eq 'complete' ) || $cur_fc;
+        $n_final_complete ++ if ( $cur_integrity // '' ) eq 'complete';
     };
 
     print "##gff-version 3\n";
-    open my $in, "<", $final_gff3 or die "Can not open file $final_gff3, $!\n";
+    open my $in, "<", $final_clean or die "Can not open file $final_clean, $!\n";
     while ( my $line = <$in> ) {
         next if $line =~ m/^##gff-version/;
         my $is_gene = ( $line =~ m/^[^\t]*\t[^\t]*\tgene\t/ ) ? 1 : 0;
@@ -865,7 +905,7 @@ else {
             undef $cur_integrity;
             $n_gene ++;
             undef $cur_type;
-            if ( $line =~ m/Integrity=([^;\s]+)/ ) { $cur_integrity = $1; $integrity{$1} ++; }
+            if ( $line =~ m/(?:^|;)Integrity=([^;\s]+)/ ) { $cur_integrity = $1; $integrity_after{$1} ++; }
             $cur_fc = 1 if $line =~ m/(?:^|;)Filling2Complete=True/;
             $cur_fu = 1 if $line =~ m/(?:^|;)Filling2Uncomplete=True/;
             if ( $line =~ m/(?:^|\t|;)ID=([^;\s]+)/ ) {
@@ -889,14 +929,15 @@ else {
     }
     close $in;
     $flush_gene->();
-    die "Error: no gene model was found in the final result $final_gff3 .\n" unless $n_gene;
+    die "Error: no gene model was found in the final result $final_clean .\n" unless $n_gene;
     print STDERR "Total gene models: $n_gene\n";
-    print STDERR "  Integrity (of the originally predicted gene models, before end filling): " . join(", ", map { "$_=$integrity{$_}" } sort keys %integrity) . "\n" if %integrity;
+    print STDERR "  Integrity of the originally predicted gene models (before end filling): " . join(", ", map { "$_=$integrity_before{$_}" } sort keys %integrity_before) . "\n" if %integrity_before;
+    print STDERR "  Integrity of the final gene models (detected again by GFF3Clear): " . join(", ", map { "$_=$integrity_after{$_}" } sort keys %integrity_after) . "\n" if %integrity_after;
     unless ( $o{no_filling_ends} ) {
         print STDERR "  Filling (gene level, any transcript filled): " . join(", ", map { "$_=" . ( $fill_gene{$_} // 0 ) } qw/Filling2Complete Filling2Uncomplete/) . "\n";
         print STDERR "  Filling (mRNA level): " . join(", ", map { "$_=" . ( $fill_mrna{$_} // 0 ) } qw/Filling2Complete Filling2Uncomplete/) . "\n";
-        printf STDERR "  Complete gene models after end filling: %d (%.2f%%)\n", $n_final_complete, 100 * $n_final_complete / $n_gene;
     }
+    printf STDERR "  Complete gene models in the final result (detected by GFF3Clear): %d (%.2f%%)\n", $n_final_complete, 100 * $n_final_complete / $n_gene;
     print STDERR "  Classification of gene models (based on the models before end filling):\n";
     foreach my $c (qw/A B C D/) {
         my $n = $class_count{$c} // 0;
@@ -912,7 +953,8 @@ print STDERR "\nImportant intermediate results are saved in $results_dir :\n";
 foreach my $f ( "alignment.bam", "alignment.bam.bai", "alignment.stats", "intron.txt", "base_depth.txt",
                 "Sam2Transfrag.raw.gff3", "stringtie.raw.gff3", "Sam2Transfrag.ORF.gff3", "stringtie.ORF.gff3",
                 "Sam2Transfrag.alignment.gff3", "stringtie.alignment.gff3",
-                "merged.ORF.gff3", "merged_classified.ORF.gff3", "merged_classified.ORF.fillEnd.gff3" ) {
+                "merged.ORF.gff3", "merged_classified.ORF.gff3", "merged_classified.ORF.cleaned.gff3",
+                "merged_classified.ORF.fillEnd.gff3", "final.ORF.gff3" ) {
     print STDERR "  $f\n" if -e "$results_dir/$f";
 }
 print STDERR "The temporary directory $tmp_dir was kept; delete it manually if it is no longer needed.\n";
@@ -953,9 +995,18 @@ sub find_in_path {
     return;
 }
 
+# 生成调用GFF3Clear整理GFF3文件的命令：
+# 使用--genome、--genetic_code（与第5、7步一致）、--cpu等参数，不过滤基因模型，不重命名基因ID；
+# GFF3Clear默认会在gene和mRNA行添加根据起始/终止密码子重新检测的准确Integrity信息。
+# 其标准错误输出（修正和警告信息及改动统计）保存到日志文件。
+sub gff3clear_cmd {
+    my ($in, $out, $log) = @_;
+    return "$bin_path/GFF3Clear --genome $input_genome --genetic_code $codon_table_id --cpu $o{cpu} $in > $out 2> $log";
+}
+
 sub check_dependencies {
     my @missing;
-    foreach my $p (qw/NGSReads_prediction.01RNASeq2Sam NGSReads_prediction.02Sam2Transfrag NGSReads_prediction.03Stringtie NGSReads_prediction.04Transfrag2ORF GFF3_merging_and_removing_redundancy fillingEndsOfGeneModels/) {
+    foreach my $p (qw/NGSReads_prediction.01RNASeq2Sam NGSReads_prediction.02Sam2Transfrag NGSReads_prediction.03Stringtie NGSReads_prediction.04Transfrag2ORF GFF3_merging_and_removing_redundancy fillingEndsOfGeneModels GFF3Clear/) {
         push @missing, "$bin_path/$p (not found or not executable)" unless -f "$bin_path/$p" && -x "$bin_path/$p";
     }
     push @missing, "samtools" unless &find_in_path("samtools");
@@ -992,7 +1043,7 @@ sub check_dependencies {
 #   - 上游步骤本次重新运行过、.ok存在但输出缺失，仍然重跑（清理后从头开始）；
 #   - 中断的步骤仍保留工作目录，由子程序断点续跑；
 #   - 可选的第6个参数 $hard_sig（"硬签名"）始终会被比较（保存在.hsig文件中），不受--ignore_signature影响，
-#     用于第7步检测分类结果是否改变。
+#     用于第7步和GFF3Clear整理步骤检测其输入文件的内容是否改变。
 sub prepare_step {
     my ($name, $sig, $deps, $workdirs, $outputs, $hard_sig) = @_;
     my $ok    = "$tmp_dir/$name.ok";
@@ -1484,6 +1535,22 @@ sub read_gene_types {
     return %h;
 }
 
+# 统计GFF3文件中gene行Integrity标签各取值的基因数量，返回 (取值 => 数量) 哈希。
+# 用于在日志中给出强制填补之前（分类结果）的基因完整性统计。
+sub read_gene_integrity {
+    my ($file) = @_;
+    my %h;
+    open my $fh, "<", $file or die "Can not open file $file, $!\n";
+    while (<$fh>) {
+        next if /^#/;
+        my @f = split /\t/, $_, 9;
+        next unless @f >= 9 && $f[2] eq 'gene';
+        $h{$1} ++ if $f[8] =~ m/(?:^|;)Integrity=([^;\s]+)/;
+    }
+    close $fh;
+    return %h;
+}
+
 
 ########################################################################
 # 英文用法说明（位于程序最尾部；中文用法说明位于程序前部）
@@ -1501,8 +1568,8 @@ Usage:
     (3) Call NGSReads_prediction.03Stringtie to assemble transcripts from the same BAM file with StringTie, producing a GFF3 file.
     (4) Call NGSReads_prediction.04Transfrag2ORF to perform ORF analysis on the transcripts from Sam2Transfrag and StringTie separately and predict gene models. The two analyses run in parallel, sharing the threads so that the total does not exceed --cpu. The ORF predictor is chosen by --ORF_predictor (TransDecoder or TIdeS); TIdeS requires homologous proteins as its database; with TIdeS, complete and partial (5'/3' incomplete) ORFs are both predicted by default.
     (5) Call GFF3_merging_and_removing_redundancy to merge the gene models of the two methods and remove redundancy (adjustable with --overlap_coverage; the genetic code used to judge gene completeness and to detect internal stop codons is given by --genetic_code); the result is saved as results/merged.ORF.gff3.
-    (6) Classify the gene models of step 5 into four accuracy classes A/B/C/D according to gene completeness, CDS length, the number of introns between CDSs and the proportion of exon bases that are CDS (taken from the Form information in column 9 of the GFF3 file), and mark the class with a Type= tag in column 9 (on gene lines the Type= tag directly follows ID=; on mRNA lines it directly follows Parent=, and is followed by Integrity=, CDS_Length=, CDS_intron_Num= and CDS_exon_Ratio=). The result is saved as results/merged_classified.ORF.gff3.
-    (7) Call fillingEndsOfGeneModels to forcibly fill in the 5' or 3' ends of the incomplete gene models in the classified result of step 6 (can be skipped with --no_filling_ends; the genetic code used for filling is given by --genetic_code); the filled result is saved as results/merged_classified.ORF.fillEnd.gff3. Then write the final gene models in GFF3 format to standard output (starting with ##gff-version 3; gene IDs are uniformly renamed, default prefix RNASeqORF), and report statistics (number of gene models, integrity, filling, classification, ...) to standard error.
+    (6) Classify the gene models of step 5 into four accuracy classes A/B/C/D according to gene completeness, CDS length, the number of introns between CDSs and the proportion of exon bases that are CDS (taken from the Form information in column 9 of the GFF3 file), and mark the class with a Type= tag in column 9 (on gene lines the Type= tag directly follows ID=; on mRNA lines it directly follows Parent=, and is followed by Integrity=, CDS_Length=, CDS_intron_Num= and CDS_exon_Ratio=). The result is saved as results/merged_classified.ORF.gff3. If --output_raw_GFF3 is used, this result is further tidied by GFF3Clear (with --genetic_code, --cpu, etc.), which detects the Integrity information again and adds the accurate value; the tidied result is saved as results/merged_classified.ORF.cleaned.gff3 and written to the file given by --output_raw_GFF3.
+    (7) Call fillingEndsOfGeneModels to forcibly fill in the 5' or 3' ends of the incomplete gene models in the classified result of step 6 (can be skipped with --no_filling_ends; the genetic code used for filling is given by --genetic_code); the filled result is saved as results/merged_classified.ORF.fillEnd.gff3. Then call GFF3Clear (with --genetic_code, --cpu, etc.) to tidy the final gene models (the filled result; the classified result of step 6 with --no_filling_ends) and add the accurate Integrity information; the tidied result is saved as results/final.ORF.gff3. Finally write the tidied gene models in GFF3 format to standard output (starting with ##gff-version 3; gene IDs are uniformly renamed, default prefix RNASeqORF), and report statistics (number of gene models, integrity, filling, classification, ...) to standard error.
 
     Usage notes:
     (1) Quality control, alignment and sorting/merging are all done by NGSReads_prediction.01RNASeq2Sam; this program only passes the parameters through. Multiple libraries of the same type can be given, separated by commas. Files given by --sam must end with .sam, .bam or .cram.
@@ -1514,22 +1581,23 @@ Usage:
         Passed to NGSReads_prediction.04Transfrag2ORF: --ORF_predictor, --min_protein_length, --genetic_code, --TIdeS_partial/--noTIdeS_partial. The other options of 04Transfrag2ORF (e.g. the TIdeS executable, the clustering identity used for model training, ...) use the defaults of that sub-program.
         Passed to GFF3_merging_and_removing_redundancy: --overlap_coverage (the default of that sub-program is used when it is not set) and --genetic_code (the same genetic code as used by 04Transfrag2ORF, see usage note 14).
         Passed to fillingEndsOfGeneModels: --genetic_code (same as above).
+        Passed to GFF3Clear: --genetic_code (same as above), --cpu, and the genome sequence (--genome). GFF3Clear is used to tidy the result of --output_raw_GFF3 and the final result (see usage note 15); the other options of GFF3Clear use the defaults of that program.
         All the other options of the sub-programs are no longer passed through this program and use the defaults of the sub-programs themselves; NGSReads_prediction.03Stringtie receives no key parameters from this program, and stringtie is called from PATH.
         The following options are set by this program itself: --input_single_sorted_BAM_file, --tmp_dir, --cpu, --strand_specific (02), --strand_specific_library (03), --intron_info_out, --base_depth_out, --gene_prefix (03, 04), --source (04), --keep_tmp_files. For the detailed options of the sub-programs, see the --help output of each of them.
     (5) In step 4 each ORF yields one gene model, so alternative isoforms of the same gene produce redundant models, which are removed in step 5. To avoid gene ID collisions when merging, the two ORF analyses use different gene prefixes (Sam2Transfrag_ORF, stringtie_ORF); the gene IDs of the final result are uniformly renamed to RNASeqORF000001, RNASeqORF000002 ... by default; use --gene_prefix to change the prefix.
-    (6) Use --output_raw_GFF3 to obtain the result of step 6, i.e. after classification and before the forced end filling of step 7 (identical to results/merged_classified.ORF.gff3, with the Type classification tags). These are highly accurate but contain more incomplete gene models. Gene models completed by forced end filling in step 7 are not necessarily accurate; please examine them with care.
-    (7) TIdeS requires homologous proteins as its database. If --homolog_protein is not provided, --ORF_predictor is automatically set to TransDecoder (with a warning if TIdeS was requested). If --homolog_protein is provided and --ORF_predictor is not set, TIdeS is used. --min_protein_length applies to both predictors (TransDecoder: passed to -m; TIdeS: multiplied by 3 and passed to --min-orf); the genetic code table number of --genetic_code only applies to the ORF prediction of TIdeS (but it is also passed as --genetic_code to GFF3_merging_and_removing_redundancy in step 5 and to fillingEndsOfGeneModels in step 7), and --TIdeS_partial/--noTIdeS_partial only applies to TIdeS.
+    (6) Use --output_raw_GFF3 to obtain the result of step 6, i.e. after classification and before the forced end filling of step 7 (the same gene models as results/merged_classified.ORF.gff3, with the Type classification tags, but tidied by GFF3Clear so that the Integrity information is detected again, see usage note 15). These are highly accurate but contain more incomplete gene models. Gene models completed by forced end filling in step 7 are not necessarily accurate; please examine them with care.
+    (7) TIdeS requires homologous proteins as its database. If --homolog_protein is not provided, --ORF_predictor is automatically set to TransDecoder (with a warning if TIdeS was requested). If --homolog_protein is provided and --ORF_predictor is not set, TIdeS is used. --min_protein_length applies to both predictors (TransDecoder: passed to -m; TIdeS: multiplied by 3 and passed to --min-orf); the genetic code table number of --genetic_code only applies to the ORF prediction of TIdeS (but it is also passed as --genetic_code to GFF3_merging_and_removing_redundancy in step 5, to fillingEndsOfGeneModels in step 7 and to GFF3Clear), and --TIdeS_partial/--noTIdeS_partial only applies to TIdeS.
         When TIdeS is used, this program passes --TIdeS_partial to 04Transfrag2ORF by default, i.e. tides predicts 5'/3' partial ORFs in addition to complete ORFs (with start and stop codons). Integrity is then judged from the start/stop codons on the genome sequence, so gene models can be complete, 5prime_partial, 3prime_partial or internal, and classes A and B are distinguished by both gene completeness and the CDS/exon ratio. If only complete ORFs are wanted, add --noTIdeS_partial: every gene model is then labeled Integrity=complete, the "complete gene" condition of the classification is satisfied by all models, and classes A and B are distinguished only by the CDS/exon ratio.
-    (8) [Resuming] When a step finishes, a .ok marker and a .sig signature file (recording the command and input file information) are written to the temporary directory. When re-run with the same --tmp_dir: finished steps whose parameters and inputs are unchanged are skipped; a step interrupted midway is resumed by its sub-program; if the parameters or inputs of a step were changed (including whether --keep_tmp_files is used), that step and all downstream steps are cleaned and re-run automatically. The gene model classification is done in step 6 and is recalculated in every run (it takes very little time), so changing the classification parameters does not require re-running steps 1 to 5; if the classified result changes, step 7 is re-run automatically.
-        [Ignoring signatures] With --ignore_signature the .sig signature files are no longer used to decide whether parameters or inputs changed: any step that has a .ok marker and non-empty output files is skipped, even if its command-line parameters or the path/size/modification time of its input files have changed (e.g. the temporary directory or input files were moved, files were touched, or only unimportant parameters were changed). In this mode: (a) a step interrupted midway is still resumed by its sub-program and is not cleaned; (b) if an upstream step was actually re-executed in this run (e.g. its .ok or output file was missing), its downstream steps are still re-run, so that results stay consistent with the upstream; (c) step 7 still checks whether the classified result of step 6 has changed, and is re-run if so; (d) finished steps are NOT re-run when parameters change; to force a step to re-run, delete its .ok file (or its outputs) in the temporary directory manually. This option is only meaningful when an existing --tmp_dir is reused.
+    (8) [Resuming] When a step finishes, a .ok marker and a .sig signature file (recording the command and input file information) are written to the temporary directory. When re-run with the same --tmp_dir: finished steps whose parameters and inputs are unchanged are skipped; a step interrupted midway is resumed by its sub-program; if the parameters or inputs of a step were changed (including whether --keep_tmp_files is used), that step and all downstream steps are cleaned and re-run automatically. The gene model classification is done in step 6 and is recalculated in every run (it takes very little time), so changing the classification parameters does not require re-running steps 1 to 5; if the classified result changes, step 7 and the GFF3Clear tidying steps are re-run automatically.
+        [Ignoring signatures] With --ignore_signature the .sig signature files are no longer used to decide whether parameters or inputs changed: any step that has a .ok marker and non-empty output files is skipped, even if its command-line parameters or the path/size/modification time of its input files have changed (e.g. the temporary directory or input files were moved, files were touched, or only unimportant parameters were changed). In this mode: (a) a step interrupted midway is still resumed by its sub-program and is not cleaned; (b) if an upstream step was actually re-executed in this run (e.g. its .ok or output file was missing), its downstream steps are still re-run, so that results stay consistent with the upstream; (c) step 7 and the GFF3Clear tidying steps still check whether their input (the classified result of step 6, the filled result) has changed, and are re-run if so; (d) finished steps are NOT re-run when parameters change; to force a step to re-run, delete its .ok file (or its outputs) in the temporary directory manually. This option is only meaningful when an existing --tmp_dir is reused.
     (9) [Temporary files] The temporary directory of this program (--tmp_dir, holding the results directory, logs and .ok/.sig files) is always kept; the main program never deletes it. The temporary directories of the four sub-programs NGSReads_prediction.01RNASeq2Sam, 02Sam2Transfrag, 03Stringtie and 04Transfrag2ORF (located inside it) are removed by the sub-programs themselves after a successful run by default; with --keep_tmp_files all four sub-programs keep their temporary files. The files in the results directory (including the large alignment.bam) are not affected; if they are no longer needed, delete the whole temporary directory manually after the run (use --alignment_bam_out etc. first to save what you want to keep).
     (10) Because the sub-programs do not quote paths in the commands they build, the paths of all inputs, outputs and --tmp_dir must not contain whitespace or special shell characters (such as ; & | $ ( ) * ? < > ' " \). Non-ASCII characters such as Chinese are allowed.
     (11) Common tags in the ninth column of the output GFF3 file:
         Type: the accuracy class of the gene model (see usage note 13), marked on the gene and mRNA lines (directly after ID= on gene lines, and directly after Parent= on mRNA lines);
         Form: the number of ORFs predicted on the transcript, and the proportion of the transcript occupied by the ORF, e.g. Form=one_transcript_get_1_gene_model_num1_62.40% ; the percentage at the end is this proportion and is used as the CDS/exon ratio in the classification;
-        Integrity: completeness of the ORF (complete, 5prime_partial, 3prime_partial, internal); on mRNA lines this tag directly follows Type. It describes the originally predicted result and is not modified by the forced end filling;
-        CDS_Length: total CDS length (bp) of the mRNA line;
-        CDS_intron_Num: the number of introns between CDSs of the mRNA line;
+        Integrity: the completeness of the gene model, detected again by GFF3Clear from the genome sequence and --genetic_code. On mRNA lines the value is complete, 5prime_partial, 3prime_partial or internal (incomplete at both ends); if the CDS has in-frame stop codons, internal_stop is appended after a comma, and if the CDS length is not a multiple of 3, frameshift is appended (e.g. Integrity=complete,internal_stop). On gene lines the value is complete (at least one mRNA is complete) or incomplete (otherwise). In the final result, Integrity is detected on the gene models after forced end filling; in the result of --output_raw_GFF3 it is detected on the gene models before end filling;
+        CDS_Length: total CDS length (bp) of the mRNA line (the value at the time of classification; it is not modified by the forced end filling);
+        CDS_intron_Num: the number of introns between CDSs of the mRNA line (the value at the time of classification);
         CDS_exon_Ratio: the CDS/exon length ratio (0-1) of the mRNA line (taken from Form; the same value as used in the classification);
         Filling2Complete=True: (on mRNA lines) the ORF was incomplete but was completed by forced end filling;
         Filling2Uncomplete=True: (on mRNA lines) the ORF was incomplete and remains incomplete after forced end filling;
@@ -1544,8 +1612,9 @@ Usage:
         NGSReads_prediction.03Stringtie: stringtie.raw.gff3;
         NGSReads_prediction.04Transfrag2ORF: Sam2Transfrag.ORF.gff3, stringtie.ORF.gff3; with --output_alignment_GFF3, Sam2Transfrag.alignment.gff3 and stringtie.alignment.gff3 are also produced (kept in the results directory, and merged, sorted by chromosome name / start-end coordinates of each entry / strand, into the file given by --output_alignment_GFF3);
         Step 5: merged.ORF.gff3 (the merged gene models after redundancy removal);
-        Step 6: merged_classified.ORF.gff3 (the gene models with the Type classification tags);
-        Step 7: merged_classified.ORF.fillEnd.gff3 (the gene models after forced end filling, gene IDs still the internal IDs of the pipeline; not produced with --no_filling_ends).
+        Step 6: merged_classified.ORF.gff3 (the gene models with the Type classification tags); with --output_raw_GFF3, merged_classified.ORF.cleaned.gff3 is also produced (tidied by GFF3Clear, with the Integrity detected again; identical to the file given by --output_raw_GFF3);
+        Step 7: merged_classified.ORF.fillEnd.gff3 (the gene models after forced end filling, gene IDs still the internal IDs of the pipeline; not produced with --no_filling_ends);
+        Final tidying: final.ORF.gff3 (the final gene models tidied by GFF3Clear, with the Integrity detected again, gene IDs still the internal IDs of the pipeline; the standard output is this file with the gene IDs renamed).
         If other output paths are given by --intron_info_out or --base_depth_out, a hard link is also kept in the results directory. compare_2gff3_stats.txt and the log files stay in the top level of the temporary directory. When resuming from a temporary directory created by an older version of this program, the related steps are re-run because the file paths have changed, and files such as merged.ORF.gff3 and merged_classified.ORF.fillEnd.gff3 left in the top level by the older version are removed automatically.
     (13) [Gene model classification] In step 6 the gene models are divided into four accuracy classes by the following four indices, and marked with a Type= tag on the gene and mRNA lines in column 9 of the GFF3 file (on gene lines Type= directly follows ID=; on mRNA lines Type= directly follows Parent=, and is followed by four more tags Integrity=, CDS_Length=, CDS_intron_Num= and CDS_exon_Ratio=, giving the completeness, the CDS length, the number of introns between CDSs and the CDS/exon length ratio of that mRNA):
         Indices: whether the gene is complete (i.e. Integrity=complete; the classification is done before forced end filling, so completeness refers to the originally predicted result); CDS length (bp); the number of introns between CDSs (the gaps between adjacent CDS segments, NOT the gaps between exons); the proportion of exon bases that are CDS (taken from the percentage at the end of the Form value in column 9 of the GFF3 file, e.g. 62.40% means 0.6240; if the mRNA line has no parsable Form, the Form of the gene line is used; if neither has one, the ratio is calculated from the CDS and exon bases and a warning is given). If a gene has several mRNAs, the mRNA with the longest CDS is used.
@@ -1554,7 +1623,8 @@ Usage:
         Class C, Type=fair_gene_models_predicted_by_NGSReads: completeness is not required; CDS length >= the lower threshold, CDS intron number >= the lower threshold, CDS/exon ratio >= the lower threshold; all three conditions must be met (and the model is neither class A nor B).
         Class D, Type=poor_gene_models_predicted_by_NGSReads: all the other gene models.
         Thresholds: unless given manually (--cds_length_high etc.), the thresholds of CDS length and CDS intron number are calculated automatically from --quantile_high and --quantile_low. The reference gene models are taken from compare_2gff3_stats.txt in the temporary directory (produced in step 5): the gene models that overlap between the Sam2Transfrag and StringTie methods and were retained after redundancy removal (these are supported by both methods and are more reliable). Their CDS lengths and CDS intron numbers after step 5 are used to calculate the quantiles. All the thresholds and the number of reference gene models are reported in the log (standard error). If compare_2gff3_stats.txt is missing or no reference gene model can be extracted, all gene models after step 5 are used as the reference, with a warning. The CDS/exon ratio thresholds are not calculated automatically; they are set by --cds_ratio_high (used by class A only) and --cds_ratio_low (used by classes B and C).
-    (14) [Genetic code] The genetic code used in step 5 (merging; gene completeness is judged and internal stop codons are detected with it, for scoring) and step 7 (end filling) is given by --genetic_code. This program passes the genetic code number directly as --genetic_code to GFF3_merging_and_removing_redundancy and fillingEndsOfGeneModels, and these two programs determine the start and stop codons from it automatically. It is the same genetic code that 04Transfrag2ORF uses to judge Integrity in step 4, so the --start_codon and --stop_codon options are no longer needed (and no longer provided). With TIdeS the NCBI genetic code table given by --genetic_code is used; with TransDecoder only the standard genetic code (table 1) is supported, so table 1 is passed to steps 5 and 7 whatever the value of --genetic_code is (start codon ATG; stop codons TAA, TAG, TGA). The genetic code numbers supported in steps 5 and 7 are 1-6, 9-16 and 21-33; any other number causes an error at start-up. The genetic code number actually used is reported in the log (standard error). Note: some non-standard genetic code tables have several start codons; step 7 then fills the 5' end up to the first start codon after the upstream stop codon.
+    (14) [Genetic code] The genetic code used in step 5 (merging; gene completeness is judged and internal stop codons are detected with it, for scoring), step 7 (end filling) and the GFF3Clear tidying steps (Integrity detection, stop codon correction) is given by --genetic_code. This program passes the genetic code number directly as --genetic_code to GFF3_merging_and_removing_redundancy, fillingEndsOfGeneModels and GFF3Clear, and these programs determine the start and stop codons from it automatically. It is the same genetic code that 04Transfrag2ORF uses to judge Integrity in step 4, so the --start_codon and --stop_codon options are no longer needed (and no longer provided). With TIdeS the NCBI genetic code table given by --genetic_code is used; with TransDecoder only the standard genetic code (table 1) is supported, so table 1 is passed to steps 5 and 7 and to GFF3Clear whatever the value of --genetic_code is (start codon ATG; stop codons TAA, TAG, TGA). The genetic code numbers supported by these programs are 1-6, 9-16 and 21-33; any other number causes an error at start-up. The genetic code number actually used is reported in the log (standard error). Note: some non-standard genetic code tables have several start codons; step 7 then fills the 5' end up to the first start codon after the upstream stop codon.
+    (15) [Tidying by GFF3Clear] The result of --output_raw_GFF3 and the final result are each tidied once by GFF3Clear, with a command like: GFF3Clear --genome genome_seq.fasta --genetic_code <genetic code number> --cpu <value of --cpu> input.gff3 > output.gff3. The tidying checks and corrects the GFF3 format, corrects the tail stop codon and phases according to the genome sequence, regenerates exon/UTR/intron features, sorts the gene models by genome sequence order and position, and detects the accurate Integrity information again from the start and stop codons (see usage note 11). No gene model is filtered and no gene ID is renamed by the tidying (the gene IDs of the final result are renamed after it); the existing tags in column 9 of the gene and mRNA lines, such as Type, Form and Filling2Complete, are kept. The logs of GFF3Clear are saved in f.GFF3Clear_raw.log and h.GFF3Clear_final.log in the temporary directory.
 
 Parameters:
 [Input]
@@ -1594,7 +1664,7 @@ Parameters:
     Output the alignments of transcripts to the reference genome (non-standard GFF3). The alignments of the two assembly methods (Sam2Transfrag and StringTie) are merged into this single file. The alignment of each transcript is one entry (all lines of an entry have the same ID in column 9), and entries are separated by a blank line. All entries are sorted by chromosome name (natural order), the start-end coordinates of the cDNA_match records of the entry (smallest start and largest end) and strand ('+' first, then '-', then '.'); the lines inside an entry keep their original order.
 
     --output_raw_GFF3 <string>    default: None
-    Output the preliminary predictions after step 6 (classification) and before the forced end filling of step 7 (identical to results/merged_classified.ORF.gff3). This file has the Type classification tags, and its gene IDs are the internal IDs of the pipeline.
+    Output the preliminary predictions after step 6 (classification) and before the forced end filling of step 7. The result is tidied by GFF3Clear (with --genetic_code, --cpu, etc.); it has the accurate Integrity information and the Type classification tags, and its gene IDs are the internal IDs of the pipeline. The result before tidying is saved in results/merged_classified.ORF.gff3, and the tidied result in results/merged_classified.ORF.cleaned.gff3 (identical to the file given by this option).
 
     --intron_info_out <string>    default: results/intron.txt (in the temporary directory)
     Output file of reliable intron information (produced by Sam2Transfrag). When given, a hard link is also kept in the results directory.
@@ -1652,12 +1722,12 @@ Key parameters passed to NGSReads_prediction.04Transfrag2ORF:
     Minimum protein length (amino acids) when identifying ORFs. TransDecoder: passed to -m; TIdeS: multiplied by 3 and passed to --min-orf.
 
     --genetic_code <int>    default: 1
-    Genetic code, see NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi . It has two effects: (a) it is passed to --TIdeS_genetic_code of 04Transfrag2ORF for the ORF prediction of TIdeS (TransDecoder is not supported and always uses the standard code); (b) it is also passed as --genetic_code to step 5 (GFF3_merging_and_removing_redundancy) and step 7 (fillingEndsOfGeneModels), which determine the start and stop codons from it automatically (see usage note 14). With TransDecoder the genetic code passed to steps 5 and 7 is always 1 (the standard code: ATG; TAA,TAG,TGA). Supported numbers: 1-6, 9-16, 21-33.
+    Genetic code, see NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi . It has two effects: (a) it is passed to --TIdeS_genetic_code of 04Transfrag2ORF for the ORF prediction of TIdeS (TransDecoder is not supported and always uses the standard code); (b) it is also passed as --genetic_code to step 5 (GFF3_merging_and_removing_redundancy), step 7 (fillingEndsOfGeneModels) and GFF3Clear (used to tidy the results), which determine the start and stop codons from it automatically (see usage note 14). With TransDecoder the genetic code passed to steps 5 and 7 and to GFF3Clear is always 1 (the standard code: ATG; TAA,TAG,TGA). Supported numbers: 1-6, 9-16, 21-33.
 
     --TIdeS_partial / --noTIdeS_partial    default: --TIdeS_partial is enabled
     By default this program passes --TIdeS_partial to 04Transfrag2ORF, so with TIdeS both complete ORFs and 5'/3' partial ORFs are predicted (Integrity is judged from the start/stop codons on the genome sequence). Add --noTIdeS_partial to turn it off: TIdeS then reports only complete ORFs and all gene models get Integrity=complete (see usage note 7). Only effective with TIdeS.
 
-Key parameters passed to GFF3_merging_and_removing_redundancy (in addition, --genetic_code, see above, is also passed to this program and to fillingEndsOfGeneModels):
+Key parameters passed to GFF3_merging_and_removing_redundancy (in addition, --genetic_code, see above, is also passed to this program, to fillingEndsOfGeneModels and to GFF3Clear):
     --overlap_coverage <float>    default: 0.30
     In step 5, when the overlapping CDS bases of two gene models divided by the CDS bases of the smaller model exceeds this threshold, the lower-scoring model is removed. Range: (0, 1].
 
@@ -1688,7 +1758,7 @@ Key parameters passed to GFF3_merging_and_removing_redundancy (in addition, --ge
 
 [Advanced]
     --no_filling_ends    default: None
-    Skip the forced end filling of step 7; the classified result of step 6 is the final result.
+    Skip the forced end filling of step 7; the classified result of step 6 is the final result (it is still tidied by GFF3Clear).
 
     --ignore_signature    default: None
     When resuming, do not check the .sig signature files: a step that has a .ok marker and non-empty outputs is skipped even if its parameters or input file information (path, size, modification time) has changed. Only meaningful when an existing --tmp_dir is reused; see usage note 8.
@@ -1701,7 +1771,8 @@ Key parameters passed to GFF3_merging_and_removing_redundancy (in addition, --ge
       Step 3 NGSReads_prediction.03Stringtie: gets the --cpu value; number of worker processes running stringtie in parallel (each stringtie uses one thread);
       Step 4 NGSReads_prediction.04Transfrag2ORF: the ORF analyses of the Sam2Transfrag and StringTie transcripts run at the same time, so --cpu is divided between them (about half each, at least 1), keeping the total within --cpu; only TIdeS uses the threads (TransDecoder is single-threaded), and each TIdeS uses at most 24 threads;
       Step 5 GFF3_merging_and_removing_redundancy: gets the --cpu value; number of worker processes removing redundancy in parallel over chromosome/strand partitions;
-      Step 7 fillingEndsOfGeneModels: gets the --cpu value; the gene models are split evenly into --cpu parts that are filled in parallel.
+      Step 7 fillingEndsOfGeneModels: gets the --cpu value; the gene models are split evenly into --cpu parts that are filled in parallel;
+      GFF3Clear tidying steps (the result of --output_raw_GFF3 and the final result): GFF3Clear gets the --cpu value; number of worker processes correcting the gene models and generating the output in parallel.
     The steps run one after another (only the two analyses inside step 4 run at the same time), so the number of threads in use at any moment does not exceed --cpu (except for the phase in step 1 where index building runs alongside quality control).
 
     --chunk_num <int>    default: min(--cpu, 10)
@@ -1715,7 +1786,7 @@ Key parameters passed to GFF3_merging_and_removing_redundancy (in addition, --ge
     显示中文用法并退出。
 
 Dependencies:
-    The programs NGSReads_prediction.01RNASeq2Sam, NGSReads_prediction.02Sam2Transfrag, NGSReads_prediction.03Stringtie, NGSReads_prediction.04Transfrag2ORF, GFF3_merging_and_removing_redundancy and fillingEndsOfGeneModels in __BIN__ must be executable; samtools and stringtie must be available in PATH; with FASTQ input, java, the aligner (STAR or hisat2/hisat2-build) and __SW__/Trimmomatic-0.38 are also required; TransDecoder needs __SW__/TransDecoder-v5.5.0 (the modified version), TIdeS needs the tides command (tides.py or tides, and its dependencies DIAMOND, CD-HIT, ...). These are checked at start-up.
+    The programs NGSReads_prediction.01RNASeq2Sam, NGSReads_prediction.02Sam2Transfrag, NGSReads_prediction.03Stringtie, NGSReads_prediction.04Transfrag2ORF, GFF3_merging_and_removing_redundancy, fillingEndsOfGeneModels and GFF3Clear in __BIN__ must be executable; samtools and stringtie must be available in PATH; with FASTQ input, java, the aligner (STAR or hisat2/hisat2-build) and __SW__/Trimmomatic-0.38 are also required; TransDecoder needs __SW__/TransDecoder-v5.5.0 (the modified version), TIdeS needs the tides command (tides.py or tides, and its dependencies DIAMOND, CD-HIT, ...). These are checked at start-up.
 
 USAGE_EN
     $t =~ s/__SW__/$software_dir/g;

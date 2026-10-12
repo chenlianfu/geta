@@ -180,7 +180,7 @@ while ( @commands || $runing_task_num > 0 ) {
             $runing_task_num ++;
         }
         close OUT;
-        my $cmdString = "parallel -j $parallel_j < $tmp_dir3/parallel_job$parallel_job &> /dev/null & ";
+        my $cmdString = "parallel -j $parallel_j < $tmp_dir3/parallel_job$parallel_job > /dev/null 2>&1 & ";
         system($cmdString);
     }
 
@@ -195,7 +195,7 @@ while ( @commands || $runing_task_num > 0 ) {
             $runing_task_num ++;
         }
         close OUT;
-        my $cmdString = "parallel -j $parallel_j < $tmp_dir3/parallel_job$parallel_job &> /dev/null & ";
+        my $cmdString = "parallel -j $parallel_j < $tmp_dir3/parallel_job$parallel_job > /dev/null 2>&1 & ";
         system($cmdString);
     }
 

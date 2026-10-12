@@ -232,7 +232,7 @@ $cmdString = "$tool{GFF3Clear} --genome " . shq($genome) . " --genetic_code $gen
 
 # 2 选择CDS数量较多、CDS长度较长、CDS/exon比例较大且去冗余的基因模型用于Augustus training。
 $cmdString = "$tool{'runAugustus.01PickGeneModels'} --out_prefix ati --cpu $cpu --genetic_code $genetic_code evidence_prediction.gff3 " . shq($genome)
-           . " &> runAugustus.01PickGeneModels.log";
+           . " > runAugustus.01PickGeneModels.log 2>&1";
 &execute_cmds($cmdString,
     "test -s ati.filter1.gff3 || { echo 'Error: ati.filter1.gff3 is empty, please check runAugustus.01PickGeneModels.log' >&2; exit 1; }",
     "test -s ati.filter2.gff3 || { echo 'Error: ati.filter2.gff3 is empty, please check runAugustus.01PickGeneModels.log' >&2; exit 1; }",
@@ -305,7 +305,7 @@ my $env_species_dir = "$ENV{'AUGUSTUS_CONFIG_PATH'}/species/";
 $cmdString1 = "$tool{'runAugustus.02BGM2AT'} --AUGUSTUS_CONFIG_PATH " . shq("$tmp_dir/config") . " $augustus_species_start_from"
             . " --flanking_length $flanking_length --min_intron_len $min_intron_len --cpu $cpu"
             . " --onlytrain_GFF3 ati.filter1.gff3 ati.filter2.gff3 " . shq($genome) . " " . shq($augustus_species)
-            . " &> runAugustus.02BGM2AT.log";
+            . " > runAugustus.02BGM2AT.log 2>&1";
 $cmdString2 = "cp accuary_of_AUGUSTUS_HMM_Training.txt ../";
 $cmdString3 = "cp -a " . shq("$tmp_dir/config/species/$augustus_species") . " " . shq($env_species_dir)
             . " || echo Can not create file in directory " . shq($env_species_dir);
@@ -378,7 +378,7 @@ print STDERR "\n#################### $prog_name | Done ####################\n";
 ########################################################################
 # 子程序
 ########################################################################
-# 执行命令。最后一个参数为.ok标记文件，已存在则跳过全部命令；使用bash执行，以支持&>重定向并检测管道中任一环节的失败。
+# 执行命令。最后一个参数为.ok标记文件，已存在则跳过全部命令；使用bash执行，以支持> 重定向并检测管道中任一环节的失败。 2>&1
 sub execute_cmds {
     my $ok_file = pop @_;
     my @cmds = @_;

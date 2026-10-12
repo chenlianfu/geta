@@ -20,7 +20,7 @@ my $usage_cn = <<'USAGE';
     __PROG__ --cpu 20 --repeat repeat.gff3 --HMM_db Pfam-A.hmm --diamond_db eggnog_proteins.dmnd --intron intron.txt --base_depth base_depth.txt --genetic_code 1 --tmp_dir tmp_curate genome.fasta NGSReads.gff3 homolog.gff3 augustus.gff3 > geneModels.gff3
 
 功能简介:
-    程序将NGSReads、Homolog和Augustus三种方法预测的基因模型进行整合；去除位于转座子上的基因模型；再将基因模型分为可信和不可信两类，对仅NGSReads预测、仅Homolog预测但支持力度较低、仅Augustus预测等不可信的基因模型使用HMM(如Pfam)或diamond蛋白数据库(如eggNOG)进行验证过滤；然后根据intron信息添加可变剪接并对可变剪接转录本进行ORF分析；最后使用GFF3Clear检测基因模型的完整性，将5'端或3'端不完整的转录本输出到incomplete.gff3，得到最终准确的基因模型。
+    程序将NGSReads、Homolog和Augustus三种方法预测的基因模型进行整合；去除位于转座子上的基因模型；再将基因模型分为可信和不可信两类，对仅NGSReads预测、仅Homolog预测但支持力度较低、仅Augustus预测等不可信的基因模型使用HMM(如Pfam)或diamond蛋白数据库(如eggNOG)进行验证过滤；然后根据intron信息添加可变剪接并对可变剪接转录本进行ORF分析；最后使用GFF3Clear检测基因模型的完整性，将5'端或3'端不完整以及没有CDS的转录本输出到incomplete.gff3，得到最终准确的基因模型。
 
 运行流程:
     (1) 整合基因模型：先用同源蛋白预测的基因模型填补转录本预测的基因模型，与同源蛋白预测的基因模型合并去冗余，再用augustus预测的基因模型填补，强制填补基因模型末端，与augustus预测的基因模型合并去冗余，最后用GFF3Clear整理修复，得到geneModels.f.gff3。
@@ -29,7 +29,8 @@ my $usage_cn = <<'USAGE';
     (4) 验证不可信基因：使用curateGeneModels.03ValidateGenes，用HMM数据库和/或diamond蛋白数据库对需要验证的基因模型进行验证，通过验证的基因模型输出到geneModels.j.gff3，未通过验证的基因模型输出到invalidated.gff3。
     (5) 合并：将高度可信的基因模型和通过验证的基因模型整合去冗余，得到geneModels.k.gff3。
     (6) 可变剪接：使用curateGeneModels.04AlternativeSplicing(并行调用alternative_splicing_analysis)，根据intron信息添加可变剪接转录本，得到geneModels.l.gff3；未同时设置--intron和--base_depth时跳过该步骤。
-    (7) ORF分析与完整性过滤：使用curateGeneModels.05ORFAnalysis对可变剪接转录本进行ORF分析，得到geneModels.m.gff3；再使用GFF3Clear(--discard_partial)检测基因模型的完整性，5'端或3'端不完整的转录本输出到incomplete.gff3，其余基因模型输出到geneModels.gff3；最终结果geneModels.gff3输出到标准输出，同时保存在临时文件夹中。
+    (7) ORF分析：使用curateGeneModels.05ORFAnalysis对可变剪接转录本进行ORF分析，得到geneModels.m.gff3。
+    (8) 完整性过滤：使用GFF3Clear(--discard_partial --discard_mRNA_without_CDS)检测基因模型的完整性，5'端或3'端不完整以及没有CDS的转录本输出到incomplete.gff3，其余基因模型输出到geneModels.gff3；最终结果geneModels.gff3输出到标准输出，同时保存在临时文件夹中。
 
 输入文件:
     genome.fasta    基因组序列文件
@@ -40,7 +41,7 @@ my $usage_cn = <<'USAGE';
 输出文件(位于临时文件夹中):
     geneModels.gff3    最终的基因模型结果文件，同时输出到标准输出
     genes_in_repeats.gff3    位于转座子序列区域的基因模型
-    incomplete.gff3    经GFF3Clear分析后得到的5'端或3'端不完整的基因模型(转录本)
+    incomplete.gff3    经GFF3Clear分析后得到的5'端或3'端不完整以及没有CDS的基因模型(转录本)
     invalidated.gff3    未能通过HMM或BLASTP数据库验证的基因模型
     geneModels.Readme    各个中间文件的说明
 
@@ -282,15 +283,19 @@ else {
 &execute_cmds( $cmdString, "06.AlternativeSplicing.ok" );
 
 ########################################################################
-# 7. 对可变剪接转录本进行ORF分析；再用GFF3Clear分析完整性，得到incomplete.gff3和最终结果
+# 7. 对可变剪接转录本进行ORF分析
 ########################################################################
-print STDERR "\n7. ORF analysis of the alternative splicing transcripts, then GFF3Clear analysis to get incomplete.gff3 and the final gene models.\n";
-@cmdString = ();
-# a. ORF分析
-push @cmdString, "$bin_path/curateGeneModels.05ORFAnalysis --genome $g --genetic_code $genetic_code --cpu $cpu geneModels.l.gff3 > geneModels.m.gff3 2> ORFAnalysis.log";
-# b. 使用GFF3Clear检测完整性：不完整的转录本输出到incomplete.gff3，其余输出到geneModels.gff3
-push @cmdString, "$bin_path/GFF3Clear --genome $g --cpu $cpu --genetic_code $genetic_code --discard_partial --filtered_gff3 incomplete.gff3 geneModels.m.gff3 > geneModels.gff3 2> GFF3Clear.2.log";
-&execute_cmds( @cmdString, "07.ORFAnalysis.ok" );
+print STDERR "\n7. ORF analysis of the alternative splicing transcripts.\n";
+$cmdString = "$bin_path/curateGeneModels.05ORFAnalysis --genome $g --genetic_code $genetic_code --cpu $cpu geneModels.l.gff3 > geneModels.m.gff3 2> ORFAnalysis.log";
+&execute_cmds( $cmdString, "07.ORFAnalysis.ok" );
+
+########################################################################
+# 8. 使用GFF3Clear分析完整性，得到incomplete.gff3和最终结果
+########################################################################
+print STDERR "\n8. GFF3Clear analysis to get incomplete.gff3 and the final gene models.\n";
+# 使用GFF3Clear检测完整性：不完整的转录本输出到incomplete.gff3，其余输出到geneModels.gff3
+$cmdString = "$bin_path/GFF3Clear --genome $g --cpu $cpu --genetic_code $genetic_code --discard_partial --discard_mRNA_without_CDS --filtered_gff3 incomplete.gff3 geneModels.m.gff3 > geneModels.gff3 2> GFF3Clear.2.log";
+&execute_cmds( $cmdString, "08.GFF3Clear.ok" );
 
 # 最终结果输出到标准输出
 open my $res, '<', "geneModels.gff3" or die "Error: can not open $tmp_dir/geneModels.gff3, $!\n";
@@ -356,7 +361,7 @@ Example:
     __PROG__ --cpu 20 --repeat repeat.gff3 --HMM_db Pfam-A.hmm --diamond_db eggnog_proteins.dmnd --intron intron.txt --base_depth base_depth.txt --genetic_code 1 --tmp_dir tmp_curate genome.fasta NGSReads.gff3 homolog.gff3 augustus.gff3 > geneModels.gff3
 
 Function:
-    The program integrates the gene models predicted by NGSReads, homolog and Augustus; removes the gene models located in transposable elements; divides the gene models into reliable and unreliable classes; validates the unreliable gene models (predicted only by NGSReads, predicted only by homolog with low support, or predicted only by Augustus) with HMM databases (e.g. Pfam) and/or diamond protein databases (e.g. eggNOG); then adds alternative splicing transcripts according to intron information and performs ORF analysis on them; finally GFF3Clear is used to check the integrity of the gene models, and the transcripts incomplete at the 5' or 3' end are written to incomplete.gff3, giving the final accurate gene models.
+    The program integrates the gene models predicted by NGSReads, homolog and Augustus; removes the gene models located in transposable elements; divides the gene models into reliable and unreliable classes; validates the unreliable gene models (predicted only by NGSReads, predicted only by homolog with low support, or predicted only by Augustus) with HMM databases (e.g. Pfam) and/or diamond protein databases (e.g. eggNOG); then adds alternative splicing transcripts according to intron information and performs ORF analysis on them; finally GFF3Clear is used to check the integrity of the gene models, and the transcripts incomplete at the 5' or 3' end or without CDS are written to incomplete.gff3, giving the final accurate gene models.
 
 Workflow:
     (1) Combine gene models: fill the transcript-based gene models with the homolog-based gene models, merge them with the homolog-based gene models and remove redundancy, fill them with the augustus gene models, force-fill the ends of the gene models, merge them with the augustus gene models and remove redundancy, and finally tidy and repair them with GFF3Clear to get geneModels.f.gff3.
@@ -365,7 +370,8 @@ Workflow:
     (4) Validate unreliable genes: curateGeneModels.03ValidateGenes verifies the gene models needing verification with HMM and/or diamond protein databases; the validated gene models are written to geneModels.j.gff3 and the others to invalidated.gff3.
     (5) Merge: the highly reliable gene models and the validated gene models are merged and redundancy is removed, giving geneModels.k.gff3.
     (6) Alternative splicing: curateGeneModels.04AlternativeSplicing (which runs alternative_splicing_analysis in parallel) adds alternative splicing transcripts according to intron information, giving geneModels.l.gff3; this step is skipped unless both --intron and --base_depth are set.
-    (7) ORF analysis and integrity filtering: curateGeneModels.05ORFAnalysis performs ORF analysis on the alternative splicing transcripts, giving geneModels.m.gff3; then GFF3Clear (--discard_partial) checks the integrity of the gene models, the transcripts incomplete at the 5' or 3' end are written to incomplete.gff3 and the remaining gene models are written to geneModels.gff3; the final result geneModels.gff3 is written to STDOUT and also saved in the temporary directory.
+    (7) ORF analysis: curateGeneModels.05ORFAnalysis performs ORF analysis on the alternative splicing transcripts, giving geneModels.m.gff3.
+    (8) Integrity filtering: GFF3Clear (--discard_partial --discard_mRNA_without_CDS) checks the integrity of the gene models; the transcripts incomplete at the 5' or 3' end or without CDS are written to incomplete.gff3 and the remaining gene models are written to geneModels.gff3; the final result geneModels.gff3 is written to STDOUT and also saved in the temporary directory.
 
 Input files:
     genome.fasta    Genome sequence file
@@ -376,7 +382,7 @@ Input files:
 Output files (in the temporary directory):
     geneModels.gff3    Final gene model result file, also written to STDOUT
     genes_in_repeats.gff3    Gene models located in transposable element regions
-    incomplete.gff3    Gene models (transcripts) incomplete at the 5' or 3' end, obtained by the GFF3Clear analysis
+    incomplete.gff3    Gene models (transcripts) incomplete at the 5' or 3' end or without CDS, obtained by the GFF3Clear analysis
     invalidated.gff3    Gene models that failed the HMM or BLASTP database validation
     geneModels.Readme    Description of the intermediate files
 
@@ -402,7 +408,7 @@ Output files (in the temporary directory):
 
 [Repeat filtering options]
     --repeat_ratio <float>
-    Default: 0.6. A gene model is removed if the overlap ratio between its CDS and repeats is not lower than this value.
+    Default: 0.2. A gene model is removed if the overlap ratio between its CDS and repeats is not lower than this value.
 
     --repeat_min_coverage <float>
     Default: 0.6. Repeats whose Ratio value in column 9 of the repeat GFF3 file is lower than this value are ignored.

@@ -1,0 +1,1211 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use Getopt::Long qw(GetOptions);
+use File::Basename qw(basename dirname);
+use File::Path qw(make_path remove_tree);
+use Cwd qw(abs_path getcwd);
+use POSIX qw(strftime);
+
+$| = 1;
+our %CHILD;    # 当前存活的子进程 pid（子进程均自成进程组，便于整组终止）
+$SIG{INT} = $SIG{TERM} = sub {
+    kill_children();
+    print STDERR "\n程序被中断，已终止所有子进程。\n";
+    exit 130;
+};
+
+my $prog_name    = basename($0);
+my $pwd          = getcwd();
+my $command_line = "$0 " . join(" ", map { shq($_) } @ARGV);
+
+########################################################################
+# 中文用法说明（放在代码最前面；英文用法说明放在文件最末尾的__DATA__部分）
+########################################################################
+my $usage_cn = <<'USAGE';
+用法:
+    __PROG__ [options] genome.fasta
+
+说明:
+    本程序用于对基因组序列进行重复序列分析：（1）使用RepeatMasker基于Dfam（hmmer引擎）和RepBase（ncbi引擎）数据库进行分析；（2）使用RepeatModeler从头构建重复序列库，再用RepeatMasker基于该库进行分析（或直接使用 --RM_lib 提供的重复序列库）；（3）合并上述分析结果，输出RepeatMasker格式文件、重复序列GFF3文件、统计文件，并按设定的方式（软屏蔽或硬屏蔽）屏蔽基因组序列中的重复序列，输出屏蔽后的基因组序列。
+    RepeatMasker的并行化由Perl内置的fork多进程worker池完成：基因组序列被分割成多个任务（长序列单独成任务，大量小scaffold按 --batch_size 打包），按任务大小从大到小调度以减少长尾等待，失败的任务自动重试，最后合并结果。结果合并与重复序列屏蔽功能均已内置于本程序，不再依赖外部脚本。worker的临时文件夹（para_RepeatMasker.tmp）位于各分析步骤运行时的工作目录下。
+
+输出（位于 --tmp_dir 文件夹）:
+    genome.repeat.out           合并后的RepeatMasker格式结果（ID列已重新连续编号）
+    genome.repeat.gff3          合并后的重复序列GFF3文件
+    genome.repeat.stats         重复序列统计信息
+    genome.masked.fasta         重复序列屏蔽后的基因组序列
+    genome.repeat.percentage    每条基因组序列的重复序列百分比（仅在设置 --out_repeat_percentage 时输出）
+
+重复序列分析参数:
+    --RM_species_RepBase | --RM_species <string>    默认值: 无
+    设置RepeatMasker使用RepBase数据库（ncbi引擎）进行重复序列分析时采用的分类名称。推荐真菌物种使用Fungi；植物Viridiplantae；动物Metazoa。设置后，程序使用RepBase数据库运行一次RepeatMasker。本参数与--RM_species_Dfam相互独立，两个参数可以设置为不同的值。未配置RepBase数据库时请不要设置该参数。
+
+    --RM_species_Dfam <string>    默认值: 无
+    设置RepeatMasker使用Dfam数据库（hmmer引擎）进行重复序列分析时采用的分类名称。推荐真菌物种使用Fungi；植物Viridiplantae；动物Metazoa。设置后，程序使用Dfam数据库运行一次RepeatMasker。本参数与--RM_species_RepBase相互独立，两个参数可以设置为不同的值。未配置Dfam数据库时请不要设置该参数。
+
+    --RM_lib <string>    默认值: 无
+    输入一个FASTA文件作为重复序列数据库，用RepeatMasker（rmblastn引擎）进行分析。设置该参数后，不再运行RepeatModeler。
+
+    --no_RepeatModeler    默认值: 无
+    设置后不运行RepeatModeler（也不使用 --RM_lib 以外的重复序列库）。若同时没有设置 --RM_species_Dfam、--RM_species_RepBase 和 --RM_lib，则没有任何分析可运行，程序将报错退出。
+
+并行与资源参数:
+    --cpu <int>    默认值: 8
+    设置本程序使用的总CPU线程数。程序会读取 RepeatMasker/NCBIBlastSearchEngine.pm 文件中最后一处 -num_threads 参数值作为单个rmblastn的线程数（读取失败则按4处理），而单个nhmmer的线程数为2。单个RepeatMasker命令消耗的线程数 = -pa 值 × 单个搜索引擎线程数，同时运行的worker数 = --cpu / 单个RepeatMasker命令消耗的线程数（最少为1，且不超过任务数）。
+
+    --pa <int>    默认值: 自动
+    设置单个RepeatMasker命令的 -pa 参数值。默认为1；但当任务数少于可并行的worker数时（如只有一条染色体），程序会自动增大 -pa 以充分利用 --cpu 指定的线程数。
+
+    --batch_size <int>    默认值: 10000000
+    设置单个任务的目标碱基数。长度不小于该值的序列单独成为一个任务；更短的序列（如大量scaffold）按基因组文件中的顺序打包到同一个任务中，直到总长度达到该值。设置为0则每条序列单独一个任务。
+
+    --retry <int>    默认值: 1
+    设置某个并行任务运行失败后的最大重试次数。重试次数用完仍失败则程序报错退出，并保留临时文件夹以供检查。
+
+合并与屏蔽参数:
+    --min_coverge_ratio <float>    默认值: 0.25
+    设置合并步骤的最小覆盖率阈值。若匹配区域对目标重复序列的覆盖率低于此阈值，则过滤掉此结果。
+
+    --mask_type <string>    默认值: hardmaskN
+    设置重复序列屏蔽的类型，有三个值可以选择：softmask（将需要屏蔽的重复序列碱基全部换成小写字母）、hardmaskX（将需要硬屏蔽的重复序列碱基替换成X）和hardmaskN（将需要硬屏蔽的重复序列碱基替换成N）。需要软屏蔽的重复序列始终换成小写字母；同一位置同时被软屏蔽和硬屏蔽时，以硬屏蔽为准。
+
+    --mask_all    默认值: 无
+    加入该参数后，对GFF3文件中的所有重复序列进行屏蔽。默认设置：不对Low_complexity、Simple_repeat、Satellite和Tandem_repeat类型的重复序列进行屏蔽，因为这些类型的重复序列长度较短，出现在基因区域的可能性较高；对Unknown、Unspecified和Other类型的重复序列进行软屏蔽；对其它类型的转座子序列进行硬屏蔽（覆盖率低于 --mask_min_coverge_ratio 时改为软屏蔽）。
+
+    --mask_min_coverge_ratio <float>    默认值: 0.6
+    设置硬屏蔽所需的最小覆盖率阈值，取值范围为0~1。需要硬屏蔽的重复序列，若匹配区域对目标重复序列的覆盖率不低于此值才进行硬屏蔽，否则改为软屏蔽。程序读取GFF3文件最后一列中Ratio标签的值作为覆盖率；若没有Ratio标签，则认为其值为1。该参数使得仅对覆盖率较高而比较明确的转座子序列进行硬屏蔽。
+
+    --out_repeat_percentage    默认值: 无
+    加入该参数后，额外输出每条基因组序列上重复序列所占的百分比（文件 genome.repeat.percentage）。
+
+运行控制参数:
+    --tmp_dir <string>    默认值: tmp
+    设置程序运行时的工作文件夹。各分析步骤的结果（repeatMasker_Dfam、repeatMasker_RepBase、repeatModeler 子文件夹）及最终输出文件均直接位于该文件夹下。程序每完成一个步骤会生成.ok文件；若重新运行时发现.ok文件，则跳过相应步骤（断点续跑，要求基因组文件及参数不变）。若只想修改屏蔽参数，删除该文件夹下的 Mask.ok 文件后重新运行即可；若想修改合并参数（--min_coverge_ratio），删除 Merge.ok 文件后重新运行即可（Mask.ok会自动失效）。并行RepeatMasker步骤的worker临时文件夹中保存了输入签名（基因组文件、--batch_size、--RM_species_Dfam、--RM_species_RepBase、--RM_lib等），若续跑时发现签名改变，旧的任务结果会被自动清除并重新运行，避免误用。
+
+    --keep_tmp    默认值: 无
+    保留各RepeatMasker并行分析步骤的worker临时文件夹（para_RepeatMasker.tmp）。默认情况下，每个步骤成功结束后会删除该文件夹；若运行失败则始终保留，以便续跑。
+
+帮助参数:
+    --help    默认值: 无
+    Display the English help message and exit.
+
+    --chinese_help    默认值: 无
+    显示中文用法说明并退出。
+USAGE
+
+########################################################################
+# 参数解析
+########################################################################
+my $usage_en = do { local $/; <DATA> };
+$usage_en =~ s/__PROG__/$prog_name/g;
+$usage_cn =~ s/__PROG__/$prog_name/g;
+
+# 程序直接运行（无任何参数）时，给出英文用法说明
+if ( @ARGV == 0 ) { print STDERR $usage_en; exit 1; }
+
+my ( $RM_species_Dfam, $RM_species_RepBase, $RM_lib, $no_RepeatModeler );
+my ( $cpu, $pa, $batch_size, $retry );
+my ( $min_coverge_ratio, $mask_type, $mask_all, $mask_min_ratio, $out_repeat_percentage );
+my ( $tmp_dir, $keep_tmp );
+my ( $help, $chinese_help );
+GetOptions(
+    "RM_species_Dfam=s"                                => \$RM_species_Dfam,
+    "RM_species_RepBase|RM_species=s"                  => \$RM_species_RepBase,
+    "RM_lib=s"                                         => \$RM_lib,
+    "no_RepeatModeler"                                 => \$no_RepeatModeler,
+    "cpu=i"                                            => \$cpu,
+    "pa=i"                                             => \$pa,
+    "batch_size=i"                                     => \$batch_size,
+    "retry=i"                                          => \$retry,
+    "min_coverge_ratio|min_coverage_ratio=f"           => \$min_coverge_ratio,
+    "mask_type=s"                                      => \$mask_type,
+    "mask_all"                                         => \$mask_all,
+    "mask_min_coverge_ratio|mask_min_coverage_ratio=f" => \$mask_min_ratio,
+    "out_repeat_percentage"                            => \$out_repeat_percentage,
+    "tmp_dir=s"                                        => \$tmp_dir,
+    "keep_tmp"                                         => \$keep_tmp,
+    "help|h"                                           => \$help,
+    "chinese_help"                                     => \$chinese_help,
+) or do { print STDERR "\nError: invalid command line options.\n\n", $usage_en; exit 1; };
+
+if ($help)         { print $usage_en; exit 0; }
+if ($chinese_help) { print $usage_cn; exit 0; }
+
+# ---------- 参数检查与默认值 ----------
+die "Exactly one genome fasta file is required.\n\n$usage_en" unless @ARGV == 1;
+my $genome = $ARGV[0];
+die "Can not read genome file $genome\n" unless -f $genome && -r $genome;
+$genome = abs_path($genome);    # 后续会 chdir，必须使用绝对路径
+
+# --RM_species_Dfam和--RM_species_RepBase相互独立，可以设置为不同的值
+$RM_species_Dfam    = undef if defined $RM_species_Dfam    && $RM_species_Dfam    eq "";
+$RM_species_RepBase = undef if defined $RM_species_RepBase && $RM_species_RepBase eq "";
+if ( defined $RM_lib && length $RM_lib ) {
+    die "Can not read library file $RM_lib\n" unless -f $RM_lib && -r $RM_lib;
+    $RM_lib = abs_path($RM_lib);
+}
+else {
+    $RM_lib = undef;
+}
+
+$cpu               //= 8;
+$batch_size        //= 10_000_000;
+$retry             //= 1;
+$min_coverge_ratio //= 0.25;
+$mask_type         //= "hardmaskN";
+$mask_min_ratio    //= 0.6;
+$tmp_dir           //= "tmp";
+die "--cpu must be >= 1\n"                               if $cpu < 1;
+die "--pa must be >= 1\n"                                if defined $pa and $pa < 1;
+die "--retry must be >= 0\n"                             if $retry < 0;
+die "--min_coverge_ratio must be between 0 and 1\n"      if $min_coverge_ratio < 0 or $min_coverge_ratio > 1;
+die "--mask_min_coverge_ratio must be between 0 and 1\n" if $mask_min_ratio < 0 or $mask_min_ratio > 1;
+$batch_size = 0 if $batch_size < 0;
+{
+    my %canonical = ( softmask => "softmask", hardmaskx => "hardmaskX", hardmaskn => "hardmaskN" );
+    $mask_type = $canonical{ lc $mask_type } // die "--mask_type must be softmask, hardmaskX or hardmaskN\n";
+}
+
+# 确定需要运行的分析，并检查依赖的程序
+my $use_modeler = ( !$RM_lib && !$no_RepeatModeler ) ? 1 : 0;
+my $run_dfam    = defined $RM_species_Dfam    ? 1 : 0;
+my $run_repbase = defined $RM_species_RepBase ? 1 : 0;
+unless ( $run_dfam or $run_repbase or $RM_lib or $use_modeler ) {
+    die "Error: no analysis to run. Please set --RM_species_Dfam, --RM_species_RepBase or --RM_lib, "
+      . "or do not set --no_RepeatModeler.\n";
+}
+find_in_path("RepeatMasker") or die "Can not find RepeatMasker in PATH !\n";
+if ($use_modeler) {
+    find_in_path("BuildDatabase") or die "Can not find BuildDatabase in PATH !\n";
+    find_in_path("RepeatModeler") or die "Can not find RepeatModeler in PATH !\n";
+}
+
+make_path($tmp_dir) unless -d $tmp_dir;
+$tmp_dir = abs_path($tmp_dir) or die "Error: can not resolve directory $tmp_dir, $!\n";
+chdir $tmp_dir or die "Error: can not enter directory $tmp_dir, $!\n";
+
+print STDERR "\n#################### $prog_name | Start ####################\n";
+print STDERR "PWD: $pwd\n" . localtime() . ": CMD: $command_line\n";
+
+my $start_time = time;
+my $rm_dir     = $tmp_dir;    # 各分析步骤的结果直接位于 --tmp_dir 下
+
+########################################################################
+# 1 使用RepeatMasker基于Dfam和RepBase数据库进行分析
+########################################################################
+step( "RepeatMasker Dfam", "$rm_dir/repeatMasker_Dfam.ok", sub {
+    my $dir = "$rm_dir/repeatMasker_Dfam";
+    make_path($dir);
+    chdir $dir or die "Error: can not enter directory $dir, $!\n";
+    msg("PWD: $dir");
+    if ($run_dfam) {
+        run_para_repeatmasker(
+            label => "Dfam", genome => $genome, species => $RM_species_Dfam, engine => "hmmer",
+            out_prefix => "RepeatMasker_out", tmp_dir => "para_RepeatMasker.tmp",
+            cpu => $cpu, pa => $pa, batch_size => $batch_size, retry => $retry, keep_tmp => $keep_tmp,
+        );
+    }
+    else {
+        touch("RepeatMasker_out.out");
+    }
+} );
+
+step( "RepeatMasker RepBase", "$rm_dir/repeatMasker_RepBase.ok", sub {
+    my $dir = "$rm_dir/repeatMasker_RepBase";
+    make_path($dir);
+    chdir $dir or die "Error: can not enter directory $dir, $!\n";
+    msg("PWD: $dir");
+    if ($run_repbase) {
+        run_para_repeatmasker(
+            label => "RepBase", genome => $genome, species => $RM_species_RepBase, engine => "ncbi",
+            out_prefix => "RepeatMasker_out", tmp_dir => "para_RepeatMasker.tmp",
+            cpu => $cpu, pa => $pa, batch_size => $batch_size, retry => $retry, keep_tmp => $keep_tmp,
+        );
+    }
+    else {
+        touch("RepeatMasker_out.out");
+    }
+} );
+
+########################################################################
+# 2 进行RepeatModeler分析（或使用提供的重复序列库）
+########################################################################
+step( "RepeatModeler", "$rm_dir/repeatModeler.ok", sub {
+    my $dir = "$rm_dir/repeatModeler";
+    make_path($dir);
+    chdir $dir or die "Error: can not enter directory $dir, $!\n";
+    msg("PWD: $dir");
+
+    if ($RM_lib) {
+        run_para_repeatmasker(
+            label => "RM_lib", genome => $genome, lib => $RM_lib,
+            out_prefix => "RepeatModeler_out", tmp_dir => "para_RepeatMasker.tmp",
+            cpu => $cpu, pa => $pa, batch_size => $batch_size, retry => $retry, keep_tmp => $keep_tmp,
+        );
+    }
+    elsif ($no_RepeatModeler) {
+        touch("RepeatModeler_out.out");
+    }
+    else {
+        step( "BuildDatabase", "$dir/BuildDatabase.ok", sub {
+            run_cmd( [ "BuildDatabase", "-name", "species", "-engine", "ncbi", $genome ], "BuildDatabase.log" );
+        } );
+
+        step( "RepeatModeler run", "$dir/RepeatModeler.ok", sub {
+            # 重新运行RepeatModeler前，清除上一次中断运行留下的RM_*文件夹，避免误用旧结果
+            remove_tree($_) foreach grep { -d $_ } glob("RM_*");
+
+            my @cmd = ( "RepeatModeler", "-threads", $cpu, "-database", "species", "-LTRStruct" );
+            # 若RepeatModeler版本为2.0.3或更低，则需要将-threads参数换为-pa参数。
+            # 感谢Toney823在2023.07.27日提交的BUG反馈，https://github.com/chenlianfu/geta/issues/24。
+            my $version = `RepeatModeler --version 2>&1`;
+            if ( defined $version && $version =~ m/(\d+)\.(\d+)\.(\d+)/ && ( $1 < 2 or ( $1 == 2 && $2 == 0 && $3 <= 3 ) ) ) {
+                my $cpu_RepeatModeler = int( $cpu / 4 );
+                $cpu_RepeatModeler = 1 if $cpu_RepeatModeler < 1;
+                @cmd = ( "RepeatModeler", "-pa", $cpu_RepeatModeler, "-database", "species", "-LTRStruct" );
+            }
+            run_cmd( \@cmd, "RepeatModeler.log" );
+        } );
+
+        # 选择最新生成的分类后重复序列库
+        my @libs = sort { ( stat($b) )[9] <=> ( stat($a) )[9] } grep { -s $_ } glob("RM_*/*.classified");
+        if (@libs) {
+            run_para_repeatmasker(
+                label => "RepeatModeler", genome => $genome, lib => abs_path( $libs[0] ),
+                out_prefix => "RepeatModeler_out", tmp_dir => "para_RepeatMasker.tmp",
+                cpu => $cpu, pa => $pa, batch_size => $batch_size, retry => $retry, keep_tmp => $keep_tmp,
+            );
+        }
+        else {
+            warn "警告：RepeatModeler没有生成可用的 RM_*/*.classified 文件，按无RepeatModeler重复序列处理。\n";
+            touch("RepeatModeler_out.out");
+        }
+    }
+} );
+
+########################################################################
+# 3 合并RepeatMasker和RepeatModeler的结果
+########################################################################
+step( "Merge", "$tmp_dir/Merge.ok", sub {
+    chdir $rm_dir or die "Error: can not enter directory $rm_dir, $!\n";
+    msg("PWD: $rm_dir");
+
+    my @outs = grep { has_repeats($_) }
+      ( "$rm_dir/repeatMasker_Dfam/RepeatMasker_out.out", "$rm_dir/repeatMasker_RepBase/RepeatMasker_out.out", "$rm_dir/repeatModeler/RepeatModeler_out.out" );
+
+    unlink "genome.repeat.out", "genome.repeat.gff3", "genome.repeat.stats";
+    unlink "$tmp_dir/Mask.ok";    # 合并结果更新后，屏蔽步骤需要重新运行
+    if (@outs) {
+        merge_repeats( $genome, \@outs, $min_coverge_ratio, "genome.repeat" );
+    }
+    else {
+        msg("没有检测到任何重复序列。");
+        touch("genome.repeat.out");
+        touch("genome.repeat.gff3");
+        touch("genome.repeat.stats");
+    }
+} );
+
+########################################################################
+# 4 根据GFF3文件屏蔽基因组中的重复序列（原maskedByGff.pl的功能）
+########################################################################
+step( "Mask", "$tmp_dir/Mask.ok", sub {
+    chdir $rm_dir or die "Error: can not enter directory $rm_dir, $!\n";
+    msg("PWD: $rm_dir");
+    unlink "genome.masked.fasta", "genome.repeat.percentage";
+    mask_genome(
+        $genome, "genome.repeat.gff3", "genome.masked.fasta",
+        {
+            mask_type       => $mask_type,
+            mask_all        => $mask_all,
+            min_ratio       => $mask_min_ratio,
+            percentage_file => ( $out_repeat_percentage ? "genome.repeat.percentage" : undef ),
+        }
+    );
+} );
+
+my $out_list = "genome.repeat.out, genome.repeat.gff3, genome.repeat.stats, genome.masked.fasta";
+$out_list .= ", genome.repeat.percentage" if $out_repeat_percentage;
+msg("输出文件位于 $rm_dir：$out_list");
+print STDERR "\n#################### $prog_name | Finished (" . sprintf( "%.1f", ( time - $start_time ) / 60 ) . " min) ####################\n";
+exit 0;
+
+########################################################################
+# 子程序
+########################################################################
+sub msg {
+    print STDERR "[" . strftime( "%H:%M:%S", localtime ) . "] @_\n";
+}
+
+sub shq {
+    my $s = shift;
+    return "''" if $s eq "";
+    return $s   if $s =~ m/^[\w\/.,:=+\-]+$/;
+    $s =~ s/'/'\\''/g;
+    return "'$s'";
+}
+
+sub touch {
+    my $f = shift;
+    open my $fh, ">>", $f or die "Error: can not create file $f, $!\n";
+    close $fh;
+}
+
+# 若.ok文件存在则跳过；否则运行$code，运行完毕后（恢复工作目录）生成.ok文件。
+sub step {
+    my ( $label, $ok_file, $code ) = @_;
+    if ( -e $ok_file ) {
+        msg("(Skipped) $label 已完成：$ok_file");
+        return 0;
+    }
+    my $old = getcwd();
+    $code->();
+    chdir $old or die "Error: can not enter directory $old, $!\n";
+    open my $fh, ">", $ok_file or die "Error: can not create file $ok_file, $!\n";
+    close $fh;
+    return 1;
+}
+
+# 是否含有重复序列数据行（RepeatMasker .out文件数据行以空白和数字开头）
+sub has_repeats {
+    my $f = shift;
+    local $_;    # 避免while(<$in>)改写grep等调用方别名的$_
+    return 0 unless -s $f;
+    open my $in, "<", $f or return 0;
+    while (<$in>) {
+        if ( m/^\s*\d+\s/ ) { close $in; return 1; }
+    }
+    close $in;
+    return 0;
+}
+
+sub find_in_path {
+    my $name = shift;
+    foreach my $d ( split /:/, ( $ENV{PATH} // "" ) ) {
+        next if $d eq "";
+        my $f = "$d/$name";
+        return $f if -f $f && -x $f;
+    }
+    return;
+}
+
+sub kill_children {
+    foreach my $pid ( keys %CHILD ) {
+        kill 'TERM', -$pid;    # 子进程自成进程组，整组终止
+        kill 'TERM', $pid;
+    }
+}
+
+# 启动子进程（不经过shell，路径中含空格也安全）：stdout 重定向到 $out；stderr 默认与 stdout 合并，
+# 指定 $err 时重定向到 $err，指定 $err_inherit 时继承父进程的 stderr。
+sub spawn_cmd {
+    my ( $cmd, $out, $err, $err_inherit ) = @_;
+    my $pid = fork();
+    die "fork failed: $!\n" unless defined $pid;
+    if ( $pid == 0 ) {
+        $SIG{INT} = $SIG{TERM} = 'DEFAULT';    # 子进程不继承父进程的中断处理（否则会误杀兄弟进程）
+        %CHILD = ();
+        setpgrp( 0, 0 );
+        open( STDIN, "<", "/dev/null" );
+        if ( defined $out ) { open( STDOUT, ">", $out ) or POSIX::_exit(126) }
+        if    ( defined $err ) { open( STDERR, ">", $err ) or POSIX::_exit(126) }
+        elsif ( defined $out and !$err_inherit ) { open( STDERR, ">&", \*STDOUT ) or POSIX::_exit(126) }
+        {
+            no warnings 'exec';
+            exec { $cmd->[0] } @$cmd;
+        }
+        print STDERR "Can not execute $cmd->[0]: $!\n";
+        POSIX::_exit(127);
+    }
+    $CHILD{$pid} = 1;
+    return $pid;
+}
+
+# 同步运行一个命令；$log 为stdout（及默认stderr）的重定向文件；$err_inherit为真时stderr不重定向。
+sub run_cmd {
+    my ( $cmd, $log, $err_inherit ) = @_;
+    msg( "CMD: " . join( " ", map { shq($_) } @$cmd ) . ( defined $log ? " > $log" : "" ) );
+    my $pid = spawn_cmd( $cmd, $log, undef, $err_inherit );
+    waitpid( $pid, 0 );
+    my $st = $?;
+    delete $CHILD{$pid};
+    if ( $st != 0 ) {
+        my $why = ( $st & 127 ) ? "signal " . ( $st & 127 ) : "exit code " . ( $st >> 8 );
+        die "failed to execute: " . join( " ", map { shq($_) } @$cmd ) . " ($why)" . ( defined $log ? "，详见 " . getcwd() . "/$log" : "" ) . "\n";
+    }
+    return 1;
+}
+
+# 读取 RepeatMasker 安装目录下 NCBIBlastSearchEngine.pm 中最后一处 -num_threads 的值
+sub detect_rmblast_threads {
+    my $rm      = shift;
+    my $threads = 4;
+    local $_;
+    my $real = abs_path($rm) // $rm;    # 解析软链接
+    my $pm   = dirname($real) . "/NCBIBlastSearchEngine.pm";
+    unless ( -e $pm ) {
+        warn "警告：没有找到 $pm ，rmblastn线程数按 $threads 处理。\n";
+        return $threads;
+    }
+    open my $in, "<", $pm or do { warn "警告：Can not open file $pm, $!\n"; return $threads };
+    my $found = 0;
+    while (<$in>) {
+        if ( m/-num_threads\s+(\d+)/ and $1 > 0 ) { $threads = $1; $found = 1; }    # 不 last：取最后一处匹配
+    }
+    close $in;
+    warn "警告：$pm 中没有找到 -num_threads 参数，rmblastn线程数按 $threads 处理。\n" unless $found;
+    return $threads;
+}
+
+########################################################################
+# 合并多个RepeatMasker .out 文件（原merge_repeatMasker_out.pl的功能）
+# 参数：基因组fasta文件, .out文件列表引用, 最小覆盖率, 输出文件前缀
+# 结果：生成 $prefix.out、$prefix.gff3、$prefix.stats
+#   - 覆盖率 = 匹配区域占目标重复序列（共有序列）全长的比例，低于阈值的结果被过滤；
+#   - 基因组上起止坐标完全相同的结果只保留得分（SW score）最高者，得分相同时保留先出现者；
+#   - 输出按基因组文件中的序列顺序、再按起始坐标排序；
+#   - 输出的 .out 文件中 ID 列按输出顺序重新连续编号（不同来源的ID原本会重复）。
+########################################################################
+sub merge_repeats {
+    my ( $genome_file, $outs, $min_ratio, $prefix ) = @_;
+    local $_;
+
+    # ---------- 读取基因组：序列顺序与总长度 ----------
+    my %order;
+    my ( $n_seq, $genome_size ) = ( 0, 0 );
+    open my $gin, "<", $genome_file or die "Can not open file $genome_file, $!\n";
+    while (<$gin>) {
+        if ( m/^>(\S*)/ ) { $order{$1} //= $n_seq++; next; }
+        s/\s+//g;
+        $genome_size += length;
+    }
+    close $gin;
+    die "Genome file $genome_file contains no bases.\n" unless $genome_size > 0;
+
+    # ---------- 读取并过滤RepeatMasker结果 ----------
+    # .out数据行字段（0起）：0 score, 1 div, 2 del, 3 ins, 4 query, 5 begin, 6 end, 7 (left), 8 strand(+/C),
+    #   9 repeat, 10 class/family, 正链：11 begin, 12 end, 13 (left)；负链(C)：11 (left), 12 end, 13 begin
+    my %locus;
+    foreach my $file (@$outs) {
+        open my $in, "<", $file or die "Can not open file $file, $!\n";
+        while ( my $line = <$in> ) {
+            next unless $line =~ m/^\s*\d+\s/;    # 跳过表头及空行
+            $line =~ s/\s+$//;
+            my @f = split ' ', $line;
+            next if @f < 14;
+            my ( $score, $seq, $beg, $end, $strand, $rname, $class ) = @f[ 0, 4, 5, 6, 8, 9, 10 ];
+            my ( $rbeg, $rend, $rleft ) = $strand eq 'C' ? @f[ 13, 12, 11 ] : @f[ 11, 12, 13 ];
+            $rleft =~ s/[()]//g;
+            next unless $beg =~ m/^\d+$/ && $end =~ m/^\d+$/ && $rbeg =~ m/^\d+$/ && $rend =~ m/^\d+$/ && $rleft =~ m/^\d+$/;
+            ( $beg, $end ) = ( $end, $beg ) if $beg > $end;
+            my $rlen = $rend + $rleft;
+            next if $rlen <= 0;
+            my $ratio = ( $rend - $rbeg + 1 ) / $rlen;
+            next if $ratio < $min_ratio;
+
+            my $key = "$beg\t$end";
+            my $old = $locus{$seq}{$key};
+            next if $old and $old->{score} >= $score;
+            $locus{$seq}{$key} = {
+                line => $line, beg => $beg, end => $end, strand => ( $strand eq 'C' ? '-' : '+' ),
+                name => $rname, class => $class, rbeg => $rbeg, rend => $rend, score => $score,
+                ratio => sprintf( "%.4f", $ratio ),
+            };
+        }
+        close $in;
+    }
+
+    # ---------- 输出 .out 和 .gff3，同时累计统计信息 ----------
+    # 统计结构：{num => 个数, reg => {序列名 => [起,止,起,止,...]}, len => 去重叠碱基数（缓存）}
+    # 输出时按序列、再按起始坐标有序遍历，因此各序列的区域数组天然按起始坐标有序。
+    my ( %T, %C, %S );    # %T 汇总类别；%C 大类；%S{大类}{子类}
+    my $add = sub {
+        my ( $h, $seq, $beg, $end ) = @_;
+        $h->{num}++;
+        push @{ $h->{reg}{$seq} }, $beg, $end;
+    };
+
+    open my $out_fh, ">", "$prefix.out"  or die "Can not create file $prefix.out, $!\n";
+    open my $gff_fh, ">", "$prefix.gff3" or die "Can not create file $prefix.gff3, $!\n";
+    print $out_fh "   SW   perc perc perc  query         position in query           matching          repeat                position in repeat\n";
+    print $out_fh "score   div. del. ins.  sequence      begin   end        (left)   repeat            class/family      begin   end    (left)    ID\n\n";
+    print $gff_fh "##gff-version 3\n";
+
+    my $new_id = 0;
+    my @seqs = sort { ( $order{$a} // 1e12 ) <=> ( $order{$b} // 1e12 ) or $a cmp $b } keys %locus;
+    foreach my $seq (@seqs) {
+        my @keys = sort { $locus{$seq}{$a}{beg} <=> $locus{$seq}{$b}{beg} or $locus{$seq}{$a}{end} <=> $locus{$seq}{$b}{end} } keys %{ $locus{$seq} };
+        foreach my $key (@keys) {
+            my $l = $locus{$seq}{$key};
+
+            my $line = $l->{line};
+            $new_id++;
+            $line =~ s/^(\s*(?:\S+\s+){14})\d+/$1 . $new_id/e;    # ID列（第15列）重新编号
+            print $out_fh "$line\n";
+            print $gff_fh join( "\t", $seq, "RepeatMasker", "similarity", $l->{beg}, $l->{end}, ".", $l->{strand}, ".",
+                "Name=$l->{class};Target=$l->{name} $l->{rbeg} $l->{rend};Ratio=$l->{ratio}" ), "\n";
+
+            my ( $main, $sub ) = split /\//, $l->{class}, 2;
+            $main //= "";
+            my ( $rb, $re ) = ( $l->{beg}, $l->{end} );
+            $add->( $T{total} //= {}, $seq, $rb, $re );
+            $add->( $C{$main} //= {}, $seq, $rb, $re );
+            $add->( $S{$main}{$sub} //= {}, $seq, $rb, $re ) if defined $sub && length $sub;
+
+            if    ( $main =~ m/^(?:LTR|LINE|SINE|Retroposon)/ ) { $add->( $T{retro} //= {}, $seq, $rb, $re ) }
+            elsif ( $main =~ m/^DNA/ )                          { $add->( $T{dna}   //= {}, $seq, $rb, $re ) }
+            if ( $main =~ m/^(?:Low_complexity|Satellite|Simple_repeat|rRNA)/ ) { $add->( $T{nonint} //= {}, $seq, $rb, $re ) }
+            else                                                                  { $add->( $T{inter}  //= {}, $seq, $rb, $re ) }
+        }
+    }
+    close $out_fh or die "Failed to write $prefix.out, $!\n";
+    close $gff_fh or die "Failed to write $prefix.gff3, $!\n";
+    %locus = ();    # 释放内存
+
+    # ---------- 输出统计信息 ----------
+    my $measure = sub {    # 返回 (个数, 去重叠后的碱基数)；去重叠长度只计算一次并缓存
+        my $h = shift;
+        return ( 0, 0 ) unless $h;
+        unless ( defined $h->{len} ) {
+            my $sum = 0;
+            $sum += union_length($_) foreach values %{ $h->{reg} };
+            $h->{len} = $sum;
+        }
+        return ( $h->{num}, $h->{len} );
+    };
+    my $pct = sub { int( $_[0] / $genome_size * 10000 ) / 100 };
+
+    open my $st, ">", "$prefix.stats" or die "Can not create file $prefix.stats, $!\n";
+    my $row = sub {
+        my ( $indent, $label, $h ) = @_;
+        my ( $num, $len ) = $measure->($h);
+        printf $st "%s%s\t%d\t%d\t%.2f%%\n", " " x $indent, $label, $num, $len, $pct->($len);
+    };
+    my $by_len = sub {    # 按碱基数从大到小排序（相同时按名称）
+        my ( $get, @names ) = @_;
+        my %len = map { $_ => ( $measure->( $get->($_) ) )[1] } @names;
+        return sort { $len{$b} <=> $len{$a} or $a cmp $b } @names;
+    };
+    my $sub_rows = sub {    # 输出某大类下的所有子类
+        my ( $indent, $main, $bylen ) = @_;
+        my @subs = keys %{ $S{$main} || {} };
+        @subs = $bylen ? $by_len->( sub { $S{$main}{ $_[0] } }, @subs ) : sort @subs;
+        $row->( $indent, $_, $S{$main}{$_} ) foreach @subs;
+    };
+
+    my ( $total_num, $total_len ) = $measure->( $T{total} );
+    print $st "=======================================================\n";
+    printf $st "Genome Size: %d bp\nRepeat Size: %d bp\nRepeat Ratio: %.2f%%\n", $genome_size, $total_len, $pct->($total_len);
+    print $st "=======================================================\n";
+    print $st "Class\tNumber\tLength\tPercentage\n";
+    print $st "-------------------------------------------------------\n";
+    $row->( 0, "Total", $T{total} );
+
+    # 非散在重复序列
+    $row->( 4, "Non-interspersed Repeats", $T{nonint} );
+    foreach my $class ( $by_len->( sub { $C{ $_[0] } }, qw/Simple_repeat Low_complexity Satellite rRNA/ ) ) {
+        $row->( 8, $class, $C{$class} );
+        $sub_rows->( 12, $class, 0 );
+    }
+
+    # 散在重复序列
+    $row->( 4, "Interspersed Repeats", $T{inter} );
+
+    # 逆转录转座子
+    $row->( 8, "Retroelements", $T{retro} );
+    my %retro_rank = ( LTR => 1, LINE => 2, SINE => 3, Retroposon => 4 );
+    my @retro = grep { m/^(?:LTR|LINE|SINE|Retroposon)/ } keys %C;
+    @retro = sort { ( $retro_rank{$a} // 5 ) <=> ( $retro_rank{$b} // 5 ) or $a cmp $b } @retro;
+    foreach my $class (@retro) {
+        $row->( 12, $class, $C{$class} );
+        $sub_rows->( 16, $class, 1 );
+    }
+
+    # DNA转座子
+    $row->( 8, "DNA transposons", $T{dna} );
+    foreach my $class ( sort grep { m/^DNA/ } keys %C ) {
+        if ( $S{$class} ) { $sub_rows->( 12, $class, 1 ) }
+        else              { $row->( 12, $class, $C{$class} ) }
+    }
+
+    # 其它散在重复序列
+    my @others = grep { !m/^(?:LTR|LINE|SINE|Retroposon|DNA|Low_complexity|Satellite|Simple_repeat|rRNA)/ } keys %C;
+    foreach my $class ( $by_len->( sub { $C{ $_[0] } }, @others ) ) {
+        $row->( 8, ( $class eq "RC" ? "Rolling-circles" : $class ), $C{$class} );
+        $sub_rows->( 12, $class, 0 );
+    }
+    print $st "=======================================================\n";
+    print $st "# 注意事项：\n";
+    print $st "# 1. 某个大类的总个数可能超过其所属小类的总数之和，这是因为该大类下包含一些未能归于其子类的重复序列。\n";
+    print $st "# 2. 重复序列的总碱基数会小于各类型重复序列碱基数之和，这是因为不同类型的重复序列之间可能有重叠。\n";
+    close $st or die "Failed to write $prefix.stats, $!\n";
+
+    msg("合并完成：保留 $total_num 条重复序列比对结果，重复序列共 $total_len bp（占基因组 " . sprintf( "%.2f", $pct->($total_len) ) . "%）。");
+    return 1;
+}
+
+# 计算一组区域去除重叠后的总长度。参数：数组引用 [起,止,起,止,...]（要求每个区域起<=止）。
+# 若区域已按起始坐标有序（本程序的常见情况）则线性扫描，否则先排序。
+sub union_length {
+    my ($flat) = @_;
+    my $cnt = int( @$flat / 2 );
+    return 0 unless $cnt;
+    my $sorted = 1;
+    for ( my $i = 1 ; $i < $cnt ; $i++ ) {
+        if ( $flat->[ 2 * $i ] < $flat->[ 2 * $i - 2 ] ) { $sorted = 0; last; }
+    }
+    my @idx;
+    @idx = sort { $flat->[ 2 * $a ] <=> $flat->[ 2 * $b ] } 0 .. $cnt - 1 unless $sorted;
+
+    my ( $length, $cs, $ce ) = ( 0, undef, undef );
+    for ( my $j = 0 ; $j < $cnt ; $j++ ) {
+        my $i = $sorted ? $j : $idx[$j];
+        my ( $bg, $ed ) = ( $flat->[ 2 * $i ], $flat->[ 2 * $i + 1 ] );
+        if ( !defined $cs ) { ( $cs, $ce ) = ( $bg, $ed ); next; }
+        if ( $bg > $ce ) {
+            $length += $ce - $cs + 1;
+            ( $cs, $ce ) = ( $bg, $ed );
+        }
+        elsif ( $ed > $ce ) {
+            $ce = $ed;
+        }
+    }
+    $length += $ce - $cs + 1 if defined $cs;
+    return $length;
+}
+
+########################################################################
+# 根据重复序列GFF3文件屏蔽基因组（原maskedByGff.pl的功能，已修复若干BUG）
+# 参数：基因组fasta文件, GFF3文件, 输出fasta文件, 选项哈希引用
+#   选项：mask_type(softmask|hardmaskX|hardmaskN), mask_all, min_ratio, percentage_file(可选)
+# 屏蔽规则：
+#   - 默认不屏蔽 Low_complexity、Simple_repeat、Satellite、Tandem_repeat（mask_all时屏蔽）；
+#   - Unknown、Unspecified、Other 类型软屏蔽（转小写）；
+#   - 其它类型：mask_type为softmask时软屏蔽；否则覆盖率（GFF3的Ratio标签，缺省为1）不低于min_ratio时硬屏蔽，低于时软屏蔽；
+#   - 同一位置既被软屏蔽又被硬屏蔽时以硬屏蔽为准（与GFF3中记录的先后顺序无关）。
+# 相对原maskedByGff.pl修复的BUG：
+#   1. 参数用 ||= 设默认值，导致 --min_coverge_ratio 0 被误改为0.6，现改为 //=；
+#   2. 原程序用不加锚点的贪婪正则解析GFF列，列内容特殊时可能错位，现改为按制表符分列，并按Name标签的大类精确匹配类型；
+#   3. 原程序按顺序逐条屏蔽，后面的软屏蔽（N→n）会把前面已硬屏蔽的碱基降级为软屏蔽，现改为先软后硬；
+#   4. 原程序只转换 ATCGN 字符，含IUPAC简并碱基（R、Y、K等）时会漏屏蔽，现对所有字母处理；
+#   5. 原程序遇到GFF3中不在基因组中的序列名或超出序列长度的坐标时报错或产生警告，现跳过/截断并给出汇总警告；
+#   6. 原程序用 \w{60} 折行，序列含 * 、- 等非\w字符时折行错乱，现按固定长度截取；
+#   7. 原程序整个基因组读入内存，现改为逐条序列流式处理；
+#   8. 原程序统计重复序列百分比时的区间合并函数按字符串排序，现改用 union_length，并输出所有序列（无重复者为0.00%）；
+#   9. 原程序未对输入输出文件的打开做错误检查，且不处理Windows换行符。
+########################################################################
+sub mask_genome {
+    my ( $genome_file, $gff_file, $out_file, $opt ) = @_;
+    my $mask_type = $opt->{mask_type} // "hardmaskN";
+    my $mask_all  = $opt->{mask_all};
+    my $min_ratio = $opt->{min_ratio} // 0.6;
+    my $pct_file  = $opt->{percentage_file};
+    local $_;
+
+    my %skip_class = map { $_ => 1 } qw(Low_complexity Simple_repeat Satellite Tandem_repeat);
+    my %soft_class = map { $_ => 1 } qw(Unknown Unspecified Other);
+
+    # ---------- 读取GFF3，按软/硬屏蔽分类保存区域（扁平数组：起,止,起,止...） ----------
+    my ( %soft, %hard, %region, %gff_ids );
+    my ( $n_bad, $n_skip, $n_soft, $n_hard ) = ( 0, 0, 0, 0 );
+    open my $gin, "<", $gff_file or die "Can not open file $gff_file, $!\n";
+    while (<$gin>) {
+        s/[\r\n]+$//;
+        next if m/^#/ or m/^\s*$/;
+        my @f = split /\t/;
+        unless ( @f >= 5 and $f[3] =~ m/^\d+$/ and $f[4] =~ m/^\d+$/ and $f[3] > 0 and $f[4] > 0 ) {
+            $n_bad++;
+            next;
+        }
+        my ( $seq, $beg, $end ) = @f[ 0, 3, 4 ];
+        ( $beg, $end ) = ( $end, $beg ) if $beg > $end;
+        $gff_ids{$seq} = 1;
+        push @{ $region{$seq} }, $beg, $end if defined $pct_file;    # 百分比统计包含所有重复序列（不受屏蔽规则影响）
+
+        my $attr = defined $f[8] ? $f[8] : "";
+        my ($class) = $attr =~ m/(?:^|;)\s*Name=([^;]*)/;
+        $class //= "";
+        my ($main) = split m{/}, $class;
+        $main //= "";
+        if ( !$mask_all and $skip_class{$main} ) { $n_skip++; next; }
+
+        my ($ratio) = $attr =~ m/(?:^|;)\s*Ratio=([^;\s]+)/i;
+        $ratio = 1 unless defined $ratio and $ratio =~ m/^\d*\.?\d+$/;
+
+        if ( $soft_class{$main} or $mask_type eq "softmask" or $ratio < $min_ratio ) {
+            push @{ $soft{$seq} }, $beg, $end;
+            $n_soft++;
+        }
+        else {
+            push @{ $hard{$seq} }, $beg, $end;
+            $n_hard++;
+        }
+    }
+    close $gin;
+    warn "警告：GFF3文件 $gff_file 中有 $n_bad 行格式不正确（需至少5列且起止坐标为正整数），已忽略。\n" if $n_bad;
+
+    # ---------- 流式读取基因组，逐条屏蔽并输出 ----------
+    open my $out_fh, ">", $out_file or die "Can not create file $out_file, $!\n";
+    my $pct_fh;
+    if ( defined $pct_file ) { open $pct_fh, ">", $pct_file or die "Can not create file $pct_file, $!\n"; }
+
+    my ( $id, @chunks, %seen_id );
+    my $n_range = 0;
+    my $flush = sub {
+        return unless defined $id;
+        my $seq = join "", @chunks;
+        @chunks = ();
+        my $len = length $seq;
+
+        # 先软屏蔽、后硬屏蔽，保证硬屏蔽不会被软屏蔽降级
+        foreach my $pass ( [ $soft{$id}, "soft" ], [ $hard{$id}, "hard" ] ) {
+            my ( $list, $kind ) = @$pass;
+            next unless $list;
+            for ( my $i = 0 ; $i < @$list ; $i += 2 ) {
+                my ( $bg, $ed ) = ( $list->[$i], $list->[ $i + 1 ] );
+                if ( $bg > $len ) { $n_range++; next; }
+                if ( $ed > $len ) { $ed = $len; $n_range++; }
+                my $l = $ed - $bg + 1;
+                if ( $kind eq "soft" ) {
+                    substr( $seq, $bg - 1, $l ) =~ tr/A-Z/a-z/;
+                }
+                elsif ( $mask_type eq "hardmaskX" ) {
+                    substr( $seq, $bg - 1, $l ) =~ tr/A-Z/X/;
+                    substr( $seq, $bg - 1, $l ) =~ tr/a-z/x/;
+                }
+                else {
+                    substr( $seq, $bg - 1, $l ) =~ tr/A-Z/N/;
+                    substr( $seq, $bg - 1, $l ) =~ tr/a-z/n/;
+                }
+            }
+        }
+
+        print $out_fh ">$id\n";
+        for ( my $p = 0 ; $p < $len ; $p += 60 ) {
+            print $out_fh substr( $seq, $p, 60 ), "\n";
+        }
+
+        if ($pct_fh) {
+            my $f = $region{$id} || [];
+            my @r;
+            for ( my $i = 0 ; $i < @$f ; $i += 2 ) {
+                my ( $bg, $ed ) = ( $f->[$i], $f->[ $i + 1 ] );
+                next if $bg > $len;
+                $ed = $len if $ed > $len;
+                push @r, $bg, $ed;
+            }
+            my $percent = $len ? union_length( \@r ) * 100 / $len : 0;
+            printf $pct_fh "%s\t%.2f%%\n", $id, $percent;
+        }
+    };
+
+    open my $fin, "<", $genome_file or die "Can not open file $genome_file, $!\n";
+    while (<$fin>) {
+        s/\r?\n$//;
+        next if m/^\s*$/;
+        if ( m/^>(\S*)/ ) {
+            $flush->();
+            $id = $1;
+            $seen_id{$id} = 1;
+        }
+        else {
+            die "Genome file $genome_file is not a valid FASTA file (sequence before first header).\n" unless defined $id;
+            ( my $s = $_ ) =~ s/\s+//g;
+            push @chunks, $s;
+        }
+    }
+    close $fin;
+    $flush->();
+    close $out_fh or die "Failed to write $out_file, $!\n";
+    close $pct_fh or die "Failed to write $pct_file, $!\n" if $pct_fh;
+
+    my @missing = grep { !$seen_id{$_} } sort keys %gff_ids;
+    warn "警告：GFF3文件中有 " . scalar(@missing) . " 个序列名称在基因组文件中不存在，已忽略（如 $missing[0]）。\n" if @missing;
+    warn "警告：GFF3文件中有 $n_range 个区域超出了基因组序列的范围，已忽略或截断。\n" if $n_range;
+
+    msg("屏蔽完成（$mask_type）：硬屏蔽 $n_hard 条、软屏蔽 $n_soft 条重复序列，另有 $n_skip 条（Low_complexity等）按设置未屏蔽。");
+    return 1;
+}
+
+########################################################################
+# 并行运行RepeatMasker
+# 参数：label genome species engine lib out_prefix tmp_dir cpu pa batch_size retry keep_tmp
+# 结果：在当前工作目录生成 $out_prefix.out（合并后的RepeatMasker .out文件，ID列已重新编号）
+# worker临时文件夹 tmp_dir 位于当前工作目录下。
+########################################################################
+sub run_para_repeatmasker {
+    my %o          = @_;
+    my $label      = $o{label} // "RepeatMasker";
+    my $genome     = $o{genome};
+    my $species    = $o{species};
+    my $lib        = $o{lib};
+    my $engine     = lc( $o{engine} // "hmmer" );
+    my $out_prefix = $o{out_prefix} // "RepeatMasker_out";
+    my $cpu        = $o{cpu} // 8;
+    my $pa         = $o{pa};
+    my $batch_size = $o{batch_size} // 10_000_000;
+    my $retry      = $o{retry} // 1;
+    my $tmp_dir    = $o{tmp_dir} // "para_RepeatMasker.tmp";
+    my $keep_tmp   = $o{keep_tmp};
+
+    if ($lib) { $engine = "ncbi" }
+    else {
+        die "At least one of the species and lib should be set !\n" unless defined $species && length $species;
+        $engine = "ncbi" if $engine eq "rmblast";
+        die "engine must be hmmer or ncbi, got '$engine'\n" unless $engine eq "hmmer" or $engine eq "ncbi";
+    }
+
+    my $RepeatMasker = find_in_path("RepeatMasker") or die "Can not find RepeatMasker in PATH !\n";
+
+    # ---------- 并行度估算 ----------
+    my $engine_threads = $engine eq "ncbi" ? detect_rmblast_threads($RepeatMasker) : 2;
+    my $nproc = `nproc 2>/dev/null`;
+    $nproc = "" unless defined $nproc;
+    chomp $nproc;
+    $nproc = 0 unless $nproc =~ /^\d+$/;
+    my $msg = "[$label] 设置使用的CPU线程数为 $cpu";
+    $msg .= "（警告：超过了本机的 $nproc 个核心）" if $nproc && $cpu > $nproc;
+    $msg .= "，单个" . ( $engine eq "ncbi" ? "rmblastn" : "nhmmer" ) . "命令使用 $engine_threads 线程。";
+    msg($msg);
+
+    # ---------- worker临时文件夹（位于当前工作目录下） ----------
+    $tmp_dir = getcwd() . "/$tmp_dir" unless $tmp_dir =~ m{^/};
+    make_path($tmp_dir) unless -d $tmp_dir;
+    msg("[$label] worker临时文件夹：$tmp_dir");
+
+    # ---------- 断点续跑签名：输入或关键参数改变时，旧的任务结果不可复用 ----------
+    # （例如 --batch_size 改变后，seq_N 对应的序列会不同，若误用旧的 .done 结果会得到错误结果）
+    my @lib_st    = $lib ? ( stat $lib )[ 7, 9 ] : ();
+    my $signature = join( "|", $genome, ( stat $genome )[ 7, 9 ], $batch_size, $engine, $species // "", $lib // "", @lib_st );
+    my $sig_file  = "$tmp_dir/.signature";
+    if ( -e $sig_file ) {
+        my $old_sig = "";
+        if ( open my $rfh, "<", $sig_file ) { $old_sig = <$rfh> // ""; chomp $old_sig; close $rfh; }
+        if ( $old_sig ne $signature ) {
+            msg("[$label] 警告：输入文件或参数与上次运行不一致，清除旧的临时文件夹并重新运行。");
+            remove_tree($tmp_dir);
+            make_path($tmp_dir);
+        }
+    }
+    open my $wfh, ">", $sig_file or die "Can not create file $sig_file, $!\n";
+    print $wfh "$signature\n";
+    close $wfh;
+
+    # ---------- 将基因组分割为任务 ----------
+    my ( $tasks_ref, $test_seq ) = split_genome( $genome, $tmp_dir, $batch_size );
+    my @tasks  = @$tasks_ref;
+    my $ntasks = scalar @tasks;
+    msg("[$label] 基因组被分割为 $ntasks 个任务。");
+
+    # ---------- 计算 -pa 及 worker 数 ----------
+    my $pa_use  = defined $pa ? $pa : 1;
+    my $workers = int( $cpu / ( $pa_use * $engine_threads ) );
+    $workers = 1 if $workers < 1;
+    if ( !defined $pa and $workers > $ntasks ) {
+        $pa_use = int( $cpu / ( $ntasks * $engine_threads ) );
+        $pa_use = 1 if $pa_use < 1;
+    }
+    $workers = $ntasks if $workers > $ntasks;
+    msg("[$label] RepeatMasker 命令的 -pa 参数设置为 $pa_use，同时运行 $workers 个worker。");
+
+    foreach my $t (@tasks) {
+        my @cmd = ( "RepeatMasker", "-no_is", "-pa", $pa_use );
+        if ($lib) { push @cmd, "-e", "ncbi", "-lib", $lib }
+        else      { push @cmd, "-e", $engine, "-species", $species }
+        push @cmd, "-dir", $t->{dir}, $t->{fasta};
+        $t->{cmd}      = \@cmd;
+        $t->{attempts} = 0;
+    }
+
+    # ---------- 先试运行，生成对应物种的数据库（避免多个worker同时建库） ----------
+    if ( !$lib and $workers > 1 and length $test_seq and !-e "$tmp_dir/seq_test.ok" ) {
+        my $test_dir = "$tmp_dir/seq_test";
+        make_path($test_dir);
+        open my $tfh, ">", "$test_dir.fasta" or die "Can not create file $test_dir.fasta, $!";
+        print $tfh ">test\n$test_seq\n";
+        close $tfh;
+        my @cmd = ( "RepeatMasker", "-no_is", "-pa", 1, "-e", $engine, "-species", $species, "-dir", $test_dir, "$test_dir.fasta" );
+        msg( "[$label] CMD: " . join( " ", map { shq($_) } @cmd ) );
+        my $pid = spawn_cmd( \@cmd, "$tmp_dir/seq_test.log" );
+        waitpid( $pid, 0 );
+        my $st = $?;
+        delete $CHILD{$pid};
+        if ( $st != 0 ) { warn "警告：试运行失败，详见 $tmp_dir/seq_test.log\n" }
+        else { touch("$tmp_dir/seq_test.ok") }
+    }
+
+    # ---------- 运行RepeatMasker：Perl worker池 ----------
+    my @queue = sort { $b->{bases} <=> $a->{bases} || $a->{idx} <=> $b->{idx} } grep { !-e "$_->{dir}/.done" } @tasks;
+    my $skipped = $ntasks - @queue;
+    msg("[$label] 检测到 $skipped 个已完成的任务，将跳过。") if $skipped;
+    my @failed = run_pool( $label, \@queue, $workers, $retry, $ntasks, $skipped );
+    if (@failed) {
+        my $list = join( "", map { "    $_->{name}\t$_->{log}\n" } @failed );
+        die "[$label] 以下任务运行失败（已保留临时文件夹 $tmp_dir ，可修复后用相同参数重新运行以续跑）：\n$list";
+    }
+
+    # ---------- 合并结果（重新编号ID列，避免不同任务ID重复） ----------
+    msg("[$label] 合并各任务的RepeatMasker结果。");
+    my $merged_out = "$out_prefix.out";
+    open my $mo, ">", $merged_out or die "Can not create file $merged_out, $!";
+    print $mo "   SW   perc perc perc  query         position in query           matching          repeat                position in repeat\n";
+    print $mo "score   div. del. ins.  sequence      begin   end        (left)   repeat            class/family      begin   end    (left)    ID\n\n";
+    my $id_offset = 0;
+    my $n_norepeat = 0;
+    foreach my $t (@tasks) {
+        my $f = "$t->{dir}/$t->{name}.fasta.out";
+        unless ( -e $f ) {
+            # RepeatMasker在没有检测到重复序列时可能不生成.out文件；通过日志区分这种正常情况与异常情况
+            my $no_repeat = 0;
+            if ( open my $lg, "<", $t->{log} ) {
+                local $_;
+                while (<$lg>) {
+                    if ( m/no repetitive sequences detected/i ) { $no_repeat = 1; last; }
+                }
+                close $lg;
+            }
+            if   ($no_repeat) { $n_norepeat++ }
+            else              { warn "警告：没有找到文件 $f ，该任务按无重复序列处理。\n" }
+            next;
+        }
+        open my $in, "<", $f or die "Can not open file $f, $!";
+        my $max_id = 0;
+        while ( my $line = <$in> ) {
+            next unless $line =~ m/^\s*\d+\s/;    # 只保留数据行，跳过表头和提示信息
+            if ( $line =~ m/^(\s*(?:\S+\s+){14})(\d+)(.*)$/s ) {
+                my ( $pre, $id, $post ) = ( $1, $2, $3 );
+                $max_id = $id if $id > $max_id;
+                $line = $pre . ( $id + $id_offset ) . $post;
+            }
+            print $mo $line;
+        }
+        close $in;
+        $id_offset += $max_id;
+    }
+    close $mo or die "Failed to write $merged_out, $!";
+    msg("[$label] 有 $n_norepeat 个任务没有检测到重复序列。") if $n_norepeat;
+
+    # ---------- 清理 ----------
+    remove_tree($tmp_dir) unless $keep_tmp;
+    return $merged_out;
+}
+
+# 分割基因组：返回 (任务列表引用, 用于试运行的测试序列)
+sub split_genome {
+    my ( $genome, $tmp_dir, $batch_size ) = @_;
+    local $_;
+
+    # 第一遍：统计每条序列的长度
+    open my $in, "<", $genome or die "Can not open file $genome, $!";
+    my ( @names, @lens, %seen, $dup );
+    my $test_seq = "";
+    $dup = 0;
+    while (<$in>) {
+        s/\r?\n$//;
+        next if m/^\s*$/;
+        if ( m/^>(\S*)/ ) {
+            $dup++ if $seen{$1}++;
+            push @names, $1;
+            push @lens,  0;
+        }
+        else {
+            die "Genome file $genome is not a valid FASTA file (sequence before first header).\n" unless @names;
+            ( my $s = $_ ) =~ s/\s+//g;
+            $lens[-1] += length $s;
+            if ( length($test_seq) < 1000 ) {
+                ( my $u = $s ) =~ tr/ACGTacgt//cd;    # 试运行序列只保留A/C/G/T
+                $test_seq .= $u;
+            }
+        }
+    }
+    close $in;
+    die "No sequence found in $genome\n" unless @names;
+    $test_seq = substr( $test_seq, 0, 1000 );
+    warn "警告：基因组文件中有 $dup 条序列的名称重复，这可能导致下游结果混乱。\n" if $dup;
+
+    # 规划任务：按文件顺序，大序列单独成任务，小序列打包
+    my ( @seq_task, @tasks, $cur );
+    foreach my $i ( 0 .. $#lens ) {
+        if ( $lens[$i] == 0 ) {
+            warn "警告：序列 $names[$i] 长度为0，已跳过。\n";
+            $seq_task[$i] = -1;
+            next;
+        }
+        if ( $batch_size <= 0 or $lens[$i] >= $batch_size ) {
+            $cur = undef;
+            push @tasks, new_task( scalar(@tasks) + 1, $tmp_dir );
+            $tasks[-1]{bases} = $lens[$i];
+            $tasks[-1]{nseq}  = 1;
+            $seq_task[$i]     = $#tasks;
+        }
+        else {
+            if ( !$cur or $cur->{bases} + $lens[$i] > $batch_size ) {
+                push @tasks, new_task( scalar(@tasks) + 1, $tmp_dir );
+                $cur = $tasks[-1];
+            }
+            $cur->{bases} += $lens[$i];
+            $cur->{nseq}++;
+            $seq_task[$i] = $#tasks;
+        }
+    }
+    die "All sequences in $genome are empty.\n" unless @tasks;
+
+    # 第二遍：流式写出各任务的fasta文件（长度为0的序列被跳过，不影响所在批次）
+    open $in, "<", $genome or die "Can not open file $genome, $!";
+    my ( $si, $cur_task, $ofh, $writing ) = ( -1, -2, undef, 0 );
+    while (<$in>) {
+        s/\r?\n$//;
+        next if m/^\s*$/;
+        if ( m/^>/ ) {
+            $si++;
+            my $tk = $seq_task[$si];
+            if ( $tk < 0 ) { $writing = 0 }
+            else {
+                if ( $tk != $cur_task ) {
+                    close $ofh if $ofh;
+                    open $ofh, ">", $tasks[$tk]{fasta} or die "Can not create file $tasks[$tk]{fasta}, $!";
+                    $cur_task = $tk;
+                }
+                $writing = 1;
+            }
+        }
+        print $ofh "$_\n" if $writing && $ofh;
+    }
+    close $ofh if $ofh;
+    close $in;
+    return ( \@tasks, $test_seq );
+}
+
+sub new_task {
+    my ( $idx, $tmp_dir ) = @_;
+    my $name = "seq_$idx";
+    make_path("$tmp_dir/$name");
+    return {
+        idx   => $idx,
+        name  => $name,
+        dir   => "$tmp_dir/$name",
+        fasta => "$tmp_dir/$name.fasta",
+        log   => "$tmp_dir/$name.log",
+        bases => 0,
+        nseq  => 0,
+    };
+}
+
+# worker池：保持最多 $workers 个子进程同时运行，完成一个就补充一个任务；失败任务按 $retry 重试
+sub run_pool {
+    my ( $label, $queue, $workers, $retry, $total, $done ) = @_;
+    my @queue = @$queue;
+    my ( %running, @failed );
+    while ( @queue or %running ) {
+        while ( @queue and keys(%running) < $workers ) {
+            my $t = shift @queue;
+            unlink "$t->{dir}/$t->{name}.fasta.out";
+            my $pid = spawn_cmd( $t->{cmd}, $t->{log} );
+            $running{$pid} = $t;
+            msg( "[$label] 启动任务 $t->{name}（$t->{nseq} 条序列，$t->{bases} bp）" . ( $t->{attempts} ? "，第 $t->{attempts} 次重试" : "" ) );
+        }
+        my $pid = wait();
+        if ( $pid < 0 ) {    # 没有可等待的子进程却仍有记录：视为失败，避免死循环
+            push @failed, values %running;
+            %running = ();
+            last;
+        }
+        my $st = $?;
+        delete $CHILD{$pid};
+        my $t = delete $running{$pid} or next;
+        if ( $st == 0 ) {
+            $done++;
+            if ( open my $dfh, ">", "$t->{dir}/.done" ) { close $dfh }
+            msg("[$label] 任务 $t->{name} 完成 ($done/$total)");
+        }
+        else {
+            my $why = ( $st & 127 ) ? "被信号 " . ( $st & 127 ) . " 终止" : "退出码 " . ( $st >> 8 );
+            $t->{attempts}++;
+            if ( $t->{attempts} <= $retry ) {
+                msg("[$label] 任务 $t->{name} 失败（$why），将重试。");
+                unshift @queue, $t;
+            }
+            else {
+                msg("[$label] 任务 $t->{name} 失败（$why），已超过重试次数。");
+                push @failed, $t;
+            }
+        }
+    }
+    return @failed;
+}
+
+########################################################################
+# 英文用法说明（放在文件最末尾，运行时通过DATA文件句柄读取）
+########################################################################
+__DATA__
+Usage:
+    __PROG__ [options] genome.fasta
+
+Description:
+    This program identifies repeats in a genome: (1) RepeatMasker is run with the Dfam (hmmer engine) and RepBase (ncbi engine) databases; (2) RepeatModeler is run to build a de novo repeat library, which is then used by RepeatMasker (or a repeat library provided by --RM_lib is used directly); (3) all results are merged to generate a RepeatMasker-format file, a repeat GFF3 file and a statistics file, and the repeats in the genome are masked (soft-masking or hard-masking, as set) to generate the repeat-masked genome.
+    RepeatMasker is parallelized by a built-in Perl fork-based worker pool: the genome is split into tasks (long sequences are separate tasks, many small scaffolds are packed according to --batch_size), tasks are scheduled from the largest to the smallest to reduce tail latency, failed tasks are retried automatically, and the results are merged. Both the merging of results and the masking of repeats are built into this program, so no external script is required. The temporary directory of the workers (para_RepeatMasker.tmp) is located in the working directory of each analysis step.
+
+Output (in the --tmp_dir directory):
+    genome.repeat.out           merged repeat annotation in RepeatMasker .out format (the ID column is renumbered consecutively)
+    genome.repeat.gff3          merged repeat annotation in GFF3 format
+    genome.repeat.stats         repeat statistics
+    genome.masked.fasta         repeat-masked genome sequence
+    genome.repeat.percentage    percentage of repeats in each genome sequence (only generated when --out_repeat_percentage is set)
+
+Repeat Analysis Options:
+    --RM_species_RepBase | --RM_species <string>    default: None
+    Set the taxon name used by RepeatMasker with the RepBase database (ncbi engine) for the repeat analysis. Fungi is recommended for fungi, Viridiplantae for plants, and Metazoa for animals. When set, RepeatMasker is run once with the RepBase database. This parameter is independent of --RM_species_Dfam, and the two parameters can be set to different values. Do not set this parameter when RepBase is not configured in RepeatMasker.
+
+    --RM_species_Dfam <string>    default: None
+    Set the taxon name used by RepeatMasker with the Dfam database (hmmer engine) for the repeat analysis. Fungi is recommended for fungi, Viridiplantae for plants, and Metazoa for animals. When set, RepeatMasker is run once with the Dfam database.  This parameter is independent of --RM_species_Dfam, and the two parameters can be set to different values. Do not set this parameter when Dfam is not configured in RepeatMasker.
+
+    --RM_lib <string>    default: None
+    Provide a FASTA file as the repeat library, which is used by RepeatMasker (rmblastn engine). When set, RepeatModeler is not run.
+
+    --no_RepeatModeler    default: None
+    Do not run RepeatModeler (no repeat library other than --RM_lib is used). If none of --RM_species_Dfam, --RM_species_RepBase and --RM_lib is set at the same time, there is nothing to run and the program exits with an error.
+
+Parallelization and Resource Options:
+    --cpu <int>    default: 8
+    Set the total number of CPU threads used by this program. The program reads the last -num_threads value in RepeatMasker/NCBIBlastSearchEngine.pm as the number of threads of one rmblastn (4 if it cannot be read), and one nhmmer uses 2 threads. The threads consumed by one RepeatMasker command = the -pa value x the threads of one search engine, and the number of concurrent workers = --cpu / the threads consumed by one RepeatMasker command (at least 1, and not more than the number of tasks).
+
+    --pa <int>    default: auto
+    Set the -pa value of each RepeatMasker command. The default is 1; however, when there are fewer tasks than possible workers (e.g. only one chromosome), the program automatically increases -pa to make full use of the threads set by --cpu.
+
+    --batch_size <int>    default: 10000000
+    Set the target number of bases per task. A sequence not shorter than this value becomes a task by itself; shorter sequences (e.g. many scaffolds) are packed, in genome file order, into the same task until the total length reaches this value. Set to 0 to run every sequence as a separate task.
+
+    --retry <int>    default: 1
+    Set the maximum number of retries for a failed parallel task. If a task still fails after all retries, the program exits with an error and keeps the temporary directory for inspection.
+
+Merging and Masking Options:
+    --min_coverge_ratio <float>    default: 0.25
+    Set the minimum coverage ratio threshold of the merging step. A hit is filtered out if its coverage of the target repeat is lower than this value.
+
+    --mask_type <string>    default: hardmaskN
+    Set the type of repeat masking, one of three values: softmask (convert all bases of the repeats to be masked to lowercase letters), hardmaskX (replace the bases of the repeats to be hard-masked with X) and hardmaskN (replace the bases of the repeats to be hard-masked with N). Repeats that are only soft-masked are always converted to lowercase letters; where a position is both soft-masked and hard-masked, hard-masking takes precedence.
+
+    --mask_all    default: None
+    When set, all repeats in the GFF3 file are masked. By default, repeats of the types Low_complexity, Simple_repeat, Satellite and Tandem_repeat are not masked because they are short and likely to occur in gene regions; repeats of the types Unknown, Unspecified and Other are soft-masked; the other transposable-element repeats are hard-masked (soft-masked if their coverage is lower than --mask_min_coverge_ratio).
+
+    --mask_min_coverge_ratio <float>    default: 0.6
+    Set the minimum coverage ratio threshold required for hard-masking, in the range of 0 to 1. A repeat that is to be hard-masked is hard-masked only if its coverage of the target repeat is not lower than this value, otherwise it is soft-masked. The program reads the value of the Ratio tag in the last column of the GFF3 file as the coverage; if there is no Ratio tag, the value is regarded as 1. This makes only the transposable-element repeats with high and clear coverage hard-masked.
+
+    --out_repeat_percentage    default: None
+    When set, also output the percentage of repeats in each genome sequence (file genome.repeat.percentage).
+
+Run Control Options:
+    --tmp_dir <string>    default: tmp
+    Set the working directory. The results of the analysis steps (the repeatMasker_Dfam, repeatMasker_RepBase and repeatModeler sub-directories) and the final output files are located directly in it. An .ok file is generated when a step finishes; steps whose .ok file exists are skipped when the program is re-run (resume; the genome file and the parameters must not change). To change only the masking options, delete the Mask.ok file in this directory and re-run; to change the merging option (--min_coverge_ratio), delete Merge.ok and re-run (Mask.ok is invalidated automatically). The worker temporary directory of each parallel RepeatMasker step stores a signature of its inputs (genome file, --batch_size, --RM_species_Dfam, --RM_species_RepBase, --RM_lib, etc.); if the signature differs when resuming, the old task results are discarded automatically and the step is re-run, so that stale results are never reused.
+
+    --keep_tmp    default: None
+    Keep the worker temporary directories (para_RepeatMasker.tmp) of the parallel RepeatMasker steps. By default they are removed after each step succeeds; they are always kept if a step fails, so that the run can be resumed.
+
+Help Options:
+    --help    default: None
+    Display the English help message and exit.
+
+    --chinese_help    default: None
+    显示中文用法说明并退出。
+

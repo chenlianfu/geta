@@ -1,0 +1,573 @@
+########################################################################
+# GETA configuration file: config.txt
+########################################################################
+# This file sets the detailed parameters of the sub-programs called by geta.pl.
+# It is placed in the software installation directory and is read automatically
+# when --config is not given to geta.pl. You can also copy this file, modify the
+# copy, and pass it to geta.pl with --config (in that case only the copy is read,
+# and config.txt in the installation directory is not read).
+#
+# [Format]
+#   1. A line "[program name]" starts a section. Every line below it is appended
+#      as-is to the command line of that program.
+#      Supported sections: [runRepeatMaskerModeler] [homolog_prediction]
+#                          [NGSReads_prediction] [runAugustus]
+#                          [curateGeneModels] [outputResults]
+#   2. Lines starting with # (and anything after # within a line) are comments
+#      and are ignored. Therefore a parameter value must not contain the # character.
+#   3. Write one parameter per line, as "--name value". A switch (a parameter
+#      without a value) is written as "--name" only. All switches are off by
+#      default; they are given below as commented lines, remove the leading # to
+#      turn one on.
+#   4. A value containing spaces must be enclosed in quotes, e.g.
+#      --miniprot_options="--outs=0.95 -N 20".
+#      Note: the quoted content must be written on one line and must not contain #.
+#   5. A section or parameter absent from this file uses the default of the
+#      sub-program itself. Every parameter given as an effective line (without #)
+#      in this file has its default value.
+#   6. Parameters set on the command line of geta.pl take priority over those of
+#      the same name in this file.
+#
+# [Parameters that must NOT be set in this file]
+#   The following parameters are set and passed by geta.pl (e.g. --cpu,
+#   --genetic_code, --tmp_dir and the input/output files). Set them on the
+#   command line of geta.pl rather than in this file:
+#     General:  --cpu --genetic_code --tmp_dir
+#     homolog_prediction:  --method (set by --homolog_prediction_method of geta.pl)
+#                          --ignore_signature --output_raw_GFF3 --output_alignment_GFF3
+#     NGSReads_prediction: --pe1 --pe2 --se --sam --strand_specific --aligner
+#                          --homolog_protein --pe_used_pair_num
+#                          --se_used_read_num (set by --max_used_read_num of geta.pl)
+#                          --intron_info_out --base_depth_out --output_raw_GFF3
+#                          --output_alignment_GFF3
+#     runAugustus:  --input_evidence_gff3 --augustus_species --intron_tab
+#     curateGeneModels:  --HMM_db --diamond_db --repeat --intron --base_depth
+#                        (the values of --validate_options and --alt_splicing_options
+#                         must not contain --HMM_db --diamond_db --genetic_code --cpu
+#                         --tmp_dir --filtered_gene_models --out_stats either, since
+#                         these are set centrally by the upper-level programs)
+#     outputResults:  --genome --out_prefix --gene_prefix --BUSCO_lineage_dataset
+#                     --busco_for_all_gff3
+#
+# [About genome size]
+#   geta.pl no longer switches configuration files automatically according to the
+#   genome size. For very large (>1 Gb) or very small (<50 Mb) genomes, adjust the
+#   parameters below if necessary, e.g. the maximum intron length
+#   (--max_intron_size), the RepeatMasker task size (--batch_size), and the
+#   sequencing depth thresholds of Sam2Transfrag.
+#
+# [When the number of predicted genes is abnormal]
+#   If the number of predicted genes is clearly too high or too low, the filtering
+#   thresholds of the gene models usually need to be adjusted, e.g.:
+#   --threshold_ratio_of_*_Supported_times and --threshold_homolog_coverage_* in
+#   [homolog_prediction]; --min_fragment_count_per_transfrag, --cds_* and
+#   --quantile_* in [NGSReads_prediction]; --repeat_ratio in [curateGeneModels],
+#   and the --hmm_* and --blast_* thresholds in --validate_options.
+#   After modification, delete the .ok files of the affected steps and run geta.pl again.
+########################################################################
+
+
+########################################################################
+# runRepeatMaskerModeler: repeat analysis (Step 1 of geta.pl)
+########################################################################
+[runRepeatMaskerModeler]
+
+# ---- Parallelism and resources ----
+# The -pa value of a single RepeatMasker command. Automatic by default: usually 1;
+# when there are fewer tasks than parallel workers (e.g. only one chromosome),
+# the program increases it automatically to make full use of the threads given by
+# --cpu. Usually no need to set it.
+# --pa 1
+
+# Target number of bases (bp) of a single parallel task. A sequence not shorter than
+# this value becomes a task on its own; shorter sequences (e.g. many scaffolds) are
+# packed into one task in order until the total length reaches this value. Set to 0
+# to run every sequence as a separate task.
+--batch_size 10000000
+
+# Maximum number of retries of a failed parallel task. If it still fails after the
+# retries are used up, the program exits with an error.
+--retry 1
+
+# ---- Merging and masking ----
+# Minimum coverage threshold (0~1) when merging RepeatMasker results: results whose
+# matched region covers less than this fraction of the target repeat (consensus
+# sequence) are filtered out.
+--min_coverge_ratio 0.25
+
+# Masking type of repeats: softmask (all converted to lowercase), hardmaskX
+# (masked bases replaced by X), hardmaskN (masked bases replaced by N).
+# Note: later steps of this pipeline (e.g. the filtering of genes in transposable
+# elements) depend on the masking result; usually no need to change it.
+--mask_type hardmaskN
+
+# Switch: mask all repeats in the repeat GFF3 file.
+# By default Low_complexity, Simple_repeat, Satellite and Tandem_repeat are not
+# masked (they are short and likely to occur in gene regions).
+# --mask_all
+
+# Minimum coverage (0~1) required for hard masking: a repeat to be hard-masked is
+# hard-masked only if its coverage (the Ratio value in column 9 of the GFF3) is not
+# lower than this value, otherwise it is soft-masked instead.
+--mask_min_coverge_ratio 0.6
+
+# Switch: keep the worker temporary directory of the parallel RepeatMasker step
+# (para_RepeatMasker.tmp). By default it is deleted after the step succeeds, and it
+# is always kept when the run fails so that the run can be resumed.
+# --keep_tmp
+
+
+########################################################################
+# homolog_prediction: gene prediction using homologous proteins (Step 2 of geta.pl)
+########################################################################
+[homolog_prediction]
+
+# ---------- Output ----------
+# Prefix of the final gene IDs (does not affect the gene IDs of --output_raw_GFF3).
+# Keeping the default is recommended.
+--gene_prefix homolog
+
+# Maximum number of homologous proteins output per source per gene region when
+# the homolog alignment GFF3 is output.
+--max_alignment_num_for_each_gene_region 5
+
+# ---------- Classification and filtering of gene models ----------
+# "good" threshold ((0,1]) of the coverage of the homologous protein: gene models
+# whose coverage is not lower than this value (without frameshift and internal stop
+# codon) are rated class B (complete ones with 100% coverage are class A).
+--threshold_homolog_coverage_good 0.8
+
+# "fair" threshold ((0,1], must not be larger than the good threshold) of the
+# coverage of the homologous protein: gene models with coverage not lower than this
+# value but lower than the good threshold are rated class C; lower ones are class D.
+--threshold_homolog_coverage_fair 0.4
+
+# Quantile ratio ([0,1]) used to filter class C and D gene models by the
+# Supported_times of gene lines and to mark Low_support. The Supported_times of the
+# gene lines of class A and B gene models are sorted from large to small, and the
+# value at this ratio position is taken as threshold 1 (0.5 is the median).
+# The smaller the value, the higher the threshold, and the stricter the filtering
+# and marking.
+--threshold_ratio_of_gene_Supported_times 0.5
+
+# The same as above, for the Supported_times of intron lines, giving threshold 2.
+--threshold_ratio_of_intron_Supported_times 0.5
+
+# ---------- Merging and redundancy removal (passed to GFF3_merging_and_removing_redundancy) ----------
+# CDS overlap coverage threshold ([0,1]) used to remove redundant gene models with
+# overlapping CDS.
+--overlap_coverage 0.30
+
+# Switch: partition only by chromosome when merging and removing redundancy, so that
+# gene models on different strands whose CDS overlap exceeds the threshold are also
+# regarded as redundant. Suitable when the homolog prediction contains many gene
+# models with wrong strands; do not use it if the genome has real antisense
+# overlapping genes.
+# --both_strands
+
+# Ratio p ([0,1]) by which an intron raises the score of a gene model. The k-th
+# intron raises the score by the ratio p*(1-p)**(k-1).
+--intron_bonus 0.3
+
+# Penalty of (this value * S) deducted from the score when a gene model lacks a
+# correct start codon.
+--missing_start_penalty 0.2
+
+# Penalty of (this value * S) deducted from the score when a gene model lacks a
+# correct stop codon.
+--missing_stop_penalty 0.2
+
+# Penalty of (this value * S) deducted from the score for each internal stop codon
+# of a gene model; penalties accumulate.
+--internal_stop_penalty 0.1
+
+# Penalty of (this value * S) deducted from the score for each frameshift of a gene
+# model; penalties accumulate.
+--frameshift_penalty 0.1
+
+# ---------- General alignment parameters ----------
+# Maximum intron length, passed to exonerate (--maxintron), miniprot (-G) and spaln
+# (-yM). Calculated automatically by default: 3.6 * sqrt(total genome length), e.g.
+# 72000 for a 400 Mb genome. Set a larger value manually if the genome has very
+# long introns.
+# --max_intron_size 72000
+
+# ---------- MMseqs2 alignment and Hit filtering (used by the gth/exonerate/genewise methods; passed to homolog_prediction.01MMseqs2CalHits) ----------
+# Identity filtering threshold of an HSP (High-scoring Segment Pair), range (0,1].
+--HSP_identity 0.1
+
+# E-value filtering threshold of an HSP, must be greater than 0.
+--HSP_evalue 1e-3
+
+# Maximum distance (bp) on the genome between HSPs when merging them into one Hit.
+# Calculated automatically by default: 3.6 * sqrt(total genome length).
+# --HSP_max_distance 72000
+
+# Maximum overlap ratio on the homologous protein sequence between an HSP to be
+# added and the existing HSP group when merging HSPs into one Hit, range (0,1].
+--HSP_max_overlap_ratio 0.5
+
+# Identity filtering threshold of a Hit (cumulative identical amino acids of
+# multiple HSPs / matched length), range (0,1].
+--identity 0.2
+
+# E-value filtering threshold of a Hit (the E-value of a Hit is the lowest E-value
+# among its HSPs), must be greater than 0.
+--evalue 1e-9
+
+# Filtering threshold of the coverage of the homologous protein by a Hit (the
+# proportion of amino acids of all HSPs in the homologous protein sequence),
+# range (0,1].
+--homolog_coverage 0.3
+
+# When Hit A contains Hit B: threshold of the proportion of the matched region of
+# Hit B covered by the overlapping region of the two Hits, range (0,1].
+--threshold_Hit_cover_ratio 0.9
+
+# When Hit A contains Hit B and Hit A is better: Hit B is removed if its Score is
+# lower than the Score of Hit A multiplied by this ratio, range (0,1].
+--threshold_Hit_score_ratio 0.4
+
+# Maximum number of homologous protein matches from a single species in one
+# homologous match region on the genome. This parameter takes effect only if the
+# protein names contain species information (e.g. XP_002436309_2_SpeciesSorghumBicolor).
+--max_hit_num_per_single_species 2
+
+# Maximum number of homologous protein matches in one homologous match region (one
+# gene region) on the genome.
+--max_hits_num_per_match_region 10
+
+# ---------- Gene structure prediction (used by the gth/exonerate/genewise methods; passed to homolog_prediction.02HitToGenePrediction) ----------
+# Length of the flanking sequence on both sides of a gene region. Calculated
+# automatically by default (just longer than more than 90% of the gene regions);
+# 5000 is recommended when set directly. Changing this parameter re-splits the gene
+# prediction tasks.
+# --flanking_length 5000
+
+# Number of gene prediction commands in each chunk. Too large causes unbalanced
+# load at the end; too small increases the process start-up overhead.
+--chunk_num 100
+
+# Maximum running time (seconds) of a single gene prediction command; 0 means no limit.
+--timeout 120
+
+# Number of automatic retry rounds of timed-out gene prediction commands; the
+# timeout of round r is --timeout * 2^r; 0 means no retry.
+--retry 1
+
+# Minimum intron length, effective only when exonerate is used.
+--min_intron_length 20
+
+# A gene model is filtered if its matched length (number of amino acids) on the
+# homologous protein is smaller than this value; can be set to 0.
+--threshold_protein_length 25
+
+# A gene model is filtered if its coverage of the homologous protein is lower than
+# this value; can be set to 0.
+--threshold_homolog_coverage 0.2
+
+# A gene model is filtered if its number of internal stop codons is higher than
+# this value; can be set to 0.
+--threshold_inter_stop_codon_num 3
+
+# ---------- miniprot parameters ----------
+# Extra parameters passed to miniprot, none by default. If the value starts with
+# "--", connect it with an equals sign and quote it, e.g.:
+# --miniprot_options="--outs=0.95 -N 20"
+
+# ---------- spaln parameters ----------
+# Species-specific parameter set used by spaln (the -T parameter of spaln); it is
+# recommended to set the species most closely related to the target species, e.g.
+# arabidopsis_thaliana, zea_mays. None by default.
+# --spaln_species arabidopsis_thaliana
+
+# Extra parameters passed to the spaln alignment command, none by default. For example:
+# --spaln_options="-LS -yX2"
+
+# Calculation mode of spaln dynamic programming (the -A parameter of spaln), 0~7.
+# 0 is the most accurate but slowest; 3 is the fastest but least accurate.
+--spaln_dp_mode 1
+
+# Maximum number of loci output per homologous protein, not smaller than 1. When
+# greater than 1 it is passed to the -M parameter of spaln.
+--spaln_max_loci 4
+
+# Length of the longest gene on the genome, passed to the -XG parameter of spaln
+# when formatting the genome. By default spaln infers it from the genome size.
+# --spaln_max_gene_size 1000000
+
+
+########################################################################
+# NGSReads_prediction: gene prediction using RNA-Seq data (Step 3 of geta.pl)
+########################################################################
+[NGSReads_prediction]
+
+# ---------- Quality control and alignment (passed to NGSReads_prediction.01RNASeq2Sam) ----------
+# Once any of the following three parameters is set, it REPLACES (rather than
+# appends to) the built-in default parameters of the corresponding software, so the
+# complete content must be written.
+# When only --sam data are input (no quality control or alignment), these three
+# parameters have no effect and the program gives a harmless warning.
+
+# Other quality-control steps and parameters of Trimmomatic after ILLUMINACLIP
+# (adapter removal, using the default settings of the sub-program).
+--trimmomatic_opts="LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:50 TOPHRED33"
+
+# Alignment parameters passed to hisat2; effective only with --aligner hisat2 of geta.pl.
+--hisat2_opts="--min-intronlen 20 --max-intronlen 200000 --dta --score-min L,0.0,-0.4 -k 1"
+
+# Alignment parameters passed to STAR; effective only when STAR is used (default).
+--star_opts="--alignIntronMax 200000 --alignMatesGapMax 200000 --outFilterType BySJout --outFilterMultimapNmax 20 --alignSJoverhangMin 8 --alignSJDBoverhangMin 1 --outFilterMismatchNmax 999 --outFilterMismatchNoverReadLmax 0.04"
+
+# Number of parts into which the clean data are split after quality control; the
+# parts are aligned in parallel, and each alignment command uses --cpu/--chunk_num
+# threads. Every STAR process loads a copy of the genome index, so memory
+# consumption grows with the number of parts; lower it if memory is small.
+# Default: min(--cpu, 10).
+# --chunk_num 10
+
+# ---------- Transcript assembly (passed to NGSReads_prediction.02Sam2Transfrag) ----------
+# When breaking alignment regions, the thresholds of the exon base depth and the
+# intron depth = (highest base depth of the transcript region) * this parameter,
+# range (0,1].
+--fraction 0.05
+
+# Lower limit of the exon base depth threshold.
+--min_expressed_base_depth 2
+
+# Upper limit of the exon base depth threshold.
+--max_expressed_base_depth 50
+
+# Lower limit of the intron depth threshold.
+--min_junction_depth 2
+
+# Upper limit of the intron depth threshold.
+--max_junction_depth 50
+
+# When outputting transcripts, the number of fragments supporting a transcript must
+# be not lower than this value. It can be lowered when the amount of sequencing
+# data is very small.
+--min_fragment_count_per_transfrag 10
+
+# ---------- ORF prediction (passed to NGSReads_prediction.04Transfrag2ORF) ----------
+# Minimum length (number of amino acids) of the protein sequence when identifying ORFs.
+--min_protein_length 100
+
+# ORF prediction software, TransDecoder or TIdeS. Automatic by default: TIdeS is
+# used when homologous proteins are provided, otherwise TransDecoder.
+# (TIdeS must use homologous proteins as its database.)
+# --ORF_predictor TIdeS
+
+# When TIdeS is used, complete ORFs and 5'/3'-incomplete ORFs are predicted together
+# by default (i.e. --TIdeS_partial is enabled by default). To obtain complete ORFs
+# only, remove the # of the following line (the Integrity of all gene models is then
+# complete).
+# --noTIdeS_partial
+
+# ---------- Merging and redundancy removal of transcriptome transcripts (passed to GFF3_merging_and_removing_redundancy) ----------
+# When merging the gene models of the Sam2Transfrag and StringTie methods, if the
+# number of overlapping CDS bases divided by the CDS bases of the smaller gene model
+# exceeds this threshold, the one with the lower score is removed. Range (0,1].
+--overlap_coverage 0.30
+
+# ---------- Gene model classification (A/B/C/D) ----------
+# Quantile used to calculate the "larger" thresholds (CDS length, number of introns
+# between CDS), range (0,1]: after the reference gene models are sorted from large
+# to small, the value at this ratio position is taken, i.e. at least this proportion
+# of the reference gene models satisfy the threshold.
+--quantile_high 0.80
+
+# Quantile used to calculate the "smaller" thresholds; same rule as above, and must
+# not be smaller than --quantile_high.
+--quantile_low 0.95
+
+# When the following four parameters are set manually, the corresponding thresholds
+# are no longer calculated automatically (they are calculated automatically by default):
+# Minimum CDS length (bp) required for class A and B
+# --cds_length_high 1000
+# Minimum CDS length (bp) required for class C
+# --cds_length_low 500
+# Minimum number of introns between CDS required for class A and B
+# --cds_intron_high 3
+# Minimum number of introns between CDS required for class C
+# --cds_intron_low 1
+
+# Minimum proportion (0~1) of CDS in exons required for class A (taken from the
+# percentage at the end of the Form information in column 9 of the GFF3).
+--cds_ratio_high 0.6
+
+# Minimum proportion (0~1) of CDS in exons required for class B and C; must not be
+# larger than --cds_ratio_high.
+--cds_ratio_low 0.3
+
+# ---------- Others ----------
+# Prefix of the gene IDs of the final results (numbers increase in output order).
+# Keeping the default is recommended.
+--gene_prefix RNASeqORF
+
+# Number of digits of the gene number; padded with 0 on the left when insufficient.
+--gene_code_length 6
+
+# Switch: skip the forced filling of the ends of incomplete gene models and use the
+# classification result directly as the final result.
+# --no_filling_ends
+
+# Switch: keep the temporary files of each sub-program (01RNASeq2Sam, 02Sam2Transfrag,
+# 03Stringtie, 04Transfrag2ORF).
+# --keep_tmp_files
+
+
+########################################################################
+# runAugustus: AUGUSTUS training and gene prediction with hints (Step 4 of geta.pl)
+########################################################################
+[runAugustus]
+
+# Prefix of the final gene IDs.
+--gene_prefix augustus
+
+# Minimum intron length used by Augustus and etraining. The default of Augustus
+# itself is 39, which is too large for small genomes; this pipeline uses 20 by default.
+--min_intron_len 20
+
+# Length of the flanking sequence added on both sides of each gene during training.
+# Calculated automatically by default: the smaller of (1/8 of the median intergenic
+# length, the median gene length), limited to between 1 and 10000. For species with
+# dense genes (e.g. fungi), setting it manually is recommended, e.g. 100.
+# --flanking_length 100
+
+
+########################################################################
+# curateGeneModels: integrate and filter gene models, alternative splicing and ORF analysis (Step 5 of geta.pl)
+########################################################################
+[curateGeneModels]
+
+# ---- Transposable element filtering (effective only when repeat annotation exists) ----
+# A gene model is removed if the proportion of its CDS region overlapping with
+# repeats is not lower than this value.
+--repeat_ratio 0.2
+
+# Repeats whose Ratio value in column 9 of the repeat GFF3 is lower than this value
+# are ignored.
+--repeat_min_coverage 0.6
+
+
+# ======================================================================
+# Gene model validation: --validate_options (passed to curateGeneModels.03ValidateGenes)
+# ======================================================================
+# This program validates gene models with HMM databases (hmmscan) and/or diamond
+# protein databases. A gene passes validation (with all its transcripts) as long as
+# one of its transcripts passes; gene models that fail go to the low-quality gene models.
+# The HMM and diamond databases are set by --HMM_db and --BLASTP_db (or --protein)
+# of geta.pl, not here.
+#
+# The value of this option must be enclosed in quotes and written on ONE line (see
+# the effective line at the end of this section). Each parameter and its default
+# value are explained below:
+#
+# [HMM validation] A protein passes HMM validation if both "full-sequence E-value <=
+#            threshold" and "overall coverage of the HMM model by the qualified
+#            domains >= --hmm_coverage" hold. --hmm_evalue2 is used for HMM models
+#            shorter than --hmm_length, otherwise --hmm_evalue1.
+#   --hmm_evalue1 1e-5     Full-sequence E-value threshold for HMM models not shorter than --hmm_length.
+#   --hmm_evalue2 1e-3     Full-sequence E-value threshold for HMM models shorter than --hmm_length (looser for short models).
+#   --hmm_length 80        Length threshold distinguishing long and short HMM models.
+#   --hmm_coverage 0.25    Threshold of the overall coverage of the HMM model by the qualified domains of the protein (calculated after merging multiple matched regions).
+#
+# [BLASTP validation] Only HSPs with E-value <= --blast_evalue are kept; the HSPs of
+#               each protein-subject pair are merged. A hit whose cumulative
+#               identity (CIP), query coverage and subject coverage all reach the
+#               thresholds is a qualified hit; a protein with a qualified hit in
+#               any diamond database passes BLASTP validation.
+#   --blast_evalue 1e-9    E-value threshold (also used to filter HSPs).
+#   --blast_CIP 0.4        Threshold of the cumulative identity (sum of identical residues / sum of aligned lengths).
+#   --blast_coverage 0.4   Threshold of the overall query and subject coverages (both must be reached).
+#
+# [When both HMM and diamond databases are provided] Transcripts passing both are
+#               valid; transcripts passing only one type must also satisfy the
+#               stricter *_onlyOne thresholds below. These 5 parameters have no
+#               effect when only one type of database is provided.
+#   --hmm_evalue_onlyOne 1e-7        Full-sequence E-value threshold required when only HMM validation is passed.
+#   --hmm_coverage_onlyOne 0.5       HMM coverage threshold required when only HMM validation is passed.
+#   --blast_evalue_onlyOne 1e-12     E-value threshold required when only BLASTP validation is passed.
+#   --blast_CIP_onlyOne 0.6          CIP threshold required when only BLASTP validation is passed.
+#   --blast_coverage_onlyOne 0.6     Query and subject coverage threshold required when only BLASTP validation is passed.
+#
+# [Switch] (off by default; add it inside the quotes of the effective line below if needed)
+#   --both_required   Both HMM and diamond validation must be passed. Both types of
+#                     databases must be provided, so it can not be used when only
+#                     --HMM_db, or only --BLASTP_db / --protein, is used.
+#
+# [Performance]
+#   --chunk_num 50    Number of proteins in each part of the parallel hmmscan analysis
+#                     (proteins are sorted by length from long to short and then
+#                     divided). The smaller the value, the more parts and the more
+#                     balanced the load, but the larger the process start-up overhead.
+#
+# [diamond alignment parameters] The default value contains spaces, so nested quotes
+#   would be needed inside --validate_options; therefore it is not put in the effective line.
+#   --diamond_options "--sensitive --max-target-seqs 20 --id 10 --block-size 5 --index-chunks 1"
+#   To change it, append it to the effective line as shown below, and test with a
+#   small data set first to confirm that the quotes are passed correctly:
+#   --validate_options "... --diamond_options '--sensitive --max-target-seqs 20 --id 10 --block-size 5 --index-chunks 1'"
+#
+# The following line gives all the default values; to modify, change the numbers in it directly.
+--validate_options "--hmm_evalue1 1e-5 --hmm_evalue2 1e-3 --hmm_length 80 --hmm_coverage 0.25 --blast_evalue 1e-9 --blast_CIP 0.4 --blast_coverage 0.4 --hmm_evalue_onlyOne 1e-7 --hmm_coverage_onlyOne 0.5 --blast_evalue_onlyOne 1e-12 --blast_CIP_onlyOne 0.6 --blast_coverage_onlyOne 0.6 --chunk_num 50"
+
+
+# ======================================================================
+# Alternative splicing analysis: --alt_splicing_options (passed to curateGeneModels.04AlternativeSplicing)
+# ======================================================================
+# This program uses the intron information and base depth information of RNA-Seq to
+# add alternative splicing transcripts to the gene models, and gives Transcript_Ratio
+# in column 9 of the mRNA lines. It runs only when RNA-Seq data are input and
+# --no_alternative_splicing_analysis of geta.pl is not set.
+# intron.txt and base_depth.txt are specified automatically by geta.pl, not here.
+#
+# The value of this option must be enclosed in quotes and written on ONE line (see
+# the effective line at the end of this section). Each parameter and its default
+# value are explained below:
+#
+# [Alternative splicing analysis parameters] (same as alternative_splicing_analysis)
+#   --min_intron_depth 1
+#       Minimum intron depth. Introns whose value in column 6 of intron.txt is lower than this are ignored. It can be raised (e.g. 2) when the data volume is large and noisy.
+#   --min_base_depth_ratio_for_ref_specific_intron 0.3
+#       For an intron present only in the original gene model: if (base depth / gene depth) exceeds this value, an IR (intron retention) event is considered to exist.
+#   --min_intron_depth_ratio_for_evidence_specific_intron 0.2
+#       For an intron present only in the RNA-Seq evidence: if (intron depth / gene depth) exceeds this value, the intron is considered reliable.
+#   --min_base_depth_ratio_for_common_intron 0.2
+#       For an intron shared by both: if (base depth / gene depth) exceeds this value, an IR event is considered to exist.
+#   --min_gene_depth 10
+#       When the gene depth is lower than this value, this value is used instead (to avoid inflated ratios in lowly expressed genes).
+#   --min_transcript_confidence_for_output 0.05
+#       An added alternative splicing transcript is output only if its ratio is not lower than this value. Raising it gives fewer but more reliable transcripts.
+#   --transcript_num_for_output_when_all_low_confidence 8
+#       When the ratios of all alternative splicing transcripts are below the threshold above, the top-ranked transcripts are output until the number of mRNAs reaches this value.
+#   --added_mRNA_ID_prefix t
+#       The ID of an added transcript is <geneID>.<prefix><two-digit number>, e.g. gene000001.t01.
+#
+# [Parallelism and chunking parameters]
+#   --split_cpu            Number of parallel processes used to split intron.txt and base_depth.txt.
+#                          Same as --cpu of geta.pl by default; no need to raise it when disk reading is slow.
+#   --split_block_mb 32    Minimum file size (MB) handled by one parallel split task; a file smaller than twice this value is not split in parallel.
+#   --chunk_gene_num       Approximate number of genes per chunk. Calculated automatically by default (between 20 and 5000, with at most 300 chunks in total).
+#   (--cpu and --tmp_dir are set by geta.pl, do not write them here.)
+#
+# [Switch]
+#   --keep_tmp   By default the automatically created temporary directory is deleted
+#                after success; geta.pl already specifies the temporary directory
+#                with --tmp_dir, so it is usually not needed.
+#
+# The following line gives the default values of all the alternative splicing analysis
+# parameters (the parallelism and chunking parameters use their defaults and are not
+# written); to modify, change the numbers in it directly.
+--alt_splicing_options "--min_intron_depth 1 --min_base_depth_ratio_for_ref_specific_intron 0.3 --min_intron_depth_ratio_for_evidence_specific_intron 0.2 --min_base_depth_ratio_for_common_intron 0.2 --min_gene_depth 10 --min_transcript_confidence_for_output 0.05 --transcript_num_for_output_when_all_low_confidence 8 --added_mRNA_ID_prefix t"
+
+
+########################################################################
+# outputResults: output the results and statistics (Step 6 of geta.pl)
+########################################################################
+[outputResults]
+
+# All parameters of outputResults (--cpu --genetic_code --genome --out_prefix
+# --gene_prefix --BUSCO_lineage_dataset --busco_for_all_gff3) are set by geta.pl,
+# so no extra parameter needs to be set here.

@@ -334,11 +334,11 @@ else {
 
 # 将GFF3转换成GeneBank格式
 @cmds = (
-    "gff2gbSmallDNA.pl --overlap $gff_q $fa_q $flanking_length genes.raw.gb &> gff2gbSmallDNA.raw.log",
+    "gff2gbSmallDNA.pl --overlap $gff_q $fa_q $flanking_length genes.raw.gb > gff2gbSmallDNA.raw.log 2>&1",
     "test -s genes.raw.gb || { echo 'Error: genes.raw.gb is empty, please check gff2gbSmallDNA.raw.log' >&2; exit 1; }",
 );
 if ( defined $onlytrain_GFF3 ) {
-    push @cmds, "gff2gbSmallDNA.pl --overlap " . sh_quote($onlytrain_GFF3) . " $fa_q $flanking_length genes.all.gb &> gff2gbSmallDNA.all.log";
+    push @cmds, "gff2gbSmallDNA.pl --overlap " . sh_quote($onlytrain_GFF3) . " $fa_q $flanking_length genes.all.gb > gff2gbSmallDNA.all.log 2>&1";
     push @cmds, "test -s genes.all.gb || { echo 'Error: genes.all.gb is empty, please check gff2gbSmallDNA.all.log' >&2; exit 1; }";
 }
 run_cmds(\@cmds, "05b.BGM2AT.gff2gbSmallDNA.ok");
@@ -349,7 +349,7 @@ print STDERR "\n3. Removing incorrect gene models.\n";
 my $tmp_species = "for_bad_genes_removing_$$";
 $tmp_species_dir = "$AUGUSTUS_CONFIG_PATH/species/$tmp_species";
 @cmds = (
-    "new_species.pl --species=$tmp_species --AUGUSTUS_CONFIG_PATH=$cfg_q --ignore &> new_species.1.log",
+    "new_species.pl --species=$tmp_species --AUGUSTUS_CONFIG_PATH=$cfg_q --ignore > new_species.1.log 2>&1",
     "etraining --min_intron_len=$min_intron_len --species=$tmp_species --AUGUSTUS_CONFIG_PATH=$cfg_q --stopCodonExcludedFromCDS=false genes.raw.gb 1> etraining.out0 2> etraining.err0",
 );
 if ( defined $onlytrain_GFF3 ) {
@@ -441,7 +441,7 @@ else {
             run_cmds(["rm -rf " . sh_quote($species_config_dir)], "NULL");
         }
         touch_file($new_species_marker);
-        run_cmds(["new_species.pl --species=$species_name --AUGUSTUS_CONFIG_PATH=$cfg_q --ignore &> new_species.2.log"], "NULL");
+        run_cmds(["new_species.pl --species=$species_name --AUGUSTUS_CONFIG_PATH=$cfg_q --ignore > new_species.2.log 2>&1"], "NULL");
     }
 
     # 若添加了--augustus_species_start_from参数，则拷贝parameters.cfg文件。
@@ -668,7 +668,7 @@ sub write_text_file {
     return 1;
 }
 
-# 用于执行调用的Linux命令，同时生成.ok文件。使用bash执行，以支持&>重定向并检测管道中任一环节的失败。
+# 用于执行调用的Linux命令，同时生成.ok文件。使用bash执行，以支持> 重定向并检测管道中任一环节的失败。 2>&1
 sub run_cmds {
     my ($cmds, $ok_file) = @_;
     if ( $ok_file ne "NULL" && -e $ok_file ) {

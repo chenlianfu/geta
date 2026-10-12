@@ -3,8 +3,11 @@ use strict;
 use warnings;
 use Getopt::Long;
 
-my $usage_chinese = <<USAGE;
-Usage:
+########################################################################
+# 中文用法说明（放在代码最前面；英文用法说明放在文件最末尾的__DATA__部分）
+########################################################################
+my $usage_cn = <<'USAGE';
+用法:
     perl $0 --out_prefix out genome.fasta input1.gff3 [input2.gff3 ...] > statitics.txt
 
     本程序用于根据GFF3的内容信息和基因组序列，转换出对应的序列信息，并对各种类型的Features进行统计。程序能对各种类型的Feature都进行序列转换，每种类型的Feature各得到一个Fasta文件，gene类型的Feature能得到CDS、cDNA和Protein三个Fasta文件。
@@ -15,38 +18,58 @@ Usage:
 
     若GFF3文件中包含编码基因信息，则对这些编码基因的CDS长度、基因的cDNA长度、基因的intron长度、基因的gene长度、基因的CDS个数、基因的exon个数、基因的intron个数、单个CDS长度、单个exon长度、单个intron长度和基因间区长度进行了统计，并将结果输入到out.codingGeneModels.stats文件中。
 
-    --out_prefix <string>    default: out
+参数说明:
+
+[输出设置]
+
+    --out_prefix <string>    默认值: out
     设置程序输出的序列文件前缀。程序根据GFF3文件的Feature Name生成对应的Fasta文件，out.FeatureName.fasta。若Feature Name为gene，则额外生成out.CDS.fasta，out.cDNA.fasta和out.protein.fasta文件。若有编码基因信息，即gene中有CDS feature，则额外生成out.codingGeneModels.stats文件。
 
-    --only_gene_sequences    default: None
+[序列筛选]
+
+    --only_gene_sequences    默认值: 无
     添加该参数后，仅输出GFF3文件中属于gene类型的序列。
 
-    --only_coding_gene_sequences    default: None
+    --only_coding_gene_sequences    默认值: 无
     添加该参数后，仅输出GFF3文件中编码基因的序列信息。
 
-    --only_first_isoform    default: None
+[可变剪接处理]
+
+    --only_first_isoform    默认值: 无
     添加该参数后，若一个基因有多个可变剪接，则仅选择在GFF3文件中出现的第一个isoform进行统计和序列输出。和--only_longest_isoform参数只能有一个生效。当两个参数同时设置时，本参数是有效参数。来自GETA软件预测的基因模型，一般第一个isoform的表达量占比最大。
 
-    --only_longest_isoform    default: None
+    --only_longest_isoform    默认值: 无
     添加该参数后，若一个基因有多个可变剪接，则仅选择其CDS最长或exon最长的isoform进行统计和序列输出。
 
-    --sort_isoforms    default: None
+    --sort_isoforms    默认值: 无
     添加该参数后，对基因模型的多个可变剪接的转录本进行排序后再输出序列。优先按CDS长度从长到短，然后按cDNA长度从长到短，最后按ID的ASCII编码从小到大进行排序。程序默认输出所有的可变剪接序列，按其在GFF3文件中出现的顺序输出序列。
 
-    --genetic_code <int>    default: 1
+    --gene_id_header    默认值: 无
+    添加该参数后，若同时使用了--only_first_isoform或--only_longest_isoform参数(此时每个基因仅输出一个转录本)，则输出的Fasta文件的头部使用基因ID，而不是转录本ID，并且头部后面不再附带其它标签=值的信息，即头部格式为 >GeneID。若没有同时使用--only_first_isoform或--only_longest_isoform参数，则本参数不生效。
+
+[翻译设置]
+
+    --genetic_code <int>    默认值: 1
     设置遗传密码，程序据此自动确定密码子的翻译方式、起始密码子和终止密码子。该参数对应的值请参考NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi 。该参数在将CDS转换为Protein序列时生效：终止密码子翻译为*；当基因5'端完整（起始CDS的phase为0）且第一个密码子是起始密码子时，该密码子翻译为M。支持的遗传密码编号为：1、2、3、4、5、6、9、10、11、12、13、14、15、16、21、22、23、24、25、26、27、28、29、30、31、32、33。例如：1为标准遗传密码（起始密码子为ATG，终止密码子为TAA、TAG、TGA），11为细菌/古菌/植物质体遗传密码，2为脊椎动物线粒体遗传密码。
 
-    --help    default: None
+[帮助]
+
+    --help    默认值: 无
     Display this English usage and exit.
 
-    --chinese_help    default: None
+    --chinese_help    默认值: 无
     显示中文用法说明并退出。
 
 USAGE
-my $usage_english = &get_usage_english();
+$usage_cn =~ s/\$0/$0/g;
+
+# 英文用法说明从文件末尾的__DATA__部分读取
+my $usage_english = do { local $/ = undef; my $t = <DATA>; defined $t ? $t : '' };
+$usage_english =~ s/\$0/$0/g;
+
 if (@ARGV==0){die $usage_english}
 
-my ($help_flag, $chinese_help_flag, $out_prefix, $only_gene_sequences, $only_coding_gene_sequences, $only_longest_isoform, $only_first_isoform, $sort_isoform, $genetic_code);
+my ($help_flag, $chinese_help_flag, $out_prefix, $only_gene_sequences, $only_coding_gene_sequences, $only_longest_isoform, $only_first_isoform, $sort_isoform, $gene_id_header, $genetic_code);
 GetOptions(
     "help" => \$help_flag,
     "chinese_help" => \$chinese_help_flag,
@@ -56,11 +79,23 @@ GetOptions(
     "only_longest_isoform" => \$only_longest_isoform,
     "only_first_isoform" => \$only_first_isoform,
     "sort_isoforms" => \$sort_isoform,
+    "gene_id_header" => \$gene_id_header,
     "genetic_code:i" => \$genetic_code,
 ) or die $usage_english;
 if ( $help_flag ) { print STDERR $usage_english; exit 0; }
-if ( $chinese_help_flag ) { print STDERR $usage_chinese; exit 0; }
+if ( $chinese_help_flag ) { print STDERR $usage_cn; exit 0; }
 $out_prefix ||= "out";
+
+# --gene_id_header 仅在同时使用了 --only_first_isoform 或 --only_longest_isoform 时生效
+my $simple_header = 0;
+if ( $gene_id_header ) {
+    if ( $only_first_isoform || $only_longest_isoform ) {
+        $simple_header = 1;
+    }
+    else {
+        print STDERR "Warning: --gene_id_header only takes effect together with --only_first_isoform or --only_longest_isoform; it is ignored.\n";
+    }
+}
 
 # 遗传密码：未设置或设置值不是正整数时，按标准遗传密码（1）处理
 $genetic_code = 1 unless ( defined $genetic_code && $genetic_code > 0 );
@@ -221,7 +256,8 @@ foreach my $gene_ID ( @geneID ) {
             }
 
             # 输出 CDS, exon 和 Protein 序列
-            my $header_output = get_fasta_header($mRNA_ID, $mRNA_header[8]);
+            # 若使用了 --gene_id_header（且同时使用了 --only_first_isoform 或 --only_longest_isoform），头部使用基因ID，且不带其它标签信息
+            my $header_output = get_fasta_header( ( $simple_header ? $gene_ID : $mRNA_ID ), $mRNA_header[8] );
             if ( $seq_CDS ) {
                 print {$output_fh{"CDS"}} "$header_output$seq_CDS\n";
                 $collected_output_file_name{"$out_prefix.CDS.fasta"} = 1;
@@ -541,8 +577,10 @@ sub get_seqs {
 }
 
 # 生成FASTA header行（保证末尾一定带换行符）
+# 若设置了 --gene_id_header 且同时使用了 --only_first_isoform 或 --only_longest_isoform，则仅输出 ">ID"，不带其它标签信息。
 sub get_fasta_header {
     my ( $id, $input ) = @_;
+    return ">$id\n" if $simple_header;
     $input = '' unless defined $input;
     $input =~ s/\r?\n$//;
     my @extra;
@@ -795,10 +833,10 @@ sub codon_table {
     return (\%translate_table, \%start_table, \%stop_table);
 }
 
-# 英文用法说明
-sub get_usage_english {
-
-my $usage = <<USAGE;
+########################################################################
+# 英文用法说明（放在文件最末尾，运行时通过DATA文件句柄读取）
+########################################################################
+__DATA__
 Usage:
     perl $0 --out_prefix out genome.fasta input1.gff3 [input2.gff3 ...] > statitics.txt
 
@@ -810,14 +848,22 @@ Usage:
 
     If the GFF3 files contain coding gene information, statistics are made for these coding genes on the CDS length, the cDNA length, the intron length, the gene length, the number of CDS, the number of exons, the number of introns, the single CDS length, the single exon length, the single intron length and the intergenic length, and the results are written to the file out.codingGeneModels.stats.
 
+Options:
+
+[Output settings]
+
     --out_prefix <string>    default: out
     Set the prefix of the output sequence files. The program generates the corresponding Fasta files out.FeatureName.fasta according to the Feature Name of the GFF3 files. If the Feature Name is gene, the files out.CDS.fasta, out.cDNA.fasta and out.protein.fasta are additionally generated. If there is coding gene information, i.e. the genes contain CDS features, the file out.codingGeneModels.stats is additionally generated.
+
+[Sequence selection]
 
     --only_gene_sequences    default: None
     When this option is added, only the sequences of the gene type in the GFF3 files are output.
 
     --only_coding_gene_sequences    default: None
     When this option is added, only the sequence information of the coding genes in the GFF3 files is output.
+
+[Isoform handling]
 
     --only_first_isoform    default: None
     When this option is added, if a gene has several alternative splicing isoforms, only the first isoform that appears in the GFF3 file is selected for statistics and sequence output. Only one of this option and --only_longest_isoform can take effect; when both are set, this option is the effective one. For gene models predicted by the GETA software, the first isoform generally has the largest expression proportion.
@@ -828,8 +874,15 @@ Usage:
     --sort_isoforms    default: None
     When this option is added, the multiple alternative splicing transcripts of a gene model are sorted before their sequences are output. They are sorted first by CDS length from long to short, then by cDNA length from long to short, and finally by the ASCII code of the ID from small to large. By default the program outputs all alternative splicing sequences in the order in which they appear in the GFF3 file.
 
+    --gene_id_header    default: None
+    When this option is added together with --only_first_isoform or --only_longest_isoform (so that only one transcript is output for each gene), the headers of the output Fasta files use the gene ID instead of the transcript ID, and are not followed by any other tag=value information, i.e. the header format is >GeneID. If neither --only_first_isoform nor --only_longest_isoform is used, this option does not take effect.
+
+[Translation settings]
+
     --genetic_code <int>    default: 1
     Set the genetic code, from which the translation of codons, the start codons and the stop codons are determined automatically. For the corresponding values, please refer to NCBI Genetic Codes: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi . This option takes effect when the CDS is converted into the Protein sequence: stop codons are translated as *; when the 5' end of the gene is complete (the phase of the first CDS is 0) and the first codon is a start codon, that codon is translated as M. The supported genetic code numbers are: 1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33. For example: 1 is the standard code (start codon ATG; stop codons TAA, TAG, TGA), 11 is the bacterial/archaeal/plant plastid code, and 2 is the vertebrate mitochondrial code.
+
+[Help]
 
     --help    default: None
     Display this English usage and exit.
@@ -837,7 +890,3 @@ Usage:
     --chinese_help    default: None
     显示中文用法说明并退出。
 
-USAGE
-
-return $usage;
-}
