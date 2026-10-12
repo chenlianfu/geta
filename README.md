@@ -7,7 +7,7 @@
 *One command from genome + RNA-Seq + homologous proteins to an accurate GFF3 gene annotation.*
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-![Version](https://img.shields.io/badge/version-2.7.1-green.svg)
+![Version](https://img.shields.io/badge/version-3.0.0-green.svg)
 ![Language](https://img.shields.io/badge/language-Perl-orange.svg)
 ![Platform](https://img.shields.io/badge/tested%20on-Rocky%20Linux%209.2-lightgrey.svg)
 
